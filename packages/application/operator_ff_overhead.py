@@ -113,6 +113,7 @@ def _public(conn, row):
             "source_revision": source["source_revision"], "filename": source["filename"], "source_mode": manifest["source_mode"]},
         "document": {"document_id": doc_id, "posted": True} if doc_id else None,
         "publication": publication, "processing_receipt": json.loads(row["receipt_json"]),
+        "journal_path": "/sheet-vitrina-v1/operations?operation_id=" + row["request_id"],
         "detail_path": PREFIX + "/" + row["request_id"], "native_detail_path": NATIVE + row["request_id"]}
 
 

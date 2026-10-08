@@ -29140,7 +29140,8 @@
       clear(nodes.workflow); nodes.workflow.hidden = false;
       const view = Object.assign({}, operation);
       if (!Array.isArray(view.fields)) view.fields=Array.from(operationSummary(view).children).map(function(row){return {label:row.querySelector("dt").textContent,value:row.querySelector("dd").textContent};});
-      window.OperatorAcceptance.renderReceipt(nodes.workflow, view, {onClose:closeModal,onJournal:function(receipt){activateTab("journal");showOperationDetail(receipt.operation_id);}});
+      view.journal_path="/sheet-vitrina-v1/operations?operation_id="+encodeURIComponent(view.operation_id);
+      window.OperatorAcceptance.renderReceipt(nodes.workflow, view, {onClose:closeModal});
     }
     function renderOverheadUnknown(id) {
       nodes.statusToolbar.hidden = true; clear(nodes.workflow); nodes.workflow.hidden = false;

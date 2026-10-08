@@ -425,7 +425,7 @@ def _public(conn, row):
         'kind':source['document_kind'],'document_kind':source['document_kind'],'title':DOCUMENT_LABELS_RU[source['document_kind']], 'title_ru':DOCUMENT_LABELS_RU[source['document_kind']],
         'accepted_at':row['accepted_at'],'actor':row['actor'],'business_date':source['business_date'],'state':row['state'],'label_ru':labels[row['state']],
         'reason_code':row['reason_code'],'reason_ru':reasons.get(row['reason_code'],'Документ сохранён. Повторная отправка не требуется.'),
-        'summary':summary,'fields':fields,'domain':'ff_pool_document','journal_path':'/sheet-vitrina-v1/vitrina?operation_id='+row['request_id'],
+        'summary':summary,'fields':fields,'domain':'ff_pool_document','journal_path':'/sheet-vitrina-v1/operations?operation_id='+row['request_id'],
         'source_document':{'request_id':row['request_id'],'source_revision':source['source_revision'],'source_sha256':source['source_sha256'],'filename':source['filename']},
         'document':dict(doc) if doc else None,'processing_receipt':json.loads(row['receipt_json']),
         'detail_path':'/v1/sheet-vitrina-v1/operations/'+row['request_id'],
