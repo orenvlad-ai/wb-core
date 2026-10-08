@@ -765,17 +765,24 @@ Apply operator от имени документированного owner confir
 права на установку нет.
 
 Состояния пары — `available`, `claimed`, `closed`. Resolver действует только
-для нового native manual intent после installation, при выключенном
-расписании и полном точном list/stats CPM-контракте; единственная допустимая
-неполнота — `minus_pair_omitted`. Daily occurrence, legacy/старые задания,
-другие пары, CPC и malformed источники не получают fallback. При отсутствии
+для нового native manual intent или точного дочернего задания действующего
+daily occurrence после installation, при выключенном прежнем автоматическом
+режиме и полном точном list/stats CPM-контракте; единственная допустимая
+неполнота — `minus_pair_omitted`. Daily проверяет сохранённую связь
+child→batch→occurrence→enabled schedule, account/generation/actor, точную пару,
+активное состояние группы и текущую общую политику автообновлений. И child, и
+группа должны быть созданы после installation; изменение слота или владельца
+закрывает fallback. Legacy/старые или непривязанные задания, другие пары, CPC
+и malformed источники не получают fallback. При отсутствии
 плохих актуальных запросов результат `no_change`, WB запись не создаётся,
 допуск остаётся `available`. Правила и запросы перечитываются; старый trial
 не задаёт будущий список исключений.
 Историческая declaration не ограничивает обычный полный ответ WB после
 изменения правил/профиля: current bootstrap binding проверяется только при
 фактическом fallback и claim. Closed, чужой claim и отсутствие нового manual
-intent сохраняют missing как unknown, не применяя старое основание.
+intent сохраняют missing как unknown, не применяя старое основание. Допуск
+daily использует ту же одноразовую пару: `claimed`/`closed` не переоткрываются,
+а повторное чтение результата по-прежнему требует полного ответа WB.
 
 Непустой minus **или list.excluded**, известная историческая исключённая
 фраза, любая прежняя write operation или внешний dispatch seal навсегда
