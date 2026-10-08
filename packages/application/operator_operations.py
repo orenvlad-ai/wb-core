@@ -8,6 +8,7 @@ from packages.application import operator_partner_report as partner_report
 from packages.application import operator_supplier_journal as supplier_journal
 from packages.application import operator_trade_documents as trade
 from packages.application import operator_supplier_contracts as contracts
+from packages.application import operator_facility_mappings as facilities
 
 DOMAIN_LABELS = {'ff_pool_document': 'Складские документы', fulfillment.DOMAIN: 'Услуги фулфилмента',
     'plan_report_baseline': 'Исходные данные отчётов',
@@ -16,12 +17,14 @@ DOMAIN_LABELS = {'ff_pool_document': 'Складские документы', fu
 DOMAIN_LABELS.update(supplier_journal.LABELS)
 DOMAIN_LABELS[trade.DOMAIN] = 'Библиотека инвойсов и договоров'
 DOMAIN_LABELS[contracts.DOMAIN]='Договоры поставщика'
+DOMAIN_LABELS[facilities.DOMAIN] = "Склады и связи FBS"
 DEFAULT_DOMAINS = frozenset({'ff_pool_document', fulfillment.DOMAIN})
 DOMAIN_SECTIONS = {'ff_pool_document': 'supply', fulfillment.DOMAIN: 'supply',
     'plan_report_baseline': 'reports', 'factory_order_dataset': 'supply', partner_report.DOMAIN: 'reports'}
 DOMAIN_SECTIONS.update({name: 'supply' for name in supplier_journal.LABELS})
 DOMAIN_SECTIONS[trade.DOMAIN] = 'settings'
 DOMAIN_SECTIONS[contracts.DOMAIN] = 'supply'
+DOMAIN_SECTIONS[facilities.DOMAIN] = 'supply'
 
 
 def _allowed(allowed_domains, allowed_sections):
@@ -76,6 +79,7 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
     if len(search) > 200:
         raise ValueError('invalid_operation_search')
     selected = allowed if domain in ('', 'all') else allowed.intersection({domain})
+    file_items = facilities.journal_entries(db_path, request_scope=request_scope) if request_scope and not supplier_safe and facilities.DOMAIN in selected else []
     with closing(overhead.readonly(db_path)) as conn:
         sources=supplier_journal.sources(conn, selected=selected, request_scope=request_scope, supplier_safe=supplier_safe, db_path=db_path, runtime_dir=runtime_dir)
         sources.extend(_trade_sources(conn, selected=selected, request_scope=request_scope, supplier_safe=supplier_safe))
@@ -95,6 +99,7 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
                 'domain IN (' + ','.join('?' for _ in reports) + ')', reports,
                 lambda connection, row: report_sources.public(dict(row))))
         if search:
+            file_items=[item for item in file_items if search.casefold() in json_search(item).casefold()]
             value = '%' + search.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
             search_columns = {report_sources.TABLE: 'after_json', partner_report.TABLE: "product_name || ' ' || nm_id"}
             search_columns[trade.TABLE] = "coalesce(json_extract(source_json,'$.document.number'),'') || ' ' || coalesce(json_extract(source_json,'$.document.file_original_name'),'') || ' ' || action"
@@ -112,14 +117,16 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
             sources = [(table, key, columns, where + " AND lower(" + search_columns.get(table, 'source_json') + ") LIKE lower(?) ESCAPE '\\'",
                         (*params, value), reader) for table, key, columns, where, params, reader in sources]
         total = sum(conn.execute(f'SELECT count(*) FROM {table} WHERE {where}', params).fetchone()[0]
-                    for table, _, _, where, params, _ in sources)
+                    for table, _, _, where, params, _ in sources)+len(file_items)
         # Distinct action families may share one native table. Keep the
         # exact scoped reader paired with its own UNION arm.
         sql = ' UNION ALL '.join(f"SELECT {identity} AS operation_id,accepted_at,'{index}' source_table FROM {table} WHERE {where}"
             for index, (table, identity, _, where, _, _) in enumerate(sources))
         params = tuple(value for _, _, _, _, values, _ in sources for value in values)
+        offset=(page-1)*limit
+        db_offset=max(0,offset-len(file_items))
         rows = conn.execute('SELECT * FROM (' + sql + ') ORDER BY accepted_at DESC,operation_id DESC LIMIT ? OFFSET ?',
-            (*params, limit, (page-1)*limit)).fetchall() if sources else []
+            (*params, limit+len(file_items), db_offset)).fetchall() if sources else []
         readers = {str(index): item for index, item in enumerate(sources)}
         items = []
         for row in rows:
@@ -127,9 +134,19 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
             native = conn.execute(f'SELECT {columns} FROM {table} WHERE {identity}=? AND ({where})',
                                   (row['operation_id'], *values)).fetchone()
             items.append(_common(reader(conn, native)))
+        items.extend(_common(item) for item in file_items)
+        items.sort(key=lambda item:(item['accepted_at'],item['operation_id']),reverse=True)
+        items=items[offset-db_offset:offset-db_offset+limit]
     return {'contract_name':'operator_operations_v1','status':'ready','items':items,'page':page,'limit':limit,
         'total':total,'has_more':page*limit<total,
         'available_domains':[{'domain':key,'label_ru':DOMAIN_LABELS[key]} for key in sorted(allowed)]}
+
+
+def json_search(item):
+    """Only public identifiers/fields participate in file-source search."""
+    values = (item.get('operation_id'), item.get('actor'), item.get('native_state'),
+              item.get('source_ref', {}).get('entity_id'), item.get('title_ru'))
+    return ' '.join(str(value or '') for value in values)
 
 
 def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections=None, domain='', request_scope='', supplier_safe=False, runtime_dir=None):
@@ -139,6 +156,10 @@ def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections
             raise ValueError('invalid_operation_domain')
         allowed.intersection_update({domain})
     with closing(overhead.readonly(db_path)) as conn:
+        if request_scope and not supplier_safe and facilities.DOMAIN in allowed:
+            result = facilities.read(db_path, request_scope=request_scope, operation_id=identity)
+            if result.get('status') == 'accepted' and result.get('acceptance'):
+                return _common(result['acceptance'])
         if request_scope and not supplier_safe and runtime_dir is not None:
             for family in sorted(allowed.intersection(supplier_journal.FINANCIAL_DOMAINS)):
                 value = supplier_journal.financial_acceptance(conn, runtime_dir, db_path, identity,

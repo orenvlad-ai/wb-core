@@ -10863,7 +10863,7 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
     if _user_can_access_path(user, DEFAULT_TRADE_DOCUMENTS_PATH):
         domains.add('trade_document_library')
     if _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY):
-        domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services', 'supplier_factual_date', 'supplier_financial_document', 'cny_account_document'))
+        domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services', 'supplier_factual_date', 'supplier_financial_document', 'cny_account_document', 'facility_mapping'))
     if _user_can_access_path(user, DEFAULT_SUPPLIER_SHIPMENTS_PATH):
         domains.add('supplier_shipment')
     if (_user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY)

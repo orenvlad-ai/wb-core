@@ -3146,6 +3146,12 @@ class RegistryUploadHttpEntrypoint:
                 for row in generation['warehouses']])),
             'fbs_run_sequence': str(latest['run_sequence'])})
 
+    def _cycle_drain_facility_activations(self, owner_token):
+        require_heavy_owner(self.runtime.runtime_dir)
+        require_warehouse_job_owner(self.runtime.runtime_dir, owner_token)
+        from packages.application.ff_pool_dense_fbs import DenseFbsService
+        return DenseFbsService(db_path=self.runtime.db_path, runtime_dir=self.runtime.runtime_dir).drain_facility_activations(limit=32)
+
     def _cycle_warehouse(self, store, receipt, fbs):
         require_heavy_owner(self.runtime.runtime_dir)
         from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
@@ -3154,6 +3160,7 @@ class RegistryUploadHttpEntrypoint:
         from packages.application.warehouse_update_journal import PHASES
         with warehouse_functional_job_lock(self.runtime.runtime_dir) as metrics:
             token = str(metrics['owner_token'])
+            self._cycle_drain_facility_activations(token)
             run_id = self.warehouse_update_journal.start(trigger_source='cycle', scheduled_for=receipt['slot_utc'], owner_token=token)
             item = next(i for i in receipt['stages'] if i['stage'] == 'warehouse')
             item['durable_ref'] = run_id
