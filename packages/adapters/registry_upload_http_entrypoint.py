@@ -10862,6 +10862,9 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
         domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services', 'supplier_factual_date', 'supplier_financial_document', 'cny_account_document'))
     if _user_can_access_path(user, DEFAULT_SUPPLIER_SHIPMENTS_PATH):
         domains.add('supplier_shipment')
+    if (_user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY)
+            and _user_can_access_path(user, DEFAULT_SUPPLIER_SHIPMENTS_PATH + '/source/contract')):
+        domains.add('supplier_contract')
     if _user_has_section_access(user, WEB_AUTH_SECTION_REPORTS):
         domains.update(('plan_report_baseline', 'partner_report_settings'))
     return frozenset(domains)

@@ -24,7 +24,48 @@ def multipart(base,path,identity,body=None,filename='contract.xlsx'):
     with closing(response):return response.status,json.loads(response.read())
 
 
+def journal_check():
+    from apps.operator_supplier_journal_http_smoke import auth, scope
+    from packages.application import operator_operations as journal
+    with TemporaryDirectory(prefix='contract-journal-http-') as raw:
+        rt,entry,sid=setup(raw)
+        accepted=[]
+        for actor in ('alice','bob'):
+            accepted.append(entry.handle_supplier_shipments_contract_upload_request(sid,contract_bytes(),
+                uploaded_filename='contract.xlsx',fields={'request_id':'journal-contract-'+actor},
+                actor=actor,request_scope=scope(actor))['acceptance'])
+        # The newer exact native intent supersedes the old one; each principal
+        # still sees its own accepted source and no foreign successor identity.
+        server,thread,base=server_for(entry);before=rt.db_path.read_bytes()
+        try:
+            with patch.object(receipts,'ensure_schema',side_effect=AssertionError('GET bootstrap')):
+                with auth('alice'):
+                    url='/v1/sheet-vitrina-v1/operations?domain=supplier_contract'
+                    code,value=request(base,url)
+                    assert code==200 and value['total']==1 and len(value['items'])==1,value
+                    item=value['items'][0]
+                    assert item['operation_id']==accepted[0]['operation_id'] and item['state']=='needs_attention'
+                    assert item['processing']['superseded_by'] is None
+                    assert request(base,url+'&page=2&limit=1')[1]['items']==[]
+                    assert request(base,url+'&search='+sid)[1]['total']==1
+                    assert request(base,url+'&search=not-in-saved-order')[1]['total']==0
+                    assert request(base,'/v1/sheet-vitrina-v1/operations/'+accepted[0]['operation_id'])[0]==200
+                    assert request(base,'/v1/sheet-vitrina-v1/operations/'+accepted[1]['operation_id'])[0]==404
+                    assert not any(x in json.dumps(value) for x in ('file_path','source_json','order_json','amount_total'))
+                for role,sections in [('supplier',()),('operator',('settings',)),('operator',('reports',))]:
+                    with auth('alice',role=role,sections=sections):
+                        code,value=request(base,url)
+                        assert code==200 and value['total']==0,value
+                        assert request(base,'/v1/sheet-vitrina-v1/operations/'+accepted[0]['operation_id'])[0]==404
+                args=dict(allowed_domains={'supplier_contract'},request_scope=scope('alice'))
+                assert journal.journal(rt.db_path,supplier_safe=True,**args)['total']==0
+                assert journal.read_acceptance(rt.db_path,accepted[0]['operation_id'],supplier_safe=True,**args) is None
+            assert rt.db_path.read_bytes()==before,'GET wrote native state'
+        finally:stop(server,thread)
+
+
 def main():
+    journal_check()
     with TemporaryDirectory(prefix='operator-contract-http-') as raw:
         rt,entry,sid=setup(raw);server,thread,base=server_for(entry);path=PATH+'/'+sid+'/contract'
         try:
