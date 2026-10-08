@@ -32,6 +32,11 @@ def ensure_schema(conn):
             receipt_json TEXT NOT NULL DEFAULT '{{}}' CHECK(json_valid(receipt_json))
         );
         CREATE INDEX IF NOT EXISTS ff_overhead_confirmations_by_time ON {TABLE}(accepted_at,request_id);
+        CREATE TRIGGER IF NOT EXISTS ff_overhead_superseded_preview_cannot_confirm
+        BEFORE INSERT ON {TABLE}
+        WHEN EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_overhead_payment_renewals WHERE predecessor_request_id=NEW.request_id)
+        BEGIN SELECT RAISE(ABORT,'superseded overhead preview cannot confirm'); END;
+
         CREATE TRIGGER IF NOT EXISTS ff_overhead_confirmation_source_immutable
         BEFORE UPDATE ON {TABLE}
         WHEN NEW.request_id<>OLD.request_id OR NEW.source_json<>OLD.source_json
@@ -412,4 +417,4 @@ def assert_native_confirmation(conn, request):
 
 def stale_payment_reason(day):
     return (f"Этот платёж уже загружали {day}, но не подтвердили. "
-            "Нужен разбор ранее созданного документа; повторная загрузка не изменит дату.")
+            "Загрузите этот PDF ещё раз с прежними параметрами расхода, чтобы проверить и подтвердить его текущей датой учёта склада.")

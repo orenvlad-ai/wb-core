@@ -1060,7 +1060,9 @@ class FfPoolSurface:
             acceptance = read_acceptance(self.db_path, canonical)
             # Receipt/recovery is source-only. Never run a fresh candidate
             # or show technical legacy pool shares as the applied daily basis.
-            preview_summary.update(allocation_status="pending", allocation_label="Ожидает публикации в расчёте себестоимости",
+            preview_summary.update(allocation_status="pending", allocation_label=(
+                "Распределение будет выполнено после подтверждения в плановом цикле"
+                if acceptance is None and not row["posted_document_id"] else "Ожидает публикации в расчёте себестоимости"),
                 denominator_quantity=None, denominator_sku_count=None, affected_sku_count=None,
                 allocation_total_rub=None, pool_allocations_rub={})
         payload = {
@@ -1110,7 +1112,22 @@ class FfPoolSurface:
         if str(row["document_kind"]) == "pool_overhead":
             from packages.application.operator_ff_overhead import read_acceptance, source_confirmable
             payload["acceptance"] = acceptance
-            if acceptance is None and not overhead_date_current and request_manifest.get("source_mode") == "payment_order_pdf":
+            from packages.application.ff_pool_documents import OVERHEAD_PAYMENT_RENEWALS_TABLE, _active_overhead_payment_request
+            with self._read() as conn:
+                renewal = conn.execute(f"SELECT successor_request_id,business_date,anchor_request_id FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} WHERE predecessor_request_id=?", (canonical,)).fetchone()
+                origin = conn.execute(f"SELECT predecessor_request_id,previous_business_date FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} WHERE successor_request_id=?", (canonical,)).fetchone()
+                if renewal is not None:
+                    active_id = _active_overhead_payment_request(conn, str(renewal["anchor_request_id"]))
+                    renewal = conn.execute(f"SELECT request_id AS successor_request_id,business_date FROM {REQUESTS_TABLE} WHERE request_id=?", (active_id,)).fetchone()
+
+            if renewal is not None:
+                payload["superseded_by"] = {"request_id": str(renewal["successor_request_id"]), "business_date": str(renewal["business_date"])}
+                payload["confirmation_block_reason_code"] = "overhead_preview_superseded"
+                payload["confirmation_block_reason_ru"] = "Этот предпросмотр заменён после повторной загрузки платежа. Откройте новый предпросмотр и проверьте дату учёта перед подтверждением."
+            if origin is not None:
+                payload["preview_renewal"] = {"predecessor_request_id": str(origin["predecessor_request_id"]), "previous_business_date": str(origin["previous_business_date"])}
+
+            if renewal is None and acceptance is None and not row["posted_document_id"] and not overhead_date_current and request_manifest.get("source_mode") == "payment_order_pdf":
                 from packages.application.operator_ff_overhead import stale_payment_reason
                 payload["confirmation_block_reason_code"] = "overhead_unconfirmed_payment_prior_day"
                 payload["confirmation_block_reason_ru"] = stale_payment_reason(str(row["business_date"]))
@@ -2031,6 +2048,7 @@ class FfPoolSurface:
                     source_bytes=evidence_bytes,
                     source_filename=str(filename or ""),
                     source_content_type=str(content_type or ""),
+                    overhead_source_only=True,
                 )
             else:
                 result = self._service(resume=False, bootstrap=False).accept_blocked(

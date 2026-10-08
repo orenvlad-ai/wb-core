@@ -86,6 +86,7 @@ WORKFLOW_EVENTS_TABLE = "sheet_vitrina_v1_ff_workflow_events"
 GUIDED_REPLAYS_TABLE = "sheet_vitrina_v1_ff_guided_acceptance_replays"
 GUIDED_RECOVERIES_TABLE = "sheet_vitrina_v1_ff_guided_acceptance_recoveries"
 OVERHEAD_PAYMENT_EVIDENCE_TABLE = "sheet_vitrina_v1_ff_pool_overhead_payment_evidence"
+OVERHEAD_PAYMENT_RENEWALS_TABLE = "sheet_vitrina_v1_ff_pool_overhead_payment_renewals"
 TARGETED_RECALC_QUEUE_TABLE = "sheet_vitrina_v1_warehouse_targeted_recalc_queue"
 
 WORKFLOW_STATES = (
@@ -365,6 +366,52 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS ff_pool_overhead_payment_by_request
         ON {OVERHEAD_PAYMENT_EVIDENCE_TABLE}(request_id);
+        CREATE TABLE IF NOT EXISTS {OVERHEAD_PAYMENT_RENEWALS_TABLE}(
+            predecessor_request_id TEXT PRIMARY KEY REFERENCES {REQUESTS_TABLE}(request_id),
+            successor_request_id TEXT NOT NULL UNIQUE REFERENCES {REQUESTS_TABLE}(request_id),
+            anchor_request_id TEXT NOT NULL REFERENCES {OVERHEAD_PAYMENT_EVIDENCE_TABLE}(request_id),
+            payment_fingerprint TEXT NOT NULL REFERENCES {OVERHEAD_PAYMENT_EVIDENCE_TABLE}(payment_fingerprint),
+            previous_business_date TEXT NOT NULL,
+            business_date TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            CHECK(predecessor_request_id<>successor_request_id),
+            CHECK(previous_business_date<business_date)
+        );
+        CREATE INDEX IF NOT EXISTS ff_pool_overhead_payment_renewals_by_anchor
+        ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}(anchor_request_id,business_date DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS ff_pool_overhead_payment_renewals_by_payment_day
+        ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}(payment_fingerprint,business_date);
+        CREATE TRIGGER IF NOT EXISTS ff_pool_overhead_payment_renewal_source_guard
+        BEFORE INSERT ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}
+        WHEN NOT EXISTS(
+            SELECT 1 FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE} evidence
+            JOIN {REQUESTS_TABLE} predecessor ON predecessor.request_id=NEW.predecessor_request_id
+            JOIN {REQUESTS_TABLE} successor ON successor.request_id=NEW.successor_request_id
+            WHERE evidence.request_id=NEW.anchor_request_id AND evidence.payment_fingerprint=NEW.payment_fingerprint
+              AND (predecessor.request_id=evidence.request_id OR EXISTS(
+                  SELECT 1 FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} previous
+                  WHERE previous.successor_request_id=predecessor.request_id AND previous.anchor_request_id=evidence.request_id))
+              AND predecessor.business_date=NEW.previous_business_date AND successor.business_date=NEW.business_date
+              AND predecessor.business_date<successor.business_date
+              AND predecessor.idempotency_epoch=successor.idempotency_epoch
+              AND predecessor.request_payload_json=successor.request_payload_json
+              AND predecessor.source_sha256=successor.source_sha256 AND predecessor.source_file_blob=successor.source_file_blob
+              AND predecessor.posted_document_id='' AND predecessor.posted_at='' AND predecessor.recovery_operation_id=''
+              AND NOT EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_overhead_confirmations WHERE request_id=predecessor.request_id)
+              AND NOT EXISTS(SELECT 1 FROM {DOCUMENTS_TABLE} WHERE request_id=predecessor.request_id))
+        BEGIN SELECT RAISE(ABORT,'overhead payment renewal requires an unconfirmed original source'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_overhead_predecessor_cannot_post
+        BEFORE INSERT ON {DOCUMENTS_TABLE}
+        WHEN EXISTS(SELECT 1 FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} WHERE predecessor_request_id=NEW.request_id)
+        BEGIN SELECT RAISE(ABORT,'superseded overhead preview cannot post'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_overhead_payment_renewals_no_update
+        BEFORE UPDATE ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'overhead payment renewal is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_overhead_payment_renewals_no_delete
+        BEFORE DELETE ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'overhead payment renewal is append-only'); END;
+
 
         CREATE TRIGGER IF NOT EXISTS ff_pool_documents_no_update
         BEFORE UPDATE ON {DOCUMENTS_TABLE}
@@ -469,6 +516,9 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
 
     from packages.application.operator_ff_overhead import ensure_schema
     ensure_schema(conn)
+    from packages.application.warehouse_domain_write_guard import EVENTS_TABLE, install_warehouse_domain_table_guards
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (EVENTS_TABLE,)).fetchone():
+        install_warehouse_domain_table_guards(conn)
 
 
 def _ensure_targeted_recalc_queue_schema(conn: sqlite3.Connection) -> None:
@@ -554,6 +604,7 @@ class FfPoolDocumentService:
         source_filename: str = "",
         source_content_type: str = "",
         template_fingerprint: str = "",
+        overhead_source_only: bool = False,
     ) -> dict[str, Any]:
         """Persist accepted evidence, validate it and produce a durable preview."""
 
@@ -569,25 +620,25 @@ class FfPoolDocumentService:
             template_fingerprint=template_fingerprint,
         )
         if inserted:
-            self.process_request(canonical_request_id)
+            self.process_request(canonical_request_id, overhead_source_only=overhead_source_only)
         elif self._retry_legacy_money_block(canonical_request_id):
-            self.process_request(canonical_request_id)
+            self.process_request(canonical_request_id, overhead_source_only=overhead_source_only)
         elif self._retry_guided_source_revision_contract_block(
             canonical_request_id,
             expected_source_revision=str(identity.source_revision),
         ):
-            self.process_request(canonical_request_id)
+            self.process_request(canonical_request_id, overhead_source_only=overhead_source_only)
         elif self._retry_guided_parity_block(canonical_request_id):
-            self.process_request(canonical_request_id)
+            self.process_request(canonical_request_id, overhead_source_only=overhead_source_only)
         elif self._retry_ready_guided_plan_preview(canonical_request_id):
-            self.process_request(canonical_request_id)
+            self.process_request(canonical_request_id, overhead_source_only=overhead_source_only)
         elif (
             normalized_kind == "pool_overhead"
             and self._retry_pool_overhead_preview(canonical_request_id)
         ):
-            self.process_request(canonical_request_id)
+            self.process_request(canonical_request_id, overhead_source_only=overhead_source_only)
         return {
-            **self.status(request_id=identity.request_id),
+            **self.status(request_id=canonical_request_id),
             "idempotent": not inserted,
             "payment_duplicate": bool(
                 normalized_kind == "pool_overhead"
@@ -622,6 +673,10 @@ class FfPoolDocumentService:
                     )
                 )
             ):
+                conn.rollback()
+                return False
+            from packages.application.operator_ff_overhead import TABLE as confirmations_table
+            if conn.execute(f"SELECT 1 FROM {confirmations_table} WHERE request_id=?", (request_id,)).fetchone():
                 conn.rollback()
                 return False
             changed = conn.execute(
@@ -1052,9 +1107,9 @@ class FfPoolDocumentService:
                     details={"error_code": str(error_code)},
                 )
                 conn.commit()
-        return {**self.status(request_id=identity.request_id), "idempotent": not inserted}
+        return {**self.status(request_id=canonical_request_id), "idempotent": not inserted}
 
-    def process_request(self, request_id: str) -> dict[str, Any]:
+    def process_request(self, request_id: str, *, overhead_source_only: bool = False) -> dict[str, Any]:
         canonical = self._resolve_request_id(request_id)
         now = self._now()
         with _connect(self.db_path) as conn:
@@ -1140,6 +1195,13 @@ class FfPoolDocumentService:
                         plan=plan,
                         epoch=epoch,
                     )
+            elif str(row["document_kind"]) == "pool_overhead" and overhead_source_only:
+                with _connect(self.db_path, query_only=True) as conn:
+                    _writer_epoch(conn)
+                    _facility(conn, str(manifest.get("facility_id") or ""), require_active=True)
+                    _scope(str(manifest.get("scope") or ""))
+                    _overhead_metadata(conn, request=row, manifest=manifest,
+                        amount_cents=_money_cents(manifest.get("amount_rub"), field="overhead amount", positive=True))
             elif str(row["document_kind"]) == "pool_overhead":
                 with _connect(self.db_path, query_only=True) as conn:
                     epoch = _writer_epoch(conn)
@@ -1410,23 +1472,7 @@ class FfPoolDocumentService:
         _validate_identity(identity)
         client_request_id = _client_request_id(identity.request_id)
         source_sha256 = _sha256(source_bytes) if source_bytes else ""
-        semantic_manifest = {
-            key: value for key, value in manifest.items() if key != "source_filename"
-        }
-        request_identity = _fingerprint(
-            {
-                "document_kind": document_kind,
-                "source_system": identity.source_system,
-                "source_type": identity.source_type,
-                "source_id": identity.source_id,
-                "source_revision": identity.source_revision,
-                "idempotency_epoch": identity.idempotency_epoch,
-                "business_date": identity.business_date,
-                "source_sha256": source_sha256,
-                "template_fingerprint": template_fingerprint,
-                "manifest": semantic_manifest,
-            }
-        )
+        request_identity = _document_request_identity(identity, document_kind, manifest, source_sha256, template_fingerprint)
         canonical = "ffpdr_" + request_identity.removeprefix("sha256:")[:28]
         now = self._now()
         with _connect(self.db_path) as conn:
@@ -1437,43 +1483,74 @@ class FfPoolDocumentService:
                 f"SELECT request_identity,request_id FROM {ALIASES_TABLE} WHERE client_request_id=?",
                 (client_request_id,),
             ).fetchone()
-            if existing_alias is not None and str(existing_alias["request_identity"]) != request_identity:
-                raise FfPoolDocumentError(
-                    "request_id_identity_conflict",
-                    "Client request_id was already used for another semantic document",
-                )
             payment_fingerprint = _payment_fingerprint_from_manifest(manifest)
+            renewal = None
+            anchor_request_id = ""
             if document_kind == "pool_overhead" and payment_fingerprint:
-                existing_payment = conn.execute(
-                    f"""SELECT evidence.request_id,request.request_identity
-                        FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE} AS evidence
-                        JOIN {REQUESTS_TABLE} AS request ON request.request_id=evidence.request_id
-                        WHERE evidence.payment_fingerprint=?""",
+                evidence_row = conn.execute(
+                    f"SELECT * FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE} WHERE payment_fingerprint=?",
                     (payment_fingerprint,),
                 ).fetchone()
-                if existing_payment is not None:
-                    existing_request_id = str(existing_payment["request_id"])
-                    existing_identity = str(existing_payment["request_identity"])
-                    conn.execute(
-                        f"INSERT OR IGNORE INTO {ALIASES_TABLE}(client_request_id,request_id,request_identity,accepted_at) "
-                        "VALUES(?,?,?,?)",
-                        (client_request_id, existing_request_id, existing_identity, now),
-                    )
-                    alias = conn.execute(
-                        f"SELECT request_id,request_identity FROM {ALIASES_TABLE} WHERE client_request_id=?",
-                        (client_request_id,),
-                    ).fetchone()
-                    if (
-                        alias is None
-                        or str(alias["request_id"]) != existing_request_id
-                        or str(alias["request_identity"]) != existing_identity
-                    ):
-                        raise FfPoolDocumentError(
-                            "request_id_identity_conflict",
-                            "Client request_id was already used for another semantic document",
-                        )
-                    conn.commit()
-                    return existing_request_id, False
+                if evidence_row is not None:
+                    anchor_request_id = str(evidence_row["request_id"])
+                    active_id = _active_overhead_payment_request(conn, anchor_request_id)
+                    active = conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?", (active_id,)).fetchone()
+                    if existing_alias is not None:
+                        aliased = conn.execute(f"SELECT request_payload_json FROM {REQUESTS_TABLE} WHERE request_id=?", (existing_alias["request_id"],)).fetchone()
+                        if aliased is None or _payment_fingerprint_from_manifest(_loads(aliased[0], {})) != payment_fingerprint:
+                            raise FfPoolDocumentError("request_id_identity_conflict", "Client request_id was already used for another semantic document")
+                    from packages.application.operator_ff_overhead import TABLE as confirmations_table
+                    frozen_request = conn.execute(f"""SELECT request_id FROM {REQUESTS_TABLE} request
+                        WHERE request_id IN (SELECT ? UNION ALL SELECT successor_request_id FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} WHERE anchor_request_id=?)
+                        AND (posted_document_id<>'' OR posted_at<>'' OR recovery_operation_id<>'' OR state IN ('posted','replaying','complete')
+                            OR EXISTS(SELECT 1 FROM {confirmations_table} WHERE request_id=request.request_id)
+                            OR EXISTS(SELECT 1 FROM {DOCUMENTS_TABLE} WHERE request_id=request.request_id)) LIMIT 1""",
+                        (anchor_request_id, anchor_request_id)).fetchone()
+                    frozen = frozen_request is not None
+                    if frozen:
+                        active_id = str(frozen_request["request_id"])
+                        active = conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?", (active_id,)).fetchone()
+                    anchor = conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?", (anchor_request_id,)).fetchone()
+                    original_manifest = _json_object(_loads(anchor["request_payload_json"], {}))
+                    fields = ("facility_id", "scope", "category", "comment", "amount_rub")
+                    if any(manifest.get(key) != original_manifest.get(key) for key in fields):
+                        raise FfPoolDocumentError("overhead_payment_fields_mismatch",
+                            "Платёж уже загружен с другими параметрами расхода. Используйте исходные склад, область, категорию, комментарий и сумму.",
+                            details={"request_id": active_id, "detail_path": "/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/requests/" + active_id})
+                    if not frozen and str(active["business_date"]) < identity.business_date:
+                        _overhead_metadata(conn, request=active, manifest=_json_object(_loads(active["request_payload_json"], {})),
+                            amount_cents=_money_cents(original_manifest["amount_rub"], field="overhead amount", positive=True))
+                        if active["idempotency_epoch"] != identity.idempotency_epoch or _writer_epoch(conn) != active["idempotency_epoch"]:
+                            raise FfPoolDocumentError("feature_epoch_changed", "Складской режим изменился после проверки")
+                        facility_id = _facility(conn, original_manifest["facility_id"], require_active=True)
+                        from packages.application.ff_pool_surfaces import _business_date_in_timezone
+                        timezone_name = conn.execute(f"SELECT display_timezone FROM {FACILITIES_TABLE} WHERE facility_id=?", (facility_id,)).fetchone()[0]
+                        if _business_date_in_timezone(self._now(), timezone_name) != identity.business_date:
+                            raise FfPoolDocumentError("overhead_business_date_stale", "Дата выбранного склада изменилась после проверки. Выполните проверку заново.")
+                        if str(active["state"]) not in {"accepted", "ready", "blocked", "error"}:
+                            raise FfPoolDocumentError("overhead_preview_busy", "Проверка платежа ещё выполняется. Повторите загрузку после её завершения.")
+                        # Every successor retains exact original bytes/parser evidence; a renamed
+                        # or regenerated upload is only a semantic-fingerprint lookup.
+                        manifest = original_manifest
+                        source_bytes = bytes(anchor["source_file_blob"])
+                        source_sha256 = str(anchor["source_sha256"])
+                        source_filename = str(anchor["source_filename"])
+                        source_content_type = str(anchor["source_content_type"])
+                        from dataclasses import replace
+                        identity = replace(identity, source_system=str(anchor["source_system"]), source_type=str(anchor["source_type"]), source_id=str(anchor["source_id"]), source_revision=_fingerprint({
+                            "payment_anchor": anchor_request_id, "predecessor": active_id,
+                            "business_date": identity.business_date, "manifest": manifest,
+                        }))
+                        request_identity = _document_request_identity(identity, document_kind, manifest, source_sha256, template_fingerprint)
+                        canonical = "ffpdr_" + request_identity.removeprefix("sha256:")[:28]
+                        renewal = active
+                    else:
+                        conn.execute(f"INSERT OR IGNORE INTO {ALIASES_TABLE}(client_request_id,request_id,request_identity,accepted_at) VALUES(?,?,?,?)",
+                            (client_request_id, active_id, active["request_identity"], now))
+                        conn.commit()
+                        return active_id, False
+            if existing_alias is not None and renewal is None and str(existing_alias["request_identity"]) != request_identity:
+                raise FfPoolDocumentError("request_id_identity_conflict", "Client request_id was already used for another semantic document")
             existing_source = conn.execute(
                 f"SELECT request_id,request_identity FROM {REQUESTS_TABLE} "
                 "WHERE source_system=? AND source_type=? AND source_id=? "
@@ -1541,17 +1618,29 @@ class FfPoolDocumentService:
             ).fetchone()
             if (
                 alias is None
-                or str(alias["request_identity"]) != request_identity
-                or str(alias["request_id"]) != canonical
+                or (existing_alias is None and (str(alias["request_identity"]) != request_identity
+                    or str(alias["request_id"]) != canonical))
             ):
                 raise FfPoolDocumentError(
                     "request_id_identity_conflict",
                     "Client request_id was concurrently bound to another semantic document",
                 )
-            canonical = str(alias["request_id"])
             if inserted:
                 self._event(conn, request_id=canonical, stage="file_accepted", status="complete")
-            if payment_fingerprint:
+            if renewal is not None:
+                conn.execute(f"""INSERT INTO {OVERHEAD_PAYMENT_RENEWALS_TABLE}(
+                    predecessor_request_id,successor_request_id,anchor_request_id,payment_fingerprint,
+                    previous_business_date,business_date,actor,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                    (renewal["request_id"], canonical, anchor_request_id, payment_fingerprint,
+                     renewal["business_date"], identity.business_date, identity.actor, now))
+                conn.execute(f"UPDATE {REQUESTS_TABLE} SET state='blocked',updated_at=?,error_code='overhead_preview_superseded',error_details_json=? WHERE request_id=?",
+                    (now, _json({"successor_request_id": canonical}), renewal["request_id"]))
+                for event_request in (str(renewal["request_id"]), canonical):
+                    self._event(conn, request_id=event_request, stage="overhead_preview_renewal", status="complete",
+                        details={"anchor_request_id": anchor_request_id, "predecessor_request_id": str(renewal["request_id"]),
+                                 "successor_request_id": canonical, "previous_business_date": str(renewal["business_date"]),
+                                 "business_date": identity.business_date, "actor": identity.actor})
+            if payment_fingerprint and renewal is None:
                 evidence = _payment_evidence_from_manifest(manifest)
                 conn.execute(
                     f"""INSERT OR IGNORE INTO {OVERHEAD_PAYMENT_EVIDENCE_TABLE}(
@@ -4760,6 +4849,25 @@ def _plan_pool_overhead(
     }
 
 
+def _active_overhead_payment_request(conn: sqlite3.Connection, anchor_request_id: str) -> str:
+    """Resolve the sole leaf of immutable, transaction-serialized renewal links."""
+    row = conn.execute(f"""SELECT successor_request_id
+        FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} WHERE anchor_request_id=?
+        ORDER BY business_date DESC LIMIT 1""", (anchor_request_id,)).fetchone()
+    return str(row[0]) if row else anchor_request_id
+
+
+def _document_request_identity(identity, document_kind, manifest, source_sha256, template_fingerprint):
+    return _fingerprint({
+        "document_kind": document_kind, "source_system": identity.source_system,
+        "source_type": identity.source_type, "source_id": identity.source_id,
+        "source_revision": identity.source_revision, "idempotency_epoch": identity.idempotency_epoch,
+        "business_date": identity.business_date, "source_sha256": source_sha256,
+        "template_fingerprint": template_fingerprint,
+        "manifest": {key: value for key, value in manifest.items() if key != "source_filename"},
+    })
+
+
 def _overhead_metadata(
     conn: sqlite3.Connection,
     *,
@@ -4866,9 +4974,13 @@ def _overhead_metadata(
             WHERE payment_fingerprint=?""",
         (payment_fingerprint,),
     ).fetchone()
+    if stored is not None and _active_overhead_payment_request(conn, str(stored["request_id"])) != str(request["request_id"]):
+        raise FfPoolDocumentError("overhead_preview_superseded",
+            "Этот предпросмотр заменён. Откройте новый предпросмотр платежа перед подтверждением.",
+            details={"successor_request_id": _active_overhead_payment_request(conn, str(stored["request_id"]))})
     if (
         stored is None
-        or str(stored["request_id"]) != str(request["request_id"])
+        or _active_overhead_payment_request(conn, str(stored["request_id"])) != str(request["request_id"])
         or str(stored["file_sha256"]) != file_sha256
         or str(stored["parser_version"]) != RUSSIAN_PAYMENT_ORDER_PARSER_VERSION
         or str(stored["fingerprint_version"]) != RUSSIAN_PAYMENT_ORDER_FINGERPRINT_VERSION

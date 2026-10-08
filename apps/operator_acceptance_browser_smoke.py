@@ -73,7 +73,7 @@ def run(browser, base: str, directory: Path) -> None:
     reads = []
     journal_reads = []
     held_reads = []
-    controls = {"lose_confirm":False, "malformed_confirm":False, "lose_read":False, "reject_confirm":False, "reject_html":False, "commit_proxy403":False, "commit_proxy409":False, "malformed_read":False, "blocked_old_pdf":False, "hold_read_id":"", "mismatch_identity":""}
+    controls = {"lose_confirm":False, "malformed_confirm":False, "lose_read":False, "reject_confirm":False, "reject_html":False, "commit_proxy403":False, "commit_proxy409":False, "malformed_read":False, "renewed_pdf":False, "hold_read_id":"", "mismatch_identity":""}
 
     def send(route, payload):
         route.fulfill(status=200, content_type="application/json", body=json.dumps(payload, ensure_ascii=False))
@@ -83,7 +83,7 @@ def run(browser, base: str, directory: Path) -> None:
         pdf = request.all_headers().get("content-type", "").startswith("multipart/")
         if pdf:
             # The fixture parser response proves that file parsing alone is not acceptance.
-            identity = "old-pdf-browser" if controls["blocked_old_pdf"] else "pdf-browser"
+            identity = "renewed-pdf-browser" if controls["renewed_pdf"] else "pdf-browser"
         else:
             identity = request.post_data_json["request_id"]
         summary = {"facility_id":"browser-facility", "facility_name":"FF Москва",
@@ -94,12 +94,18 @@ def run(browser, base: str, directory: Path) -> None:
             "request_id":identity,"document_kind":"pool_overhead", "state":"ready",
             "state_label_ru":"Готово к проведению", "confirm_allowed":True, "steps":[],
             "preview":{"available":True,"summary":summary}}
-        if pdf and controls["blocked_old_pdf"]:
-            summary["business_date"] = "2026-08-11"
-            payload.update(state="blocked", state_label_ru="Проведение заблокировано", confirm_allowed=False,
-                confirmation_block_reason_code="overhead_unconfirmed_payment_prior_day",
-                confirmation_block_reason_ru="Этот платёж уже загружали 2026-08-11, но не подтвердили. Нужен разбор ранее созданного документа; повторная загрузка не изменит дату.",
-                error={"code":"overhead_unconfirmed_payment_prior_day"})
+        if pdf and controls["renewed_pdf"]:
+            summary["allocation_label"] = "Распределение будет выполнено после подтверждения в плановом цикле"
+            payload["preview_renewal"] = {"predecessor_request_id":"old-pdf-browser","previous_business_date":"2026-08-11"}
+            old = dict(payload)
+            old.update(request_id="old-pdf-browser",state="blocked",state_label_ru="Проведение заблокировано",confirm_allowed=False,
+                superseded_by={"request_id":identity,"business_date":"2026-08-12"},
+                confirmation_block_reason_code="overhead_preview_superseded",
+                confirmation_block_reason_ru="Этот предпросмотр заменён после повторной загрузки платежа. Откройте новый предпросмотр и проверьте дату учёта перед подтверждением.",
+                error={"code":"overhead_preview_superseded"})
+            old.pop("preview_renewal")
+            old["preview"]={"available":True,"summary":{**summary,"business_date":"2026-08-11"}}
+            previews["old-pdf-browser"]=old
         previews[identity] = payload
         send(route, payload)
 
@@ -390,8 +396,9 @@ def run(browser, base: str, directory: Path) -> None:
         assert receipt.get_attribute("data-ff-operation-receipt") == uncertain
         assert len(confirmations) == confirm_count
     assert len(confirmations) == 8 and len(accepted) == 6
-    # Repeated old-day, unconfirmed PDF keeps its canonical request and explains the real block.
-    controls.update(commit_proxy409=False, blocked_old_pdf=True)
+    # Ordinary reupload opens today's active preview. An old saved ID remains
+    # unconfirmed and provides a safe, explicit navigation to its successor.
+    controls.update(commit_proxy409=False, renewed_pdf=True)
     page.locator('[data-ff-pool-tab="create"]').click()
     page.locator('[data-ff-pool-action-kind]').select_option("pool_overhead")
     page.locator('[data-ff-pool-facility]').select_option(index=1)
@@ -400,20 +407,25 @@ def run(browser, base: str, directory: Path) -> None:
     page.locator('[data-ff-pool-overhead-comment]').fill("Ранее загруженный платёж")
     page.locator('[data-ff-pool-overhead-file]').set_input_files(str(pdf))
     page.locator('[data-ff-pool-preview]').click()
+    page.get_by_text("Дата учёта обновлена после повторной загрузки. Проверьте новый предпросмотр перед подтверждением.",exact=True).wait_for()
+    page.get_by_text("Распределение будет выполнено после подтверждения в плановом цикле",exact=True).wait_for()
+    assert page.locator('[data-ff-pool-request-id]').input_value() == "renewed-pdf-browser"
+    assert page.get_by_role("button", name="Подтвердить проведение", exact=True).is_enabled()
+    assert page.locator('[data-ff-operation-receipt]').count() == 0
+    page.locator('[data-ff-pool-request-id]').fill("old-pdf-browser")
+    page.locator('[data-ff-pool-request-load]').click()
     blocked_reason = page.locator('[data-ff-confirmation-block-reason]')
     blocked_reason.wait_for()
-    assert "Этот платёж уже загружали 2026-08-11, но не подтвердили." in blocked_reason.inner_text()
-    assert "повторная загрузка не изменит дату." in blocked_reason.inner_text()
-    assert page.locator('[data-ff-pool-request-id]').input_value() == "old-pdf-browser"
+    assert "Этот предпросмотр заменён" in blocked_reason.inner_text()
     assert page.get_by_role("button", name="Подтвердить проведение", exact=True).is_disabled()
     assert page.locator('[data-ff-operation-receipt]').count() == 0
-    assert page.get_by_text("Документ пока не принят. Проверьте данные и выполните проверку снова.", exact=True).count() == 0
-    assert "old-pdf-browser" not in accepted and len(confirmations) == 8
-    page.locator('[data-ff-pool-tab="workflow"]').click()
-    blocked_reason.wait_for()
-    assert page.get_by_role("button", name="Подтвердить проведение", exact=True).is_disabled()
+    page.get_by_role("button",name="Открыть новый предпросмотр",exact=True).click()
+    page.wait_for_function("document.querySelector('[data-ff-pool-request-id]').value === 'renewed-pdf-browser' && !document.querySelector('[data-ff-confirmation-block-reason]')")
+    assert page.get_by_role("button", name="Подтвердить проведение", exact=True).is_enabled()
+    assert page.locator('[data-ff-operation-receipt]').count() == 0
+    assert "old-pdf-browser" not in accepted and "renewed-pdf-browser" not in accepted and len(confirmations) == 8
     # Hold accepted A's actual GET response while the operator previews a new unconfirmed B.
-    controls.update(blocked_old_pdf=False, hold_read_id=manual)
+    controls.update(renewed_pdf=False, hold_read_id=manual)
     page.locator('[data-ff-pool-request-id]').fill(manual)
     page.locator('[data-ff-pool-request-load]').click()
     for _ in range(50):

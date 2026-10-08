@@ -29030,6 +29030,14 @@
         const duplicate = payload.duplicate_link || {};
         nodes.workflow.appendChild(make("p", "ff-pool-alert", "Этот платёж уже связан с существующим запросом " + (duplicate.request_id || payload.request_id || "—") + (duplicate.document_id ? " и документом " + duplicate.document_id : "") + ". Повторный расход не создан."));
       }
+      if (payload.preview_renewal && !payload.acceptance) {
+        nodes.workflow.appendChild(make("p", "ff-pool-note", "Дата учёта обновлена после повторной загрузки. Проверьте новый предпросмотр перед подтверждением."));
+      }
+      if (payload.superseded_by && payload.superseded_by.request_id) {
+        const current = make("button", "button ghost", "Открыть новый предпросмотр"); current.type = "button";
+        current.addEventListener("click", function(){nodes.requestId.value = payload.superseded_by.request_id; loadWorkflow();});
+        nodes.workflow.appendChild(current);
+      }
       if (confirmationBlockReason) {
         const explanation = make("p", "ff-pool-alert", confirmationBlockReason);
         explanation.dataset.ffConfirmationBlockReason = ""; explanation.dataset.tone = "error"; explanation.setAttribute("role", "alert");
