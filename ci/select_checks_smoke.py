@@ -528,6 +528,8 @@ def command_dependency_checks():
     next_browsers = ['apps/operator_nomenclature_browser_smoke.py', 'apps/operator_supplier_shipments_browser_smoke.py', 'apps/operator_supplier_factual_dates_browser_smoke.py', 'apps/operator_policy_browser_smoke.py', 'apps/operator_external_operations_browser_smoke.py', 'apps/operator_external_forms_browser_smoke.py', 'apps/operator_supplier_financial_browser_smoke.py', 'apps/operator_cny_documents_browser_smoke.py']
     next_backend += ['apps/operator_facility_mappings_smoke.py', 'apps/operator_facility_mappings_http_smoke.py', 'apps/operator_supplier_contracts_smoke.py', 'apps/operator_supplier_contracts_http_smoke.py', 'apps/operator_trade_documents_smoke.py', 'apps/operator_trade_documents_http_smoke.py', 'apps/operator_trade_journal_smoke.py']
     next_browsers += ['apps/operator_json_business_settings_smoke.py', 'apps/operator_facility_mappings_browser_smoke.py', 'apps/operator_autoanswers_settings_smoke.py', 'apps/operator_supplier_contracts_browser_smoke.py', 'apps/operator_trade_documents_browser_smoke.py', 'apps/operator_feedback_forms_browser_smoke.py', 'apps/operator_business_settings_smoke.py', 'apps/operator_cleaner_operations_smoke.py']
+    next_backend += ['apps/operator_facility_journal_cycle_smoke.py', 'apps/operator_manual_ff_stock_smoke.py', 'apps/operator_manual_ff_stock_http_smoke.py']
+    next_browsers += ['apps/operator_feedback_schedules_smoke.py', 'apps/operator_balance_job_recovery_smoke.py', 'apps/operator_spp_job_receipts_smoke.py', 'apps/operator_manual_ff_stock_browser_smoke.py']
     supplier_cycle = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD, paths=['apps/operator_supplier_history_cycle_smoke.py'], file_exists=lambda _, p: p == 'apps/operator_supplier_history_cycle_smoke.py')
     verify_plan(supplier_cycle)
     assert {'openpyxl==3.1.5', 'pypdf==6.4.1'} <= set(supplier_cycle['pip']), supplier_cycle
@@ -538,7 +540,7 @@ def command_dependency_checks():
         verify_plan(narrow)
         assert narrow['commands'].count(['python3', script]) == 1, narrow
         assert 'openpyxl==3.1.5' in narrow['pip'], narrow
-        if script in {'apps/operator_autoanswers_settings_smoke.py', 'apps/operator_json_business_settings_smoke.py'}:
+        if script in {'apps/operator_feedback_schedules_smoke.py', 'apps/operator_autoanswers_settings_smoke.py', 'apps/operator_json_business_settings_smoke.py', 'apps/operator_spp_job_receipts_smoke.py', 'apps/operator_balance_job_recovery_smoke.py'}:
             assert 'apsw==3.53.4.0' in narrow['pip'], narrow
         if script in next_browsers:
             check(narrow, [script])
