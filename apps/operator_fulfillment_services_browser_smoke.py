@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from urllib.parse import parse_qs,urlsplit
 from playwright.sync_api import sync_playwright, expect
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart
@@ -94,30 +95,44 @@ def main():
         try:
             with sync_playwright() as pw:
                 browser=pw.chromium.launch();page=browser.new_page(viewport={'width':1440,'height':1000})
-                mutations=[];foreign=True
+                mutations=[];recoveries=[]
                 def upload(route):
                     if route.request.method=='POST':
                         mutations.append('upload');route.fetch();route.abort('failed')
                     else:route.continue_()
                 def recovery(route):
+                    # Bind the scripted answer to this GET before route.fetch yields.
+                    # A reload GET must stay foreign while the manual click is prepared.
+                    recoveries.append((route.request.method,route.request.url))
+                    foreign=len(recoveries)<=2
                     response=route.fetch();payload=response.json()
                     if foreign and payload.get('acceptance'):
                         payload['request_id']='another-request'
                     route.fulfill(status=response.status,content_type='application/json',body=json.dumps(payload))
+                def recovery_response(response):
+                    return response.request.method=='GET' and response.url.startswith(base+UPLOADS+'?request_id=')
                 page.route('**/fulfillment-services/uploads',upload)
                 page.route('**/fulfillment-services/uploads?request_id=*',recovery)
                 open_form(page,base)
-                choose_workbook(page, {'name':'synthetic.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('1001')])})
+                with page.expect_response(recovery_response) as upload_recovery:
+                    choose_workbook(page, {'name':'synthetic.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('1001')])})
+                assert upload_recovery.value.json()['request_id']=='another-request'
                 expect(page.locator('#fulfillmentAcceptance')).to_contain_text('Проверяем сохранение',timeout=10000)
                 expect(page.locator('#fulfillmentUploadButton')).to_be_disabled()
                 assert page.locator('#fulfillmentAcceptance .ff-operation-check').count()==0
                 assert mutations==['upload']
                 # Reload retains the same uncertain request and sends only GET.
-                open_form(page,base)
+                with page.expect_response(recovery_response) as reload_recovery:
+                    open_form(page,base)
+                assert reload_recovery.value.json()['request_id']=='another-request'
                 expect(page.locator('#fulfillmentAcceptance')).to_contain_text('Проверяем сохранение')
                 assert mutations==['upload']
-                foreign=False
-                page.locator('#fulfillmentAcceptance').get_by_role('button',name='Проверить статус').click()
+                assert len(recoveries)==2 and recoveries[0]==recoveries[1] and recoveries[0][0]=='GET'
+                with page.expect_response(recovery_response) as manual_recovery:
+                    page.locator('#fulfillmentAcceptance').get_by_role('button',name='Проверить статус').click()
+                assert len(recoveries)==3 and recoveries[2]==recoveries[0]
+                request_id=parse_qs(urlsplit(recoveries[0][1]).query)['request_id'][0]
+                assert manual_recovery.value.json()['request_id']==request_id
                 expect(page.locator('#fulfillmentAcceptance .ff-operation-check')).to_be_visible(timeout=10000)
                 expect(page.locator('#fulfillmentAcceptance')).to_contain_text('Документ сохранён.')
                 expect(page.locator('#fulfillmentAcceptance')).to_contain_text('Ожидает обработки')
