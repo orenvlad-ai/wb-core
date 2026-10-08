@@ -17,7 +17,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from packages.application.sheet_vitrina_v1_cycle import (
-    CycleHistoryConfig, CycleReceiptStore, CycleStageFailure, CycleConflict,
+    CycleHistoryConfig, CycleReceiptStore, CycleStageFailure, FbsGenerationFailure, CycleConflict,
     StageProof, STAGES, run_cycle, validate_collection, daily_report_proof,
 )
 from packages.application.registry_upload_http_entrypoint import (
@@ -162,6 +162,47 @@ class CycleTests(unittest.TestCase):
         finally:lock.close()
         self.assertNotIn('derive',fake.events)
         self.assertEqual(fake.events.count('api_sources'),1)
+
+    def test_fbs_failure_is_sanitized_and_survives_receipt_reload(self):
+        secret = 'secret-provider-body'
+        proof = {'seller_warehouse_id': 1988668, 'confirmation_complete': False,
+                 'first_complete': True, 'reason_codes': ['confirmation_stock_request_failed', secret],
+                 'confirmation_digest': secret, 'amount_change_count': True, 'raw_body': secret,
+                 'changed_identities':[{'chrt_id':9001, 'nm_id':1235346302, 'raw_body':secret}] * 30}
+        latest = {'run_id': 'fbsreg_' + 'a' * 28, 'run_sequence': 3654,
+            'error': secret, 'catalog_scope_json': json.dumps({'stability': {'stock_sources_stable': False,
+                'catalog_stable': secret}, 'generation_diagnostics': {'reason_codes': [secret, 'stock_sources_unstable'],
+                'stock_confirmation_count': 100, 'stock_confirmations': [proof] * 100, 'raw_body': secret}})}
+        receipt, lock = self.accepted()
+        fake = CycleFake(self.root)
+        def failed():
+            fake.mark('fbs_generation')
+            raise FbsGenerationFailure(latest)
+        fake._cycle_fbs_generation = failed
+        try:
+            with heavy_admitted(self.root, operation='cycle'), self.assertRaises(FbsGenerationFailure):
+                run_cycle(fake, self.store, receipt, self.config, lambda _:None)
+        finally:
+            lock.close()
+        reloaded = CycleReceiptStore(self.root, lambda:STAMP).read(receipt['cycle_id'])
+        diagnostic = reloaded['fbs_failure']
+        self.assertNotIn(secret, json.dumps(reloaded))
+        self.assertEqual(diagnostic['registry_run_id'], latest['run_id'])
+        self.assertEqual(diagnostic['stability'], {'stock_sources_stable':False})
+        self.assertEqual(len(diagnostic['stock_confirmations']), 8)
+        self.assertNotIn('amount_change_count', diagnostic['stock_confirmations'][0])
+        self.assertEqual(len(diagnostic['stock_confirmations'][0]['changed_identities']), 10)
+        self.assertEqual(diagnostic['stock_confirmations'][0]['changed_identities'][0],
+                         {'chrt_id':9001, 'nm_id':1235346302})
+        stage = next(s for s in reloaded['stages'] if s['stage']=='fbs_generation')
+        self.assertEqual(stage['fbs_failure'], diagnostic)
+        self.assertEqual(reloaded['error_code'], 'fbs_new_complete_generation_missing')
+        self.assertNotIn('warehouse', fake.events)
+        self.assertEqual(fake.events.count('fbs_generation'), 1)
+        self.assertEqual(FbsGenerationFailure(latest, 'new_generation_missing').diagnostic()['reason_codes'],
+                         ['new_generation_missing'])
+        self.assertEqual(FbsGenerationFailure(latest, 'generation_binding_mismatch').diagnostic()['reason_codes'],
+                         ['generation_binding_mismatch'])
     def test_cycle_lock_blocks_another_os_process(self):
         import subprocess
         receipt,lock=self.accepted()
@@ -559,6 +600,69 @@ class SourceAndAdmissionTests(unittest.TestCase):
             entry.wb_fbs_warehouse_registry=bad
             with self.assertRaisesRegex(CycleStageFailure,'fbs_new_complete_generation_missing'):
                 Entry._cycle_fbs_generation(entry)
+
+    def test_fbs_catalog_hash_retains_original_scope_and_excludes_only_diagnostics(self):
+        from apps import wb_fbs_complete_snapshot_smoke as fixture
+        from packages.application.wb_fbs_warehouse_registry import WbFbsWarehouseRegistry, _complete_source_generation
+        from packages.application.ready_publication import readonly, canonical, digest
+        with TemporaryDirectory() as temp:
+            db = Path(temp) / 'operational.sqlite3'
+            fixture._seed(db)
+            clock = fixture.Clock()
+            registry = WbFbsWarehouseRegistry(db_path=db, runtime_dir=db.parent, timestamp_factory=clock,
+                source=fixture.OfficialSource(), catalog_source=fixture.CatalogSource())
+            registry.collect()
+            entry = SimpleNamespace(runtime=SimpleNamespace(db_path=db),
+                wb_fbs_warehouse_registry=registry, now_factory=lambda:clock.value)
+            proof = Entry._cycle_fbs_generation(entry)
+            with readonly(db) as conn:
+                scope = dict(_complete_source_generation(conn)['catalog_scope'])
+            self.assertIn('generation_diagnostics', scope)
+            del scope['generation_diagnostics']
+            self.assertEqual(proof.versions['fbs_catalog'], digest(canonical(scope)))
+            def with_changed_diagnostics(conn):
+                generation = _complete_source_generation(conn)
+                generation['catalog_scope']['generation_diagnostics'] = {'arbitrary':'different operational metadata'}
+                return generation
+            with patch('packages.application.wb_fbs_warehouse_registry._complete_source_generation',
+                side_effect=with_changed_diagnostics):
+                changed = Entry._cycle_fbs_generation(entry)
+            self.assertEqual(changed.versions['fbs_catalog'], proof.versions['fbs_catalog'])
+
+    def test_partial_new_fbs_never_reads_stale_last_good_across_business_midnight(self):
+        from apps import wb_fbs_complete_snapshot_smoke as fixture
+        from packages.application.wb_fbs_warehouse_registry import WbFbsWarehouseRegistry
+        for current_hour in (17, 19):
+            with self.subTest(hour=current_hour), TemporaryDirectory() as temp:
+                db = Path(temp) / 'operational.sqlite3'
+                fixture._seed(db)
+                clock = fixture.Clock()
+                clock.value = datetime(2026, 10, 8, 16, 42, tzinfo=timezone.utc)
+                prior = WbFbsWarehouseRegistry(db_path=db, runtime_dir=db.parent, timestamp_factory=clock,
+                    source=fixture.OfficialSource(), catalog_source=fixture.CatalogSource()).collect()
+                clock.value = datetime(2026, 10, 8, current_hour, 16, tzinfo=timezone.utc)
+                source = fixture.ConfirmationSource('amount')
+                registry = WbFbsWarehouseRegistry(db_path=db, runtime_dir=db.parent, timestamp_factory=clock,
+                    source=source, catalog_source=fixture.CatalogSource())
+                entry = SimpleNamespace(runtime=SimpleNamespace(db_path=db),
+                    wb_fbs_warehouse_registry=registry, now_factory=lambda:clock.value)
+                with patch('packages.application.official_fbs_stock_read.read_complete_official_fbs_stock',
+                    side_effect=ValueError('official_snapshot_not_fresh_current_day')) as reader:
+                    with self.assertRaises(FbsGenerationFailure) as raised:
+                        Entry._cycle_fbs_generation(entry)
+                reader.assert_not_called()
+                diagnostic = raised.exception.diagnostic()
+                self.assertEqual(diagnostic['registry_run_sequence'], 2)
+                self.assertNotEqual(diagnostic['registry_run_id'], prior['source_generation']['generation_id'])
+                self.assertIn('stock_amount_changed', diagnostic['reason_codes'])
+                self.assertFalse(diagnostic['stability']['stock_sources_stable'])
+                self.assertEqual(source.calls, {fixture.MOSCOW_WAREHOUSE_ID:2, fixture.ORENBURG_WAREHOUSE_ID:2})
+                with patch.object(registry, 'collect', return_value={'status':'last_good'}), \
+                    patch('packages.application.official_fbs_stock_read.read_complete_official_fbs_stock') as reader:
+                    with self.assertRaises(FbsGenerationFailure) as unchanged:
+                        Entry._cycle_fbs_generation(entry)
+                    self.assertEqual(unchanged.exception.diagnostic()['reason_codes'], ['new_generation_missing'])
+                    reader.assert_not_called()
 
     def test_owned_summary_copies_and_real_source_failure_policy(self):
         case=local_fixture.LocalDeriveTests();case.setUp()

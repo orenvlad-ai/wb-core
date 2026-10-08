@@ -3122,21 +3122,26 @@ class RegistryUploadHttpEntrypoint:
         from packages.application.wb_fbs_warehouse_registry import REGISTRY_RUNS_TABLE, _complete_source_generation
         from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
         from packages.application.ready_publication import readonly, canonical, digest
-        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, FbsGenerationFailure
         with readonly(self.runtime.db_path) as conn:
             prior = conn.execute(f'SELECT coalesce(max(run_sequence),0) FROM {REGISTRY_RUNS_TABLE}').fetchone()[0]
         self.wb_fbs_warehouse_registry.collect()  # Exactly one attempt; never last-good as new collection.
         with readonly(self.runtime.db_path) as conn:
             latest = conn.execute(f'SELECT * FROM {REGISTRY_RUNS_TABLE} ORDER BY run_sequence DESC LIMIT 1').fetchone()
             generation = _complete_source_generation(conn)
+            if latest is None or latest['run_sequence'] <= prior:
+                raise FbsGenerationFailure(latest, 'new_generation_missing')
+            if latest['status'] != 'success' or not latest['complete']:
+                raise FbsGenerationFailure(latest)
+            if not generation['complete'] or generation['generation_id'] != latest['run_id']:
+                raise FbsGenerationFailure(latest, 'generation_binding_mismatch')
             stock = read_complete_official_fbs_stock(conn, universe=None,
                 day=current_business_date_iso(self.now_factory()), now=self.now_factory())
-        if (latest is None or latest['run_sequence'] <= prior or latest['status'] != 'success'
-                or not latest['complete'] or not generation['complete']
-                or stock['generation_id'] != latest['run_id'] or generation['generation_id'] != latest['run_id']):
-            raise CycleStageFailure('fbs_new_complete_generation_missing')
+        if stock['generation_id'] != latest['run_id']:
+            raise FbsGenerationFailure(latest, 'generation_binding_mismatch')
         return StageProof({'fbs_generation': stock['generation_id'], 'fbs_digest': stock['generation_digest'],
-            'fbs_catalog': digest(canonical(generation['catalog_scope'])),
+            'fbs_catalog': digest(canonical({key: value for key, value in generation['catalog_scope'].items()
+                if key != 'generation_diagnostics'})),
             'fbs_mapping': digest(canonical([{key: row[key] for key in ('seller_warehouse_id', 'facility_id', 'mapping_id')}
                 for row in generation['warehouses']])),
             'fbs_run_sequence': str(latest['run_sequence'])})

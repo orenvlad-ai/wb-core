@@ -33,6 +33,17 @@ class CycleStageFailure(RuntimeError):
     pass
 
 
+class FbsGenerationFailure(CycleStageFailure):
+    def __init__(self, latest, reason_code='generation_incomplete'):
+        super().__init__('fbs_new_complete_generation_missing')
+        self._latest = dict(latest) if latest is not None else None
+        self._reason_code = reason_code
+
+    def diagnostic(self):
+        from packages.application.wb_fbs_warehouse_registry import fbs_generation_failure
+        return fbs_generation_failure(self._latest, self._reason_code)
+
+
 @dataclass(frozen=True)
 class CycleHistoryConfig:
     candidate_root: Path
@@ -416,9 +427,12 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         # Small codes only: exception text can contain a provider response/secret.
         from packages.application.owned_history_worker_capability import HistoryDelegationError
         history_failure = exc.diagnostic() if isinstance(exc, HistoryDelegationError) else None
+        fbs_failure = exc.diagnostic() if isinstance(exc, FbsGenerationFailure) else None
         code = history_failure["error_code"] if history_failure else str(exc) if isinstance(exc, CycleStageFailure) else type(exc).__name__
         if history_failure:
             receipt['history_failure'] = history_failure
+        if fbs_failure:
+            receipt['fbs_failure'] = fbs_failure
         receipt.update(status='failed' if isinstance(exc, Exception) else 'interrupted',
             error_code=code[:256], finished_at=store.timestamp_factory())
         for item in receipt['stages']:
@@ -426,5 +440,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
                 item.update(status=receipt['status'], error_code=code[:256], finished_at=store.timestamp_factory())
                 if history_failure:
                     item['history_failure'] = dict(history_failure)
+                if fbs_failure:
+                    item['fbs_failure'] = dict(fbs_failure)
         store.write(receipt)
         raise

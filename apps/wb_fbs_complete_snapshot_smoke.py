@@ -130,6 +130,120 @@ class StockFailureSource(OfficialSource):
         return super().list_stocks(warehouse_id=warehouse_id, chrt_ids=chrt_ids)
 
 
+class ConfirmationSource(OfficialSource):
+    def __init__(self, mode='stable'):
+        self.mode, self.calls = mode, {}
+        self.registry_calls = self.office_calls = 0
+
+    def list_seller_warehouses(self):
+        self.registry_calls += 1
+        return super().list_seller_warehouses()
+
+    def list_offices(self):
+        self.office_calls += 1
+        return super().list_offices()
+
+    def list_stocks(self, *, warehouse_id, chrt_ids):
+        self.calls[warehouse_id] = self.calls.get(warehouse_id, 0) + 1
+        if warehouse_id == MOSCOW_WAREHOUSE_ID and self.calls[warehouse_id] == 1 and self.mode == 'initial_failed':
+            raise RuntimeError('Authorization=secret-fixture-token raw response body')
+        rows = super().list_stocks(warehouse_id=warehouse_id, chrt_ids=chrt_ids)
+        if warehouse_id == MOSCOW_WAREHOUSE_ID and self.calls[warehouse_id] == 2:
+            if self.mode == 'failed':
+                raise RuntimeError('Authorization=secret-fixture-token raw response body')
+            if self.mode == 'amount':
+                rows = [WbFbsStock(chrt_id=r.chrt_id, amount=r.amount + 1) for r in rows]
+            if self.mode == 'provenance':
+                rows = rows + [WbFbsStock(chrt_id=9002, amount=0)]
+            if self.mode == 'duplicate':
+                rows = rows + [rows[0]]
+        return rows
+
+
+def check_confirmation_diagnostics():
+    import json
+    from packages.application.wb_fbs_warehouse_registry import REGISTRY_RUNS_TABLE, fbs_generation_failure
+    for mode, reason in (('stable', None), ('failed', 'confirmation_stock_request_failed'),
+                         ('duplicate', 'duplicate_stock_identity'),
+                         ('initial_failed', 'initial_stock_request_failed'),
+                         ('amount', 'stock_amount_changed'), ('provenance', 'stock_provenance_changed')):
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / 'operational.sqlite3'
+            _seed(db)
+            source, catalog = ConfirmationSource(mode), CatalogSource()
+            result = WbFbsWarehouseRegistry(db_path=db, runtime_dir=db.parent,
+                timestamp_factory=Clock(), source=source, catalog_source=catalog).collect()
+            assert source.calls == {MOSCOW_WAREHOUSE_ID: 2, ORENBURG_WAREHOUSE_ID: 2}
+            assert source.registry_calls == source.office_calls == catalog.calls == 2
+            with sqlite3.connect(db) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(f'SELECT * FROM {REGISTRY_RUNS_TABLE} ORDER BY run_sequence DESC LIMIT 1').fetchone()
+                saved = json.loads(row['catalog_scope_json'])['generation_diagnostics']
+                diagnostic = fbs_generation_failure(row)
+                assert 'secret-fixture-token' not in repr([tuple(r) for r in conn.execute('SELECT * FROM sheet_vitrina_v1_wb_fbs_stock_snapshot_runs')])
+            assert saved['stock_confirmation_count'] == 2
+            assert 'secret-fixture-token' not in json.dumps(dict(row))
+            if reason is None:
+                assert result['source_generation']['complete'] and row['complete'] == 1
+                # Captured from the same stable fixture on the pre-diagnostics collector.
+                assert result['source_generation']['generation_digest'] == 'sha256:4a06511b86d53c19224a1e1566c81803d17a6d8bd49c73fb145fd34c57d15009'
+                assert all(not p['reason_codes'] for p in saved['stock_confirmations'])
+            else:
+                assert row['complete'] == 0 and result['source_generation']['complete'] is False
+                assert reason in diagnostic['reason_codes']
+                proof = next(p for p in diagnostic['stock_confirmations'] if p['seller_warehouse_id'] == MOSCOW_WAREHOUSE_ID)
+                assert reason in proof['reason_codes']
+                if mode == 'provenance':
+                    assert proof['amount_change_count'] == 0 and proof['provenance_change_count'] == 1
+                    assert proof['changed_identities'] == [{'chrt_id':9002, 'nm_id':101}]
+                if mode == 'amount':
+                    assert proof['amount_change_count'] == 2 and proof['provenance_change_count'] == 0
+                    assert proof['changed_identities'] == [{'chrt_id':9001, 'nm_id':101}, {'chrt_id':9003, 'nm_id':202}]
+                if mode in ('failed', 'initial_failed'):
+                    assert proof['changed_identity_count'] == 0 and proof['changed_identities'] == []
+    # Large exact reads retain bounded identifiers, never a raw second response.
+    from packages.application.wb_fbs_warehouse_registry import _stock_confirmation_proofs
+    before = [{'chrt_id':k, 'nm_id':100+k, 'amount':1, 'provenance':'explicit_wb_row'} for k in range(30)]
+    after = [{**r, 'amount':2} for r in before]
+    pair = lambda rows: {'seller_warehouse_id':1988668, 'complete':True, 'rows':rows}
+    proof = _stock_confirmation_proofs([pair(before)], [pair(after)])[0]
+    assert proof['changed_identity_count'] == 30 and proof['changed_identities_truncated']
+    assert len(proof['changed_identities']) == 10
+    assert proof['amount_change_count'] == 30 and 'amount' not in proof['changed_identities'][0]
+
+    # The retained proof cap must not reduce the count of reads actually attempted.
+    from unittest.mock import patch
+    class LateCatalogFailure(CatalogSource):
+        def fetch_catalog_snapshot(self):
+            if self.calls:
+                raise RuntimeError('Authorization=secret-fixture-token raw response body')
+            return super().fetch_catalog_snapshot()
+
+    with tempfile.TemporaryDirectory() as temp:
+        db = Path(temp) / 'operational.sqlite3'
+        _seed(db)
+        registry = WbFbsWarehouseRegistry(db_path=db, runtime_dir=db.parent,
+            timestamp_factory=Clock(), source=OfficialSource(), catalog_source=LateCatalogFailure())
+        scope = {'warehouses':[{'seller_warehouse_id':k} for k in range(1, 10)],
+                 'warehouse_count':9, 'complete':True, 'scope_digest':'sha256:scope'}
+        persisted, reads = [], []
+        def read_stocks(**kwargs):
+            reads.append(kwargs['seller_warehouse_id'])
+            return {'seller_warehouse_id':kwargs['seller_warehouse_id'],
+                    'complete':True, 'status':'success', 'source_digest':'sha256:stock', 'rows':[]}
+        with patch.object(registry, '_active_exact_warehouse_scope', return_value=scope), \
+             patch.object(registry, '_read_warehouse_stocks', side_effect=read_stocks), \
+             patch.object(registry, '_persist', side_effect=lambda **kwargs: persisted.append(kwargs)), \
+             patch.object(registry, 'read_model', return_value={}):
+            registry.collect()
+        assert reads == list(range(1, 10)) * 2
+        saved = persisted[0]['registry']['catalog_scope']['generation_diagnostics']
+        assert saved['stock_confirmation_count'] == 9 and len(saved['stock_confirmations']) == 8
+        assert persisted[0]['registry']['complete'] is False
+        assert persisted[0]['registry']['error'] == 'official_fbs_acquisition_failed'
+        assert 'secret-fixture-token' not in repr(persisted)
+
+
 class OfficeMismatchSource(OfficialSource):
     def list_seller_warehouses(self):
         rows = super().list_seller_warehouses()
@@ -211,6 +325,7 @@ class CatalogSource:
 
 
 def main() -> int:
+    check_confirmation_diagnostics()
     with tempfile.TemporaryDirectory(prefix="wb-fbs-complete-snapshot-") as raw:
         db_path = Path(raw) / "operational.sqlite3"
         _seed(db_path)
