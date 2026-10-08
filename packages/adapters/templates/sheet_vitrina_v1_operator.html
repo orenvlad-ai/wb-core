@@ -5241,6 +5241,7 @@
               <button id="cnyOpeningSaveButton" class="action-button secondary-button" type="button">Сохранить opening</button>
             </div>
             <p id="cnyAccountMessage" class="section-message"></p>
+            <div id="cnySourceReceipt" hidden></div>
             <h3 class="block-title" style="margin-top: 18px;">Конвертации RUB → CNY</h3>
             <div class="cny-account-table-wrap">
               <table class="cny-account-table" aria-label="Конвертации CNY">
@@ -6284,6 +6285,8 @@
       let cnyAccountUploading = false;
       let cnyAccountReplayLoading = false;
       let cnyAccountOpeningSaving = false;
+      let cnySourceLocked = false;
+      let cnySourceAcceptance;
       const cnyAccountDeletingDocumentIds = new Set();
       let fulfillmentServicesInitialized = false;
       let fulfillmentServicesLoading = false;
@@ -11572,7 +11575,7 @@
       }
 
       function updateCnyAccountBusyState() {
-        const deleteBusy = cnyAccountDeletingDocumentIds.size > 0;
+        const deleteBusy = cnySourceLocked || cnyAccountDeletingDocumentIds.size > 0;
         if (cnyAccountUploadButton) {
           cnyAccountUploadButton.disabled = cnyAccountLoading || cnyAccountUploading || deleteBusy;
           cnyAccountUploadButton.textContent = cnyAccountUploading ? "Загружаем..." : "Загрузить PDF";
@@ -11657,24 +11660,25 @@
         const summary = payload && payload.summary ? payload.summary : {};
         const replay = payload && payload.replay ? payload.replay : {};
         const diagnostics = payload && payload.diagnostics ? payload.diagnostics : {};
+        const moneyCurrent = Boolean(payload && payload.financial_authority && payload.financial_authority.current);
         if (cnyBalanceCny) {
-          cnyBalanceCny.textContent = formatCnyAmount(summary.balance_cny);
+          cnyBalanceCny.textContent = moneyCurrent ? formatCnyAmount(summary.balance_cny) : "Ожидает подтверждения";
         }
         if (cnyBalanceRub) {
-          cnyBalanceRub.textContent = formatCnyRub(summary.balance_rub_value);
+          cnyBalanceRub.textContent = moneyCurrent ? formatCnyRub(summary.balance_rub_value) : "Ожидает подтверждения";
         }
         if (cnyAverageRate) {
-          cnyAverageRate.textContent = formatCnyRate(summary.average_rate);
+          cnyAverageRate.textContent = moneyCurrent ? formatCnyRate(summary.average_rate) : "Ожидает подтверждения";
         }
         const preparation = payload && payload.account_preparation ? payload.account_preparation : {};
         const continuation = preparation.warehouse_targeted_recalculation || {};
         if (cnyReplayStatus) {
-          cnyReplayStatus.textContent = preparation.status === "pending"
+          cnyReplayStatus.textContent = !moneyCurrent
             ? "Документы сохранены. Пересчёт счёта ожидает обработки."
             : cnyReplayDisplay(replay, diagnostics);
         }
         if (cnyAccountState) {
-          cnyAccountState.textContent = preparation.status === "pending"
+          cnyAccountState.textContent = !moneyCurrent
             ? (continuation.diagnostic_code === "cny_replay_shipment_scope_missing"
               ? "Пересчёт ожидает исправления связи документа с поставкой. Повторно загружать документ не нужно."
               : "Сохранённое задание продолжит обычный пересчёт. Повторно загружать документы не нужно.")
@@ -11740,81 +11744,15 @@
 
       async function handleCnyConversionDelete(event) {
         const button = event.target.closest("[data-cny-delete-document]");
-        if (!button || !cnyConversionsBody || !cnyConversionsBody.contains(button)) {
-          return;
-        }
-        const documentId = String(button.getAttribute("data-cny-delete-document") || "").trim();
-        if (!documentId || cnyAccountDeletingDocumentIds.size > 0) {
-          return;
-        }
-        const documentLabel = String(button.getAttribute("data-cny-delete-label") || documentId);
-        const confirmed = window.confirm(
-          "Удалить документ «" + documentLabel + "»?\n\n" +
-          "Документ будет удалён. Остаток CNY, рублёвая стоимость остатка, средний курс и последующие операции ledger будут пересчитаны"
-        );
-        if (!confirmed || cnyAccountDeletingDocumentIds.has(documentId)) {
-          return;
-        }
-        cnyAccountDeletingDocumentIds.add(documentId);
-        updateCnyAccountBusyState();
-        setCnyAccountMessage("Удаляем документ и пересчитываем CNY ledger...", "");
+        if (!button || !cnyConversionsBody.contains(button) || cnySourceLocked) return;
+        const id = String(button.getAttribute("data-cny-delete-document") || "");
+        const label = String(button.getAttribute("data-cny-delete-label") || id);
+        if (!id || !window.confirm("Исключить документ «" + label + "»?\n\nДокумент будет исключён. Остаток CNY, рублёвая стоимость остатка, средний курс и последующие операции будут пересчитаны. Запись сохранится в истории.")) return;
+        cnyAccountDeletingDocumentIds.add(id); updateCnyAccountBusyState();
         try {
-          const response = await fetch(
-            config.cny_account_documents_path + "/" + encodeURIComponent(documentId),
-            { method: "DELETE", headers: { "Accept": "application/json" } }
-          );
-          const payload = await readJson(response);
-          if (!response.ok) {
-            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
-          }
-          const mutationConfirmed = payload.deleted === true ||
-            (payload.archived === true && payload.audit_record_retained === true);
-          if (!mutationConfirmed) {
-            throw new Error("backend не подтвердил удаление или архивирование canonical CNY document");
-          }
-          const pending = isCnyAppliedPending(payload, response);
-          const reloaded = await loadCnyAccount({ preserveMessage: true, preserveDataOnError: true });
-          if (!reloaded) {
-            setCnyAccountMessage(
-              "Документ «" + documentLabel + "» удалён и ledger пересчитан, но серверный read model не удалось загрузить заново.",
-              "warning"
-            );
-            return;
-          }
-          if (supplierShipmentsFrame) {
-            const supplierFrameSource = String(supplierShipmentsFrame.getAttribute("src") || "");
-            if (supplierFrameSource) {
-              supplierShipmentsFrame.setAttribute("src", supplierFrameSource);
-            }
-          }
-          setCnyAccountMessage(
-            pending
-              ? valueOrDash(payload.message || "Документ исключён и ledger подтверждён; связанный пересчёт ожидает безопасного повтора.")
-              : "Документ «" + documentLabel + "» удалён. CNY ledger и связанные расчётные показатели пересчитаны.",
-            pending ? "warning" : "success"
-          );
-        } catch (error) {
-          const reconciliation = await reconcileCnyArchiveById(documentId);
-          if (reconciliation.archived) {
-            setCnyAccountMessage(
-              "Документ исключён и ledger подтверждён. Ответ удаления не был получен полностью; повтор не требуется.",
-              "warning"
-            );
-          } else if (reconciliation.checked) {
-            setCnyAccountMessage(
-              "Не удалось удалить CNY документ: " + (error instanceof Error ? error.message : String(error)),
-              "error"
-            );
-          } else {
-            setCnyAccountMessage(
-              "Исход исключения CNY документа не удалось подтвердить. Обновите счёт перед безопасным повтором.",
-              "warning"
-            );
-          }
-        } finally {
-          cnyAccountDeletingDocumentIds.delete(documentId);
-          updateCnyAccountBusyState();
-        }
+          await cnySourceAcceptance.mutate(config.cny_account_documents_path + "/" + encodeURIComponent(id), "cny_exclude", {}, "DELETE", null, id);
+        } catch (error) {setCnyAccountMessage(error.message || String(error), "error");}
+        finally {cnyAccountDeletingDocumentIds.delete(id); updateCnyAccountBusyState();}
       }
 
       function renderCnyLedgerOperations(operations) {
@@ -11843,141 +11781,30 @@
 
       async function uploadCnyAccountDocument() {
         const file = cnyAccountFileInput && cnyAccountFileInput.files ? cnyAccountFileInput.files[0] : null;
-        if (!file || cnyAccountUploading) {
-          setCnyAccountMessage("Сначала выберите PDF-файл конвертации.", "error");
-          return;
-        }
-        cnyAccountUploading = true;
-        updateCnyAccountBusyState();
-        setCnyAccountMessage("Загружаем PDF и пересчитываем ledger...", "");
-        let fileSha256 = "";
+        if (!file || cnyAccountUploading || cnySourceLocked) return;
+        cnyAccountUploading = true; updateCnyAccountBusyState();
         try {
-          fileSha256 = await cnyFileSha256(file);
-          const formData = new FormData();
-          formData.append("file", file, file.name || "cny-document.pdf");
-          const response = await fetch(config.cny_account_documents_path, {
-            method: "POST",
-            headers: { "Accept": "application/json" },
-            body: formData
-          });
-          let outcomeResponse = response;
-          let payload = await readJson(response);
-          if (!response.ok) {
-            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          const operands = {filename: file.name, file_sha256: await cnyFileSha256(file), payment_date: ""};
+          const result = await cnySourceAcceptance.mutate(config.cny_account_documents_path, "cny_upload", operands, "POST", file);
+          if (result.preview_required && result.manual_field === "payment_date" && !result.acceptance) {
+            const day = window.prompt("Дата платежа не распознана. Укажите фактическую дату YYYY-MM-DD.", "");
+            if (day) await cnySourceAcceptance.mutate(config.cny_account_documents_path, "cny_upload", {...operands, payment_date: String(day).trim()}, "POST", file);
           }
-          if (payload.preview_required && payload.manual_field === "payment_date" && payload.durable_saved === false) {
-            const paymentDate = window.prompt(
-              "Дата платежа не распознана. Введите фактическую дату платежа в формате YYYY-MM-DD. Финансовые поля изменить нельзя.",
-              ""
-            );
-            if (!paymentDate) {
-              throw new Error("Документ не сохранён: дата платежа не подтверждена");
-            }
-            const confirmedFormData = new FormData();
-            confirmedFormData.append("file", file, file.name || "cny-document.pdf");
-            confirmedFormData.append("payment_date", String(paymentDate).trim());
-            const confirmedResponse = await fetch(config.cny_account_documents_path, {
-              method: "POST",
-              headers: { "Accept": "application/json" },
-              body: confirmedFormData
-            });
-            outcomeResponse = confirmedResponse;
-            payload = await readJson(confirmedResponse);
-            if (!confirmedResponse.ok) {
-              throw new Error(valueOrDash(payload.error) + " (HTTP " + confirmedResponse.status + ")");
-            }
-          }
-          if (outcomeResponse.status === 202 && !isCnyAppliedPending(payload, outcomeResponse)) {
-            throw new Error("backend вернул неподтверждённый pending outcome");
-          }
-          if (cnyAccountFileInput) {
-            cnyAccountFileInput.value = "";
-          }
-          const pending = isCnyAppliedPending(payload, outcomeResponse);
-          const reloaded = await loadCnyAccount({ preserveMessage: true, preserveDataOnError: true });
-          if (!reloaded) {
-            setCnyAccountMessage(
-              "Документ CNY сохранён и ledger подтверждён, но обновлённый read model пока не прочитан.",
-              "warning"
-            );
-          } else {
-            setCnyAccountMessage(
-              valueOrDash(payload.message || "Документ CNY сохранён и ledger пересчитан."),
-              pending ? "warning" : "success"
-            );
-          }
-        } catch (error) {
-          const reconciliation = await reconcileCnyUploadByHash(fileSha256);
-          if (reconciliation.documentSaved) {
-            if (cnyAccountFileInput) {
-              cnyAccountFileInput.value = "";
-            }
-            setCnyAccountMessage(
-              reconciliation.readbackConfirmed
-                ? "Документ CNY сохранён и ledger подтверждён. Ответ загрузки не был получен полностью; повтор не требуется."
-                : "Документ CNY сохранён, но ledger ещё не подтверждён. Безопасный повтор использует тот же документ без дубля.",
-              "warning"
-            );
-          } else if (reconciliation.checked) {
-            setCnyAccountMessage(
-              "Не удалось загрузить CNY документ: " + (error instanceof Error ? error.message : String(error)),
-              "error"
-            );
-          } else {
-            setCnyAccountMessage(
-              "Исход загрузки CNY не удалось подтвердить. Безопасно повторите тот же файл: повтор не создаст дубль.",
-              "warning"
-            );
-          }
-        } finally {
-          cnyAccountUploading = false;
-          updateCnyAccountBusyState();
-        }
+          cnyAccountFileInput.value = "";
+        } catch (error) {setCnyAccountMessage(error.message || String(error), "error");}
+        finally {cnyAccountUploading = false; updateCnyAccountBusyState();}
       }
 
       async function saveCnyOpeningBalance() {
-        if (cnyAccountOpeningSaving) {
-          return;
-        }
-        const payload = {
-          operation_date: cnyOpeningDateInput ? cnyOpeningDateInput.value : "",
-          cny_amount: cnyOpeningCnyInput ? cnyOpeningCnyInput.value : "",
-          rub_value: cnyOpeningRubInput ? cnyOpeningRubInput.value : ""
-        };
+        if (cnyAccountOpeningSaving || cnySourceLocked) return;
+        const payload = {operation_date: cnyOpeningDateInput.value, cny_amount: cnyOpeningCnyInput.value, rub_value: cnyOpeningRubInput.value};
         if (!payload.operation_date || !payload.cny_amount || !payload.rub_value) {
-          setCnyAccountMessage("Укажите дату, CNY и RUB value для opening balance.", "error");
-          return;
+          setCnyAccountMessage("Укажите дату, сумму CNY и стоимость в рублях.", "error"); return;
         }
-        cnyAccountOpeningSaving = true;
-        updateCnyAccountBusyState();
-        setCnyAccountMessage("Сохраняем opening balance и пересчитываем ledger...", "");
-        try {
-          const response = await fetch(config.cny_account_opening_balance_path, {
-            method: "POST",
-            headers: { "Accept": "application/json", "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-          });
-          const responsePayload = await readJson(response);
-          if (!response.ok) {
-            throw new Error(valueOrDash(responsePayload.error) + " (HTTP " + response.status + ")");
-          }
-          if (response.status === 202 && !isCnyAppliedPending(responsePayload, response)) {
-            throw new Error("backend вернул неподтверждённый pending outcome");
-          }
-          await loadCnyAccount({ preserveMessage: true, preserveDataOnError: true });
-          setCnyAccountMessage(
-            valueOrDash(responsePayload.message || "Opening balance сохранён, ledger пересчитан."),
-            isCnyAppliedPending(responsePayload, response) ? "warning" : "success"
-          );
-        } catch (error) {
-          setCnyAccountMessage(
-            "Не удалось сохранить opening balance: " + (error instanceof Error ? error.message : String(error)),
-            "error"
-          );
-        } finally {
-          cnyAccountOpeningSaving = false;
-          updateCnyAccountBusyState();
-        }
+        cnyAccountOpeningSaving = true; updateCnyAccountBusyState();
+        try {await cnySourceAcceptance.mutate(config.cny_account_opening_balance_path, "cny_opening", payload, "POST");}
+        catch (error) {setCnyAccountMessage(error.message || String(error), "error");}
+        finally {cnyAccountOpeningSaving = false; updateCnyAccountBusyState();}
       }
 
       async function replayCnyLedger() {
@@ -16240,6 +16067,23 @@
         shipmentRegistryBody.addEventListener("change", handleShipmentRegistryExpensesChange);
       }
       updateShipmentRegistryCompareState();
+      cnySourceAcceptance = window.CnySourceAcceptance.create({
+        scope: config.user_config_key, path: config.cny_account_path, operationPath: config.supplier_shipments_path,
+        container: document.getElementById("cnySourceReceipt"),
+        onLock: locked => {cnySourceLocked = locked; updateCnyAccountBusyState();},
+        onError: error => setCnyAccountMessage(error.message || String(error), "warning"),
+        onRecovered: async () => {
+          setCnyAccountMessage("", ""); await loadCnyAccount({preserveMessage: true, preserveDataOnError: true});
+          const frameSource = supplierShipmentsFrame && supplierShipmentsFrame.getAttribute("src");
+          if (frameSource) supplierShipmentsFrame.setAttribute("src", frameSource);
+        }
+      });
+      cnySourceAcceptance.recover().catch(error => setCnyAccountMessage(error.message || String(error), "warning"));
+      const cnyOperationId = new URLSearchParams(location.search).get("operation_id");
+      if (cnyOperationId && /^supplier_financial_(?:batch_)?[a-f0-9]{32}$/.test(cnyOperationId)) {
+        activateSupplyMode("cny-account");
+        cnySourceAcceptance.showOperation(cnyOperationId).catch(error => setCnyAccountMessage(error.message || String(error), "warning"));
+      }
       updateCnyAccountBusyState();
       if (cnyAccountUploadButton && cnyAccountFileInput) {
         cnyAccountUploadButton.addEventListener("click", () => cnyAccountFileInput.click());

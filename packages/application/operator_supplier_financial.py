@@ -27,7 +27,10 @@ _ACTION = ContextVar('supplier_financial_source_action', default=None)
 FINANCIAL_ACTIONS = frozenset({'confirm_upload', 'confirm_import', 'exclude', 'status', 'zero_fee'})
 TITLES = {'confirm_upload': 'Добавление финансовых документов', 'confirm_import': 'Добавление комиссий',
           'exclude': 'Исключение финансового документа', 'status': 'Изменение финансового документа',
-          'zero_fee': 'Подтверждение отсутствия комиссий'}
+          'zero_fee': 'Подтверждение отсутствия комиссий',
+          'cny_upload': 'Добавление документа CNY', 'cny_opening': 'Начальный остаток CNY',
+          'cny_exclude': 'Исключение документа CNY', 'cny_restore': 'Восстановление документа CNY',
+          'cny_relink': 'Изменение связи документа CNY'}
 
 
 def ensure_schema(conn):

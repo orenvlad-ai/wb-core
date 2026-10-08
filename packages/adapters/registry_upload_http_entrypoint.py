@@ -2517,7 +2517,7 @@ def _build_handler(
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                         fields=(upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {}),
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -2538,7 +2538,7 @@ def _build_handler(
                     return
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_cny_account_opening_balance_request(payload)
+                    result = entrypoint.handle_cny_account_opening_balance_request(payload, actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -3761,6 +3761,7 @@ def _build_handler(
                         operator_context=entrypoint.build_sheet_operator_ui_context(),
                         user_config_key=_current_web_user_config_key(self),
                         embedded_tab=embedded_tab,
+                        user_config_key=_current_web_user_config_key(self),
                     ),
                 )
                 return
@@ -4894,7 +4895,9 @@ def _build_handler(
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
-                    payload = entrypoint.handle_cny_account_status_request()
+                    request_id = urllib_parse.parse_qs(parsed.query).get('request_id', [''])[0]
+                    payload = (entrypoint.handle_cny_operator_request_read(request_id, request_scope=_current_web_user_config_key(self))
+                        if request_id else entrypoint.handle_cny_account_status_request())
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -6389,6 +6392,19 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
+            if _is_cny_account_document_detail_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    result = entrypoint.handle_cny_account_document_patch_request(
+                        _resolve_cny_account_document_id(parsed.path), _load_request_payload(self),
+                        actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self))
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
             if _is_supplier_financial_document_detail_path(parsed.path):
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -6640,7 +6656,9 @@ def _build_handler(
                     return
                 try:
                     document_id = _resolve_cny_account_document_id(parsed.path)
-                    payload = entrypoint.handle_cny_account_document_delete_request(document_id)
+                    payload = entrypoint.handle_cny_account_document_delete_request(document_id,
+                        _load_request_payload(self) if int(self.headers.get('Content-Length') or 0) > 0 else {},
+                        actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
                     return
@@ -11229,6 +11247,7 @@ def _render_sheet_vitrina_operator_ui(
     user_config_key: str = "local_operator",
     operator_context: Mapping[str, Any] | None = None,
     embedded_tab: str = "",
+    user_config_key: str = "local_operator",
 ) -> str:
     web_vitrina_url = DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     operator_ui_context = operator_context or {}
@@ -11236,6 +11255,7 @@ def _render_sheet_vitrina_operator_ui(
     config_payload = {
         "user_config_key": user_config_key,
         "page_title": "Операторский сайт" if normalized_embedded_tab else "sheet_vitrina_v1",
+        "user_config_key": user_config_key,
         "embedded": bool(normalized_embedded_tab),
         "initial_tab": normalized_embedded_tab,
         "daily_report_path": daily_report_path,
@@ -11333,6 +11353,8 @@ def _render_sheet_vitrina_operator_ui(
     template = _inject_sheet_vitrina_ui_system(
         OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     )
+    cny_acceptance = UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_cny_acceptance.js').read_text(encoding='utf-8')
+    template = template.replace('</head>', '<script>\n' + cny_acceptance + '\n</script>\n</head>', 1)
     return (
         template.replace("__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__", config_payload["page_title"])
         .replace(

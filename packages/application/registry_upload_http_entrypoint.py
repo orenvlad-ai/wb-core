@@ -4975,8 +4975,11 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_supplier_operator_operation_read(self, operation_id: str, *, request_scope: str, supplier_safe: bool = False) -> dict[str, Any]:
         if operation_id.startswith('supplier_financial_'):
-            from packages.application.operator_supplier_financial import read_operation
-            return read_operation(self.runtime.runtime_dir,self.runtime.db_path,operation_id,request_scope=request_scope)
+            from packages.application import operator_cny_documents as cny_operations
+            from packages.application import operator_supplier_financial as financial_operations
+            action = cny_operations.operation_action(self.runtime.db_path, operation_id, request_scope=request_scope)
+            reader = cny_operations.read_operation if action in cny_operations.ACTIONS else financial_operations.read_operation
+            return reader(self.runtime.runtime_dir,self.runtime.db_path,operation_id,request_scope=request_scope)
         if operation_id.startswith("ssfc_job_"):
             from packages.application.operator_supplier_factual_dates import read_operation
             return read_operation(self.runtime.db_path, operation_id, request_scope=request_scope)
@@ -6737,13 +6740,21 @@ class RegistryUploadHttpEntrypoint:
         return self.supplier_financial_documents_block.download_document_file(shipment_id, document_id)
 
     def handle_cny_account_status_request(self) -> dict[str, Any]:
-        return self.cny_ledger_block.get_status()
+        from packages.application.operator_cny_documents import read_status
+        return read_status(self.cny_ledger_block)
+
+    def handle_cny_operator_request_read(self, request_id: str, *, request_scope: str) -> dict[str, Any]:
+        from packages.application.operator_cny_documents import read_request
+        return read_request(self.runtime.runtime_dir, self.runtime.db_path, request_id, request_scope=request_scope)
 
     def handle_cny_account_conversions_request(self) -> dict[str, Any]:
-        return self.cny_ledger_block.list_conversions()
+        payload = self.handle_cny_account_status_request()
+        return {k: payload[k] for k in ('contract_name', 'status', 'conversions', 'summary', 'replay', 'financial_authority')}
 
     def handle_cny_account_ledger_request(self) -> dict[str, Any]:
-        return self.cny_ledger_block.list_ledger_operations()
+        payload = self.handle_cny_account_status_request()
+        return {**{k: payload[k] for k in ('contract_name', 'status', 'summary', 'replay', 'financial_authority')},
+            'operations': payload['ledger_operations']}
 
     def handle_cny_account_upload_request(
         self,
@@ -6753,8 +6764,14 @@ class RegistryUploadHttpEntrypoint:
         uploaded_content_type: str | None = None,
         fields: Mapping[str, Any] | None = None,
         actor: str = "",
+        request_scope: str = "",
     ) -> dict[str, Any]:
         upload_fields = dict(fields or {})
+        if upload_fields.get('request_id'):
+            from packages.application.operator_cny_documents import upload
+            return upload(self.cny_ledger_block, file_bytes, fields=upload_fields,
+                filename=uploaded_filename, content_type=uploaded_content_type,
+                request_scope=request_scope or actor, actor=actor)
         return self.cny_ledger_block.upload_document(
             file_bytes=file_bytes,
             uploaded_filename=uploaded_filename,
@@ -6765,7 +6782,11 @@ class RegistryUploadHttpEntrypoint:
             manual_payment_date_actor=actor,
         )
 
-    def handle_cny_account_opening_balance_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def handle_cny_account_opening_balance_request(self, payload: Mapping[str, Any], *, actor: str = '', request_scope: str = '') -> dict[str, Any]:
+        if payload.get('request_id'):
+            from packages.application.operator_cny_documents import execute
+            return execute(self.cny_ledger_block, action='cny_opening', payload=payload, actor=actor,
+                request_scope=request_scope or actor, native_write=lambda: self.cny_ledger_block.create_opening_balance(payload))
         return self.cny_ledger_block.create_opening_balance(payload)
 
     def handle_cny_account_replay_request(self) -> dict[str, Any]:
@@ -6774,8 +6795,24 @@ class RegistryUploadHttpEntrypoint:
     def handle_cny_account_document_file_request(self, document_id: str) -> tuple[bytes, str, str]:
         return self.cny_ledger_block.download_document_file(document_id)
 
-    def handle_cny_account_document_delete_request(self, document_id: str) -> dict[str, Any]:
+    def handle_cny_account_document_delete_request(self, document_id: str, payload: Mapping[str, Any] | None = None, *, actor: str = '', request_scope: str = '') -> dict[str, Any]:
+        if payload and payload.get('request_id'):
+            from packages.application.operator_cny_documents import execute
+            return execute(self.cny_ledger_block, action='cny_exclude', payload=payload, actor=actor,
+                document_id=document_id, request_scope=request_scope or actor,
+                native_write=lambda: self.cny_ledger_block.delete_document(document_id))
         return self.cny_ledger_block.delete_document(document_id)
+
+    def handle_cny_account_document_patch_request(self, document_id: str, payload: Mapping[str, Any], *, actor: str, request_scope: str) -> dict[str, Any]:
+        from packages.application.operator_cny_documents import execute
+        target = str(payload.get('supplier_order_id') or '').strip()
+        action = str(payload.get('action') or '')
+        if action not in {'restore','relink'} or not target or not payload.get('request_id'):
+            raise ValueError('CNY action, target order and request identity are required')
+        native = self.cny_ledger_block.restore_document if action == 'restore' else self.cny_ledger_block.relink_document
+        return execute(self.cny_ledger_block, action='cny_' + action, payload=payload, actor=actor,
+            document_id=document_id, target_shipment_id=target, request_scope=request_scope,
+            native_write=lambda: native(document_id, target_shipment_id=target))
 
     def handle_supplier_shipments_contract_patch_request(
         self,
