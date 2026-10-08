@@ -15596,12 +15596,16 @@
         throw new Error("Неизвестный источник данных.");
       }
       function sourceOperationKey(scope) { return "operator-report-source-v1:"+config.user_config_key+":"+scope.domain+":"+scope.entity; }
+      function withSourceLock(key,action) {
+        if (!navigator.locks)throw new Error("Для надёжного сохранения обновите браузер и откройте сервис по защищённому соединению.");
+        return navigator.locks.request(key,action);
+      }
       const sourceRefusalStatuses = [400,401,403,413,415,422,423];
-      function clearSourcePending(key) { sessionStorage.removeItem(key);sessionStorage.removeItem(key+":refusal"); }
+      function clearSourcePending(key) { localStorage.removeItem(key);localStorage.removeItem(key+":refusal"); }
       function sourceRefused(ref,key,result) {
         if (result.read_http_status!==404)return false;
         try {
-          const saved=JSON.parse(sessionStorage.getItem(key+":refusal") || "null");
+          const saved=JSON.parse(localStorage.getItem(key+":refusal") || "null");
           if (!saved || saved.operation_id!==ref.operation_id || !sourceRefusalStatuses.includes(saved.status))return false;
           clearSourcePending(key);return true;
         } catch (_) { return false; }
@@ -15634,10 +15638,14 @@
         const check=document.createElement("button"); check.type="button"; check.textContent="Проверить сохранение";
         check.addEventListener("click",async()=>{
           check.disabled=true;
-          const result=await readSourceOperation(ref);
-          if (result.status==="accepted") {clearSourcePending(key);showSourceReceipt(result.operation);}
-          else if (sourceRefused(ref,key,result)) {showSourceRefused();}
-          else {check.disabled=false;}
+          try {
+            await withSourceLock(key,async()=>{
+              const result=await readSourceOperation(ref);
+              if (result.status==="accepted") {if(localStorage.getItem(key)===ref.operation_id)clearSourcePending(key);showSourceReceipt(result.operation);}
+              else if (localStorage.getItem(key)===ref.operation_id && sourceRefused(ref,key,result)) {showSourceRefused();}
+              else {check.disabled=false;}
+            });
+          } catch (_) {check.disabled=false;}
         });
         const close=document.createElement("button"); close.type="button"; close.textContent="Закрыть";
         close.addEventListener("click",()=>sourceReceiptDialog.close());
@@ -15646,14 +15654,15 @@
       }
       async function submitSourceOperation(path, method, body) {
         const scope=sourceOperationScope(path), key=sourceOperationKey(scope);
-        const pending=sessionStorage.getItem(key);
+        return withSourceLock(key,async()=>{
+        const pending=localStorage.getItem(key);
         const ref={domain:scope.domain,operation_id:pending || "ors_"+crypto.randomUUID()};
-        if (!pending) sessionStorage.setItem(key,ref.operation_id); // Persist identity before the only submit.
+        if (!pending) localStorage.setItem(key,ref.operation_id); // Persist identity before the only submit.
         let payload=null, response=null;
         if (!pending) {
           try {
             response=await fetch(path,{method,body,headers:{Accept:"application/json","X-Operator-Operation-Id":ref.operation_id}});
-            if (sourceRefusalStatuses.includes(response.status))sessionStorage.setItem(key+":refusal",JSON.stringify({operation_id:ref.operation_id,status:response.status}));
+            if (sourceRefusalStatuses.includes(response.status))localStorage.setItem(key+":refusal",JSON.stringify({operation_id:ref.operation_id,status:response.status}));
             payload=await readJson(response);
           } catch (_) { /* Same-identity read resolves a lost response. */ }
         }
@@ -15672,18 +15681,23 @@
         }
         showSourceUnknown(ref,key);
         throw new Error("Подтверждение ещё не получено. Повторно отправлять файл не нужно; проверьте сохранение в открытом окне.");
+        });
       }
       queueMicrotask(async()=>{
         for (const path of [config.plan_report_baseline_upload_path,config.factory_order_upload_stock_ff_path,
                             config.factory_order_upload_inbound_factory_path,config.factory_order_upload_inbound_ff_to_wb_path]) {
           if (!path)continue;
           try {
-            const scope=sourceOperationScope(path),key=sourceOperationKey(scope),identity=sessionStorage.getItem(key);
-            if (!identity)continue;
-            const ref={domain:scope.domain,operation_id:identity},result=await readSourceOperation(ref);
-            if (result.status==="accepted") {clearSourcePending(key);showSourceReceipt(result.operation);}
-            else if (sourceRefused(ref,key,result)) {showSourceRefused();}
-            else {showSourceUnknown(ref,key);break;}
+            const scope=sourceOperationScope(path),key=sourceOperationKey(scope);
+            const unresolved=await withSourceLock(key,async()=>{
+              const identity=localStorage.getItem(key);if(!identity)return false;
+              const ref={domain:scope.domain,operation_id:identity},result=await readSourceOperation(ref);
+              if (result.status==="accepted") {clearSourcePending(key);showSourceReceipt(result.operation);}
+              else if (sourceRefused(ref,key,result)) {showSourceRefused();}
+              else {showSourceUnknown(ref,key);return true;}
+              return false;
+            });
+            if(unresolved)break;
           } catch (_) { /* No submission or identity replacement during recovery. */ }
         }
       });

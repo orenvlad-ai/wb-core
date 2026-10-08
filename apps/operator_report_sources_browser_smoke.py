@@ -57,8 +57,8 @@ def main():
                     base=f'http://127.0.0.1:{port}'
                     api='/v1/sheet-vitrina-v1/operations'
                     upload=http.DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH
-                    controls={'lose_post':False,'lose_read':False,'wrong_domain':False}
-                    posts=[]
+                    controls={'lose_post':False,'lose_read':False,'wrong_domain':False,'hold_post':False}
+                    posts=[];held=[]
                     def route(request):
                         path=urlparse(request.request.url).path
                         if path==upload and request.request.method=='POST':
@@ -69,6 +69,7 @@ def main():
                                 assert payload['acceptance']['operation_id']==identity
                                 assert payload['acceptance']['actor']=='report-operator'
                             posts.append(identity)
+                            if controls['hold_post']:held.append(request);return
                             if controls['lose_post']:request.abort();return
                             request.fulfill(response=response);return
                         if path.startswith(api+'/'):
@@ -79,7 +80,7 @@ def main():
                                     payload['operation']['domain']='ff_pool_document'
                                     request.fulfill(status=200,content_type='application/json',body=json.dumps(payload));return
                         request.continue_()
-                    page.route('**/*',route)
+                    context.route('**/*',route)
                     navigation=page.goto(base+http.DEFAULT_SHEET_OPERATOR_UI_PATH+'?embedded_tab=reports')
                     assert navigation.status==200,page.locator('body').inner_text()[:300]
                     assert page.locator('#planReportBaselineFileInput').count()==1
@@ -103,7 +104,8 @@ def main():
                     page.locator('#operatorSourceReceipt').get_by_role('button',name='Проверить сохранение').wait_for()
                     assert len(posts)==2
                     controls['lose_read']=False
-                    page.reload()
+                    page.close();page=context.new_page()
+                    page.goto(base+http.DEFAULT_SHEET_OPERATOR_UI_PATH+'?embedded_tab=reports')
                     page.locator('#operatorSourceReceipt').get_by_text('Изменение не принято. Проверьте файл и загрузите исправленный вариант.',exact=True).wait_for()
                     assert len(posts)==2
                     assert page.locator('#operatorSourceReceipt .ff-operation-check').count()==0
@@ -112,17 +114,29 @@ def main():
                     page.locator('#operatorSourceReceipt .ff-operation-receipt').wait_for()
                     assert len(posts)==3 and len(set(posts))==3
                     page.locator('#operatorSourceReceipt').get_by_role('button',name='Закрыть',exact=True).click()
-                    controls.update(lose_post=True,lose_read=True)
+                    controls.update(lose_post=True,lose_read=True,hold_post=True)
                     upload_file(200)
+                    page.wait_for_function("document.querySelector('#planReportBaselineFileInput').disabled")
+                    # Another tab cannot overwrite the persisted pending identity
+                    # or start another mutation while the first answer is pending.
+                    other=context.new_page()
+                    other.goto(base+http.DEFAULT_SHEET_OPERATOR_UI_PATH+'?embedded_tab=reports')
+                    other.locator('#planReportBaselineFileInput').set_input_files({'name':'other.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':build_single_sheet_workbook_bytes('План',[BASELINE_TEMPLATE_HEADERS,['2026-01',300,10]])})
+                    other.wait_for_timeout(100)
+                    assert len(posts)==4 and len(held)==1
+                    held.pop().abort()
                     page.locator('#operatorSourceReceipt').get_by_role('button',name='Проверить сохранение').wait_for()
+                    other.locator('#operatorSourceReceipt').get_by_role('button',name='Проверить сохранение').wait_for()
+                    other.close()
                     assert page.locator('#operatorSourceReceipt .ff-operation-receipt').count()==0
                     assert len(posts)==4
-                    controls.update(lose_post=False,lose_read=False,wrong_domain=True)
+                    controls.update(lose_post=False,lose_read=False,wrong_domain=True,hold_post=False)
                     page.locator('#operatorSourceReceipt').get_by_role('button',name='Проверить сохранение').click()
                     page.wait_for_function("!document.querySelector('#operatorSourceReceipt button').disabled")
                     assert page.locator('#operatorSourceReceipt .ff-operation-receipt').count()==0
                     controls['wrong_domain']=False
-                    page.reload()  # Durable identity survives a lost response and a page restart.
+                    page.close();page=context.new_page()  # Identity also survives closing its originating tab.
+                    page.goto(base+http.DEFAULT_SHEET_OPERATOR_UI_PATH+'?embedded_tab=reports')
                     page.locator('#operatorSourceReceipt .ff-operation-receipt').wait_for()
                     assert len(posts)==4
                     assert page.locator('#operatorSourceReceipt [data-ff-operation-receipt]').get_attribute('data-ff-operation-receipt')==posts[-1]
