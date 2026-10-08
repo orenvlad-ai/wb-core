@@ -586,6 +586,10 @@ class SheetVitrinaV1WebVitrinaBlock:
             rows, presentation=dict(snapshot.metadata or {}).get("server_cell_presentation", {}),
             business_date=current_business_date_iso(now),
         )
+        if management_book_mode:
+            from packages.application.fbs_accounting_historical_history import restore_revision_rows
+            rows=restore_revision_rows(rows,runtime=self.runtime,plan=snapshot,
+                inventory_history=inventory_history,business_date=current_business_date_iso(now))
         if current_business_date_iso(now) in snapshot.date_columns:
             if inventory_snapshot is not None:
                 rows = inventory_snapshot.apply_rows(rows, business_date=current_business_date_iso(now))

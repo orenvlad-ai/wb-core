@@ -1021,8 +1021,9 @@ def _collect_autonomous_transit_costs(
 def _publish_fbs_snapshot_accounting(runtime: RegistryUploadDbBackedRuntime) -> dict[str, Any]:
     from packages.application.fbs_accounting_runtime import refresh
 
-    result = refresh(runtime.runtime_dir, ready_runtime=runtime)
-    return result
+    from packages.application.fbs_accounting_historical_cycle import refresh as historical_refresh
+    result = historical_refresh(runtime)
+    return result if result is not None else refresh(runtime.runtime_dir, ready_runtime=runtime)
 
 
 def _recalculate_downstream_finance_cost(
@@ -1038,9 +1039,11 @@ def _recalculate_downstream_finance_cost(
     """
 
     from packages.application.fbs_accounting_runtime import load
-    before=load(runtime.runtime_dir)[1]
-    receipt=block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks()
-    after=load(runtime.runtime_dir)[1]
+    from packages.application.fbs_accounting_runtime import writer_lock
+    with writer_lock(runtime.runtime_dir):
+        before=load(runtime.runtime_dir)[1]
+        receipt=block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks()
+        after=load(runtime.runtime_dir)[1]
     return {**receipt,'accounting_version_before':before,'accounting_version':after,
             'accounting_version_unchanged':before==after}
 

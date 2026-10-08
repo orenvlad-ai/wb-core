@@ -387,8 +387,15 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
     def history():
         if history_config.fingerprint() != receipt['history_config_fingerprint']:
             raise CycleStageFailure('cycle_history_contract_changed')
-        proof = entrypoint._cycle_history(history_config, receipt, ready,
-            backfill_dates=backfill_dates, closed_receipt=closed if backfill_dates else None)
+        from packages.application.fbs_accounting_historical_history import pending_receipt
+        historical=pending_receipt(entrypoint.runtime)
+        kwargs=dict(backfill_dates=backfill_dates,closed_receipt=closed if backfill_dates else None)
+        if historical is not None:
+            historical.freeze_scope(entrypoint.now_factory())
+            from datetime import datetime,timedelta
+            yesterday=(datetime.fromisoformat(receipt['business_date'])-timedelta(days=1)).date().isoformat()
+            kwargs.update(historical_receipt=historical,backfill_dates=tuple(sorted(set(backfill_dates)|{d for d in historical.publication_dates() if d<yesterday})))
+        proof = entrypoint._cycle_history(history_config, receipt, ready, **kwargs)
         if backfill_dates:
             value = closed.status()
             if not value or any(value['dates'][day]['state'] != 'acknowledged' for day in backfill_dates):
