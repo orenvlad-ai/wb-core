@@ -44,6 +44,32 @@ class FacilityIntegrationTests(unittest.TestCase):
                 self.assertNotIn(facility.DOMAIN, http._operator_domains_for_user({'username': section, 'role': 'operator', 'allowed_sections': [section]}))
             self.assertIn(facility.DOMAIN, http._operator_domains_for_user({'username': 'supply', 'role': 'operator', 'allowed_sections': ['supply']}))
 
+    def test_facility_and_library_receipts_share_pagination_without_hidden_rows(self):
+        from packages.application import operator_trade_documents as trade
+        with TemporaryDirectory() as raw:
+            runtime, surface = fixture(Path(raw))
+            entry = Entry(runtime_dir=runtime.runtime_dir, runtime=runtime)
+            expected = []
+            for index in range(3):
+                expected.append(submit(surface, 'create', envelope(request_id=f'mixed-facility-{index:04d}',
+                    name=f'Mixed facility {index}', city='Москва', active=False))['acceptance'])
+            for index, scope in enumerate(('principal-A', 'principal-A', 'foreign')):
+                receipt = entry.handle_trade_documents_create_request(f'invoice-{index}'.encode(),
+                    uploaded_filename=f'invoice-{index}.pdf', fields={'request_id': f'mixed-library-{index:04d}',
+                    'document_type': 'invoice', 'number': f'Mixed library {index}'}, actor='fixture', request_scope=scope)['acceptance']
+                if scope == 'principal-A': expected.append(receipt)
+            kwargs = dict(allowed_domains={facility.DOMAIN, trade.DOMAIN}, request_scope='principal-A')
+            ordered = sorted(expected, key=lambda item: (item['accepted_at'], item['operation_id']), reverse=True)
+            for limit in (1, 2, 3):
+                found = []
+                for page in range(1, 7):
+                    result = journal.journal(runtime.db_path, page=page, limit=limit, **kwargs)
+                    self.assertEqual(result['total'], len(expected))
+                    found.extend(item['operation_id'] for item in result['items'])
+                self.assertEqual(found, [item['operation_id'] for item in ordered])
+            self.assertEqual(journal.journal(runtime.db_path, search='Mixed library 2', **kwargs)['total'], 0)
+            self.assertEqual(journal.journal(runtime.db_path, search=expected[0]['operation_id'], **kwargs)['total'], 1)
+
     def test_cycle_drain_requires_both_native_owners_and_completes_actual_activation(self):
         with TemporaryDirectory() as raw:
             runtime, surface = fixture(Path(raw))

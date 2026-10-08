@@ -1062,6 +1062,10 @@
       }
 
       async function fetchJson(url, options) {
+        return fetchJsonNative(url, options);
+      }
+
+      async function fetchJsonNative(url, options) {
         const response = await fetch(url, options || {});
         const contentType = response.headers.get("content-type") || "";
         const text = await response.text();
