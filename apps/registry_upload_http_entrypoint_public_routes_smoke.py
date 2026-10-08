@@ -156,6 +156,24 @@ def main() -> None:
         manifest,
         proxy_pass_url="http://127.0.0.1:8765",
     )
+    # Monitoring must reach the authenticated application through the public
+    # listener. Exact routes must not expose arbitrary monitor descendants.
+    for path, method in (
+        ("/v1/sheet-vitrina-v1/stock-monitor", "GET"),
+        ("/v1/sheet-vitrina-v1/stock-monitor/refresh", "POST"),
+    ):
+        matching = [route for route in routes if route["path"] == path]
+        if len(matching) != 1 or matching[0]["match"] != "exact" or matching[0]["methods"] != [method]:
+            raise AssertionError(f"monitor route must be exact and declare only {method}: {path}")
+        if rendered.count(f"location = {path} {{") != 1:
+            raise AssertionError(f"monitor public location missing or duplicated: {path}")
+        location = _exact_location_block(rendered, path)
+        if "proxy_pass http://127.0.0.1:8765;" not in location:
+            raise AssertionError(f"monitor route must use the authenticated application listener: {path}")
+        if "proxy_set_header X-Forwarded-Proto $scheme;" not in location:
+            raise AssertionError(f"monitor route must retain public origin for application CSRF checks: {path}")
+    if any(route["match"] == "prefix" and route["path"].startswith("/v1/sheet-vitrina-v1/stock-monitor") for route in routes):
+        raise AssertionError("monitor public routes must not introduce a wildcard prefix")
     cleaner_base='/v1/sheet-vitrina-v1/ads/keyword-cleaner'
     for path,match in ((cleaner_base,'exact'),(cleaner_base+'/','prefix')):
         route=next((item for item in routes if item['path']==path),None)
