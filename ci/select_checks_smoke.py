@@ -405,6 +405,16 @@ def command_dependency_checks():
         paths=[future_source], file_exists=lambda _, p: p in {future_source, future_script})
     check(sibling, [future_script])
 
+    # The shared receipt component also launches Chromium without the browser
+    # suffix. Its dependency must be trusted before the new smoke is added.
+    component_script = "apps/operator_acceptance_component_smoke.py"
+    component_source = component_script.removesuffix("_smoke.py") + ".py"
+    for path in (component_script, component_source):
+        component = build_plan_from_paths(pull_request=40, base=BASE, head=HEAD,
+            paths=[path], file_exists=lambda _, p: p in {component_script, component_source})
+        check(component, [component_script])
+        assert component["groups"] == [], component
+
     for path in ("apps/warehouse_recovery_policy_http_smoke.py", "packages/application/warehouse_recovery_policy.py"):
         plan = build_plan_from_paths(pull_request=35, base=BASE, head=HEAD,
             paths=[path], file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
