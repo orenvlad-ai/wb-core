@@ -7376,11 +7376,13 @@ class RegistryUploadHttpEntrypoint:
             try:
                 value = operation()
             except Exception as exc:
+                from packages.application.wb_finance_weekly import FinanceStaleCostHandoffError
                 self.warehouse_update_journal.phase_finished(
                     durable_run_id,
                     phase_key,
                     status="failed",
                     error=str(exc),
+                    details={'finance_failure': exc.diagnostic()} if isinstance(exc, FinanceStaleCostHandoffError) else {},
                 )
                 raise
             item_count = 0
