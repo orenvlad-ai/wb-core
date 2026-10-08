@@ -525,6 +525,14 @@ def command_dependency_checks():
             assert 'playwright==1.58.0' not in narrow['pip'], narrow
     print('next operator leaves: narrow backend/browser prerequisite selection OK')
 
+    for history_script in ('apps/operator_supplier_history_sources_smoke.py', 'apps/operator_supplier_history_smoke.py'):
+        history = build_plan_from_paths(pull_request=43, base=BASE, head=HEAD,
+            paths=[history_script], file_exists=lambda _, p: p == history_script)
+        verify_plan(history)
+        assert history['pip'] == ['openpyxl==3.1.5', 'pypdf==6.4.1'], history
+        assert install not in history['commands'], history
+        assert history['commands'].count(['python3', history_script]) == 1, history
+
     cash_script = 'apps/operator_cash_operations_smoke.py'
     cash = build_plan_from_paths(pull_request=42, base=BASE, head=HEAD,
         paths=[cash_script], file_exists=lambda _, p: p == cash_script)
