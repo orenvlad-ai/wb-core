@@ -531,7 +531,14 @@ def command_dependency_checks():
     next_backend += ['apps/operator_settings_facilities_smoke.py', 'apps/operator_settings_facilities_http_smoke.py']
     next_browsers += ['apps/operator_settings_facilities_browser_smoke.py']
     next_backend += ['apps/operator_facility_journal_cycle_smoke.py', 'apps/operator_manual_ff_stock_smoke.py', 'apps/operator_manual_ff_stock_http_smoke.py']
-    next_browsers += ['apps/operator_feedback_schedules_smoke.py', 'apps/operator_balance_job_recovery_smoke.py', 'apps/operator_spp_job_receipts_smoke.py', 'apps/operator_manual_ff_stock_browser_smoke.py']
+    next_browsers += ['apps/operator_feedback_schedules_smoke.py', 'apps/operator_balance_job_recovery_smoke.py', 'apps/operator_spp_job_recovery_smoke.py', 'apps/operator_manual_ff_stock_browser_smoke.py']
+    complaints_browser = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD, paths=['apps/operator_complaint_runs_browser_smoke.py'], file_exists=lambda _, p: p == 'apps/operator_complaint_runs_browser_smoke.py')
+    verify_plan(complaints_browser)
+    assert 'playwright==1.58.0' in complaints_browser['pip'], complaints_browser
+    for script in ('apps/operator_complaint_runs_smoke.py', 'apps/operator_complaint_runs_http_smoke.py'):
+        minimal = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD, paths=[script], file_exists=lambda _, p: p == script)
+        verify_plan(minimal)
+        assert minimal['commands'].count(['python3', script]) == 1, minimal
     supplier_cycle = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD, paths=['apps/operator_supplier_history_cycle_smoke.py'], file_exists=lambda _, p: p == 'apps/operator_supplier_history_cycle_smoke.py')
     verify_plan(supplier_cycle)
     assert {'openpyxl==3.1.5', 'pypdf==6.4.1'} <= set(supplier_cycle['pip']), supplier_cycle
@@ -542,7 +549,7 @@ def command_dependency_checks():
         verify_plan(narrow)
         assert narrow['commands'].count(['python3', script]) == 1, narrow
         assert 'openpyxl==3.1.5' in narrow['pip'], narrow
-        if script in {'apps/operator_feedback_schedules_smoke.py', 'apps/operator_autoanswers_settings_smoke.py', 'apps/operator_json_business_settings_smoke.py', 'apps/operator_spp_job_receipts_smoke.py', 'apps/operator_balance_job_recovery_smoke.py'}:
+        if script in {'apps/operator_feedback_schedules_smoke.py', 'apps/operator_autoanswers_settings_smoke.py', 'apps/operator_json_business_settings_smoke.py', 'apps/operator_spp_job_recovery_smoke.py', 'apps/operator_balance_job_recovery_smoke.py'}:
             assert 'apsw==3.53.4.0' in narrow['pip'], narrow
         if script in next_browsers:
             check(narrow, [script])

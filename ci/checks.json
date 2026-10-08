@@ -47,7 +47,7 @@
     },
     "finance_liquidity_auth_imports": {
       "scripts": [
-        "apps/operator_feedback_schedules_smoke.py","apps/operator_balance_job_recovery_smoke.py","apps/operator_spp_job_receipts_smoke.py",
+        "apps/operator_feedback_schedules_smoke.py","apps/operator_balance_job_recovery_smoke.py","apps/operator_spp_job_recovery_smoke.py",
         "apps/operator_json_business_settings_smoke.py",
         "apps/operator_autoanswers_settings_smoke.py",
         "apps/finance_liquidity_auth_smoke.py",
@@ -63,8 +63,9 @@
     },
     "playwright_chromium": {
       "scripts": [
+        "apps/operator_complaint_runs_browser_smoke.py",
         "apps/operator_settings_facilities_browser_smoke.py",
-        "apps/operator_feedback_schedules_smoke.py","apps/operator_balance_job_recovery_smoke.py","apps/operator_spp_job_receipts_smoke.py","apps/operator_manual_ff_stock_browser_smoke.py",
+        "apps/operator_feedback_schedules_smoke.py","apps/operator_balance_job_recovery_smoke.py","apps/operator_spp_job_recovery_smoke.py","apps/operator_manual_ff_stock_browser_smoke.py",
         "apps/operator_facility_mappings_browser_smoke.py",
         "apps/operator_json_business_settings_smoke.py",
         "apps/operator_autoanswers_settings_smoke.py",
