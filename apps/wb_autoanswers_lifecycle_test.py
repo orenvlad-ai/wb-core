@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -18,6 +19,13 @@ from packages.application.wb_autoanswers_lifecycle import (
     WORKER_TIMER,
 )
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository
+from packages.application.business_data_maintenance_pause import (
+    SCHEMA as PAUSE_SCHEMA, STATE_FILENAME as PAUSE_STATE, fingerprint, save_state,
+)
+from packages.application.business_data_write_barrier import (
+    STATE_FILENAME as BARRIER_STATE, acquire_barrier, confirm_barrier_hold,
+    mark_barrier_restoring, release_barrier,
+)
 
 
 class FakeSystemd:
@@ -29,6 +37,7 @@ class FakeSystemd:
         self.fail_enable = ""
         self.active_services: set[str] = set()
         self.calls: list[tuple[str, str]] = []
+        self.service_results: dict[str, str] = {}
 
     def unit_state(self, unit: str) -> dict:
         if unit in self.timers:
@@ -52,7 +61,7 @@ class FakeSystemd:
             "is_active": (
                 "activating" if unit in self.active_services else "inactive"
             ),
-            "properties": {"Result": "success"},
+            "properties": {"Result": self.service_results.get(unit, "success")},
         }
 
     def disable_now(self, unit: str) -> None:
@@ -278,6 +287,122 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(paused["stop_reason"], "budget_state_unknown")
         self.assertFalse(paused["components"]["readonly_sync"]["actual"])
         self.assertFalse(paused["components"]["worker"]["actual"])
+
+    def held_maintenance(self, *, kind: str = "maintenance_pause", confirm: bool = True) -> dict:
+        self.set_mode("auto_all")
+        self.reconcile()
+        self.repository.record_scheduler_tick(errors=[])
+        self.clock.value += timedelta(minutes=4)
+        self.systemd.timers = dict.fromkeys(self.systemd.timers, False)
+        state = {"schema_version": PAUSE_SCHEMA, "phase": "held",
+                 "window_id": "synthetic-maintenance-window", "baseline": {},
+                 "baseline_fingerprint": fingerprint({}), "plan_fingerprint": fingerprint({}),
+                 "hold_readback": {"quiet": True}}
+        save_state(self.runtime_dir, state, "test-held")
+        acquire_barrier(self.runtime_dir, window_id=state["window_id"], window_kind=kind,
+                        plan_fingerprint=state["plan_fingerprint"], approval_reference=state["window_id"],
+                        actor="test", reason="synthetic planned maintenance")
+        if confirm:
+            confirm_barrier_hold(self.runtime_dir, window_id=state["window_id"],
+                                 plan_fingerprint=state["plan_fingerprint"], maintenance_state=state)
+        return state
+
+    def test_held_maintenance_presentation_is_read_only_and_preserves_fault_flags(self) -> None:
+        self.held_maintenance()
+        files = {p: p.read_bytes() for p in self.runtime_dir.iterdir() if p.is_file()}
+        calls = list(self.systemd.calls)
+        status = self.lifecycle.status(suspended_by_master=False)
+        self.assertTrue(status["maintenance_pause"]["confirmed"])
+        self.assertEqual(status["lifecycle_state"], "error")
+        self.assertEqual(status["drift_status"], "drift")
+        self.assertEqual(status["stop_reason"], "worker_unavailable")
+        self.assertEqual(status["last_error"], "worker_unavailable")
+        self.assertFalse(status["actual"])
+        self.assertFalse(status["fresh_scheduler_tick"])
+        self.assertEqual(self.systemd.calls, calls)
+        self.assertEqual({p: p.read_bytes() for p in files}, files)
+
+    def test_unconfirmed_or_nonmaintenance_barrier_is_not_a_planned_pause(self) -> None:
+        self.held_maintenance(confirm=False)
+        self.assertFalse(self.lifecycle.status(suspended_by_master=False)["maintenance_pause"]["confirmed"])
+        (self.runtime_dir / BARRIER_STATE).unlink()
+        state = json.loads((self.runtime_dir / PAUSE_STATE).read_text())
+        acquire_barrier(self.runtime_dir, window_id=state["window_id"], window_kind="snapshot",
+                        plan_fingerprint=state["plan_fingerprint"], approval_reference=state["window_id"],
+                        actor="test", reason="synthetic snapshot")
+        confirm_barrier_hold(self.runtime_dir, window_id=state["window_id"],
+                             plan_fingerprint=state["plan_fingerprint"], maintenance_state=state)
+        self.assertFalse(self.lifecycle.status(suspended_by_master=False)["maintenance_pause"]["confirmed"])
+
+    def test_fresh_tick_held_maintenance_also_marks_only_expected_drift(self) -> None:
+        self.held_maintenance()
+        self.clock.value -= timedelta(minutes=3)
+        fresh = self.lifecycle.status(suspended_by_master=False)
+        self.assertTrue(fresh["fresh_scheduler_tick"])
+        self.assertEqual(fresh["stop_reason"], "no_eligible_jobs")
+        self.assertEqual(fresh["last_error"], "no_eligible_jobs")
+        self.assertTrue(fresh["maintenance_pause"]["confirmed"])
+        self.assertEqual(fresh["lifecycle_state"], "error")
+        self.assertEqual(fresh["drift_status"], "drift")
+        self.assertFalse(fresh["actual"])
+
+    def test_unknown_changed_or_failed_maintenance_is_not_a_planned_pause(self) -> None:
+        original = self.held_maintenance()
+        for change in ({"phase": "draining"}, {"phase": "restoring"}, {"phase": "restored"},
+                       {"window_id": "different-window"}, {"plan_fingerprint": fingerprint("different")},
+                       {"error": "restore failed"}, {"hold_readback": {"quiet": False}},
+                       {"baseline_fingerprint": fingerprint("wrong")}):
+            with self.subTest(change=change):
+                save_state(self.runtime_dir, {**original, **change}, "test-negative")
+                self.assertFalse(self.lifecycle.status(suspended_by_master=False)["maintenance_pause"]["confirmed"])
+        (self.runtime_dir / PAUSE_STATE).write_text("broken json")
+        self.assertFalse(self.lifecycle.status(suspended_by_master=False)["maintenance_pause"]["confirmed"])
+
+    def test_real_faults_and_owner_controls_are_not_hidden_by_held_maintenance(self) -> None:
+        self.held_maintenance()
+        for result in ("exit-code", ""):
+            self.systemd.service_results[WORKER_SERVICE] = result
+            self.assertFalse(self.lifecycle.status(suspended_by_master=False)["maintenance_pause"]["confirmed"])
+        self.systemd.service_results.clear()
+        self.repository.env["WB_AUTOANSWERS_FORCE_OFF"] = "true"
+        forced_off = self.lifecycle.status(suspended_by_master=False)
+        self.assertFalse(forced_off["maintenance_pause"]["confirmed"])
+        self.assertEqual(forced_off["stop_reason"], "emergency_stop")
+        self.repository.env["WB_AUTOANSWERS_FORCE_OFF"] = "false"
+        persisted = json.loads(self.lifecycle.state_path.read_text())
+        self.lifecycle.state_path.write_text(json.dumps({**persisted, "last_error": "synthetic lifecycle fault"}))
+        fault = self.lifecycle.status(suspended_by_master=False)
+        self.assertFalse(fault["maintenance_pause"]["confirmed"])
+        self.assertEqual(fault["last_error"], "synthetic lifecycle fault")
+        self.lifecycle.state_path.write_text(json.dumps(persisted))
+        self.assertFalse(self.lifecycle.status(suspended_by_master=True)["maintenance_pause"]["confirmed"])
+        for reason in ("worker_error", "hourly_budget_reached", "budget_state_unknown"):
+            with self.subTest(reason=reason):
+                with self.repository.transaction() as conn:
+                    self.repository._set_stop_reason(conn, reason, details={}, at=self.clock())
+                status = self.lifecycle.status(suspended_by_master=False)
+                self.assertFalse(status["maintenance_pause"]["confirmed"])
+                self.assertEqual(status["stop_reason"], reason)
+        for mode in ("manual", "off"):
+            self.set_mode(mode)
+            self.assertFalse(self.lifecycle.status(suspended_by_master=False)["maintenance_pause"]["confirmed"])
+
+    def test_restore_removes_presentation_and_requires_an_ordinary_fresh_tick(self) -> None:
+        state = self.held_maintenance()
+        mark_barrier_restoring(self.runtime_dir, window_id=state["window_id"], plan_fingerprint=state["plan_fingerprint"])
+        self.assertFalse(self.lifecycle.status(suspended_by_master=False)["maintenance_pause"]["confirmed"])
+        release_barrier(self.runtime_dir, window_id=state["window_id"], plan_fingerprint=state["plan_fingerprint"],
+                        actor="test", reason="synthetic exact restore",
+                        restore_readback={"status": "restored", "exact_prior_state_restored": True})
+        self.systemd.timers = dict.fromkeys(self.systemd.timers, True)
+        stale = self.lifecycle.status(suspended_by_master=False)
+        self.assertFalse(stale["maintenance_pause"]["confirmed"])
+        self.assertEqual(stale["stop_reason"], "worker_unavailable")
+        self.assertEqual(stale["lifecycle_state"], "error")
+        self.repository.record_scheduler_tick(errors=[])
+        running = self.lifecycle.status(suspended_by_master=False)
+        self.assertTrue(running["actual"])
+        self.assertEqual(running["lifecycle_state"], "running")
 
 
 if __name__ == "__main__":

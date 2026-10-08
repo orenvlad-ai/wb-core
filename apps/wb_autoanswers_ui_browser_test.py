@@ -62,6 +62,78 @@ def _route_unrelated_warehouse_options(route: object) -> None:
 
 
 class AutoanswersUiBrowserTest(unittest.TestCase):
+    def test_only_confirmed_maintenance_gets_calm_presentation(self) -> None:
+        held = {
+            "process_key": "autoanswers", "desired": True, "actual": False,
+            "business_mode": "auto_all", "lifecycle_state": "error", "drift_status": "drift",
+            "stop_reason": "worker_unavailable", "last_error": "worker_unavailable",
+            "budget_state": "confirmed", "master_policy": {"confirmed": True},
+            "maintenance_pause": {"contract": "wb_autoanswers_maintenance_presentation_v1",
+                                  "confirmed": True, "window_id": "synthetic-window",
+                                  "plan_fingerprint": "sha256:" + "a" * 64},
+            "components": {key: {"desired": True, "actual": False, "drift_status": "drift"}
+                           for key in ("readonly_sync", "worker")},
+        }
+        cases = [
+            ({}, "Пауза на обновление", True),
+            ({"stop_reason": "no_eligible_jobs", "last_error": "no_eligible_jobs"}, "Пауза на обновление", True),
+            ({"stop_reason": "", "last_error": "component drift: readonly_sync,worker"}, "Пауза на обновление", True),
+            ({"maintenance_pause": {"confirmed": False}}, "Остановлено из-за ошибки", False),
+            ({"master_policy": {"confirmed": False}, "lifecycle_state": "unconfirmed", "drift_status": "unknown"}, "Состояние не подтверждено", False),
+            ({"stop_reason": "worker_error", "last_error": "real worker failure"}, "Остановлено из-за ошибки", False),
+            ({"stop_reason": "budget_state_unknown", "budget_state": "unknown"}, "Остановлено из-за ошибки", False),
+            ({"stop_reason": "hourly_budget_reached"}, "Работает · штатная пауза", False),
+            ({"desired": False, "business_mode": "off", "lifecycle_state": "off", "drift_status": "matched", "stop_reason": "master_switch_off"}, "Выключено", False),
+            ({"business_mode": "manual", "stop_reason": "manual_pause"}, "Остановлено из-за ошибки", False),
+        ]
+        current = cases[0][0]
+        fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
+        with fixture as base_url:
+            base_payload = fixture.entrypoint.handle_sheet_feedbacks_autoanswers_settings_request()
+            def route_settings(route: object) -> None:
+                payload = deepcopy(base_payload)
+                payload["lifecycle"] = {**deepcopy(held), **current}
+                payload["settings"].update(master_enabled=True, mode="auto_all")
+                payload["runtime"]["progress"]["stop_reason"] = payload["lifecycle"]["stop_reason"]
+                for key in ("all_preparation", "all_publication", "content_bearing_preparation", "content_bearing_publication"):
+                    payload["runtime"]["progress"][key]["pause_reason"] = payload["lifecycle"]["stop_reason"]
+                route.fulfill(status=200, content_type="application/json; charset=utf-8", body=json.dumps(payload, ensure_ascii=False))
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                context = browser.new_context(viewport={"width": 1280, "height": 800})
+                context.route("**/v1/sheet-vitrina-v1/feedbacks/autoanswers/settings", route_settings)
+                context.route("**/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options", _route_unrelated_warehouse_options)
+                page = context.new_page()
+                try:
+                    for current, expected, calm in cases:
+                        with self.subTest(change=current):
+                            page.goto(base_url + "/sheet-vitrina-v1/vitrina?tab=feedbacks", wait_until="domcontentloaded")
+                            page.wait_for_function("""label => {
+                                const node = document.querySelector('[data-autoanswers-master-status]');
+                                return node && node.textContent === label;
+                            }""", arg=expected)
+                            summary = page.locator("[data-autoanswers-lifecycle-summary]").inner_text()
+                            reason = page.locator("[data-autoanswers-stop-reason]").inner_text()
+                            progress = page.locator("[data-autoanswers-progress-bars]").inner_text()
+                            if calm:
+                                self.assertNotIn("worker_unavailable", summary)
+                                self.assertNotIn("component drift", summary)
+                                self.assertNotIn("no_eligible_jobs", summary)
+                                self.assertNotIn("Нет свежего запуска", summary)
+                                self.assertNotIn("Расхождение", summary)
+                                self.assertIn("Последняя ошибка\n—", summary)
+                                self.assertIn("Пауза на обновление", reason)
+                                self.assertIn("Пауза на обновление", progress)
+                                self.assertIn("is-starting", page.locator("[data-autoanswers-master-status]").get_attribute("class"))
+                            else:
+                                self.assertNotIn("Пауза на обновление", summary + reason + progress)
+                                if current.get("stop_reason") == "worker_error":
+                                    self.assertIn("real worker failure", summary)
+                                    self.assertIn("Ошибка worker", reason)
+                finally:
+                    context.close()
+                    browser.close()
+
     def test_live_backlog_colors_require_fresh_confirmed_count(self) -> None:
         cases = [
             ({"verified": True, "fresh": True, "unresolved": 0}, "success", "без ответа 0"),

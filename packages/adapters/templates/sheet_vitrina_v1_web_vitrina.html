@@ -18278,11 +18278,26 @@
       return state.processMonitoring.processes[String(processKey || "")] || null;
     }
 
+    function autoanswersMaintenancePresentationConfirmed(process) {
+      const item = process || {};
+      const pause = item.maintenance_pause || {};
+      return item.process_key === "autoanswers" && item.desired === true && !item.suspended_by_master &&
+        ["draft_only", "auto_safe", "auto_all"].includes(item.business_mode) &&
+        ["", "no_eligible_jobs", "worker_unavailable"].includes(String(item.stop_reason || "")) &&
+        ["worker_unavailable", "no_eligible_jobs", "component drift: readonly_sync,worker"].includes(item.last_error) &&
+        item.budget_state !== "unknown" && (item.master_policy || {}).confirmed === true &&
+        pause.contract === "wb_autoanswers_maintenance_presentation_v1" && pause.confirmed === true &&
+        !!pause.window_id && !!pause.plan_fingerprint;
+    }
+
     function processOperationalPresentation(process) {
       const item = process || {};
       const lifecycle = String(item.lifecycle_state || "");
       const drift = String(item.drift_status || "");
       const stopReason = String(item.stop_reason || "");
+      if (autoanswersMaintenancePresentationConfirmed(item)) {
+        return {label: "Пауза на обновление", tone: "warning"};
+      }
       const normalPauseReasons = new Set([
         "hourly_budget_reached",
         "daily_budget_reached",
@@ -18943,6 +18958,10 @@
       const readonlyComponent = components.readonly_sync || {};
       const workerComponent = components.worker || {};
       const lifecyclePresentation = processOperationalPresentation(lifecycle);
+      const maintenancePause = autoanswersMaintenancePresentationConfirmed(lifecycle);
+      const displayedPauseReason = function(reason) {
+        return maintenancePause && ["", "no_eligible_jobs", "worker_unavailable"].includes(reason) ? "maintenance_pause" : reason;
+      };
       const selectorState = settings.master_enabled ? String(settings.mode || "draft_only") : "off";
       const modeLabels = {off: "Автоответы выключены", manual: "Ручной режим", draft_only: "Режим «Черновики»", auto_safe: "Безопасный режим", auto_all: "Полный режим"};
       const modeNotes = {
@@ -18990,13 +19009,14 @@
       if (autoanswersBudgetUpdatedNode) autoanswersBudgetUpdatedNode.textContent = budget.updated_at ? ("Расходы обновлены: " + budget.updated_at) : "Расходы ещё не обновлялись";
       if (autoanswersLifecycleSummaryNode) {
         const componentState = function(component) {
+          if (maintenancePause) return "Пауза на обновление";
           if (component.actual === true && component.drift_status === "matched") return "Работает";
           if (component.desired === false && component.actual === false) return "Выключено";
           if (component.drift_status === "drift") return "Расхождение";
           return "Не подтверждено";
         };
-        const lifecycleError = String(lifecycle.last_error || "");
-        const stopReason = String(lifecycle.stop_reason || "");
+        const lifecycleError = maintenancePause ? "" : String(lifecycle.last_error || "");
+        const stopReason = displayedPauseReason(String(lifecycle.stop_reason || ""));
         const schedulerTick = lifecycle.runtime_schedule && lifecycle.runtime_schedule.last_scheduler_tick_at
           ? lifecycle.runtime_schedule.last_scheduler_tick_at
           : ((server.runtime || {}).progress || {}).last_scheduler_tick_at;
@@ -19092,7 +19112,7 @@
           const percentValue = data.percent === null || data.percent === undefined ? null : Math.max(0, Math.min(100, Number(data.percent)));
           const displayPercent = percentValue === null ? "—" : percentValue.toFixed(1) + "%";
           const status = String(data.status || data.current_operation || queue.current_operation || "");
-          const pauseReason = String(data.pause_reason || queue.stop_reason || "no_eligible_jobs");
+          const pauseReason = displayedPauseReason(String(data.pause_reason || queue.stop_reason || "no_eligible_jobs"));
           const parts = total === 0
             ? ["Нет отзывов в этой категории"]
             : [done + " из " + total, "осталось " + remaining];
@@ -19119,7 +19139,7 @@
       }
       if (autoanswersStopReasonNode) {
         const stopLabels = {hourly_budget_reached:"Достигнут часовой лимит",daily_budget_reached:"Достигнут дневной лимит",monthly_budget_reached:"Достигнут месячный лимит",run_budget_reached:"Достигнут лимит текущего запуска",run_review_limit_reached:"Достигнут лимит отзывов запуска",run_cap_missing:"У запуска отсутствует обязательный лимит",paid_reviews_hourly_limit:"Достигнут лимит платных отзывов в час",concurrency_limit:"Достигнут лимит одновременной обработки",budget_state_unknown:"Стоимость оборванного вызова не подтверждена; paid processing заблокирован",openai_quota_exhausted:"Квота OpenAI исчерпана",rate_limited:"Внешний сервис ограничил частоту запросов",worker_error:"Ошибка worker",retry_backoff:"Ожидание повторной попытки",processing_queue_depth_limit:"Очередь заполнена; materialization продолжится после обработки",stale_lease:"Обнаружен просроченный lease",worker_unavailable:"Worker не выполнял scheduler ticks",manual_pause:"Пауза: ручной режим",emergency_stop:"Аварийная остановка",master_switch_off:"Автоответы выключены",provider_cooldown:"Пауза после сбоя сервиса генерации",unresolved_work:"В текущей очереди WB остались неотвеченные отзывы",no_eligible_jobs:"Нет доступных задач"};
-        const reason = String(queue.stop_reason || "no_eligible_jobs");
+        const reason = displayedPauseReason(String(queue.stop_reason || "no_eligible_jobs"));
         const eta = queue.eta_hours === null || queue.eta_hours === undefined ? "ETA пока недоступно" : ("ETA около " + Number(queue.eta_hours).toFixed(1) + " ч.");
         autoanswersStopReasonNode.textContent = (stopLabels[reason] || friendlyAutoanswersStatus(reason)) + " · run $" + Number(queue.run_actual_usd || 0).toFixed(2) + " · reserved $" + Number(queue.run_active_reserved_usd || 0).toFixed(2) + " · " + eta + " · policy epoch " + Number(queue.policy_epoch || 0);
         if (autoanswersIncreaseLimitButton) {
@@ -19191,6 +19211,7 @@
         openai_quota_exhausted: "Исчерпана квота OpenAI",
         run_cap_missing: "Не подтверждён лимит запуска",
         worker_unavailable: "Нет свежего запуска worker",
+        maintenance_pause: "Пауза на обновление",
         worker_error: "Worker остановлен из-за ошибки",
         master_switch_off: "Общая пауза",
         emergency_stop: "Аварийная остановка",
