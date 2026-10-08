@@ -345,7 +345,10 @@ def payment_pdf_dependency_checks():
 
 
 def operator_warehouse_dependency_checks():
-    script='apps/operator_warehouse_documents_smoke.py'
+    for script in ('apps/operator_warehouse_documents_smoke.py','apps/operator_inventory_documents_smoke.py'):
+        _operator_warehouse_dependency_check(script)
+
+def _operator_warehouse_dependency_check(script):
     exists=lambda revision,path: path==script or (select_checks.ROOT/path).is_file()
     for path in (script,script.replace('_smoke.py','.py')):
         plan=build_plan_from_paths(pull_request=137,base=BASE,head=HEAD,paths=[path],file_exists=lambda revision,candidate:candidate==path or exists(revision,candidate))

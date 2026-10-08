@@ -100,6 +100,27 @@ def ship_id(doc, nm):
     return f"{doc['root_document_id']}:{nm}"
 
 
+def china_discrepancy_companion(doc, documents):
+    data=raw(doc)
+    if data.get('document_role') != 'china_discrepancy':
+        return False
+    parent=documents.get(doc['root_document_id'])
+    relations=data.get('relations',[])
+    if (doc['kind']!='transfer_discrepancy' or not parent or parent['kind']!='china_acceptance'
+            or len(relations)!=1 or relations[0].get('relation_type')!='discrepancy_of'
+            or relations[0].get('parent_document_id')!=parent['document_id']
+            or relations[0].get('child_document_id')!=doc['document_id']
+            or relations[0].get('root_document_id')!=parent['document_id']
+            or data.get('movements') or not data.get('lines')):
+        raise ValueError('china_discrepancy_companion_identity_invalid')
+    for line in data['lines']:
+        if (not line.get('line_role') or line.get('pool') is not None
+                or not line.get('facility_id') or units(line['quantity'])<=0
+                or number(line['capital_rub'])!=0 or number(line['expense_rub'])!=0):
+            raise ValueError('china_discrepancy_companion_effect_invalid')
+    return True
+
+
 def initial_document_state(capture):
     """Accept existing FBO and open transit values once, without price replay."""
     book = {}
@@ -122,7 +143,7 @@ def initial_document_state(capture):
     # every source reference first, then apply the immutable terminal order.
     initial_order = sorted(ordered(documents.values()), key=lambda d: d["kind"] != "transfer_shipment")
     for doc in initial_order:
-        if not raw(doc) or doc["document_id"] in reversed_ids:
+        if not raw(doc) or doc["document_id"] in reversed_ids or china_discrepancy_companion(doc,documents):
             continue
         if doc["kind"] == "transfer_shipment":
             src, dst = context(doc, documents)
@@ -164,9 +185,31 @@ def initial_document_state(capture):
     return {"policy": DOCUMENT_POLICY, "fbo_rows": book, "transfers": transfers}
 
 
+def correction_operands(data):
+    """Validate signed documentary lines against their exact physical movements."""
+    lines, movements = data['lines'], data['movements']
+    if not lines or len(lines) != len(movements):
+        raise ValueError('correction_operands_incomplete')
+    result=[]
+    for line, movement in zip(lines, movements):
+        metadata=json.loads(line.get('metadata_json','{}')) if 'metadata_json' in line else line.get('metadata',{})
+        q=number(metadata.get('signed_quantity_delta'),signed=True)
+        value=number(metadata.get('signed_capital_rub'),signed=True)
+        if (q != q.to_integral_value() or line.get('line_no')!=movement.get('line_no') or location(line)!=location(movement)
+                or q!=number(movement['quantity_delta'],signed=True)
+                or value!=number(movement['capital_delta_rub'],signed=True)
+                or units(line['quantity'])!=abs(q) or number(line['capital_rub'])!=abs(value)
+                or line['line_role']!='correction' or (q==0 and value==0)):
+            raise ValueError('correction_signed_operand_mismatch')
+        result.append((line,int(q),value))
+    return result
+
+
 def _solve(nodes, links):
     """Solve the small same-SKU daily transfer system, including round trips."""
     prices = {}
+    if any(n['mass']<0 or n['value']<0 for n in nodes.values()):
+        raise ValueError('negative_document_cost_basis')
     if any(n["mass"] == 0 and n["value"] != 0 for n in nodes.values()):
         raise ValueError("expense_without_cost_mass")
     for nm in sorted({node["nm_id"] for node in nodes.values()}):
@@ -264,6 +307,9 @@ def _resolve(state, capture, opening, absorbed):
             n["value"] += value
         elif kind == "outgoing":
             n["outgoing"] += q
+        elif kind == 'adjustment':
+            n['mass']+=q
+            n['value']+=value
 
     # Same-open-day reversals remove their source facts before any allocation.
     cancelled = set()
@@ -274,6 +320,7 @@ def _resolve(state, capture, opening, absorbed):
                 raise ValueError("closed_document_reversal_requires_separate_adjustment")
             cancelled.update({doc["document_id"], target})
     active = [d for i, d in current.items() if i not in cancelled]
+    companions={d['document_id'] for d in active if china_discrepancy_companion(d,documents)}
     for identity in cancelled:
         effects[identity] = []
 
@@ -286,6 +333,8 @@ def _resolve(state, capture, opening, absorbed):
                            event["kind"], units(event["quantity"]), number(event["capital_rub"], signed=event["kind"] == "expense"))
             continue
         effects[doc["document_id"]] = []
+        if doc['document_id'] in companions:
+            continue
         if kind == "china_acceptance":
             for line in data["lines"]:
                 if line["line_role"] != "accepted_pool_allocation":
@@ -333,8 +382,20 @@ def _resolve(state, capture, opening, absorbed):
                     "reference": {**source(doc), "business_date": day, "source_key": src}})
         elif kind in {"transfer_root", "transfer_receipt", "transfer_loss", "transfer_cancellation", "transfer_discrepancy", "late_expense"}:
             pass
-        elif kind == "pool_inventory" and not data["movements"] and all(units(l["quantity"]) == 0 for l in data["lines"]):
-            pass
+        elif kind == 'pool_inventory':
+            if data['movements'] or any(l['line_role']!='absolute_target' or number(l['capital_rub'])!=0 or number(l['expense_rub'])!=0 for l in data['lines']):
+                raise ValueError('inventory_parent_has_direct_cost_effect')
+        elif kind in {'inventory_surplus','inventory_shortage'}:
+            expected_role=kind
+            for line in data['lines']:
+                q=units(line['quantity']);value=number(line['capital_rub'])
+                if line['line_role']!=expected_role or q<=0 or (kind=='inventory_surplus' and value<=0):
+                    raise ValueError('inventory_child_cost_operand_invalid')
+                effect(doc,location(line),'receipt' if kind=='inventory_surplus' else 'outgoing',q,value if kind=='inventory_surplus' else ZERO,
+                    {'policy':'immutable_positive_inventory_basis' if kind=='inventory_surplus' else 'daily_wac_inventory_outgoing'})
+        elif kind=='correction':
+            for line,q,value in correction_operands(data):
+                effect(doc,location(line),'adjustment',q,value,{'policy':'explicit_signed_document_adjustment'})
         else:
             # Preserve explicit unsupported FBS handling. Never silently skip
             # an auxiliary FBO mutation that could later feed a FBS transfer.
@@ -345,7 +406,7 @@ def _resolve(state, capture, opening, absorbed):
     # Outcomes consume the saved shipment reference, not today's source price.
     for doc in ordered(active):
         data, kind = raw(doc), doc["kind"]
-        if not data or kind not in {"transfer_receipt", "transfer_loss", "transfer_cancellation", "transfer_discrepancy", "late_expense"}:
+        if doc['document_id'] in companions or not data or kind not in {"transfer_receipt", "transfer_loss", "transfer_cancellation", "transfer_discrepancy", "late_expense"}:
             continue
         if kind == "late_expense":
             selected = {identity: tr for identity, tr in transfers.items()

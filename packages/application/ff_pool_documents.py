@@ -1025,6 +1025,8 @@ class FfPoolDocumentService:
         source_content_type: str,
         catalog: Iterable[Mapping[str, Any]],
         cost_basis_by_nm: Mapping[Any, Any] | None = None,
+        template_source_revision: str | None = None,
+        pin_operator_inventory: bool = False,
     ) -> dict[str, Any]:
         from packages.application.ff_pool_documents_xlsx import (
             FfPoolXlsxError,
@@ -1039,9 +1041,14 @@ class FfPoolDocumentService:
                 content_type=source_content_type,
                 facilities=self.active_facilities(),
                 catalog=rows,
-                source_revision=identity.source_revision,
+                source_revision=template_source_revision or identity.source_revision,
             )
             manifest["cost_basis_by_nm"] = dict(cost_basis_by_nm or {})
+            if pin_operator_inventory:
+                from packages.application.operator_warehouse_documents import pin_inventory_manifest
+                with _connect(self.db_path,query_only=True) as conn:
+                    conn.execute('BEGIN')
+                    pin_inventory_manifest(conn,manifest,identity.idempotency_epoch)
             return self.accept_preview(
                 identity=identity,
                 document_kind="pool_inventory",
@@ -1873,6 +1880,11 @@ class FfPoolDocumentService:
                                 ),
                             },
                         )
+                elif guided_recovery:
+                    locked_plan=_build_posting_plan(conn,request=current_request,
+                        manifest=_json_object(_loads(current_request['preview_manifest_json'],{})),epoch=epoch)
+                    if _fingerprint(locked_plan)!=_fingerprint(plan):
+                        raise FfPoolDocumentError('guided_recovery_projection_drift','Основание сторно приёмки изменилось перед применением')
                 elif str(current_request["document_kind"]) == "pool_overhead":
                     locked_manifest = _json_object(
                         _loads(current_request["preview_manifest_json"], {})
@@ -4447,6 +4459,8 @@ def _plan_pool_inventory(
     manifest: Mapping[str, Any],
     epoch: int,
 ) -> dict[str, Any]:
+    from packages.application.operator_warehouse_documents import assert_inventory_inputs
+    assert_inventory_inputs(conn,request)
     dense_initialization = _dense_fbs_initialization(conn, request, manifest)
     facility_id = _facility(
         conn,
@@ -4574,7 +4588,9 @@ def _plan_pool_inventory(
                         nm_id=nm_id,
                         quantity=delta,
                         capital_cents=capital,
-                        metadata={"positive_same_sku_cost_basis_rub": canonical_decimal_text(unit_cost)},
+                        metadata={"positive_same_sku_cost_basis_rub": canonical_decimal_text(unit_cost),
+                            **({'inventory_cost_basis_source_digest':cost_bases[str(nm_id)]['source_digest']}
+                               if isinstance(cost_bases.get(str(nm_id)),Mapping) else {})},
                     )
                 )
                 surplus_movements.append(
@@ -5089,7 +5105,7 @@ def _plan_storno(
     lines: list[dict[str, Any]] = []
     for source in source_lines:
         quantity_delta = -int(source["quantity_delta"])
-        capital_cents = -_money_cents(source["capital_delta_rub"], field="storno capital")
+        capital_cents = -_signed_money_cents(source["capital_delta_rub"], field="storno capital")
         movements.append(
             _movement(
                 facility_id=str(source["facility_id"]),
@@ -5108,7 +5124,7 @@ def _plan_storno(
                 pool=str(source["pool"]),
                 nm_id=int(source["nm_id"]),
                 quantity=abs(int(source["quantity_delta"])),
-                capital_cents=abs(_money_cents(source["capital_delta_rub"], field="storno capital")),
+                capital_cents=abs(_signed_money_cents(source["capital_delta_rub"], field="storno capital")),
                 metadata={"target_line_no": int(source["line_no"])},
             )
         )
@@ -5116,7 +5132,9 @@ def _plan_storno(
         if str(target["document_kind"]) not in {"transfer_loss", "late_expense"}:
             raise FfPoolDocumentError(
                 "storno_target_has_no_direct_effect",
-                "This parent document has no direct movement to reverse; storno its effective children instead",
+                ("Инвентаризация не содержит собственных движений. Выберите документ излишка или недостачи."
+                 if str(target["document_kind"]) == "pool_inventory" else
+                 "This parent document has no direct movement to reverse; storno its effective children instead"),
                 details={"target_document_id": target_id, "document_kind": str(target["document_kind"])},
             )
         evidence_lines = conn.execute(
@@ -5393,12 +5411,39 @@ def _guided_acceptance_recovery_context(
     active_version = conn.execute(
         "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
     ).fetchone()
-    if active_version is None or str(active_version[0]) != aggregate_version:
-        raise FfPoolDocumentError(
-            "guided_recovery_projection_drift",
-            "Active warehouse projection changed after guided acceptance",
-        )
+    if active_version is None:
+        raise FfPoolDocumentError('guided_recovery_projection_drift','Active warehouse projection is missing')
+    modern_candidate=None
+    if str(active_version[0])!=aggregate_version:
+        # Native receipt publication replaces the before-version with one exact
+        # immutable descendant. Reconstruct its actual publisher contract from
+        # the saved before-version and unchanged physical source, then compare
+        # all persisted fields, including provenance and non-target rows.
+        from packages.application.warehouse_fbs_material_rematerialization import _build_candidate, _verify_candidate_readback
+        active_row=conn.execute('SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions WHERE version_id=?',(active_version[0],)).fetchone()
+        try:
+            if not active_row or active_row['status']!='good':
+                raise ValueError('missing_good_version')
+            modern_candidate=_build_candidate(conn,affected_nm_ids=sorted(aggregate_deltas),
+                source_kind='guided_china_acceptance',source_id=target_request['request_id'],
+                business_date=active_row['business_effective_date'],published_at=active_row['published_at'],
+                source_business_date=target_request['business_date'],source_version_id_override=aggregate_version,
+                allow_source_mismatch=False)
+            if (modern_candidate['target_version_id']!=active_row['version_id']
+                    or modern_candidate['candidate_fingerprint']!=active_row['plan_fingerprint']
+                    or modern_candidate['local_source_digest']!=active_row['local_source_digest']
+                    or modern_candidate['source_watermarks']!=_loads(active_row['source_watermarks_json'],{})):
+                raise ValueError('foreign_version_or_source')
+            keys=tuple(modern_candidate['lines'][0])
+            actual_rows=[{k:r[k] for k in keys} for r in conn.execute('SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances WHERE version_id=? ORDER BY warehouse_key,nm_id',(active_row['version_id'],))]
+            if _fingerprint(actual_rows)!=_fingerprint(modern_candidate['lines']):
+                raise ValueError('material_row_drift')
+            _verify_candidate_readback(conn,modern_candidate)
+        except (WarehouseFbsMaterialError,ValueError,KeyError,TypeError) as exc:
+            raise FfPoolDocumentError('guided_recovery_projection_drift','Active warehouse projection is not the exact receipt publication') from exc
     for item in aggregate_before:
+        if modern_candidate is not None:
+            continue  # every row and native lineage was proved above
         nm_id = int(item["nm_id"])
         row = conn.execute(
             """SELECT quantity,wac_rub,capital_rub,cost_covered_quantity,
@@ -5629,6 +5674,8 @@ def _plan_late_expense(
             prior_quantity += quantity
             if str(outcome["line_role"]) == "received":
                 received_share += share
+                if share == 0:
+                    continue
                 movements.append(
                     _movement(
                         facility_id=str(outcome["facility_id"] or destination[0]),
@@ -5693,7 +5740,9 @@ def _apply_plan(
 ) -> None:
     _require_utc(posted_at)
     from packages.application.operator_warehouse_documents import KINDS, assert_effect, assert_reservations
-    if str(request["document_kind"]) in KINDS:
+    from packages.application.operator_warehouse_documents import exists as confirmation_table_exists, TABLE as CONFIRMATIONS_TABLE
+    confirmed=confirmation_table_exists(conn) and conn.execute(f'SELECT 1 FROM {CONFIRMATIONS_TABLE} WHERE request_id=?',(request['request_id'],)).fetchone()
+    if str(request["document_kind"]) in KINDS and (confirmed or str(request['document_kind']) not in {'pool_inventory','correction','storno','late_expense'}):
         assert_effect(conn, request, plan)
         assert_reservations(conn, plan=plan, epoch=epoch)
     manifest_sha = _fingerprint(plan["posted_manifest"])
@@ -5811,6 +5860,7 @@ def _apply_plan(
                     _json(dict(expense.get("metadata") or {})),
                 ),
             )
+        typed_adjustment=_typed_adjustment_allowed(conn,document)
         for line_no, movement in enumerate(document.get("movements", []), start=1):
             _apply_balance_movement(
                 conn,
@@ -5822,6 +5872,7 @@ def _apply_plan(
                 business_date=str(request["business_date"]),
                 allow_missing_fbs=str(request["document_kind"])
                 == "facility_pool_opening",
+                typed_adjustment=typed_adjustment,
             )
     _materialize_explicit_zero_balances(
         conn,
@@ -6199,6 +6250,89 @@ def _materialize_explicit_zero_balances(
         )
 
 
+def _typed_adjustment_allowed(conn, document):
+    """Only explicit correction or its exact native reversal has independent signs."""
+    kind=document['document_kind']
+    if kind=='correction':
+        lines=document.get('lines',[]);movements=document.get('movements',[])
+        if not lines or len(lines)!=len(movements):
+            raise FfPoolDocumentError('correction_signed_operand_mismatch','Неполные значения корректировки')
+        for line,movement in zip(lines,movements):
+            metadata=line.get('metadata',{})
+            if (line['line_role']!='correction'
+                    or any(line[k]!=movement[k] for k in ('facility_id','pool','nm_id'))
+                    or metadata.get('signed_quantity_delta')!=movement['quantity_delta']
+                    or _signed_money_cents(metadata.get('signed_capital_rub'),field='correction capital')!=movement['capital_delta_cents']
+                    or line['quantity']!=abs(movement['quantity_delta']) or line['capital_cents']!=abs(movement['capital_delta_cents'])):
+                raise FfPoolDocumentError('correction_signed_operand_mismatch','Значения корректировки изменились')
+        return True
+    relation=document.get('relation') or {}
+    if kind!='storno' or relation.get('relation_type')!='storno_of':
+        return False
+    target=_load_document(conn,str(relation.get('parent_document_id') or ''))
+    if not target or target['document_kind']!='correction':
+        return False
+    from packages.application.fbs_snapshot_cost_sources import _verified_manifest, _verify_typed_lines
+    original_lines=[dict(r) for r in conn.execute(f'SELECT * FROM {DOCUMENT_LINES_TABLE} WHERE document_id=? ORDER BY line_no',(target['document_id'],))]
+    original=[dict(r) for r in conn.execute(f'SELECT * FROM {LINES_TABLE} WHERE operation_id=? ORDER BY line_no',(target['operation_id'],))]
+    _verify_typed_lines(dict(target),_verified_manifest(dict(target)),original_lines,original)
+    if len(original)!=len(document.get('movements',[])):
+        raise FfPoolDocumentError('storno_correction_reversal_mismatch','Состав сторно корректировки изменился')
+    for old,reverse in zip(original,document['movements']):
+        if (any(old[k]!=reverse[k] for k in ('facility_id','pool','nm_id'))
+                or reverse['quantity_delta']!=-old['quantity_delta']
+                or reverse['capital_delta_cents']!=-_signed_money_cents(old['capital_delta_rub'],field='storno capital')
+                or reverse.get('metadata',{}).get('target_document_id')!=target['document_id']):
+            raise FfPoolDocumentError('storno_correction_reversal_mismatch','Сторно не является точным обратным движением корректировки')
+    return True
+
+
+def _validate_balance_effect(*, before_quantity, before_capital, movement, typed_adjustment=False):
+    quantity_delta=int(movement['quantity_delta']);capital_delta=int(movement['capital_delta_cents'])
+    with localcontext() as context:
+        context.prec=160
+        after_quantity=before_quantity+quantity_delta
+        after_capital=before_capital+Decimal(capital_delta)/100
+    if after_quantity<0 or after_capital<ZERO:
+        raise FfPoolDocumentError(
+            'negative_pool_balance','Pool movement would create negative quantity or capital',
+            details={
+                'facility_id': movement.get('facility_id'),
+                'pool': movement.get('pool'),
+                'nm_id': movement.get('nm_id'),
+                'after_quantity': after_quantity,
+                'after_capital_rub': canonical_decimal_text(after_capital),
+            },
+        )
+    if (after_quantity==0)!=(after_capital==ZERO):
+        raise FfPoolDocumentError(
+            'pool_quantity_capital_zero_mismatch','Zero pool quantity and capital must close together',
+            details={k: movement.get(k) for k in ('facility_id','pool','nm_id')},
+        )
+    if not typed_adjustment:
+        if quantity_delta>0 and capital_delta<=0:
+            raise FfPoolDocumentError('positive_quantity_without_cost','Positive pool receipt requires positive capital')
+        if quantity_delta<0 and capital_delta>=0:
+            raise FfPoolDocumentError('negative_quantity_without_cost','Pool debit requires negative capital')
+    if quantity_delta==0 and capital_delta==0:
+        raise FfPoolDocumentError('empty_movement','Pool movement line has no effect')
+    return after_quantity,after_capital
+
+
+def _validate_physical_plan(conn, plan, epoch):
+    """Source confirmation checks intrinsic physical conflicts without publication."""
+    simulated={}
+    for document in plan['documents']:
+        typed=_typed_adjustment_allowed(conn,document)
+        for movement in document.get('movements',[]):
+            key=(movement['facility_id'],movement['pool'],movement['nm_id'])
+            if key not in simulated:
+                balance=_balance_row(conn,key,epoch=epoch,required=False)
+                simulated[key]=(int(balance['quantity']),Decimal(balance['capital_rub'])) if balance else (0,ZERO)
+            q,c=simulated[key]
+            simulated[key]=_validate_balance_effect(before_quantity=q,before_capital=c,movement=movement,typed_adjustment=typed)
+
+
 def _apply_balance_movement(
     conn: sqlite3.Connection,
     *,
@@ -6209,6 +6343,7 @@ def _apply_balance_movement(
     posted_at: str,
     business_date: str = "",
     allow_missing_fbs: bool = False,
+    typed_adjustment: bool = False,
 ) -> None:
     facility_id = str(movement["facility_id"])
     pool = _pool(str(movement["pool"]))
@@ -6245,38 +6380,8 @@ def _apply_balance_movement(
         raise FfPoolDocumentError(
             "invalid_money", "balance capital is outside the allowed non-negative range"
         )
-    after_quantity = before_quantity + quantity_delta
-    # Balance capital is an exact Decimal with up to 80 stored characters.
-    # Keep the arithmetic outside the process-wide Decimal precision so a
-    # signed kopeck movement cannot trim an authoritative opening tail.
-    with localcontext() as context:
-        context.prec = 160
-        capital_delta_rub = Decimal(capital_delta) / Decimal(100)
-        after_capital = before_capital + capital_delta_rub
-    if after_quantity < 0 or after_capital < ZERO:
-        raise FfPoolDocumentError(
-            "negative_pool_balance",
-            "Pool movement would create negative quantity or capital",
-            details={
-                "facility_id": facility_id,
-                "pool": pool,
-                "nm_id": nm_id,
-                "after_quantity": after_quantity,
-                "after_capital_rub": canonical_decimal_text(after_capital),
-            },
-        )
-    if (after_quantity == 0) != (after_capital == ZERO):
-        raise FfPoolDocumentError(
-            "pool_quantity_capital_zero_mismatch",
-            "Zero pool quantity and capital must close together",
-            details={"facility_id": facility_id, "pool": pool, "nm_id": nm_id},
-        )
-    if quantity_delta > 0 and capital_delta <= 0:
-        raise FfPoolDocumentError("positive_quantity_without_cost", "Positive pool receipt requires positive capital")
-    if quantity_delta < 0 and capital_delta >= 0:
-        raise FfPoolDocumentError("negative_quantity_without_cost", "Pool debit requires negative capital")
-    if quantity_delta == 0 and capital_delta == 0:
-        raise FfPoolDocumentError("empty_movement", "Pool movement line has no effect")
+    after_quantity,after_capital=_validate_balance_effect(before_quantity=before_quantity,
+        before_capital=before_capital,movement=movement,typed_adjustment=typed_adjustment)
     conn.execute(
         f"""INSERT INTO {LINES_TABLE}(
             operation_id,line_no,facility_id,pool,nm_id,quantity_delta,

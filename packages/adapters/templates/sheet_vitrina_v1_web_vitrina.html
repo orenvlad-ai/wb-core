@@ -28418,7 +28418,7 @@
       pool_inventory: { label: "Инвентаризация FBS/FBO", fields: ["facility", "scope", "workbook"], workbook: true, help: "Скачайте полный шаблон выбранного склада и сегмента; пропущенные SKU блокируют проведение. Явный 0 в полном FBS-шаблоне подтверждает физический ноль и сохраняется как аудируемый остаток без движения." },
       pool_overhead: { label: "Накладные расходы FBS/FBO", fields: ["facility", "scope", "amount", "category", "comment", "payment_file", "payment_evidence"], required: ["facility", "scope", "amount", "category"], help: "Дата берётся с сервера по часовому поясу выбранного склада. PDF необязателен и никогда не определяет склад, сегмент или категорию." },
       correction: { label: "Корректировка", fields: ["target", "facility", "source_pool", "items"], help: "Строки: nmId, изменение количества, изменение капитала. Корректировка добавляется, исходный документ не меняется." },
-      storno: { label: "Сторно", fields: ["target"], help: "Создаёт точный обратный документ; исходная запись остаётся в истории." },
+      storno: { label: "Сторно", fields: ["target"], help: "Создаёт точный обратный документ; исходная запись остаётся в истории. Для инвентаризации выбирайте документ излишка или недостачи." },
       late_expense: { label: "Поздний расход", fields: ["root", "expenses"], help: "Добавляет расходы к корню перемещения без изменения ранее проведённых документов." }
     };
 
@@ -29085,7 +29085,7 @@
       } finally { state.confirmingOverhead = ""; }
     }
     function durableKind(kind) {
-      return ["pool_overhead","china_acceptance","transfer_root","transfer_shipment","transfer_receipt","transfer_loss","transfer_discrepancy","transfer_cancellation","pool_reallocation"].includes(kind);
+      return ["pool_overhead","china_acceptance","transfer_root","transfer_shipment","transfer_receipt","transfer_loss","transfer_discrepancy","transfer_cancellation","pool_reallocation","pool_inventory","correction","storno","late_expense"].includes(kind);
     }
     function acceptedOperation(operation) {
       return acceptanceDomainMatches(operation, operation && (operation.document_kind || operation.kind))

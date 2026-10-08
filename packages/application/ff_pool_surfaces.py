@@ -1887,6 +1887,17 @@ class FfPoolSurface:
         manifest = payload.get("manifest")
         if not isinstance(manifest, Mapping):
             raise FfPoolSurfaceError("manifest_required", "manifest must be an object")
+        manifest=dict(manifest)
+        if kind=='pool_inventory':
+            if 'operator_inventory_snapshot' in manifest:
+                raise FfPoolSurfaceError('inventory_snapshot_server_owned','Исходные остатки определяет сервер')
+            from packages.application.operator_warehouse_documents import pin_inventory_manifest
+            try:
+                with self._read() as conn:
+                    conn.execute('BEGIN')
+                    pin_inventory_manifest(conn,manifest,self._writer_epoch())
+            except FfPoolDocumentError as exc:
+                raise _surface_from_document_error(exc) from exc
         semantic = {"document_kind": kind, "business_date": business_date, "manifest": dict(manifest)}
         revision = _fingerprint(semantic)
         identity = DocumentIdentity(
@@ -2206,13 +2217,15 @@ class FfPoolSurface:
             business_date=selected_date,
         )
         try:
-            result = self._service().preview_inventory_workbook(
+            result = self._service(resume=False,bootstrap=False).preview_inventory_workbook(
                 identity=identity,
                 source_bytes=bytes(workbook_bytes),
                 source_filename=str(filename),
                 source_content_type=str(content_type),
                 catalog=catalog,
                 cost_basis_by_nm=cost_basis,
+                template_source_revision=source_revision,
+                pin_operator_inventory=True,
             )
         except FfPoolDocumentError as exc:
             raise _surface_from_document_error(exc) from exc

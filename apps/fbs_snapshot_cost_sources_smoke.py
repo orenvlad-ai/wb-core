@@ -69,6 +69,9 @@ def document(conn, identity, kind, *, role, q, capital, expense="0", facility="A
               "document_kind": kind, "root_document_id": root_id, "business_date": day,
               "source": {"system": "fixture", "type": kind, "id": identity,
                          "revision": "rev:" + identity, "idempotency_epoch": 1}, "domain": domain}
+    if role is not None:
+        posted['lines']=[dict(line_role=role,facility_id=facility,pool=pool,nm_id=nm_id,quantity=q,
+            capital_rub=capital,expense_rub=expense,metadata=metadata)]
     posted_json = json.dumps(posted, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     posted_hash = "sha256:" + hashlib.sha256(posted_json.encode()).hexdigest()
     conn.execute(f"INSERT INTO {P}ff_pool_documents VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -274,8 +277,9 @@ def main():
         conn.execute(f"DELETE FROM {P}ff_pool_document_lines WHERE document_id='unmapped'")
         conn.commit()
         unmapped = capture_current(path, now=NOW, include_baseline=False)
-        event = next(d for d in unmapped["documents"] if d["document_id"] == "unmapped")["events"][0]
-        assert event["kind"] == "unsupported" and event["capital_rub"] == "0"
+        assert not unmapped['documents_complete'] and unmapped['documents_reason']=='typed_document_saved_lines_missing'
+        for table,key in [('ff_pool_documents','document_id'),('warehouse_business_operations','operation_id'),('ff_pool_movement_lines','operation_id')]:
+            conn.execute(f"DELETE FROM {P}{table} WHERE {key}='unmapped'")
 
         # Header conservation, missing operations and newly added catalog SKUs
         # are material failures, not synthetic zeros or empty successful feeds.

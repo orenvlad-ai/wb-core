@@ -249,7 +249,7 @@ def evaluate_candidate(state: dict, capture: dict) -> dict:
     for identity, doc in documents.items():
         if identity in known or doc["business_date"] != day:
             continue
-        unsupported = [event for event in doc["events"] if event["kind"] not in {"receipt", "expense", "outgoing"}]
+        unsupported = [event for event in doc["events"] if event["kind"] not in {"receipt", "expense", "outgoing", "adjustment"}]
         if unsupported:
             affected = sorted({_key(event) for event in doc["events"]})
             blocked_keys.update(affected)
@@ -273,6 +273,7 @@ def evaluate_candidate(state: dict, capture: dict) -> dict:
             prior_wac = None if prior["wac_rub"] is None else _decimal(prior["wac_rub"])
             q = _decimal(quantity["quantity"], integer=True)
             received_q, received_value, expense_value = ZERO, ZERO, ZERO
+            adjustment_q, adjustment_value = ZERO, ZERO
             for event in events.get(key, []):
                 if not event.get("source"):
                     raise FbsSnapshotCostError("document_cost_source_missing")
@@ -286,21 +287,28 @@ def evaluate_candidate(state: dict, capture: dict) -> dict:
                     if _decimal(event["quantity"], integer=True) != ZERO:
                         raise FbsSnapshotCostError("expense_changes_quantity")
                     expense_value += _decimal(event["capital_rub"], signed=True)
+                elif event['kind']=='adjustment':
+                    adjustment_q+=_decimal(event['quantity'],integer=True,signed=True)
+                    adjustment_value+=_decimal(event['capital_rub'],signed=True)
                 else:
                     _decimal(event["quantity"], integer=True)
                     if _decimal(event["capital_rub"], signed=True) != ZERO:
                         raise FbsSnapshotCostError("outgoing_must_not_reuse_legacy_capital")
-            mass = prior_q + received_q
+            mass = prior_q + received_q + adjustment_q
             wac = prior_wac
             issue = ""
-            if received_q != ZERO or expense_value != ZERO:
+            if received_q != ZERO or expense_value != ZERO or adjustment_q != ZERO or adjustment_value != ZERO:
                 if prior_q > ZERO and prior_wac is None:
                     wac, issue = None, "missing_opening_cost"
-                elif mass <= ZERO:
-                    wac, issue = None, "expense_without_cost_mass"
                 else:
-                    value = prior_q * (prior_wac if prior_wac is not None else ZERO) + received_value + expense_value
-                    if value < ZERO:
+                    value = prior_q * (prior_wac if prior_wac is not None else ZERO) + received_value + expense_value + adjustment_value
+                    if mass < ZERO:
+                        wac, issue = None, 'negative_calculated_cost_mass'
+                    elif mass==ZERO and value==ZERO and q==ZERO:
+                        wac=None
+                    elif mass==ZERO:
+                        wac, issue = None, 'expense_without_cost_mass'
+                    elif value < ZERO:
                         wac, issue = None, "negative_calculated_capital"
                     else:
                         wac = value / mass
@@ -310,13 +318,14 @@ def evaluate_candidate(state: dict, capture: dict) -> dict:
                 wac, issue = None, "document_cost_unresolved"
             if issue:
                 diagnostics.append({"key": key, "reason": issue})
-            if q > prior_q + received_q:
-                diagnostics.append({"key": key, "reason": "quantity_increase_without_receipt", "quantity": _text(q - prior_q - received_q)})
+            if q > prior_q + received_q + adjustment_q:
+                diagnostics.append({"key": key, "reason": "quantity_increase_without_receipt", "quantity": _text(q - prior_q - received_q - adjustment_q)})
             rows[key] = {
                 "nm_id": quantity["nm_id"], "facility_id": quantity["facility_id"],
                 "opening_quantity": _text(prior_q), "opening_wac_rub": _text(prior_wac),
                 "receipt_quantity": _text(received_q), "receipt_capital_rub": _text(received_value),
                 "expense_capital_rub": _text(expense_value), "cost_mass_quantity": _text(mass),
+                "adjustment_quantity":_text(adjustment_q),"adjustment_capital_rub":_text(adjustment_value),
                 "quantity": _text(q), "wac_rub": _text(wac),
                 "capital_rub": _text(q * wac) if wac is not None else "0" if q == ZERO else None,
                 "quality": "missing_cost" if issue else "preliminary_snapshot_wac" if wac is not None else "empty_unpriced",

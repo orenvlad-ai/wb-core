@@ -530,6 +530,25 @@ def run(browser, base: str, directory: Path) -> None:
     row.get_by_role('button',name='Подробнее').click()
     detail.locator('.ff-operation-accepted').wait_for()
     assert len(confirmations)==before_count+1
+    # Each W2 family uses the real host's same-ID read-only recovery after a
+    # lost confirmation response. Green certifies durable source, not movement.
+    for kind in ('pool_inventory','correction','storno','late_expense'):
+        page.locator('[data-ff-pool-tab="create"]').click()
+        page.locator('[data-ff-pool-action-kind]').select_option('pool_overhead')
+        page.locator('[data-ff-pool-amount]').fill('87.25')
+        page.locator('[data-ff-pool-preview]').click()
+        page.get_by_role('button',name='Подтвердить проведение',exact=True).wait_for()
+        identity=page.locator('[data-ff-pool-request-id]').input_value()
+        previews[identity]['document_kind']=kind
+        controls['receipt_domain']='ff_pool_document';controls['receipt_source_domain']=None
+        controls['lose_confirm']=True
+        before_count=len(confirmations)
+        page.get_by_role('button',name='Подтвердить проведение',exact=True).click()
+        receipt.wait_for()
+        assert receipt.get_attribute('data-ff-operation-receipt')==identity
+        assert len(confirmations)==before_count+1 and reads[-1]==identity
+        assert accepted[identity]['document'] is None
+        controls['lose_confirm']=False
     assert not errors, errors
     context.close()
 
