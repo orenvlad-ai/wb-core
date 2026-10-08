@@ -5864,6 +5864,7 @@
     .block-filters-modal .ads-modal-actions { flex-shrink: 0; margin-top: 14px; }
     @media(max-width: 650px) { .table-heading-row, .table-heading-row.is-history { grid-template-columns: minmax(0, 1fr); } .table-heading-right { margin-left: 0; width: 100%; justify-content: flex-start; }  }
   </style>
+<!-- FACILITY_ACCEPTANCE_ASSET -->
 </head>
 <body>
   <main class="page" data-web-vitrina-page="web_vitrina_page_composition">
@@ -28619,46 +28620,48 @@
         nodes.facilityDetail.appendChild(section);
       } catch (error) { setAlert(nodes.facilityDetail, error.message, "error"); }
     }
+    const facilityReceipt = make("div", "ff-pool-alert"); facilityReceipt.hidden = true;
+    facilityReceipt.dataset.ffFacilityAcceptance = "";
+    nodes.facilityDetail.parentNode.insertBefore(facilityReceipt, nodes.facilityDetail);
+    const facilityAcceptance = window.FacilitySourceAcceptance.create({
+      scope: WEB_VITRINA_CONFIG.user_config_key || "local_operator", path: base,
+      container: facilityReceipt,
+      onLock: locked => modal.querySelectorAll("[data-ff-directory-final]").forEach(button => {button.disabled = locked;}),
+      onError: error => {if (!facilityAcceptance.isPending()) setAlert(facilityReceipt, error.message, "error");},
+      onRecovered: async () => {await loadFacilities(); await loadWbWarehouses();}
+    });
     function showFacilityEditor(facility) {
       nodes.facilityDetail.hidden = false;
       clear(nodes.facilityDetail);
       nodes.facilityDetail.appendChild(make("h3", "", facility ? "Изменить склад" : "Новый склад FF"));
-      const form = make("form", "ff-pool-form");
-      const nameLabel = make("label", "wide", "Название"); const name = make("input", "input"); name.required = true; name.maxLength = 200; name.value = facility ? facility.name : ""; nameLabel.appendChild(name);
-      const tzLabel = make("label", "", "Часовой пояс"); const tz = make("input", "input"); tz.required = true; tz.value = facility ? facility.display_timezone : "Asia/Yekaterinburg"; tzLabel.appendChild(tz);
-      const activeLabel = make("label", "", "Статус"); const active = make("select", "input"); [{v:"true",t:"Активен"},{v:"false",t:"Неактивен"}].forEach(function(x){const o=make("option","",x.t);o.value=x.v;active.appendChild(o);}); active.value = String(facility ? facility.active : false); active.disabled = !facility; activeLabel.appendChild(active);
-      const cityLabel = make("label", "", "Город"); const city = make("input", "input"); city.maxLength = 120; city.value = facility ? (facility.city || "") : ""; city.disabled = Boolean(facility); cityLabel.appendChild(city);
-      const submit = make("button", "button primary", facility ? "Сохранить" : "Проверить создание"); submit.type = "submit";
+      const form = make("form", "ff-pool-form"); form.dataset.ffFacilityForm = "";
+      const nameLabel = make("label", "wide", "Название"); const name = make("input", "input"); name.name="name";name.required = true; name.maxLength = 200; name.value = facility ? facility.name : ""; nameLabel.appendChild(name);
+      const tzLabel = make("label", "", "Часовой пояс"); const tz = make("input", "input"); tz.name="display_timezone";tz.required = true; tz.value = facility ? facility.display_timezone : "Asia/Yekaterinburg"; tzLabel.appendChild(tz);
+      const activeLabel = make("label", "", "Статус"); const active = make("select", "input");active.name="active"; [{v:"true",t:"Активен"},{v:"false",t:"Неактивен"}].forEach(function(x){const o=make("option","",x.t);o.value=x.v;active.appendChild(o);}); active.value = String(facility ? facility.active : false); active.disabled = !facility; activeLabel.appendChild(active);
+      const cityLabel = make("label", "", "Город"); const city = make("input", "input");city.name="city"; city.maxLength = 120; city.value = facility ? (facility.city || "") : ""; city.disabled = Boolean(facility); cityLabel.appendChild(city);
+      const submit = make("button", "button primary", facility ? "Сохранить" : "Проверить создание"); submit.type = "submit";submit.dataset.ffDirectoryFinal="";submit.disabled=facilityAcceptance.isPending();
       const result = make("div", "ff-pool-alert"); result.hidden = true;
       form.append(nameLabel, cityLabel, tzLabel, activeLabel, submit, result);
       let pendingPreview = null;
       form.addEventListener("submit", async function (event) {
-        event.preventDefault(); submit.disabled = true;
-        const requestId = "fffui_" + Date.now() + "_" + Math.random().toString(16).slice(2, 10);
-        const body = { request_id: requestId, name: name.value, city: city.value, display_timezone: tz.value, active: active.value === "true" };
-        if (facility) body.expected_updated_at = facility.updated_at;
+        event.preventDefault(); if(submit.disabled)return;submit.disabled = true;
         try {
           if (facility) {
-            await jsonPost("/facilities/" + encodeURIComponent(facility.facility_id), body);
-            setAlert(result, "Изменение подтверждено чтением с сервера.", "success");
+            let body={name:name.value,display_timezone:tz.value,active:active.value==="true",expected_updated_at:facility.updated_at,expected_source_digest:facility.operator_source_digest};
+            if(!facility.active&&body.active&&body.name===facility.name&&body.display_timezone===facility.display_timezone)
+              body={active:true,expected_updated_at:facility.updated_at,expected_source_digest:facility.operator_source_digest};
+            await facilityAcceptance.mutate(base+"/facilities/"+encodeURIComponent(facility.facility_id),body.active&&!Object.hasOwn(body,"name")?"activate":"update",body,facility.facility_id);
           } else if (!pendingPreview) {
-            pendingPreview = await jsonPost("/facilities/preview", body);
-            setAlert(result, "Предпросмотр: будет создан пустой неактивный склад «" + name.value + "». Остаток, капитал, документы и WB не изменятся.", "neutral");
-            submit.textContent = "Подтвердить создание";
-            name.disabled = true;
-            city.disabled = true;
-            tz.disabled = true;
+            pendingPreview = await jsonPost("/facilities/preview",{request_id:"fffui_"+crypto.randomUUID().replaceAll("-",""),name:name.value,city:city.value,display_timezone:tz.value,active:false});
+            setAlert(result,"Предпросмотр: будет создан пустой неактивный склад «"+name.value+"». Остаток, капитал, документы и WB не изменятся.","neutral");
+            submit.textContent="Подтвердить создание";name.disabled=true;city.disabled=true;tz.disabled=true;
           } else {
-            await jsonPost("/facilities/onboarding/" + encodeURIComponent(pendingPreview.request_id) + "/confirm", {confirm:true, preview_fingerprint:pendingPreview.preview_fingerprint});
-            setAlert(result, "Пустой неактивный склад создан и ожидает привязки к WB.", "success");
-            pendingPreview = null;
-            submit.textContent = "Проверить создание";
-            await loadFacilities();
-            await loadWbWarehouses();
+            await facilityAcceptance.mutate(base+"/facilities/onboarding/"+encodeURIComponent(pendingPreview.request_id)+"/confirm","create",
+              {confirm:true,preview_request_id:pendingPreview.request_id,preview_fingerprint:pendingPreview.preview_fingerprint},"");
+            submit.textContent="Склад создан";submit.dataset.sourceAccepted="true";
           }
-        }
-        catch (error) { setAlert(result, error.message, "error"); }
-        finally { submit.disabled = false; }
+        } catch(error) {setAlert(result,error.message,"error");}
+        finally {submit.disabled=facilityAcceptance.isPending()||submit.dataset.sourceAccepted==="true";}
       });
       nodes.facilityDetail.appendChild(form);
     }
@@ -28729,10 +28732,13 @@
       const result = make("div", "ff-pool-alert"); result.hidden=true;
       let preview=null;
       form.append(warehouseLabel,facilityLabel,submit,result);
-      form.addEventListener("submit",async function(event){event.preventDefault();submit.disabled=true;try{
-        if(!preview){preview=await jsonPost("/wb-warehouses/binding/preview",{request_id:"fbsbindui_"+Date.now()+"_"+Math.random().toString(16).slice(2,10),seller_warehouse_id:Number(warehouseSelect.value),facility_id:facilitySelect.value});setAlert(result,"Предпросмотр готов: создаётся только точная связь ID↔ID. Склад, остатки и перемещения не создаются.","neutral");submit.textContent="Подтвердить привязку";warehouseSelect.disabled=true;facilitySelect.disabled=true;}
-        else{await jsonPost("/wb-warehouses/binding/"+encodeURIComponent(preview.request_id)+"/confirm",{confirm:true,preview_fingerprint:preview.preview_fingerprint});setAlert(result,"Привязка подтверждена. Глобальное восстановление backlog не запускалось.","success");submit.textContent="Привязано";await loadWbWarehouses();await loadFacilities();}
-      }catch(error){setAlert(result,error.message,"error");}finally{submit.disabled=false;}});
+      form.dataset.ffBindingForm="";submit.dataset.ffDirectoryFinal="";submit.disabled=facilityAcceptance.isPending();
+      form.addEventListener("submit",async function(event){event.preventDefault();if(submit.disabled)return;submit.disabled=true;try{
+        if(!preview){preview=await jsonPost("/wb-warehouses/binding/preview",{request_id:"fbsbindui_"+crypto.randomUUID().replaceAll("-",""),seller_warehouse_id:Number(warehouseSelect.value),facility_id:facilitySelect.value});setAlert(result,"Предпросмотр готов: создаётся только точная связь ID↔ID. Склад, остатки и перемещения не создаются.","neutral");submit.textContent="Подтвердить привязку";warehouseSelect.disabled=true;facilitySelect.disabled=true;}
+        else{await facilityAcceptance.mutate(base+"/wb-warehouses/binding/"+encodeURIComponent(preview.request_id)+"/confirm","binding",
+          {confirm:true,preview_request_id:preview.request_id,preview_fingerprint:preview.preview_fingerprint,facility_id:facilitySelect.value},facilitySelect.value);
+          submit.textContent="Привязано";submit.dataset.sourceAccepted="true";}
+      }catch(error){setAlert(result,error.message,"error");}finally{submit.disabled=facilityAcceptance.isPending()||submit.dataset.sourceAccepted==="true";}});
       nodes.facilityDetail.appendChild(form);
     }
     async function loadDocuments() {
@@ -29259,7 +29265,10 @@
     }
     openButton.addEventListener("click", function () { openModal(""); });
     const linkedOperation = new URLSearchParams(window.location.search).get("operation_id");
-    if (linkedOperation && /^[A-Za-z0-9:_-]{1,160}$/.test(linkedOperation)) openModal().then(function(){activateTab("journal");showOperationDetail(linkedOperation);});
+    if (linkedOperation && /^ff_directory_[a-f0-9]{32}$/.test(linkedOperation)) openModal().then(function(){activateTab("facilities");return facilityAcceptance.showOperation(linkedOperation);}).catch(facilityAcceptanceError);
+    else if (linkedOperation && /^[A-Za-z0-9:_-]{1,160}$/.test(linkedOperation)) openModal().then(function(){activateTab("journal");showOperationDetail(linkedOperation);});
+    function facilityAcceptanceError(error){if(!facilityAcceptance.isPending())setAlert(facilityReceipt,error.message,"error");}
+    facilityAcceptance.recover().catch(facilityAcceptanceError);
     document.querySelectorAll("[data-ff-pool-open-overhead]").forEach(function(button){ button.addEventListener("click", function(){ openModal("pool_overhead"); }); });
     function closeModal(){state.workflowGeneration += 1;modal.hidden=true;document.body.style.overflow="";if(state.opener&&state.opener.focus)state.opener.focus();}
     document.querySelector("[data-ff-operations-open]").addEventListener("click", async function () { await openModal(""); activateTab("journal"); });

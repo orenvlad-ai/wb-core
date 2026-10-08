@@ -353,6 +353,7 @@ class FfPoolSurface:
     def facility_detail(self, facility_id: str, *, aggregate_revision: str = "") -> dict[str, Any]:
         selected = _identity_token(facility_id, field="facility_id")
         with self._read() as conn:
+            conn.execute('BEGIN')
             schema = self._schema(conn)
             if not schema["available"]:
                 raise FfPoolSurfaceError("schema_absent", "FF facility/pool schema is not available", http_status=503)
@@ -422,11 +423,14 @@ class FfPoolSurface:
                     WHERE facility_id=? ORDER BY changed_at DESC,change_id DESC LIMIT 20""",
                 (selected,),
             ).fetchall()
+            from packages.application.operator_facility_mappings import facility_source
+            source_digest = _fingerprint(facility_source(conn, selected))
         payload = {
             "contract_name": CONTRACT_NAME,
             "status": "ready",
             "feature": feature,
             "facility": {
+                "operator_source_digest": source_digest,
                 "facility_id": str(facility["facility_id"]),
                 "code": str(facility["code"]),
                 "name": str(facility["name"]),
@@ -1316,7 +1320,7 @@ class FfPoolSurface:
                     raise FfPoolSurfaceError(
                         exc.code, str(exc), details=exc.details, http_status=409
                     ) from exc
-        return {**self.facility_detail(facility_id), "idempotent": idempotent}
+        return self._facility_source_result(facility_id, idempotent=idempotent)
 
     def preview_facility_create(
         self, payload: Mapping[str, Any], *, actor: str
@@ -1431,8 +1435,7 @@ class FfPoolSurface:
             if confirmation is not None:
                 return {
                     "contract": "ff_facility_onboarding_result_v1",
-                    **self.facility_detail(str(confirmation["facility_id"])),
-                    "idempotent": True,
+                    **self._facility_source_result(str(confirmation["facility_id"]), idempotent=True),
                 }
             manifest = _json_object(request["manifest_json"])
         facility = dict(manifest.get("facility") or {})
@@ -1518,7 +1521,8 @@ class FfPoolSurface:
             warehouse_functional_write_lock,
         )
 
-        active = "active" in payload and _boolean(payload["active"], field="active")
+        from packages.application.operator_facility_mappings import source_only_context
+        active = "active" in payload and _boolean(payload["active"], field="active") and not source_only_context()
         admission = heavy_admitted(self.runtime_dir, operation="facility") if active else nullcontext()
         with admission, warehouse_functional_write_lock(self.runtime_dir):
             return self._update_facility_locked(
@@ -1557,7 +1561,7 @@ class FfPoolSurface:
                 if str(existing["request_identity"]) != request_identity:
                     raise FfPoolSurfaceError("request_id_identity_conflict", "request_id was already used for another facility change", http_status=409)
                 conn.rollback()
-                return {**self.facility_detail(str(existing["facility_id"])), "idempotent": True}
+                return self._facility_source_result(str(existing["facility_id"]), idempotent=True)
             row = conn.execute(
                 f"""SELECT f.*,COALESCE(profile.city,'') AS city FROM {FACILITIES_TABLE} f
                     LEFT JOIN {FACILITY_PROFILES_TABLE} profile ON profile.facility_id=f.facility_id
@@ -1572,6 +1576,8 @@ class FfPoolSurface:
                     details={"current_updated_at": str(row["updated_at"])},
                     http_status=409,
                 )
+            from packages.application.operator_facility_mappings import guard_facility
+            guard_facility(conn, selected)
             before = {
                 "facility_id": str(row["facility_id"]),
                 "code": str(row["code"]),
@@ -1582,8 +1588,11 @@ class FfPoolSurface:
             }
             current = {**before, **normalized}
             if current == before:
-                conn.rollback()
-                return {**self.facility_detail(selected), "idempotent": True}
+                self._append_facility_change(conn, request_id=request_id, request_identity=request_identity,
+                    facility_id=selected, action="unchanged", actor=actor,
+                    previous=before, current=current, changed_at=now)
+                conn.commit()
+                return self._facility_source_result(selected, idempotent=True)
             if before["active"] and not current["active"]:
                 blockers = self._facility_deactivation_blockers(conn, selected)
                 if blockers["has_unfinished_dependencies"]:
@@ -1608,7 +1617,10 @@ class FfPoolSurface:
                         db_path=self.db_path,
                         runtime_dir=self.runtime_dir,
                         timestamp_factory=self.timestamp_factory,
-                    ).activate_facility(
+                    )
+                    from packages.application.operator_facility_mappings import source_only_context
+                    publisher = result.stage_facility_activation if source_only_context() else result.activate_facility
+                    result = publisher(
                         facility_id=selected,
                         expected_updated_at=expected,
                         request_id=request_id,
@@ -1619,10 +1631,7 @@ class FfPoolSurface:
                     raise FfPoolSurfaceError(
                         exc.code, str(exc), details=exc.details, http_status=409
                     ) from exc
-                return {
-                    **self.facility_detail(selected),
-                    "idempotent": bool(result.get("idempotent")),
-                }
+                return self._facility_source_result(selected, idempotent=bool(result.get("idempotent")))
             conn.execute(
                 f"UPDATE {FACILITIES_TABLE} SET name=?,active=?,display_timezone=?,updated_at=? WHERE facility_id=? AND updated_at=?",
                 (current["name"], int(current["active"]), current["display_timezone"], now, selected, expected),
@@ -1647,7 +1656,15 @@ class FfPoolSurface:
                     changed_at=now,
                 )
             conn.commit()
-        return {**self.facility_detail(selected), "idempotent": False}
+        return self._facility_source_result(selected, idempotent=False)
+
+    def _facility_source_result(self, facility_id: str, *, idempotent: bool) -> dict[str, Any]:
+        from packages.application.operator_facility_mappings import source_only_context
+        if source_only_context():
+            # The adapter reads its immutable source proof separately. Native
+            # confirmation needs only this ID; no post-save balance aggregation.
+            return {"facility": {"facility_id": facility_id}, "idempotent": idempotent}
+        return {**self.facility_detail(facility_id), "idempotent": idempotent}
 
     def _facility_deactivation_blockers(
         self, conn: sqlite3.Connection, facility_id: str
@@ -2599,6 +2616,9 @@ class FfPoolSurface:
         current: Mapping[str, Any],
         changed_at: str,
     ) -> None:
+        from packages.application.operator_facility_mappings import audit_current
+        current = audit_current(conn, facility_id=facility_id, current=current, changed_at=changed_at,
+                                request_id=request_id, request_identity=request_identity, action=action)
         change_id = "fffc_" + _fingerprint(
             {"request_id": request_id, "action": action, "facility_id": facility_id}
         ).removeprefix("sha256:")[:28]
@@ -2693,6 +2713,14 @@ def _connect_write(path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.create_aggregate("decimal_sum", 1, _DecimalSum)
     conn.execute("PRAGMA foreign_keys=ON")
+    # Native writer schema boundary only. Query-only readers never call this.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name=? AND type='table'",(FACILITY_CHANGES_TABLE,)).fetchone():
+        from packages.application.ff_pool_foundation import _upgrade_facility_change_actions
+        try:
+            _upgrade_facility_change_actions(conn)
+        except BaseException:
+            conn.close()
+            raise
     return conn
 
 

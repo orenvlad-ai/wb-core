@@ -903,6 +903,9 @@ def append_dense_intent_event(
     if selected not in INTENT_STATES:
         raise FbsApplicabilityError("invalid_dense_intent_state", "Invalid dense FBS intent state")
     receipt_payload = dict(receipt)
+    if selected == "staged":
+        from packages.application.operator_facility_mappings import dense_staged_receipt
+        receipt_payload = dense_staged_receipt(conn, str(intent_id), receipt_payload, str(recorded_at))
     receipt_fingerprint = _fingerprint(receipt_payload)
     material = {
         "intent_id": str(intent_id),

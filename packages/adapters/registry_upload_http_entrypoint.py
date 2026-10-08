@@ -547,6 +547,7 @@ def _web_vitrina_ui_base_template() -> str:
                              ("<!-- BUYER_SUPPORT_PANEL -->", "wb_buyer_support.html"),
                              ("/* BUYER_SUPPORT_SCRIPT */", "wb_buyer_support.js")):
         template = template.replace(marker, WEB_VITRINA_UI_TEMPLATE_PATH.with_name(filename).read_text(encoding="utf-8"))
+    template=template.replace('<!-- FACILITY_ACCEPTANCE_ASSET -->','<script>'+UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_facility_acceptance.js').read_text(encoding='utf-8')+'</script>')
     return _inject_sheet_vitrina_ui_system(template)
 
 
@@ -5232,6 +5233,7 @@ def _build_handler(
                         entrypoint=entrypoint,
                         path=parsed.path,
                         query=parsed.query,
+                        request_scope=_current_web_user_config_key(self),
                     )
                 except (
                     FfPoolSurfaceError,
@@ -7265,7 +7267,7 @@ def _handle_ff_pool_post(
             _load_request_payload(
                 handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
             ),
-            actor=actor,
+            actor=actor, request_scope=_current_web_user_config_key(handler),
         )
     if (
         len(parts) == 4
@@ -7281,9 +7283,8 @@ def _handle_ff_pool_post(
                 "explicit_confirmation_required", "Explicit confirm=true is required"
             )
         return entrypoint.handle_ff_pool_facility_create_confirm_request(
-            parts[2],
-            preview_fingerprint=str(body.get("preview_fingerprint") or ""),
-            actor=actor,
+            parts[2], preview_fingerprint=str(body.get("preview_fingerprint") or ""), actor=actor,
+            operator_payload=body, request_scope=_current_web_user_config_key(handler),
         )
     if len(parts) == 3 and parts[0] == "requests" and parts[2] == "confirm":
         body = _load_request_payload(
@@ -7308,9 +7309,8 @@ def _handle_ff_pool_post(
                 "explicit_confirmation_required", "Explicit confirm=true is required"
             )
         return entrypoint.handle_wb_fbs_binding_confirm_request(
-            parts[2],
-            preview_fingerprint=str(body.get("preview_fingerprint") or ""),
-            actor=actor,
+            parts[2], preview_fingerprint=str(body.get("preview_fingerprint") or ""), actor=actor,
+            operator_payload=body, request_scope=_current_web_user_config_key(handler),
         )
     raise FfPoolSurfaceError("invalid_ff_pool_path", "Invalid FF facility/pool mutation path", http_status=404)
 
@@ -7320,9 +7320,13 @@ def _handle_ff_pool_get(
     entrypoint: RegistryUploadHttpEntrypoint,
     path: str,
     query: str,
+    request_scope: str = "local_operator",
 ) -> dict[str, Any] | tuple[bytes, str, str]:
     normalized = str(path or "").rstrip("/")
     params = _flatten_query_params(query)
+    if normalized == f"{DEFAULT_FF_POOL_PREFIX}facility-operations":
+        return entrypoint.handle_ff_facility_operation_read(request_scope=request_scope,
+            request_id=str(params.get("request_id") or ""), operation_id=str(params.get("operation_id") or ""))
     if normalized in {DEFAULT_FF_POOL_PATH, f"{DEFAULT_FF_POOL_PATH}/capabilities"}:
         return entrypoint.handle_ff_pool_capabilities_request()
     if normalized == DEFAULT_FF_POOL_FACILITIES_PATH:

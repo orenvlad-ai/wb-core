@@ -7095,7 +7095,14 @@ class RegistryUploadHttpEntrypoint:
         *,
         preview_fingerprint: str,
         actor: str,
+        operator_payload: Mapping[str, Any] | None = None,
+        request_scope: str = "local_operator",
     ) -> dict[str, Any]:
+        if operator_payload is not None and operator_payload.get("request_id"):
+            from packages.application import operator_facility_mappings as receipts
+            return receipts.execute(self.ff_pool_surface, action="binding", payload={**operator_payload, "preview_request_id": request_id},
+                actor=actor, request_scope=request_scope, entity_id=str(operator_payload.get("facility_id") or ""),
+                native_write=lambda: self.wb_fbs_warehouse_registry.confirm_binding(request_id,preview_fingerprint=preview_fingerprint,actor=actor))
         return self.wb_fbs_warehouse_registry.confirm_binding(
             request_id,
             preview_fingerprint=preview_fingerprint,
@@ -7171,7 +7178,14 @@ class RegistryUploadHttpEntrypoint:
         *,
         preview_fingerprint: str,
         actor: str,
+        operator_payload: Mapping[str, Any] | None = None,
+        request_scope: str = "local_operator",
     ) -> dict[str, Any]:
+        if operator_payload is not None and operator_payload.get("request_id"):
+            from packages.application import operator_facility_mappings as receipts
+            return receipts.execute(self.ff_pool_surface, action="create", payload={**operator_payload, "preview_request_id": request_id},
+                actor=actor, request_scope=request_scope,
+                native_write=lambda: self.ff_pool_surface.confirm_facility_create(request_id,preview_fingerprint=preview_fingerprint,actor=actor))
         return self.ff_pool_surface.confirm_facility_create(
             request_id,
             preview_fingerprint=preview_fingerprint,
@@ -7179,9 +7193,18 @@ class RegistryUploadHttpEntrypoint:
         )
 
     def handle_ff_pool_facility_update_request(
-        self, facility_id: str, payload: Mapping[str, Any], *, actor: str
+        self, facility_id: str, payload: Mapping[str, Any], *, actor: str, request_scope: str = "local_operator"
     ) -> dict[str, Any]:
+        if "operator_wire_json" in payload:
+            from packages.application import operator_facility_mappings as receipts
+            action="activate" if payload.get("active") is True and set(payload) & {"active","name","display_timezone"} == {"active"} else "update"
+            return receipts.execute(self.ff_pool_surface,action=action,payload=payload,actor=actor,request_scope=request_scope,entity_id=facility_id,
+                native_write=lambda:self.ff_pool_surface.update_facility(facility_id,payload,actor=actor))
         return self.ff_pool_surface.update_facility(facility_id, payload, actor=actor)
+
+    def handle_ff_facility_operation_read(self, *, request_scope: str, request_id: str = "", operation_id: str = "") -> dict[str, Any]:
+        from packages.application import operator_facility_mappings as receipts
+        return receipts.read(self.runtime.db_path,request_scope=request_scope,request_id=request_id,operation_id=operation_id)
 
     def handle_ff_pool_document_preview_request(
         self, payload: Mapping[str, Any], *, actor: str

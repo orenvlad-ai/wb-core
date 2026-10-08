@@ -97,6 +97,91 @@ class DenseFbsService:
         self.timestamp_factory = timestamp_factory or _utc_now
         self.document_service_factory = document_service_factory
 
+    def stage_facility_activation(self, **source: Any) -> dict[str, Any]:
+        """Save the existing native plan only; materialization belongs to its drain."""
+        with warehouse_functional_write_lock(self.runtime_dir):
+            intent = self._load_or_plan_facility_intent(
+                orchestration_key=f"facility:{source['request_id']}:dense-fbs",
+                facility_id=str(source['facility_id']),
+                expected_updated_at=str(source['expected_updated_at']),
+                request_identity=str(source['request_identity']), actor=str(source['actor']))
+            return {'intent_id': intent['intent_id'], 'state': 'staged', 'idempotent': False}
+
+    @_heavy_method
+    def drain_facility_activations(self, *, limit: int = 32) -> dict[str, Any]:
+        """Bounded native dense-intent cohort; no operator queue or global replay."""
+        with self._read() as conn:
+            if DENSE_INTENTS_TABLE not in {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+                return {'captured': 0, 'active': 0, 'pending': 0, 'blocked': 0}
+            cohort = [dict(row) for row in conn.execute(f"""
+                SELECT intent.*,event.event_sequence FROM {DENSE_INTENTS_TABLE} intent
+                JOIN {DENSE_INTENT_EVENTS_TABLE} event ON event.intent_id=intent.intent_id
+                WHERE intent.subject_kind='facility_activation'
+                  AND event.event_sequence=(SELECT MAX(last.event_sequence) FROM {DENSE_INTENT_EVENTS_TABLE} last WHERE last.intent_id=intent.intent_id)
+                  AND event.state NOT IN ('active','blocked')
+                ORDER BY event.event_sequence,intent.intent_id LIMIT ?""", (max(1,min(int(limit),100)),))]
+        result = {'captured': len(cohort), 'active': 0, 'pending': 0, 'blocked': 0}
+        for row in cohort:
+            try:
+                plan = json.loads(row['plan_json'])
+                if (not isinstance(plan,dict) or _fingerprint(plan)!=row['plan_fingerprint']
+                    or plan.get('subject_kind')!='facility_activation' or plan.get('subject_id')!=row['subject_id']
+                    or not row['orchestration_key'].startswith('facility:') or not row['orchestration_key'].endswith(':dense-fbs')
+                    or (plan.get('expected_subject') or {}).get('facility_id')!=row['subject_id']):
+                    with self._write() as conn:
+                        conn.execute('BEGIN IMMEDIATE')
+                        raise self._terminal_publication_error(conn,row,DenseFbsError('facility_activation_plan_invalid','Saved native activation plan does not match its exact source identity'))
+                self.activate_facility(facility_id=row['subject_id'],
+                    expected_updated_at=plan['expected_subject']['updated_at'],
+                    request_id=row['orchestration_key'][len('facility:'):-len(':dense-fbs')],
+                    request_identity=row['request_identity'], actor=row['actor'])
+                result['active'] += 1
+            except Exception as exc:
+                if self._intent_state(row['intent_id']).get('state') == 'blocked':
+                    result['blocked'] += 1
+                    continue
+                result['pending'] += 1
+                # A native resumable event rotates the bounded cohort even when
+                # the same recoverable failure repeats with a fixed clock.
+                with self._write() as conn:
+                    conn.execute('BEGIN IMMEDIATE')
+                    current = dense_intent_state(conn,row['intent_id'])
+                    if current['state'] not in {'active','blocked'}:
+                        sequence = conn.execute(f'SELECT MAX(event_sequence) FROM {DENSE_INTENT_EVENTS_TABLE} WHERE intent_id=?',(row['intent_id'],)).fetchone()[0]
+                        append_dense_intent_event(conn,intent_id=row['intent_id'],state='resumable',
+                            receipt={'code':'facility_activation_deferred','error_type':type(exc).__name__,
+                                     'attempt_sequence':int(sequence or 0)+1,'resume_requires_same_orchestration_identity':True},
+                            recorded_at=self._now())
+                    conn.commit()
+        return result
+
+    def _verify_facility_source(self, conn: sqlite3.Connection, intent: Mapping[str,Any]) -> None:
+        """Pin full delayed source generation, including roster and dated policy."""
+        if dense_intent_state(conn,str(intent['intent_id']))['state'] == 'active':
+            return
+        plan = dict(intent['plan'])
+        if (_fingerprint(plan)!=intent['plan_fingerprint'] or _fingerprint(plan.get('roster'))!=intent['roster_fingerprint']
+            or plan.get('subject_kind')!='facility_activation' or plan.get('subject_id')!=intent['subject_id']
+            or plan.get('effective_from')!=intent['effective_from'] or plan.get('cutover_at')!=intent['cutover_at']):
+            raise DenseFbsError('facility_activation_plan_invalid','Saved native activation plan failed exact identity proof')
+        try:
+            roster = [{'item_id':str(row['item_id']),'nm_id':int(row['nm_id']),'updated_at':str(row['updated_at'])}
+                      for row in stock_managed_nomenclature(conn)]
+        except ValueError as exc:
+            raise DenseFbsError('facility_activation_generation_changed','Current SKU roster no longer has exact identities') from exc
+        if roster != plan['roster']['skus'] or _writer_epoch(conn) != int(plan['projection_epoch']):
+            raise DenseFbsError('facility_activation_generation_changed','SKU roster or writer epoch changed after activation was saved')
+        for pair in plan.get('pairs') or []:
+            current = fbs_pair_applicability(conn,facility_id=str(pair['facility_id']),nm_id=int(pair['nm_id']),
+                as_of_date=str(intent['effective_from']),facility_active=True,sku_active=True)
+            if current != pair['applicability']:
+                raise DenseFbsError('facility_activation_generation_changed','Dated FBS applicability changed after activation was saved')
+        from packages.application.operator_facility_mappings import META, facility_source
+        staged = conn.execute(f"SELECT receipt_json FROM {DENSE_INTENT_EVENTS_TABLE} WHERE intent_id=? AND state='staged' ORDER BY event_sequence LIMIT 1",(intent['intent_id'],)).fetchone()
+        meta = json.loads(staged[0]).get(META) if staged else None
+        if meta and facility_source(conn,str(intent['subject_id'])) != meta['proof']['after']:
+            raise DenseFbsError('facility_activation_source_changed','Facility source changed after activation was saved')
+
     @_heavy_method
     def activate_facility(
         self,
@@ -116,6 +201,13 @@ class DenseFbsService:
                 request_identity=str(request_identity),
                 actor=str(actor),
             )
+            with self._write() as source_conn:
+                source_conn.execute('BEGIN IMMEDIATE')
+                try:
+                    self._verify_facility_source(source_conn, intent)
+                except DenseFbsError as exc:
+                    raise self._terminal_publication_error(source_conn, intent, exc) from exc
+                source_conn.rollback()
             materialized = self._materialize(intent)
             now = self._now()
             with self._write() as conn:
@@ -178,6 +270,7 @@ class DenseFbsService:
                         ),
                     )
                 try:
+                    self._verify_facility_source(conn, intent)
                     self._verify_materialized_under_transaction(conn, intent)
                 except DenseFbsError as exc:
                     raise self._terminal_publication_error(conn, intent, exc) from exc
