@@ -351,21 +351,233 @@ class AcceptanceTests(unittest.TestCase):
         self.publish(self.prepare())
         self.assertEqual(self.reconcile()['processed_count'],1)
 
-    def test_unconfirmed_pdf_from_prior_day_reupload_preserves_old_dedup_identity(self):
+    def pdf_preview(self, request_id, *, pdf=None, filename='receipt.pdf', **fields):
+        pdf = pdf or _render_pdf(_fixture('wb_bank_0401060.txt'),title='prior-day-source',x_offset=0)
+        return self.surface.accept_pool_overhead_preview({**self.payload,'request_id':request_id,'amount_rub':'',**fields},
+            actor='fixture',source_bytes=pdf,filename=filename,content_type='application/pdf')
+
+    def test_unconfirmed_pdf_prior_day_renewal_retains_evidence_and_only_current_day_cost(self):
+        from packages.application.ff_pool_documents import OVERHEAD_PAYMENT_EVIDENCE_TABLE, OVERHEAD_PAYMENT_RENEWALS_TABLE
+        self.open_book()
         pdf=_render_pdf(_fixture('wb_bank_0401060.txt'),title='prior-day-source',x_offset=0)
-        old=self.surface.accept_pool_overhead_preview({**self.payload,'request_id':'unconfirmed-pdf-day1','amount_rub':''},
-            actor='fixture',source_bytes=pdf,filename='receipt.pdf',content_type='application/pdf')
+        old=self.pdf_preview('pdf-day1',pdf=pdf)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            evidence_before=conn.execute(f'SELECT * FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE}').fetchall()
+            old_source=conn.execute(f'SELECT request_identity,source_revision,business_date,source_sha256,source_file_blob,request_payload_json FROM {REQUESTS_TABLE} WHERE request_id=?',(old['request_id'],)).fetchone()
         self.now += timedelta(days=1)
-        today=self.surface.accept_pool_overhead_preview({**self.payload,'request_id':'unconfirmed-pdf-day2','amount_rub':''},
-            actor='fixture',source_bytes=pdf,filename='receipt.pdf',content_type='application/pdf')
-        self.assertEqual(today['request_id'],old['request_id'])
-        self.assertTrue(today['payment_duplicate'])
-        self.assertEqual(today['business_date'],'2026-09-08')
-        with self.assertRaises(FfPoolSurfaceError) as raised:
-            self.surface.confirm_document(today['request_id'])
-        self.assertEqual(raised.exception.code,'overhead_unconfirmed_payment_prior_day')
-        self.assertIn('повторная загрузка не изменит дату',today['confirmation_block_reason_ru'])
+        regenerated=_render_pdf(_fixture('wb_bank_0401060.txt'),title='regenerated-bank-copy',x_offset=9)
+        with patch('packages.application.ff_pool_documents._build_posting_plan',side_effect=AssertionError('HTTP builds allocation')) as build, \
+             patch('packages.application.fbs_overhead_presentation.capture_current',side_effect=AssertionError('HTTP captures book')):
+            today=self.pdf_preview('pdf-day2',pdf=regenerated,filename='renamed.pdf')
+            build.assert_not_called()
+        self.assertEqual(today['state'],'ready')
+        self.assertEqual(today['preview']['summary']['allocation_label'],'Распределение будет выполнено после подтверждения в плановом цикле')
+        self.assertEqual(today['error']['code'],'')
+        self.assertNotEqual(today['request_id'],old['request_id'])
+        self.assertEqual(today['business_date'],'2026-09-09')
+        self.assertTrue(today['confirm_allowed'])
+        for fields in ({'comment':'same-day-different'},{'category':'receiving'},{'scope':'FBS'}):
+            with self.assertRaises(FfPoolSurfaceError) as raised:self.pdf_preview('same-day-fields',pdf=regenerated,**fields)
+            self.assertEqual(raised.exception.code,'overhead_payment_fields_mismatch')
+            self.assertEqual(raised.exception.details['request_id'],today['request_id'])
+        self.assertEqual(today['source']['sha256'],old['source']['sha256'])
+        self.assertEqual(today['source']['filename'],'receipt.pdf')
+        self.assertEqual(today['preview']['summary']['payment_evidence'],old['preview']['summary']['payment_evidence'])
+        stale=self.surface.request_status('pdf-day1')
+        self.assertEqual(stale['superseded_by']['request_id'],today['request_id'])
+        self.assertFalse(stale['confirm_allowed'])
+        self.assertIsNone(stale['acceptance'])
+        for identity in (old['request_id'],'pdf-day1'):
+            with self.assertRaises(FfPoolSurfaceError) as raised:self.surface.confirm_document(identity)
+            self.assertEqual(raised.exception.code,'overhead_preview_superseded')
+        self.assertEqual(self.service.post(old['request_id'])['state'],'blocked')
+        repeated=self.pdf_preview('pdf-day1',pdf=regenerated)
+        self.assertEqual(repeated['request_id'],today['request_id'])
+        self.assertTrue(repeated['payment_duplicate'])
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f'SELECT * FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE}').fetchall(),evidence_before)
+            self.assertEqual(conn.execute(f'SELECT request_identity,source_revision,business_date,source_sha256,source_file_blob,request_payload_json FROM {REQUESTS_TABLE} WHERE request_id=?',(old['request_id'],)).fetchone(),old_source)
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE}').fetchone()[0],1)
+            for verb in ('UPDATE','DELETE'):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(f'{verb} ' + ('FROM ' if verb=='DELETE' else '') + OVERHEAD_PAYMENT_RENEWALS_TABLE + (' SET actor=actor' if verb=='UPDATE' else ''))
         self.assertEqual(self.counts(),(0,0))
+        receipt=self.surface.confirm_document(today['request_id'])['acceptance']
+        self.assertEqual(receipt['business_date'],'2026-09-09')
+        self.assertEqual(self.surface.request_status(today['request_id'])['preview']['summary']['allocation_label'],'Ожидает публикации в расчёте себестоимости')
+        self.assertEqual(self.drain()['processed_count'],1)
+        self.mark_native_publications()
+        self.publish(self.prepare(quantity=800))
+        self.assertEqual(self.reconcile()['processed_count'],1)
+        book,_=accounting.load(self.root)
+        doc=operations.read_acceptance(self.runtime.db_path,today['request_id'])['document']['document_id']
+        self.assertNotIn(doc,book['state']['periods']['2026-09-08']['applied_documents'])
+        self.assertIn(doc,book['state']['periods']['2026-09-09']['applied_documents'])
+        self.now += timedelta(days=1)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            frozen=conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(today['request_id'],)).fetchone()
+        self.assertEqual(self.pdf_preview('pdf-completed',pdf=pdf)['request_id'],today['request_id'])
+        self.assertEqual(self.drain()['processed_count'],0)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(today['request_id'],)).fetchone(),frozen)
+        self.assertEqual(self.counts(),(1,1))
+
+    def test_pdf_renewal_through_multipart_http_never_builds_allocation(self):
+        from contextlib import closing
+        from threading import Thread
+        from urllib.request import Request, urlopen
+        from apps.ff_pool_surfaces_http_smoke import _reserve_free_port
+        from packages.adapters.registry_upload_http_entrypoint import (build_registry_upload_http_server, DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH,
+            DEFAULT_UPLOAD_PATH, DEFAULT_SHEET_PLAN_PATH, DEFAULT_SHEET_STATUS_PATH, DEFAULT_SHEET_OPERATOR_UI_PATH)
+        from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+        from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
+        pdf=_render_pdf(_fixture('wb_bank_0401060.txt'),title='http-source',x_offset=0)
+        old=self.pdf_preview('http-original',pdf=pdf)
+        self.now += timedelta(days=1)
+        config=RegistryUploadHttpEntrypointConfig(host='127.0.0.1',port=_reserve_free_port(),runtime_dir=self.root,
+            upload_path=DEFAULT_UPLOAD_PATH,sheet_plan_path=DEFAULT_SHEET_PLAN_PATH,sheet_refresh_path='/v1/sheet-vitrina-v1/refresh',
+            sheet_status_path=DEFAULT_SHEET_STATUS_PATH,sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH)
+        entrypoint=RegistryUploadHttpEntrypoint(runtime_dir=self.root,runtime=self.runtime,activated_at_factory=self.stamp)
+        server=build_registry_upload_http_server(config,entrypoint=entrypoint)
+        thread=Thread(target=server.serve_forever,daemon=True);thread.start()
+        boundary='----wbc-renewal-fixture'
+        fields={**self.payload,'request_id':'http-renewed','amount_rub':''}
+        body=b''.join((f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode() for key,value in fields.items()))
+        body+=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="http-copy.pdf"\r\nContent-Type: application/pdf\r\n\r\n'.encode()+pdf+f'\r\n--{boundary}--\r\n'.encode())
+        request=Request(f'http://127.0.0.1:{config.port}{DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH}',data=body,method='POST',
+            headers={'Content-Type':f'multipart/form-data; boundary={boundary}','X-WB-FF-Pool-CSRF':'1','Sec-Fetch-Site':'same-origin'})
+        try:
+            with patch('packages.application.ff_pool_documents._build_posting_plan',side_effect=AssertionError('HTTP builds allocation')) as build, \
+                 patch('packages.application.fbs_overhead_presentation.capture_current',side_effect=AssertionError('HTTP captures book')) as capture:
+                with closing(urlopen(request,timeout=10)) as response:today=json.load(response)
+                build.assert_not_called();capture.assert_not_called()
+            self.assertEqual(today['state'],'ready')
+            self.assertEqual(today['business_date'],'2026-09-09')
+            self.assertTrue(today['confirm_allowed'])
+            self.assertNotEqual(today['request_id'],old['request_id'])
+            self.assertEqual(self.counts(),(0,0))
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=5)
+
+    def test_pdf_renewal_fields_epoch_and_inactive_facility_fail_closed(self):
+        old=self.pdf_preview('guards-old')
+        self.now += timedelta(days=1)
+        for fields in ({'category':'receiving'},{'comment':'changed'},{'scope':'FBS'}):
+            with self.assertRaises(FfPoolSurfaceError) as raised:self.pdf_preview('guards-new',**fields)
+            self.assertEqual(raised.exception.code,'overhead_payment_fields_mismatch')
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.execute(f"INSERT INTO {FEATURE_EPOCHS_TABLE}(epoch,writer_enabled,reader_enabled,source_revision,created_at,metadata_json) VALUES(2,1,0,'changed',?,'{{}}')",(self.stamp(),))
+        with self.assertRaises(FfPoolSurfaceError) as raised:self.pdf_preview('guards-new')
+        self.assertEqual(raised.exception.code,'feature_epoch_changed')
+        with sqlite3.connect(self.runtime.db_path) as conn:conn.execute(f"UPDATE {FACILITIES_TABLE} SET active=0 WHERE facility_id='A'")
+        with self.assertRaises(FfPoolSurfaceError) as raised:self.pdf_preview('guards-new')
+        self.assertEqual(raised.exception.code,'facility_not_active')
+        self.assertEqual(self.counts(),(0,0))
+
+    def test_pdf_accepted_and_legacy_posted_sources_are_frozen_on_reupload(self):
+        from packages.application.ff_pool_documents import OVERHEAD_PAYMENT_RENEWALS_TABLE
+        pdf=_render_pdf(_fixture('wb_bank_0401060.txt'),title='accepted-frozen',x_offset=0)
+        old=self.pdf_preview('freeze-accepted',pdf=pdf)
+        acceptance=self.surface.confirm_document(old['request_id'])['acceptance']
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            frozen=conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(old['request_id'],)).fetchone()
+        self.now += timedelta(days=1)
+        self.assertEqual(self.pdf_preview('freeze-repeat',pdf=pdf)['acceptance'],acceptance)
+        with self.assertRaises(FfPoolSurfaceError) as raised:self.pdf_preview('freeze-different',pdf=pdf,comment='changed')
+        self.assertEqual(raised.exception.code,'overhead_payment_fields_mismatch')
+        self.assertEqual(raised.exception.details['request_id'],old['request_id'])
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(old['request_id'],)).fetchone(),frozen)
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE}').fetchone()[0],0)
+        self.drain()
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            posted=conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(old['request_id'],)).fetchone()
+        self.now += timedelta(days=1)
+        self.assertEqual(self.pdf_preview('freeze-posted',pdf=pdf)['request_id'],old['request_id'])
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(old['request_id'],)).fetchone(),posted)
+        self.assertEqual(self.counts(),(1,1))
+        # A legacy native PDF document without a new confirmation also owns the
+        # payment permanently. Exercise real native posting, not a forged state.
+        legacy_pdf=_render_pdf(_fixture('wb_bank_0401060.txt').replace('№ 101','№ 102'),title='legacy-native',x_offset=0)
+        legacy=self.pdf_preview('legacy-source',pdf=legacy_pdf)
+        self.assertNotEqual(legacy['request_id'],old['request_id'])
+        self.assertNotEqual(legacy['preview']['summary']['payment_evidence']['payment_fingerprint'],old['preview']['summary']['payment_evidence']['payment_fingerprint'])
+        self.assertTrue(self.service._retry_pool_overhead_preview(legacy['request_id']))
+        self.service.process_request(legacy['request_id'])
+        native=self.service.post(legacy['request_id'],defer_replay=True)
+        self.assertTrue(native['document'])
+        self.now += timedelta(days=1)
+        duplicate=self.pdf_preview('legacy-repeat',pdf=legacy_pdf)
+        self.assertEqual(duplicate['request_id'],legacy['request_id'])
+        self.assertIsNone(duplicate['acceptance'])
+        self.assertFalse(duplicate['confirm_allowed'])
+        self.assertEqual(self.counts(),(1,2))
+
+    def test_pdf_multiday_chain_keeps_aliases_audit_and_domain_barrier(self):
+        from packages.application.ff_pool_documents import OVERHEAD_PAYMENT_RENEWALS_TABLE, OVERHEAD_PAYMENT_EVIDENCE_TABLE, ALIASES_TABLE
+        from packages.application.warehouse_domain_write_guard import ensure_warehouse_domain_write_guard_schema, EVENTS_TABLE
+        pdf=_render_pdf(_fixture('wb_bank_0401060.txt'),title='chain',x_offset=0)
+        first=self.pdf_preview('chain-original',pdf=pdf)
+        self.now += timedelta(days=1)
+        second=self.pdf_preview('chain-original',pdf=pdf)
+        self.now += timedelta(days=1)
+        third=self.pdf_preview('chain-today',pdf=pdf)
+        self.assertEqual(third['business_date'],'2026-09-10')
+        self.assertTrue(third['confirm_allowed'])
+        self.assertEqual(self.pdf_preview('chain-original',pdf=pdf)['request_id'],third['request_id'])
+        for old in (first,second):
+            status=self.surface.request_status(old['request_id'])
+            self.assertFalse(status['confirm_allowed'])
+            self.assertEqual(status['superseded_by']['request_id'],third['request_id'])
+            self.assertIsNone(status['acceptance'])
+            with self.assertRaises(FfPoolSurfaceError):self.surface.confirm_document(old['request_id'])
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE}').fetchone()[0],2)
+            self.assertEqual(conn.execute(f'SELECT request_id FROM {ALIASES_TABLE} WHERE client_request_id=?',('chain-original',)).fetchone()[0],first['request_id'])
+            self.assertEqual(conn.execute(f'SELECT request_id FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE}').fetchone()[0],first['request_id'])
+            ensure_warehouse_domain_write_guard_schema(conn)
+            conn.execute(f"INSERT INTO {EVENTS_TABLE}(epoch_id,phase,manifest_digest,deployed_sha,event_at,actor) VALUES('fixture-guard','held',?,?,?,'fixture')",('sha256:'+'1'*64,'1'*40,self.stamp()))
+        self.now += timedelta(days=1)
+        with self.assertRaises(sqlite3.IntegrityError) as raised:self.pdf_preview('chain-blocked',pdf=pdf)
+        self.assertIn('warehouse domain write barrier',str(raised.exception))
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE}').fetchone()[0],2)
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {REQUESTS_TABLE}').fetchone()[0],3)
+        self.assertEqual(self.counts(),(0,0))
+
+    def test_pdf_two_uploads_and_old_new_confirmation_race_have_one_effect(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        pdf=_render_pdf(_fixture('wb_bank_0401060.txt'),title='race',x_offset=0)
+        old=self.pdf_preview('race-old',pdf=pdf)
+        self.now += timedelta(days=1)
+        barrier=Barrier(3)
+        def upload(client):
+            barrier.wait()
+            return self.pdf_preview(client,pdf=pdf)
+        def confirm_old():
+            barrier.wait()
+            try:return self.surface.confirm_document('race-old')
+            except FfPoolSurfaceError as error:return error.code
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures=[pool.submit(upload,'race-upload-1'),pool.submit(upload,'race-upload-2'),pool.submit(confirm_old)]
+            first,second,old_result=[future.result() for future in futures]
+        self.assertEqual(first['request_id'],second['request_id'])
+        self.assertNotEqual(first['request_id'],old['request_id'])
+        self.assertIn(old_result,('overhead_unconfirmed_payment_prior_day','overhead_preview_superseded'))
+        barrier=Barrier(3)
+        def confirm_new():
+            barrier.wait()
+            return self.surface.confirm_document(first['request_id'])
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures=[pool.submit(confirm_new),pool.submit(confirm_new),pool.submit(upload,'race-upload-3')]
+            a,b,repeat=[future.result() for future in futures]
+        self.assertEqual(a['acceptance']['operation_id'],b['acceptance']['operation_id'])
+        self.assertEqual(repeat['request_id'],first['request_id'])
+        self.assertEqual(self.counts(),(1,0))
+        self.drain();self.drain()
+        self.assertEqual(self.counts(),(1,1))
 
     def test_journal_bounds_missing_schema_and_inherited_section_permissions(self):
         from packages.adapters.registry_upload_http_entrypoint import _user_can_access_path, _required_section_for_path
