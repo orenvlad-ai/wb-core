@@ -7,7 +7,7 @@ import argparse
 import ast
 from collections import defaultdict
 import copy
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import inspect
@@ -686,11 +686,12 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
                         "apps.warehouse_functional_runner._verify_sync_external_recheck",
                         return_value={"status": "ready"},
                     ),
-                    patch("packages.application.operator_ff_overhead.drain", side_effect=drain) as overhead_drain,
-                    patch("packages.application.operator_ff_overhead.reconcile", side_effect=reconcile) as overhead_reconcile,
-                    patch("packages.application.operator_warehouse_documents.drain", return_value={"request_ids":[]}) as operator_drain,
-                    patch("packages.application.operator_warehouse_documents.reconcile", return_value={"processed_count":0}) as operator_reconcile,
+                    ExitStack() as operator_patches,
                 ):
+                    overhead_drain = operator_patches.enter_context(patch("packages.application.operator_ff_overhead.drain", side_effect=drain))
+                    overhead_reconcile = operator_patches.enter_context(patch("packages.application.operator_ff_overhead.reconcile", side_effect=reconcile))
+                    operator_drain = operator_patches.enter_context(patch("packages.application.operator_warehouse_documents.drain", return_value={"request_ids": []}))
+                    operator_reconcile = operator_patches.enter_context(patch("packages.application.operator_warehouse_documents.reconcile", return_value={"processed_count": 0}))
                     supplies_block.return_value.reconcile_functional_ff_state.return_value = {
                         "status": "success"
                     }
