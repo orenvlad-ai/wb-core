@@ -1,11 +1,13 @@
 """Snapshot scheduling: read-only GET, bounded manual refresh and retained cycle failure."""
 from pathlib import Path
 import json
+import os
+import threading
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from packages.application.stock_monitor_jobs import StockMonitorJobs, period_days
@@ -83,33 +85,138 @@ class Scheduling(unittest.TestCase):
         self.assertEqual(self.published, [30, 45])
         self.assertEqual(result['period_days'], 45)
 
-    def test_real_cycle_tail_publishes_after_history_and_ready_verification(self):
-        import threading
-        from packages.application.registry_upload_http_entrypoint import (
-            RegistryUploadHttpEntrypoint, SHEET_OPERATOR_JOB_ID,
-        )
+    def test_history_has_no_monitor_publication(self):
+        from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint as Entry, SHEET_OPERATOR_JOB_ID
+        from packages.application.business_data_heavy_admission import heavy_admitted
+        from packages.application.web_vitrina_snapshot_admission import process_identity
         events = []
         jobs = SimpleNamespace(get=lambda _: {'operation': 'cycle', 'status': 'running'},
                                _threads={'cycle-job': threading.current_thread()})
         owner = SimpleNamespace(runtime=self.service.runtime, operator_jobs=jobs,
             now_factory=lambda: None, _cycle_verify_ready=lambda _: events.append('ready_verified'))
-        def history(**kwargs):
-            events.append('history_published')
-            return {'edition': 'history-proof'}
-        def refresh(*, period_days):
-            events.append('monitor_published')
-            return self.refresh(period_days=period_days)
-        self.service.refresh_snapshot = refresh
+        receipt = {'job_id':'cycle-job', 'owner_pid':os.getpid(), 'process_identity':'offline-cycle-tail-identity'}
         token = SHEET_OPERATOR_JOB_ID.set('cycle-job')
         try:
-            with patch('packages.application.registry_upload_http_entrypoint.require_heavy_owner'), \
-                 patch('apps.web_vitrina_history_candidate_build.build_owned_cycle_history', side_effect=history), \
+            with heavy_admitted(self.root, operation='cycle'), \
+                 patch('packages.application.web_vitrina_snapshot_admission.process_identity', return_value='offline-cycle-tail-identity'), \
+                 patch('apps.web_vitrina_history_candidate_build.build_owned_cycle_history',
+                    side_effect=lambda **kwargs: events.append('history_published') or {'edition':'history-proof'}), \
                  patch('packages.application.registry_upload_http_entrypoint.StockMonitorService', return_value=self.service):
-                proof = RegistryUploadHttpEntrypoint._cycle_history(owner, None, {'job_id':'cycle-job'}, {'ready':'v1'})
-            self.assertEqual(events, ['history_published', 'ready_verified', 'monitor_published'])
-            self.assertEqual(proof.versions['history_edition'], 'history-proof')
-            self.assertIn('stock_monitor_publication', proof.versions)
-            self.assertEqual(proof.warnings, ())
+                proof = Entry._cycle_history(owner, None, receipt, {'ready':'v1'})
+            self.assertEqual(events, ['history_published', 'ready_verified'])
+            self.assertEqual(proof.versions, {'history_edition':'history-proof'})
+            self.assertEqual(self.published, [])
+        finally:
+            SHEET_OPERATOR_JOB_ID.reset(token)
+
+    def cycle_worker(self, fail='', *, monitor_error=None, diagnostic_write_error=False):
+        # Actual start/lease/job/receipt worker; only core source/domain effects
+        # use the existing isolated fault harness. No database or provider runs.
+        from apps.sheet_vitrina_v1_cycle_smoke import CycleFake, EmptyClosedFixture, NOW, SLOT, STAMP
+        from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint as Entry, SHEET_OPERATOR_JOB_ID
+        from packages.application.sheet_vitrina_v1_cycle import CycleHistoryConfig, CycleReceiptStore
+        from packages.application.business_data_heavy_admission import require_heavy_owner
+        from packages.application.business_data_procedure_admission import already_admitted
+        fake = CycleFake(self.root, fail)
+        contract = self.root / 'contract.json'; contract.write_text('{}')
+        config = CycleHistoryConfig(self.root/'history',contract,'epoch')
+        calls = []
+        def refresh(*, period_days):
+            job_id = SHEET_OPERATOR_JOB_ID.get()
+            calls.append({'operation':require_heavy_owner(self.root).operation,
+                'maintenance':already_admitted(self.root), 'job':fake.operator_jobs.get(job_id)['status'],
+                'same_thread':fake.operator_jobs._threads.get(job_id) is threading.current_thread()})
+            if monitor_error:
+                raise monitor_error
+            return self.refresh(period_days=period_days)
+        self.service.refresh_snapshot = refresh
+        original_write = CycleReceiptStore.write
+        def write(store, receipt):
+            if diagnostic_write_error and 'stock_monitor_tail' in receipt:
+                raise OSError('private diagnostic failure')
+            return original_write(store, receipt)
+        with patch('packages.application.sheet_vitrina_v1_cycle.ClosedBacklog', EmptyClosedFixture), \
+             patch('packages.application.sheet_vitrina_v1_cycle.process_identity', return_value='offline-cycle-tail-identity'), \
+             patch('packages.application.web_vitrina_snapshot_admission.process_identity', return_value='offline-cycle-tail-identity'), \
+             patch('packages.application.registry_upload_http_entrypoint.StockMonitorService', return_value=self.service), \
+             patch.object(CycleReceiptStore,'write',write):
+            result = fake._start_sheet_cycle_job(request_key='tail-fixture',slot_utc=SLOT,history_config=config)
+            thread = fake.operator_jobs._threads[result['job_id']]; thread.join(10)
+            self.assertFalse(thread.is_alive())
+            store = CycleReceiptStore(self.root,lambda:STAMP)
+            saved = store.read(result['cycle_id'])
+            job = fake.operator_jobs.get(result['job_id'])
+            # A terminal request read cannot enter another worker or source pass.
+            previous_events = list(fake.events)
+            duplicate = fake._start_sheet_cycle_job(request_key='tail-fixture',slot_utc=SLOT,history_config=config)
+            self.assertEqual(duplicate['cycle_id'], saved['cycle_id'])
+            self.assertEqual(fake.events, previous_events)
+        return saved, job, calls
+
+    def test_source_and_warehouse_failures_still_publish_once_under_live_ownership(self):
+        for failed_stage in ('api_sources','warehouse'):
+            with self.subTest(stage=failed_stage), tempfile.TemporaryDirectory() as root:
+                old_root = self.root; old_service_runtime = self.service.runtime
+                self.root = Path(root); self.service.runtime = SimpleNamespace(runtime_dir=self.root)
+                try:
+                    saved, job, calls = self.cycle_worker(failed_stage)
+                    self.assertEqual(saved['status'], 'failed')
+                    self.assertEqual(saved['error_code'], 'offline_'+failed_stage)
+                    self.assertEqual(saved['stock_monitor_tail']['status'], 'published')
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(calls[0], {'operation':'cycle','maintenance':True,'job':'running','same_thread':True})
+                    self.assertNotIn('stock_monitor_publication', saved['final_versions'])
+                    self.assertEqual(job['status'], 'error')
+                finally:
+                    self.root = old_root; self.service.runtime = old_service_runtime
+
+    def test_monitor_failure_cannot_mask_primary_cycle_failure(self):
+        saved, job, calls = self.cycle_worker('warehouse',monitor_error=RuntimeError('private source payload'))
+        self.assertEqual(saved['status'],'failed')
+        self.assertEqual(saved['error_code'],'offline_warehouse')
+        self.assertEqual(saved['stock_monitor_tail']['status'],'retained')
+        self.assertEqual(saved['stock_monitor_tail']['snapshots'][0]['error_code'],'RuntimeError')
+        self.assertEqual(job['status'],'error')
+        self.assertEqual(len(calls),1)
+        self.assertNotIn('private',json.dumps(saved['stock_monitor_tail']))
+
+    def test_successful_cycle_publishes_only_once(self):
+        saved, job, calls = self.cycle_worker()
+        self.assertEqual(saved['status'],'complete')
+        self.assertEqual(saved['stock_monitor_tail']['status'],'published')
+        self.assertEqual(len(calls),1)
+        self.assertNotIn('stock_monitor_publication',saved['final_versions'])
+        self.assertEqual(job['status'],'success')
+
+    def test_diagnostic_write_failure_keeps_primary_failed_receipt(self):
+        saved, job, calls = self.cycle_worker('warehouse',diagnostic_write_error=True)
+        self.assertEqual(saved['status'],'failed')
+        self.assertEqual(saved['error_code'],'offline_warehouse')
+        self.assertNotIn('stock_monitor_tail',saved)
+        self.assertEqual(job['status'],'error')
+        self.assertEqual(len(calls),1)
+
+    def test_unowned_or_nonterminal_tail_cannot_write_or_publish(self):
+        from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint as Entry, SHEET_OPERATOR_JOB_ID
+        from packages.application.business_data_heavy_admission import heavy_admitted
+        from packages.application.web_vitrina_snapshot_admission import process_identity
+        owner = SimpleNamespace(runtime=self.service.runtime,now_factory=lambda:None,
+            operator_jobs=SimpleNamespace(get=lambda _: {'operation':'cycle','status':'running'},
+                _threads={'cycle-job':threading.current_thread()}))
+        receipt = {'status':'failed','job_id':'cycle-job','owner_pid':os.getpid(),
+            'process_identity':'offline-cycle-tail-identity'}
+        store = Mock()
+        token = SHEET_OPERATOR_JOB_ID.set('cycle-job')
+        try:
+            Entry._cycle_stock_monitor_tail(owner,store,receipt)
+            with heavy_admitted(self.root,operation='stock_monitor_refresh'):
+                Entry._cycle_stock_monitor_tail(owner,store,receipt)
+            with heavy_admitted(self.root,operation='cycle'), patch('packages.application.web_vitrina_snapshot_admission.process_identity', return_value='offline-cycle-tail-identity'):
+                Entry._cycle_stock_monitor_tail(owner,store,{**receipt,'status':'running'})
+                owner.operator_jobs.get = lambda _: {'operation':'cycle','status':'success'}
+                Entry._cycle_stock_monitor_tail(owner,store,receipt)
+            store.write.assert_not_called()
+            self.assertEqual(self.published,[])
         finally:
             SHEET_OPERATOR_JOB_ID.reset(token)
 

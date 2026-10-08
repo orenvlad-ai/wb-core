@@ -70,7 +70,8 @@ class StockMonitorJobs:
             return {'status': 'refreshing', 'period_days': days, 'job_id': job['job_id']}
 
     def refresh_cycle(self) -> dict:
-        # Called within existing heavy ownership, after authoritative sources/history.
+        # Called once at the terminal attempt tail, under the still-live cycle
+        # worker heavy/maintenance ownership, including failed core stages.
         outcomes = []
         for days in sorted({14, self.preferred_period()}):
             try:
