@@ -284,6 +284,8 @@ def acquire_barrier(
     with _BarrierLock(runtime_dir):
         from packages.application.business_data_deploy_protection import assert_releasable
         assert_releasable(runtime_dir)
+        from packages.application.business_data_formula_resume import assert_no_partial_transition as assert_no_formula_transition
+        assert_no_formula_transition(runtime_dir)
         existing = _load_state(runtime_dir)
         if existing is not None and str(existing.get("phase") or "") in {
             "acquiring",
@@ -438,6 +440,8 @@ def release_barrier(
     def schedule_release_guard() -> None:
         try:
             assert_no_partial_transition(runtime_dir)
+            from packages.application.business_data_formula_resume import assert_no_partial_transition as assert_no_formula_transition
+            assert_no_formula_transition(runtime_dir)
         except (RuntimeError, OSError, ValueError, KeyError, TypeError) as exc:
             raise BusinessDataWriteBarrierError(str(exc)) from exc
 
@@ -593,6 +597,71 @@ def release_schedule_target_barrier(
                               "captured_at": state["released_at"], "window_id": window,
                               "restore": state["restore"], "actor": normalized_actor})
         return {**barrier_status(runtime), "idempotent": False}
+
+
+def release_formula_target_barrier(
+    runtime_dir: Path, *, operation_id: str, actor: str, reason: str,
+    systemd, activity_reader, proc_root: Path = Path('/proc'),
+) -> dict[str, Any]:
+    """Release a committed exact formula-only target, never a prior-state claim.
+
+    The caller supplies no success flag or substitute receipt. Rebuild canonical
+    deploy/fragment/dropin/formula/control/timer proof again under the barrier
+    lock. The transition holds the existing restore lock while completing it.
+    """
+    from packages.application import business_data_formula_resume as formula
+    from packages.application.business_data_schedule_profile import assert_no_partial_transition
+    from packages.application.business_data_deploy_protection import assert_releasable
+    runtime = Path(runtime_dir).resolve()
+    normalized_actor = _validate_actor(actor)
+    normalized_reason = _bounded(reason, 1000)
+    if not normalized_reason:
+        raise BusinessDataWriteBarrierError('audited formula target release reason required')
+    with _BarrierLock(runtime):
+        state = _load_state(runtime)
+        if state and state.get('phase') == 'released':
+            transition = formula.load(runtime, operation_id)
+            if not transition or transition['actor'] != normalized_actor:
+                raise BusinessDataWriteBarrierError('formula target release actor/operation differs')
+            formula.prove_recorded_release(transition, state)
+            return {**barrier_status(runtime), 'idempotent': True}
+        assert_no_partial_transition(runtime)
+        assert_releasable(runtime)
+        transition, old, _current = formula.prove_committed(runtime, operation_id,
+            systemd=systemd, activity_reader=activity_reader, proc_root=proc_root)
+        if transition['actor'] != normalized_actor:
+            raise BusinessDataWriteBarrierError('formula target release actor differs')
+        plan, receipt = transition['plan'], transition['receipt']
+        # Native wakeup consults the pause proof as soon as admission opens.
+        # A direct caller must not release first and leave crash recovery to
+        # supply that authority later. Only the freshly validated same receipt
+        # retained by the restore-lock owner is accepted here.
+        if old.get('restore_readback') != receipt:
+            raise BusinessDataWriteBarrierError('formula target retained pause receipt differs')
+        state = _load_state(runtime)
+        if (not state or state.get('window_id') != plan['window_id']
+                or state.get('plan_fingerprint') != plan['baseline_fingerprint']
+                or state.get('window_kind') != 'maintenance_pause' or not state.get('hold_confirmed')
+                or state.get('phase') not in {'held', 'restoring', 'released'}):
+            raise BusinessDataWriteBarrierError('formula target barrier identity differs')
+        if state['phase'] == 'released':
+            if (state.get('restore') or {}).get('target_fingerprint') != plan['fingerprint']:
+                raise BusinessDataWriteBarrierError('released formula target identity differs')
+            return {**barrier_status(runtime), 'idempotent': True}
+        released_at = _utc_now()
+        from packages.application.business_data_cycle_wakeup import arm_formula_before_release
+        arm_formula_before_release(runtime, state, released_at, receipt)
+        state.update(phase='released', active=False, released_at=released_at, released_by=normalized_actor,
+            release_reason=normalized_reason, restore=dict(status='restored',
+                exact_target_state_restored=True, exact_prior_state_restored=False,
+                operation_id=operation_id, target_kind='canonical_formula_epoch',
+                target_fingerprint=plan['fingerprint'], readback_fingerprint=_fingerprint(receipt)))
+        state['state_fingerprint'] = _fingerprint({k: v for k, v in state.items() if k != 'state_fingerprint'})
+        _atomic_write_private_json(_state_path(runtime), state)
+        _append_private_audit(_audit_path(runtime), dict(event='formula_target_barrier_released',
+            captured_at=state['released_at'], window_id=plan['window_id'], actor=normalized_actor,
+            restore=state['restore']))
+        return {**barrier_status(runtime), 'idempotent': False}
 
 
 def abort_barrier_acquire(
