@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from packages.application.owned_history_worker_capability import (
     CONTRACT, HistoryDelegationError, file_digest, fingerprint, linux_required,
-    lock_proof, process_generation, read_json, receive_message, send_message,
+    lock_proof, process_generation, read_json, receive_message, send_message, history_result_error,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -239,7 +239,7 @@ class _OwnedHistoryWorker:
         self._completion_deadline = time.monotonic() + total_seconds
         captured = self.capture(now)
         if captured.get("status") != "complete" or captured["result"].get("status") != "captured":
-            raise HistoryDelegationError("history_completion_capture_unproven")
+            raise history_result_error("history_completion_capture_unproven", captured, mode="capture")
         anchor = self._anchor
         # Source warming is not dated progress. No new capture/adoption occurs.
         previous = self._verified_state(anchor)
@@ -270,10 +270,10 @@ class _OwnedHistoryWorker:
             if observed["terminal"]:
                 return self._finish_completion(observed, closed_receipt, portions=number)
             if result.get("status") == "complete" and result["result"].get("status") not in {"pending"}:
-                raise HistoryDelegationError("history_completion_portion_failed")
+                raise history_result_error("history_completion_portion_failed", result, mode="portion")
             current = observed["completed"]
             if not (set(progress) < set(current) and all(current[day] == ref for day, ref in progress.items())):
-                raise HistoryDelegationError("history_completion_no_dated_progress")
+                raise history_result_error("history_completion_no_dated_progress", result, mode="portion")
             progress = current
         raise HistoryDelegationError("history_completion_portion_limit")
 
@@ -281,7 +281,7 @@ class _OwnedHistoryWorker:
         result = self._invoke("verify", anchor["now"], anchor)
         if (result.get("status") != "complete" or result["result"].get("status") != "verified"
                 or result["result"].get("invocation") != result.get("invocation")):
-            raise HistoryDelegationError("history_completion_readback_unproven:" + str(result.get("result", {}).get("reason", result.get("status")))[:128])
+            raise history_result_error("history_completion_readback_unproven", result, mode="verify")
         return result["result"]
 
     def _finish_completion(self, observed, closed_receipt, *, portions):
@@ -303,6 +303,14 @@ class _OwnedHistoryWorker:
                 "backfill_count": len(self._backfill_dates), "closed_ack": closed_receipt is not None}
 
     def _invoke(self, mode, now, anchor):
+        try:
+            return self._invoke_owned(mode, now, anchor)
+        except HistoryDelegationError as exc:
+            diagnostic = exc.diagnostic(mode=mode)
+            raise HistoryDelegationError(diagnostic["error_code"], mode=diagnostic["mode"],
+                reason_code=diagnostic["reason_code"], outcome=diagnostic["outcome"]) from None
+
+    def _invoke_owned(self, mode, now, anchor):
         self._check()
         if self._process is not None:
             raise HistoryDelegationError("history_child_already_live")

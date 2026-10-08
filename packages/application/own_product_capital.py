@@ -2397,7 +2397,8 @@ class OwnProductCapitalBlock:
             qty = _decimal(row["quantity"])
             capital = _decimal(row["capital_rub"])
             covered = _decimal(row["cost_covered_quantity"])
-            certified = bool(row["certified"])
+            cost_complete = covered >= qty and (qty == ZERO or capital > ZERO)
+            certified = bool(row["certified"]) and cost_complete
             target = result.setdefault(
                 nm_id,
                 {
@@ -2408,9 +2409,9 @@ class OwnProductCapitalBlock:
             )
             target[own_stage_metric_key(public_stage, "qty")] = float(qty)
             target[own_stage_metric_key(public_stage, "paid_equivalent_qty")] = float(qty)
-            target[own_stage_metric_key(public_stage, "capital_rub")] = float(capital)
+            target[own_stage_metric_key(public_stage, "capital_rub")] = float(capital) if cost_complete else None
             target[own_stage_metric_key(public_stage, "unit_cost_rub")] = (
-                float(capital / qty) if qty > ZERO else None
+                float(capital / qty) if qty > ZERO and cost_complete else None
             )
             target[own_stage_metric_key(public_stage, "cost_coverage_pct")] = (
                 float(covered / qty) if qty > ZERO else None
@@ -2445,7 +2446,7 @@ class OwnProductCapitalBlock:
             if public_stage == "WB_ACCEPTANCE_DISCREPANCY":
                 target[OWN_UNDERACCEPTED_WB_QTY_METRIC_KEY] = float(qty)
                 target[OWN_UNDERACCEPTED_WB_UNIT_COST_RUB_METRIC_KEY] = (
-                    float(capital / qty) if qty > ZERO else None
+                    float(capital / qty) if qty > ZERO and cost_complete else None
                 )
 
         for target in result.values():
@@ -2463,8 +2464,14 @@ class OwnProductCapitalBlock:
             )
             target[OWN_TOTAL_QTY_METRIC_KEY] = float(qty)
             target[OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY] = float(qty)
-            target[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] = float(capital)
-            target[OWN_AVG_COST_RUB_METRIC_KEY] = float(capital / qty) if qty > ZERO else None
+            # A canonical sparse balance omits empty stages. Only a present
+            # stage with an explicit unknown capital makes this SKU incomplete.
+            cost_complete = all(target[key] is not None
+                                for key in (own_stage_metric_key(stage, "capital_rub")
+                                            for stage in OWN_PRODUCT_CAPITAL_STAGES)
+                                if key in target)
+            target[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] = float(capital) if cost_complete else None
+            target[OWN_AVG_COST_RUB_METRIC_KEY] = float(capital / qty) if qty > ZERO and cost_complete else None
             target[OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY] = (
                 float(confirmed / qty) if qty > ZERO else None
             )
@@ -3691,6 +3698,7 @@ def _inventory_cost_stage_evidence(
     quantity = _decimal(row.get("quantity"))
     capital = _decimal(row.get("capital_rub"))
     covered = _decimal(row.get("cost_covered_quantity"))
+    cost_complete = covered >= quantity and (quantity == ZERO or capital > ZERO)
     locations: list[dict[str, Any]] = []
     location_status = "exact"
     if public_stage == "WB":
@@ -3700,9 +3708,9 @@ def _inventory_cost_stage_evidence(
                 "facility_id": "",
                 "pool": "WB",
                 "quantity": format(quantity, "f"),
-                "capital_rub": format(capital, "f"),
+                "capital_rub": format(capital, "f") if cost_complete else None,
                 "wac_rub": (
-                    format(capital / quantity, "f") if quantity > ZERO else None
+                    format(capital / quantity, "f") if quantity > ZERO and cost_complete else None
                 ),
             }
         ]
@@ -3769,11 +3777,12 @@ def _inventory_cost_stage_evidence(
     return {
         "warehouse_family": public_stage,
         "quantity": format(quantity, "f"),
-        "capital_rub": format(capital, "f"),
+        "capital_rub": format(capital, "f") if cost_complete else None,
         "cost_covered_quantity": format(covered, "f"),
-        "wac_rub": format(capital / quantity, "f") if quantity > ZERO else None,
+        "wac_rub": format(capital / quantity, "f") if quantity > ZERO and cost_complete else None,
         "quality": str(row.get("quality") or "coverage_gap"),
-        "certified": bool(row.get("certified")),
+        "certified": bool(row.get("certified")) and cost_complete,
+        "known_capital_rub": format(capital, "f"),
         "location_status": location_status,
         "locations": locations,
     }

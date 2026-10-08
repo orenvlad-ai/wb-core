@@ -442,6 +442,9 @@
     },
     "warehouse_targeted_operations": {
       "patterns": [
+        "packages/application/wb_initial_fbs_cost.py",
+        "packages/application/wb_initial_fbs_cost_sources.py",
+        "apps/warehouse_wb_initial_valuation_smoke.py",
         "apps/warehouse_functional_runner.py",
         "packages/application/warehouse_functional.py",
         "packages/application/warehouse_functional_lock.py",
@@ -453,6 +456,7 @@
       ],
       "commands": [
         ["python3", "apps/warehouse_functional_smoke.py"],
+        ["python3", "apps/warehouse_wb_initial_valuation_smoke.py"],
         ["python3", "apps/warehouse_targeted_replay_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5", "xlrd==2.0.1"]
@@ -1059,10 +1063,11 @@
         "docs/runbooks/owned_history_worker.md",
         "packages/application/owned_history_native_ack.py",
         "apps/owned_history_completion_smoke.py",
+        "apps/owned_history_diagnostics_smoke.py",
         "apps/business_data_cycle_owned_integration_smoke.py",
         "apps/web_vitrina_history_candidate_build.py"
       ],
-      "commands": [["python3", "apps/owned_history_worker_smoke.py"], ["python3", "apps/owned_history_completion_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"]],
+      "commands": [["python3", "apps/owned_history_worker_smoke.py"], ["python3", "apps/owned_history_completion_smoke.py"], ["python3", "apps/owned_history_diagnostics_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "finance_backup_handoff": {

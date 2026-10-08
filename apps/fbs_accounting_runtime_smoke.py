@@ -104,6 +104,30 @@ class RuntimeTests(unittest.TestCase):
         third, _ = runtime.prepare(self.root, now=datetime(2026, 9, 9, 14, tzinfo=timezone.utc))
         self.assertEqual(third["shared_days"]["2026-09-07"], after["shared_days"]["2026-09-07"])
 
+    def test_missing_wb_cost_survives_midnight_without_freezing_fresh_day(self):
+        self.opening()
+        self.wb.update(complete=False, authority_complete=True)
+        self.wb["rows"][0].update(status="missing", reason="wb_cost_coverage_incomplete", capital_rub=None,
+                                  components=dict(physical=0, to_customer=500, from_customer=0))
+        partial, expected = runtime.prepare(self.root, now=self.now)
+        runtime.save(self.root, partial, expected=expected, operation_id="partial-current")
+        self.assertEqual(runtime.load_shared(self.root).resolve(nm_id="1", operation_date=date(2026,9,7))["status"], "missing")
+        self.image = capture("2026-09-08", quantity="900")
+        self.wb = wb("2026-09-08")
+        after, previous = runtime.prepare(self.root, now=datetime(2026,9,8,14,tzinfo=timezone.utc))
+        self.assertEqual(after["shared_days"]["2026-09-07"]["quality"], "incomplete")
+        self.assertEqual(after["shared_days"]["2026-09-07"]["status"], "closed")
+        runtime.save(self.root, after, expected=previous, operation_id="fresh-next-day")
+        shared = runtime.load_shared(self.root)
+        self.assertEqual(shared.resolve(nm_id="1", operation_date=date(2026,9,7))["reason"], "wb_cost_coverage_incomplete")
+        self.assertEqual(shared.resolve(nm_id="1", operation_date=date(2026,9,8))["status"], "resolved")
+        self.image = capture("2026-09-09")
+        self.wb = wb("2026-09-09")
+        third, expected = runtime.prepare(self.root, now=datetime(2026,9,9,14,tzinfo=timezone.utc))
+        self.assertEqual(third["shared_days"]["2026-09-07"], after["shared_days"]["2026-09-07"])
+        runtime.save(self.root, third, expected=expected, operation_id="fresh-third-day")
+        self.assertEqual(runtime.load_shared(self.root).resolve(nm_id="1", operation_date=date(2026,9,9))["status"], "resolved")
+
     def test_no_missing_day_invention(self):
         self.opening()
         self.image = capture("2026-09-09")

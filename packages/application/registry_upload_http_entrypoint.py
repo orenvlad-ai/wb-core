@@ -3167,10 +3167,17 @@ class RegistryUploadHttpEntrypoint:
                 or version != accounting['version'] or snapshot.get('id') != fbs['fbs_generation']
                 or snapshot.get('digest') != fbs['fbs_digest']):
             raise CycleStageFailure('warehouse_generation_or_journal_changed')
+        valuation = result.get('wb_valuation') or {}
+        valuation_warnings = []
+        for key, policy in (('missing', 'cost_unavailable'), ('provisional', 'provisional_fbs_valuation')):
+            for row in valuation.get(key, []):
+                valuation_warnings.append({'source_key': 'warehouse_valuation', 'policy': policy,
+                    'nm_id': str(row['nm_id']), 'date': receipt['business_date']})
         return StageProof({'warehouse_run': run_id, 'functional_version': active['version_id'],
             'fbo_snapshot': stocks[0]['snapshot_id'], 'fbo_digest': stocks[0]['raw_rows_digest'],
             'fbs_book': version, 'fbs_ready_operation': accounting['operation_id'],
-            'economics_fingerprint': economics['plan_fingerprint'], 'weekly_cost_fingerprint': finance['fingerprint']})
+            'economics_fingerprint': economics['plan_fingerprint'], 'weekly_cost_fingerprint': finance['fingerprint']},
+            tuple(valuation_warnings))
 
     def _cycle_daily_projection(self):
         from apps.wb_finance_daily import _worker_lock
@@ -7399,6 +7406,7 @@ class RegistryUploadHttpEntrypoint:
                 "status": "success",
                 "mode": "manual_sync",
                 "fbs_snapshot_accounting": result.get("fbs_snapshot_accounting"),
+                "wb_valuation": dict(plan.get("wb_valuation") or {}),
                 "durable_run_id": durable_run_id,
                 "official_supply_sync": {
                     "run_id": str(sync.get("run_id") or ""),

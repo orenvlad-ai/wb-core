@@ -183,7 +183,12 @@ def capture_wb_component(
             try:
                 result["rows"].append(_operand(nm_id, canonical[nm_id], by_nm.get(nm_id), source))
             except ERRORS as exc:
-                result["rows"].append(_missing(nm_id, str(exc), source))
+                missing = _missing(nm_id, str(exc), source)
+                # Canonical official quantities were validated independently of
+                # the valuation. Preserve facts even when money is unavailable.
+                missing.update(quantity=sum(canonical[nm_id]),
+                               components=dict(zip(("physical", "to_customer", "from_customer"), canonical[nm_id])))
+                result["rows"].append(missing)
         result["complete"] = all(row["status"] == "available" for row in result["rows"])
         result["reason"] = "" if result["complete"] else "wb_sku_components_incomplete"
     except ERRORS as exc:
@@ -209,9 +214,9 @@ def _operand(nm_id: int, parts: tuple[int, int, int], row: dict | None, source: 
         if (_quantity(row["quantity"]) != quantity
                 or tuple(_quantity(row[key]) for key in BALANCE_COMPONENTS) != parts):
             raise ValueError("wb_balance_snapshot_quantity_mismatch")
-        capital = _decimal(row["capital_rub"])
         if _quantity(row["cost_covered_quantity"]) != quantity:
             raise ValueError("wb_cost_coverage_incomplete")
+        capital = _decimal(row["capital_rub"])
         if quantity == 0:
             if capital != 0:
                 raise ValueError("zero_wb_quantity_with_capital")

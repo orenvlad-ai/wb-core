@@ -11,6 +11,15 @@ retained without enrollment or recomputation. The closed receipt is the canonica
 Known pending dates are excluded by the caller; no pending date is acknowledged.
 This module does not add a timer, route, profile or readiness capability.
 
+Failed cycle receipts retain `history_failure` with the invocation mode, stable
+error and inner reason codes, and a separate `outcome_unknown` outcome when the
+transport cannot prove completion. Only fixed payload-free codes cross this
+boundary; provider messages, source values and arbitrary exception text do not.
+The same diagnostic is retained on the failed stage and survives a service
+restart. A recorded failure is evidence, never permission to replay a cycle or
+resubmit an uncertain child. Capture, initial verification and portion failures
+must remain distinguishable when investigating an unchanged `CURRENT` edition.
+
 One supervisor retains finished-builder and candidate EX descriptors across
 all children. API/systemd/daily/warehouse/storage admission precedes domain
 acquisition. Each fixed Unix-socket capability authenticates parent/child

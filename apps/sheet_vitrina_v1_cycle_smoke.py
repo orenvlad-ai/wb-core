@@ -720,7 +720,9 @@ class BoundWarehouseTests(unittest.TestCase):
                     conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_active VALUES(1,'functional')")
                     conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots VALUES('fbo','functional',1,'fbo-digest')")
                 return {'active_version':{'version_id':'functional'}}
-            entry.warehouse_functional_block=SimpleNamespace(build_sync_plan=Mock(return_value={'plan_fingerprint':'plan','diff':{}}),
+            valuation={'status':'partial','missing':[{'nm_id':101,'reason':'wb_cost_unavailable'}],
+                'provisional':[{'nm_id':102}]}
+            entry.warehouse_functional_block=SimpleNamespace(build_sync_plan=Mock(return_value={'plan_fingerprint':'plan','diff':{},'wb_valuation':valuation}),
                 apply_plan=Mock(side_effect=apply),record_failed_sync=Mock())
             entry.inventory_planning=SimpleNamespace(current=lambda:{})
             store=CycleReceiptStore(root,lambda:STAMP);store.root.mkdir()
@@ -736,6 +738,9 @@ class BoundWarehouseTests(unittest.TestCase):
                  heavy_admitted(root, operation='cycle'):
                 proof=entry._cycle_warehouse(store,receipt,{'fbs_generation':'fbs','fbs_digest':'fbs-digest'})
             self.assertEqual(proof.versions['fbs_book'],'book')
+            self.assertEqual(proof.warnings, (
+                {'source_key':'warehouse_valuation','policy':'cost_unavailable','nm_id':'101','date':'2026-09-29'},
+                {'source_key':'warehouse_valuation','policy':'provisional_fbs_valuation','nm_id':'102','date':'2026-09-29'}))
             self.assertEqual(refresh.call_count,1)
             publication_read.assert_called_once_with(entry.runtime)
             operator_drain.assert_called_once_with(entry.runtime)

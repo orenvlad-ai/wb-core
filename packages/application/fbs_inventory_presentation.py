@@ -186,6 +186,16 @@ class FbsInventorySnapshot:
                                 k == "quantity" or observed != Decimal(str(float(expected)))):
                             raise ValueError("retained_wb_shared_cost_mismatch:" + nm)
                         stages["WB"][k] = text(expected)
+                if (expected_wb.get("status") == "missing" and wb_capture.get("authority_complete")
+                        and number(expected_wb.get("quantity")) is not None):
+                    observed_quantity = number(stages["WB"].get("quantity"))
+                    if observed_quantity is not None and observed_quantity != number(expected_wb["quantity"]):
+                        raise ValueError("retained_wb_shared_cost_mismatch:" + nm)
+                    # Missing valuation does not erase the independently checked
+                    # official quantity, nor turn known-only capital into zero.
+                    stages["WB"].update(quantity=text(number(expected_wb["quantity"])),
+                                        capital_rub=None, wac_rub=None,
+                                        valuation_reason=expected_wb.get("reason", "wb_cost_unavailable"))
                 stages["FF"] = operands([*fbs, *fbo], blocked=blocked)
                 for stage in RETAINED_STAGES:
                     stages[stage] = {**stages[stage], **{k: text(number(stages[stage].get(k)))

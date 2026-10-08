@@ -148,8 +148,8 @@ def _validate(period: dict) -> None:
         raise SharedSkuCostError("shared_cost_initial_basis_missing")
     if period.get("version_id") != fingerprint({k: v for k, v in period.items() if k != "version_id"}):
         raise SharedSkuCostError("shared_cost_fingerprint_mismatch")
-    if period["status"] == "closed" and period["quality"] != "complete":
-        raise SharedSkuCostError("cannot_close_incomplete_shared_cost")
+    # Closed records freeze the admitted facts, including explicit missing
+    # valuations. Closure is immutability, not a claim that every SKU is priced.
     for nm, row in period["rows"].items():
         if _nm(nm) != _nm(row["nm_id"]):
             raise SharedSkuCostError("shared_cost_sku_identity_mismatch")
