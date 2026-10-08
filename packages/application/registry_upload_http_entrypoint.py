@@ -43,6 +43,8 @@ from packages.application.ff_document_workflow import (
 from packages.application.ff_pool_surfaces import FfPoolSurface
 from packages.application.ff_wb_supply_origins import FfWbSupplyOriginAssignments
 from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
+from packages.application.stock_monitor import StockMonitorService
+from packages.application.stock_monitor_jobs import StockMonitorJobs
 from packages.application.wb_fbs_orders import WbFbsOrdersCollector
 from packages.application.wb_fbs_warehouse_registry import WbFbsWarehouseRegistry
 from packages.application.fulfillment_services import FulfillmentServicesBlock
@@ -1352,6 +1354,8 @@ class RegistryUploadHttpEntrypoint:
             ),
         )
         self.inventory_planning = InventoryPlanningReadModel(db_path=self.runtime.db_path)
+        self.stock_monitor = StockMonitorService(runtime=self.runtime, now_factory=self.now_factory)
+        self.stock_monitor_jobs = StockMonitorJobs(service=self.stock_monitor, operator_jobs=self.operator_jobs)
         self.warehouse_stocks_block = WarehouseStocksBlock(
             runtime=self.runtime,
             stocks_block=self.factory_order_supply_block.stocks_block,
@@ -3042,7 +3046,13 @@ class RegistryUploadHttpEntrypoint:
             def worker(log):
                 try:
                     with self._sheet_cycle_lock:
-                        return run_cycle(self, store, receipt, history_config, log)
+                        try:
+                            return run_cycle(self, store, receipt, history_config, log)
+                        finally:
+                            # Derived planning publication belongs to this attempt,
+                            # including failed core stages. It cannot replay or
+                            # change the core receipt's terminal outcome.
+                            RegistryUploadHttpEntrypoint._cycle_stock_monitor_tail(self, store, receipt)
                 except Exception as exc:
                     raise SheetVitrinaV1OperatorJobError('cycle_failed', result_payload=receipt) from exc
                 finally:
@@ -3286,21 +3296,79 @@ class RegistryUploadHttpEntrypoint:
                 or publication['state'] != 'complete' or publication['after_digest'] != digest(expected.plan_json)):
             raise CycleStageFailure('cycle_ready_receipt_changed')
 
-    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None):
-        from apps.web_vitrina_history_candidate_build import build_owned_cycle_history
-        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+    def _cycle_owned_worker_identity(self, receipt):
+        """Live cycle authority, shared by history and the derived-only tail."""
+        from packages.application.business_data_procedure_admission import already_admitted
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
         from packages.application.web_vitrina_snapshot_admission import process_identity
-        require_heavy_owner(self.runtime.runtime_dir)
+        heavy = require_heavy_owner(self.runtime.runtime_dir)
         job_id = SHEET_OPERATOR_JOB_ID.get()
         job = self.operator_jobs.get(job_id)
-        if (job_id != receipt['job_id'] or job['operation'] != 'cycle' or job['status'] != 'running'
+        identity = process_identity(os.getpid())
+        if (heavy.operation != 'cycle' or not already_admitted(self.runtime.runtime_dir)
+                or not identity or receipt.get('owner_pid') != os.getpid()
+                or receipt.get('process_identity') != identity
+                or job_id != receipt.get('job_id') or not job
+                or job['operation'] != 'cycle' or job['status'] != 'running'
                 or self.operator_jobs._threads.get(job_id) is not threading.current_thread()):
-            raise CycleStageFailure('cycle_history_owner_mismatch')
-        owner = dict(job_id=job_id, operation='cycle', pid=os.getpid(), identity=process_identity(os.getpid()))
+            raise CycleStageFailure('cycle_derived_owner_mismatch')
+        return dict(job_id=job_id, operation='cycle', pid=os.getpid(), identity=identity)
+
+    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None):
+        from apps.web_vitrina_history_candidate_build import build_owned_cycle_history
+        from packages.application.sheet_vitrina_v1_cycle import StageProof
+        owner = RegistryUploadHttpEntrypoint._cycle_owned_worker_identity(self, receipt)
         proof = build_owned_cycle_history(runtime=self.runtime, config=config, cycle_owner=owner, now=self.now_factory(),
             backfill_dates=backfill_dates, closed_receipt=closed_receipt)
         self._cycle_verify_ready(ready)
         return StageProof({'history_' + key: str(value) for key,value in proof.items()})
+
+    def _cycle_stock_monitor_tail(self, store, receipt):
+        """Best effort under the existing worker lease; never masks core failure.
+
+        The independent diagnostic is not a stage proof or final-version operand.
+        Repeat reads of a terminal cycle cannot start this producer again.
+        """
+        if ('stock_monitor_tail' in receipt or
+                receipt.get('status') not in {'complete', 'degraded', 'failed', 'interrupted'}):
+            return
+        try:
+            RegistryUploadHttpEntrypoint._cycle_owned_worker_identity(self, receipt)
+        except BaseException:
+            # No file writes or source work without live worker authority.
+            return
+        diagnostic = {'status': 'retained', 'snapshots': []}
+        try:
+            publication = StockMonitorJobs(
+                service=StockMonitorService(runtime=self.runtime, now_factory=self.now_factory),
+                operator_jobs=self.operator_jobs,
+            ).refresh_cycle()
+            snapshots = publication['snapshots']
+            if not isinstance(snapshots, list) or not 1 <= len(snapshots) <= 2:
+                raise ValueError('monitor_tail_diagnostic_contract')
+            bounded = []
+            for item in snapshots:
+                days = item['period_days']
+                if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 3650:
+                    raise ValueError('monitor_tail_diagnostic_contract')
+                if item['status'] not in {'published', 'retained'}:
+                    raise ValueError('monitor_tail_diagnostic_contract')
+                bounded.append({'period_days': days, 'status': item['status'],
+                    **{key: str(item[key])[:128] for key in
+                        ('snapshot_id', 'generated_at', 'error_code') if key in item}})
+            diagnostic.update(status='published' if all(item['status']=='published' for item in bounded) else 'retained',
+                              snapshots=bounded)
+        except BaseException as exc:
+            # No exception text: a provider error may include private payloads.
+            diagnostic['error_code'] = type(exc).__name__[:128]
+        try:
+            diagnostic['attempted_at'] = str(store.timestamp_factory())[:64]
+            receipt['stock_monitor_tail'] = diagnostic
+            store.write(receipt)
+        except BaseException:
+            # The core terminal receipt has already been persisted by run_cycle.
+            # A failed diagnostic write cannot replace its error or success.
+            pass
 
     def start_sheet_refresh_job(
         self,
@@ -6677,6 +6745,14 @@ class RegistryUploadHttpEntrypoint:
             if functional.get("status") == "ready"
             else self.warehouse_stocks_block.warehouse_detail(warehouse_key)
         )
+
+    def handle_stock_monitor_request(self, *, period_days: int = 14, horizon_days: int = 60,
+                                     date_offset: int = 0, view_days: int = 90) -> dict[str, Any]:
+        return self.stock_monitor.get_snapshot(period_days=period_days, horizon_days=horizon_days,
+            date_offset=date_offset, view_days=view_days)
+
+    def handle_stock_monitor_refresh_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.stock_monitor_jobs.request_refresh(payload.get('period_days', 14))
 
     def handle_inventory_planning_request(self) -> dict[str, Any]:
         candidate = getattr(self.web_vitrina_block, "fbs_inventory_snapshot", None)

@@ -6058,7 +6058,9 @@
         <button class="warehouse-switch is-active" type="button" data-open-warehouse-costs>Склады и себестоимость</button>
         <button class="warehouse-switch" type="button" data-open-fbs-orders>FBS-заказы</button>
         <button class="warehouse-switch" type="button" data-open-stock-report>Отчёт об остатках</button>
+        <button class="warehouse-switch" type="button" data-open-stock-monitor>Мониторинг</button>
       </nav>
+      {{STOCK_MONITOR_PANEL}}
       <div data-warehouse-cost-view>
       <section class="warehouse-card inventory-planning-card" data-inventory-planning-card aria-live="polite">
         <div class="warehouse-head">
@@ -8871,6 +8873,10 @@
         activateWarehouseSubsection("stock-report");
       });
     }
+    const warehouseStockMonitorButton = document.querySelector("[data-open-stock-monitor]");
+    if (warehouseStockMonitorButton) warehouseStockMonitorButton.addEventListener("click", function() {
+      activateWarehouseSubsection("stock-monitor");
+    });
     if (inventoryPlanningRefresh) inventoryPlanningRefresh.addEventListener("click", function() { loadInventoryPlanning(true); });
     if (inventoryPlanningMetrics) inventoryPlanningMetrics.addEventListener("change", function(event) {
       const toggle = event.target.closest("[data-inventory-metric-toggle]");
@@ -11929,12 +11935,18 @@
       const selected = String(sectionName || "");
       const stockReport = selected === "stock-report";
       const fbsOrders = selected === "fbs-orders";
-      if (warehouseCostsButton) warehouseCostsButton.classList.toggle("is-active", !stockReport && !fbsOrders);
+      const stockMonitor = selected === "stock-monitor";
+      const monitorButton = document.querySelector("[data-open-stock-monitor]");
+      const monitorView = document.querySelector("[data-stock-monitor]");
+      if (monitorButton) monitorButton.classList.toggle("is-active", stockMonitor);
+      if (monitorView) monitorView.hidden = !stockMonitor;
+      if (stockMonitor && window.WbcStockMonitor) window.WbcStockMonitor.activate();
+      if (warehouseCostsButton) warehouseCostsButton.classList.toggle("is-active", !stockReport && !fbsOrders && !stockMonitor);
       if (warehouseFbsOrdersButton) warehouseFbsOrdersButton.classList.toggle("is-active", fbsOrders);
       if (warehouseStockReportButton) warehouseStockReportButton.classList.toggle("is-active", stockReport);
-      if (warehouseCostView) warehouseCostView.hidden = stockReport || fbsOrders;
+      if (warehouseCostView) warehouseCostView.hidden = stockReport || fbsOrders || stockMonitor;
       if (fbsOrdersView) fbsOrdersView.hidden = !fbsOrders;
-      if (!stockReport && !fbsOrders) loadInventoryPlanning(false);
+      if (!stockReport && !fbsOrders && !stockMonitor) loadInventoryPlanning(false);
       if (fbsOrders) { loadInventoryPlanning(false); loadFbsOrders(state.warehouses.fbsOrders.page || 1); }
       if (warehouseStockReportFrame) {
         warehouseStockReportFrame.hidden = !stockReport;

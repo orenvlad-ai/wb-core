@@ -21,6 +21,7 @@ from apps.fbs_fulfillment_order_supply_smoke import (
     MOSCOW_ID,
     _seed_facilities,
     _seed_sales_history,
+    _seed_fbs_demand,
     _seed_shipments,
 )
 from packages.adapters.registry_upload_http_entrypoint import (
@@ -64,6 +65,7 @@ def main() -> int:
         ]
         _seed_facilities(runtime, active_nm_ids)
         _seed_sales_history(runtime, active_nm_ids)
+        _seed_fbs_demand(runtime, active_nm_ids)
         _seed_shipments(runtime, active_nm_ids)
         _seed_legacy_result(runtime)
 
@@ -96,7 +98,7 @@ def main() -> int:
             for token in (
                 "Заказ на фулфилмент (FBS)",
                 "Остатки на складах WB (FBO) не учитываются.",
-                "Последние N дней",
+                "N подходящих дней",
                 "Произвольный период",
                 "Целевой фулфилмент",
                 "Учитывать заказы фабрике",
@@ -126,7 +128,7 @@ def main() -> int:
             assert status["defaults"]["inbound_scope"] == "selected_facility"
             facilities = {item["facility_id"]: item for item in status["facilities"]}
             assert facilities[MOSCOW_ID]["calculation_enabled"] is True
-            assert facilities["ff-orenburg"]["calculation_enabled"] is False
+            assert facilities["ff-orenburg"]["calculation_enabled"] is True
 
             invalid_code, invalid = _post_json(
                 base + DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH,
@@ -166,7 +168,7 @@ def main() -> int:
             assert result["sales_window"]["outside_window_samples_used"] is False
             assert result["target_facility_id"] == MOSCOW_ID
             assert result["settings"]["inbound_scope"] == "selected_facility"
-            assert result["inbound_coverage"]["total_quantity"] == 15
+            assert result["inbound_coverage"]["total_quantity"] == 35
 
             all_code, all_result = _post_json(
                 base + DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH,

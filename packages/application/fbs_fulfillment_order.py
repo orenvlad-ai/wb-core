@@ -4,22 +4,17 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 import math
 from typing import Any, Mapping
 from uuid import uuid4
 
-from packages.application.demand_estimation import (
-    estimate_availability_adjusted_demand_for_window,
-)
-from packages.application.factory_order_sales_history import (
-    FactoryOrderAuthoritativeSalesHistory,
-)
+from packages.application.fbs_demand_history import load_daily_fbs_demand, estimate_fbs_demand
 from packages.application.official_fbs_stock_read import current_official_fbs_facilities
 from packages.application.factory_order_recommendation_export import (
     build_factory_order_recommendation,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
 from packages.application.supply_calculation_registry import (
     build_fbs_fulfillment_order_calculation_evidence,
@@ -58,7 +53,7 @@ DEFAULTS = {
     "sales_history_mode": SALES_HISTORY_MODE_LAST_N_DAYS,
     "sales_avg_period_days": DEFAULT_SALES_HISTORY_DAYS,
 }
-NATIONAL_DEMAND_SCOPE = "russia_total_orderCount"
+NATIONAL_DEMAND_SCOPE = "facility_fbs_orders"
 WB_STOCK_USED = False
 _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
@@ -72,25 +67,29 @@ class FbsFulfillmentOrderBlock:
         sales_funnel_history_block: SalesFunnelHistoryBlock | None = None,
         now_factory: callable | None = None,
         timestamp_factory: callable | None = None,
+        observer_db_path: Path | None = None,
     ) -> None:
         self.runtime = runtime
         self.now_factory = now_factory or _default_now_factory
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
-        history_block = sales_funnel_history_block or SalesFunnelHistoryBlock(
-            HttpBackedSalesFunnelHistorySource()
-        )
-        self.sales_history = FactoryOrderAuthoritativeSalesHistory(
-            runtime=runtime,
-            sales_funnel_history_block=history_block,
-            now_factory=self.now_factory,
-            timestamp_factory=self.timestamp_factory,
-        )
+        # Retain the former constructor argument for callers without invoking
+        # its national sales source. Warehouse demand is independent analytics.
+        self.observer_db_path = observer_db_path or runtime.runtime_dir / "fbs_observer" / "observations.sqlite3"
+
+    def _demand_history(self, planning, active_skus, report_date):
+        mappings = {}
+        for facility in planning.get("facilities", []):
+            source = facility.get("stock_source") or {}
+            if source.get("seller_warehouse_id") is not None:
+                mappings[int(source["seller_warehouse_id"])] = str(facility["facility_id"])
+        return load_daily_fbs_demand(self.observer_db_path, report_date=report_date,
+            nm_ids=[nm for nm, _ in active_skus], warehouse_facility_map=mappings)
 
     def build_status(self) -> FbsFulfillmentOrderStatus:
         active_skus = self._load_active_skus()
         planning = current_official_fbs_facilities(
             self.runtime.db_path, requested_nm_ids=[nm_id for nm_id, _ in active_skus],
-            now=self.now_factory(),
+            now=self.now_factory(), planning_max_age_seconds=72 * 3600,
         )
         facilities = self._facility_readiness(planning, active_skus)
         for facility in facilities:
@@ -98,12 +97,13 @@ class FbsFulfillmentOrderBlock:
                 selected_facility_id=str(facility["facility_id"]),
                 active_skus=active_skus,
                 inbound_scope=INBOUND_SCOPE_SELECTED_FACILITY,
+                facilities=planning.get("facilities", []),
             )
             facility["remaining_active_inbound_qty"] = inbound["total_quantity"]
             facility["remaining_active_inbound_shipment_count"] = inbound[
                 "included_shipment_count"
             ]
-        coverage = self.sales_history.describe_coverage()
+        coverage = self._demand_history(planning, active_skus, date.fromisoformat(current_business_date_iso(self.now_factory()))).coverage
         last_result = self.runtime.load_fbs_fulfillment_order_result_state()
         any_executable = any(
             bool(facility.get("calculation_enabled")) for facility in facilities
@@ -121,9 +121,8 @@ class FbsFulfillmentOrderBlock:
             wb_stock_used=WB_STOCK_USED,
             facilities=tuple(facilities),
             sales_history_coverage={
-                "earliest_available_date": coverage.earliest_available_date,
-                "latest_available_date": coverage.latest_available_date,
-                "exact_date_snapshot_count": coverage.exact_date_snapshot_count,
+                **coverage,
+                "exact_date_snapshot_count": coverage.get("complete_day_count", 0),
             },
             defaults=dict(DEFAULTS),
             last_result=last_result,
@@ -147,7 +146,7 @@ class FbsFulfillmentOrderBlock:
             raise ValueError("Нет active SKU для расчёта")
         planning = current_official_fbs_facilities(
             self.runtime.db_path, requested_nm_ids=[nm_id for nm_id, _ in active_skus],
-            now=self.now_factory(),
+            now=self.now_factory(), planning_max_age_seconds=72 * 3600,
         )
         readiness = self._facility_readiness(planning, active_skus)
         selected = next(
@@ -167,16 +166,15 @@ class FbsFulfillmentOrderBlock:
             )
 
         history_from, history_to = _resolve_sales_window(settings, report_date)
-        order_counts_by_nm = self.sales_history.load_order_count_samples_by_date(
-            date_from=history_from.isoformat(),
-            date_to=history_to.isoformat(),
-            nm_ids=[nm_id for nm_id, _ in active_skus],
-            clamp_to_coverage=False,
-        )
+        history = self._demand_history(planning, active_skus, report_date)
+        order_counts_by_nm = {nm: list(history.samples(str(selected["facility_id"]), nm).items()) for nm, _ in active_skus}
+        if settings.sales_history_mode == SALES_HISTORY_MODE_LAST_N_DAYS and history.complete_dates:
+            history_from = date.fromisoformat(history.complete_dates[0])
         inbound = self._remaining_inbound(
             selected_facility_id=str(selected["facility_id"]),
             active_skus=active_skus,
             inbound_scope=settings.inbound_scope,
+            facilities=planning.get("facilities", []),
         )
         inbound_by_nm = {
             int(key): float(value)
@@ -195,35 +193,36 @@ class FbsFulfillmentOrderBlock:
         rows: list[FbsFulfillmentOrderRow] = []
         unavailable_demand: list[int] = []
         for nm_id, sku_comment in active_skus:
-            demand = estimate_availability_adjusted_demand_for_window(
-                order_counts_by_nm.get(nm_id, []),
-                date_from=history_from,
-                date_to=history_to,
-            )
-            if demand.used_trading_day_count == 0:
+            samples = history.samples(str(selected["facility_id"]), nm_id)
+            window_values = [value for day, value in samples.items() if history_from.isoformat() <= day <= history_to.isoformat() and value is not None]
+            requested_days = settings.sales_avg_period_days or (history_to - history_from).days + 1
+            demand = estimate_fbs_demand(samples, report_date=report_date,
+                sales_avg_period_days=requested_days,
+                date_from=history_from if settings.sales_history_mode == SALES_HISTORY_MODE_CUSTOM_PERIOD else None,
+                date_to=history_to)
+            if demand.daily_demand is None:
                 unavailable_demand.append(nm_id)
-                continue
-            if demand.demand_warning:
-                warnings.append(f"nmId {nm_id}: {demand.demand_warning}")
+            if demand.warning:
+                warnings.append(f"nmId {nm_id}: {demand.warning}")
             available = int(selected_sku_values[nm_id]["available"])
             inbound_qty = float(inbound_by_nm.get(nm_id, 0.0))
-            target_qty = demand.daily_demand_total * horizon_days
+            target_qty = demand.daily_demand * horizon_days if demand.daily_demand is not None else None
             coverage_qty = float(available) + inbound_qty
-            shortage_qty = max(target_qty - coverage_qty, 0.0)
+            shortage_qty = max(target_qty - coverage_qty, 0.0) if target_qty is not None else None
             recommended = (
                 int(
                     math.ceil(shortage_qty / settings.order_batch_qty)
                     * settings.order_batch_qty
                 )
-                if shortage_qty > 0
-                else 0
+                if shortage_qty is not None and shortage_qty > 0
+                else 0 if shortage_qty is not None else None
             )
             rows.append(
                 FbsFulfillmentOrderRow(
                     nm_id=nm_id,
                     sku_comment=sku_comment,
                     recommended_order_qty=recommended,
-                    national_daily_demand=demand.daily_demand_total,
+                    national_daily_demand=demand.daily_demand,
                     target_qty=target_qty,
                     coverage_qty=coverage_qty,
                     shortage_qty=shortage_qty,
@@ -231,7 +230,7 @@ class FbsFulfillmentOrderBlock:
                     selected_facility_reserved_fbs=None,
                     selected_facility_available_fbs=available,
                     remaining_active_inbound_qty=inbound_qty,
-                    demand_estimation_mode=demand.demand_estimation_mode,
+                    demand_estimation_mode="complete_fbs_history_backfill",
                     sales_history_mode=settings.sales_history_mode,
                     sales_avg_period_days=(
                         settings.sales_avg_period_days
@@ -241,25 +240,27 @@ class FbsFulfillmentOrderBlock:
                     ),
                     sales_date_from=history_from.isoformat(),
                     sales_date_to=history_to.isoformat(),
-                    sales_calendar_day_count=demand.calendar_day_count,
-                    used_trading_day_count=demand.used_trading_day_count,
-                    excluded_day_count=demand.excluded_day_count,
-                    included_sales_dates=demand.included_dates,
-                    excluded_sales_dates=demand.excluded_dates,
+                    sales_calendar_day_count=len(demand.used_dates) + len(demand.excluded_dates) + len(demand.incomplete_dates),
+                    used_trading_day_count=len(demand.used_dates),
+                    excluded_day_count=len(demand.excluded_dates) + len(demand.incomplete_dates),
+                    included_sales_dates=demand.used_dates,
+                    excluded_sales_dates=demand.excluded_dates + demand.incomplete_dates,
                     baseline_daily_sales=demand.baseline_daily_sales,
                     valid_day_threshold=demand.valid_day_threshold,
-                    raw_window_daily_demand=demand.raw_window_daily_demand,
-                    demand_warning=demand.demand_warning,
-                    demand_notes=demand.demand_notes,
+                    raw_window_daily_demand=(sum(window_values) / len(window_values) if window_values else None),
+                    demand_warning=demand.warning,
+                    demand_notes=demand.notes,
+                    facility_daily_demand=demand.daily_demand,
+                    demand_available=demand.daily_demand is not None,
+                    incomplete_sales_dates=demand.incomplete_dates,
                 )
             )
         if unavailable_demand:
-            raise ValueError(
-                "Недостаточно валидной истории orderCount внутри выбранного периода "
-                "для nmId: " + ", ".join(str(item) for item in unavailable_demand)
-            )
+            warnings.append("Нет достоверного спроса для nmId: " + ", ".join(map(str, unavailable_demand)) + "; эти товары исключены из рекомендации к заказу.")
+        if planning.get("warning"):
+            warnings.append(str(planning["warning"]))
 
-        total_qty = sum(row.recommended_order_qty for row in rows)
+        total_qty = sum(row.recommended_order_qty for row in rows if row.recommended_order_qty is not None)
         used_counts = [row.used_trading_day_count for row in rows]
         summary = FbsFulfillmentOrderSummary(
             total_qty=total_qty,
@@ -285,12 +286,14 @@ class FbsFulfillmentOrderBlock:
             "actual_date_to": history_to.isoformat(),
             "inclusive": True,
             "calendar_day_count": (history_to - history_from).days + 1,
-            "outside_window_samples_used": False,
+            "outside_window_samples_used": settings.sales_history_mode == SALES_HISTORY_MODE_LAST_N_DAYS,
+            "source_coverage": history.coverage,
+            "unknown_nm_ids": unavailable_demand,
             "used_trading_days_min": summary.used_trading_days_min,
             "used_trading_days_max": summary.used_trading_days_max,
         }
         result = FbsFulfillmentOrderResult(
-            status="success",
+            status="partial" if unavailable_demand else "success",
             calculation_id=uuid4().hex,
             calculated_at=self.timestamp_factory(),
             report_date=report_date.isoformat(),
@@ -367,10 +370,6 @@ class FbsFulfillmentOrderBlock:
                 or by_nm_id[nm_id].get("available") is None
                 if nm_id not in inapplicable_nm_ids
             )
-            is_moscow = (
-                str(raw.get("city") or "").strip() == MOSCOW_CITY
-                or str(raw.get("name") or "").strip() == "FF Москва"
-            )
             blockers: list[str] = []
             if raw.get("source_blocker"):
                 blockers.append(str(raw["source_blocker"]))
@@ -381,11 +380,6 @@ class FbsFulfillmentOrderBlock:
                 blockers.append(
                     "SKU явно неприменимы к выбранному FBS facility: "
                     + ", ".join(str(item) for item in inapplicable_nm_ids)
-                )
-            if not is_moscow:
-                blockers.append(
-                    "MVP закрепляет общероссийский спрос только за FF Москва; "
-                    "второй независимый расчёт на 100% спроса запрещён"
                 )
             facilities.append(
                 {
@@ -413,10 +407,13 @@ class FbsFulfillmentOrderBlock:
         selected_facility_id: str,
         active_skus: list[tuple[int, str]],
         inbound_scope: str,
+        facilities: list[dict[str, Any]],
     ) -> dict[str, Any]:
         active_nm_ids = {nm_id for nm_id, _ in active_skus}
         totals: dict[int, float] = {}
         evidence_rows: list[dict[str, Any]] = []
+        moscow_id = next((str(f["facility_id"]) for f in facilities
+            if str(f.get("city") or "").strip() == MOSCOW_CITY or str(f.get("name") or "").strip() == "FF Москва"), "")
         unassigned_count = 0
         explicit_other_count = 0
         unassigned_quantity = 0.0
@@ -455,9 +452,10 @@ class FbsFulfillmentOrderBlock:
                 unassigned_quantity += shipment_qty
             elif explicit_target != selected_facility_id:
                 explicit_other_quantity += shipment_qty
+            effective_target = explicit_target or moscow_id
             include_shipment = (
                 inbound_scope == INBOUND_SCOPE_ALL_ACTIVE
-                or explicit_target == selected_facility_id
+                or effective_target == selected_facility_id
             )
             if not include_shipment:
                 continue
@@ -468,9 +466,9 @@ class FbsFulfillmentOrderBlock:
                     {
                         "shipment_id": str(shipment.get("shipment_id") or ""),
                         "order_status": status,
-                        "target_facility_id": explicit_target,
+                        "target_facility_id": effective_target,
                         "target_assignment_source": (
-                            "explicit" if explicit_target else "unassigned"
+                            "explicit" if explicit_target else "default_fbs_moscow"
                         ),
                         "remaining_quantity": shipment_qty,
                         "quantity_by_nm_id": quantity_by_nm,
@@ -490,14 +488,14 @@ class FbsFulfillmentOrderBlock:
             "included_shipment_count": len(evidence_rows),
             "unassigned_target_active_count": unassigned_count,
             "unassigned_target_excluded_count": (
-                0 if inbound_scope == INBOUND_SCOPE_ALL_ACTIVE else unassigned_count
+                0 if inbound_scope == INBOUND_SCOPE_ALL_ACTIVE or selected_facility_id == moscow_id else unassigned_count
             ),
             "unassigned_target_included_count": (
-                unassigned_count if inbound_scope == INBOUND_SCOPE_ALL_ACTIVE else 0
+                unassigned_count if inbound_scope == INBOUND_SCOPE_ALL_ACTIVE or selected_facility_id == moscow_id else 0
             ),
             "unassigned_target_eligible_quantity": unassigned_quantity,
-            "unassigned_target_included": inbound_scope == INBOUND_SCOPE_ALL_ACTIVE,
-            "legacy_null_target_fallback_moscow_count": 0,
+            "unassigned_target_included": inbound_scope == INBOUND_SCOPE_ALL_ACTIVE or selected_facility_id == moscow_id,
+            "legacy_null_target_fallback_moscow_count": unassigned_count if selected_facility_id == moscow_id else 0,
             "explicit_other_facility_active_count": explicit_other_count,
             "explicit_other_facility_excluded_count": (
                 0 if inbound_scope == INBOUND_SCOPE_ALL_ACTIVE else explicit_other_count
@@ -535,7 +533,7 @@ class FbsFulfillmentOrderBlock:
             build_factory_order_recommendation(
                 rows=(
                     (item.nm_id, item.sku_comment, item.recommended_order_qty)
-                    for item in result.rows
+                    for item in result.rows if item.recommended_order_qty is not None
                 ),
                 total_quantity=result.summary.total_qty,
                 estimated_weight=result.summary.estimated_weight,

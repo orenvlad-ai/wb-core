@@ -73,6 +73,7 @@ def main() -> int:
         assert len(active_nm_ids) >= 2
         _seed_facilities(runtime, active_nm_ids)
         _seed_sales_history(runtime, active_nm_ids)
+        _seed_fbs_demand(runtime, active_nm_ids)
         _assert_target_facility_validation(runtime)
         _seed_shipments(runtime, active_nm_ids)
 
@@ -91,10 +92,10 @@ def main() -> int:
         assert facilities[MOSCOW_ID]["calculation_enabled"] is True
         assert facilities[MOSCOW_ID]["available"] == 100 + 200 * (len(active_nm_ids) - 1)
         assert facilities[MOSCOW_ID]["stock_source"]["captured_at"] == NOW_TEXT
-        assert facilities[MOSCOW_ID]["remaining_active_inbound_qty"] == 15
-        assert facilities[ORENBURG_ID]["calculation_enabled"] is False
+        assert facilities[MOSCOW_ID]["remaining_active_inbound_qty"] == 35
+        assert facilities[ORENBURG_ID]["calculation_enabled"] is True
         assert facilities[ORENBURG_ID]["available"] == 40 * len(active_nm_ids)
-        assert "только за FF Москва" in " ".join(facilities[ORENBURG_ID]["blockers"])
+        assert facilities[ORENBURG_ID]["blockers"] == []
 
         last_n = block.calculate(
             {
@@ -110,28 +111,28 @@ def main() -> int:
         )
         assert last_n.horizon_days == 20
         assert last_n.settings.inbound_scope == "selected_facility"
-        assert last_n.sales_window["actual_date_from"] == "2026-04-04"
+        assert last_n.sales_window["actual_date_from"] == "2026-04-02"
         assert last_n.sales_window["actual_date_to"] == "2026-04-17"
-        assert last_n.sales_window["calendar_day_count"] == 14
-        assert last_n.sales_window["outside_window_samples_used"] is False
+        assert last_n.sales_window["calendar_day_count"] == 16
+        assert last_n.sales_window["outside_window_samples_used"] is True
         rows = {row.nm_id: row for row in last_n.rows}
         first = rows[active_nm_ids[0]]
         second = rows[active_nm_ids[1]]
         assert first.selected_facility_physical_fbs is None
         assert first.selected_facility_reserved_fbs is None
         assert first.selected_facility_available_fbs == 100
-        assert first.remaining_active_inbound_qty == 15
+        assert first.remaining_active_inbound_qty == 35
         assert second.remaining_active_inbound_qty == 0
-        assert first.coverage_qty == 115
+        assert first.coverage_qty == 135
         assert first.recommended_order_qty == math.ceil(
-            max(first.national_daily_demand * 20 - 115, 0) / 50
+            max(first.national_daily_demand * 20 - 135, 0) / 50
         ) * 50
         assert last_n.wb_stock_used is False
         assert "wb" not in last_n.inbound_coverage
-        assert last_n.inbound_coverage["unassigned_target_excluded_count"] == 1
-        assert last_n.inbound_coverage["legacy_null_target_fallback_moscow_count"] == 0
+        assert last_n.inbound_coverage["unassigned_target_excluded_count"] == 0
+        assert last_n.inbound_coverage["legacy_null_target_fallback_moscow_count"] == 1
         assert last_n.inbound_coverage["scope"] == "selected_facility"
-        assert last_n.inbound_coverage["total_quantity"] == 15
+        assert last_n.inbound_coverage["total_quantity"] == 35
 
         all_active = block.calculate(
             {
@@ -188,11 +189,11 @@ def main() -> int:
         assert "2026-04-09" not in custom_row.included_sales_dates
         assert "2026-04-13" not in custom_row.included_sales_dates
 
-        _expect_error(
-            block,
-            {"target_facility_id": ORENBURG_ID},
-            "заблокирован",
-        )
+        orenburg = block.calculate({"target_facility_id": ORENBURG_ID})
+        assert orenburg.status == "success"
+        assert orenburg.rows[0].national_daily_demand == 5
+        assert orenburg.rows[0].remaining_active_inbound_qty == 500
+        assert orenburg.inbound_coverage["unassigned_target_excluded_count"] == 1
         for invalid_settings, expected in (
             ({"production_days": 0}, "больше нуля"),
             ({"ff_safety_days": -1}, "не может быть отрицательным"),
@@ -234,21 +235,16 @@ def main() -> int:
             },
             "раньше даты расчёта",
         )
-        _expect_error(
-            block,
-            {
-                "target_facility_id": MOSCOW_ID,
-                "sales_history_mode": "custom_period",
-                "sales_date_from": "2026-02-01",
-                "sales_date_to": "2026-02-02",
-            },
-            "authoritative sales history source",
-        )
+        unavailable = block.calculate({"target_facility_id": MOSCOW_ID,
+            "sales_history_mode": "custom_period", "sales_date_from": "2026-02-01", "sales_date_to": "2026-02-02"})
+        assert unavailable.status == "partial"
+        assert all(row.recommended_order_qty is None and not row.demand_available for row in unavailable.rows)
+        assert unavailable.summary.total_qty == 0
 
         registry = runtime.list_supply_calculation_registry(
             calculation_type="fbs_fulfillment_order"
         )
-        assert registry["pagination"]["total"] == 3
+        assert registry["pagination"]["total"] == 5
         record = runtime.load_supply_calculation_registry_record(custom.calculation_id)
         assert record is not None
         assert record["calculation_type"] == "fbs_fulfillment_order"
@@ -311,6 +307,21 @@ def main() -> int:
         assert len(all_export_rows[1:1 + len(active_nm_ids)]) == len(active_nm_ids)
         assert all_export_rows[-3][3] == all_active.summary.total_qty
         assert all_record["payload"]["inbound_coverage"]["total_quantity"] == 535
+        # Source incompleteness must affect one SKU only and never become a
+        # recommendation of zero units in either the table or exported order.
+        from packages.application.wb_fbs_orders import STATUS_CURRENT_TABLE, OBSERVATIONS_TABLE
+        with sqlite3.connect(runtime.runtime_dir/"fbs_observer"/"observations.sqlite3") as observer:
+            observer.execute(f"UPDATE {STATUS_CURRENT_TABLE} SET supplier_status=NULL,wb_status=NULL WHERE order_id IN (SELECT order_id FROM {OBSERVATIONS_TABLE} WHERE nm_id=? AND warehouse_id=1 AND source_created_at LIKE '2026-04-10%')",(active_nm_ids[0],))
+        isolated = block.calculate({"target_facility_id": MOSCOW_ID,
+            "sales_history_mode": "custom_period", "sales_date_from": "2026-04-10", "sales_date_to": "2026-04-10"})
+        assert isolated.status == "partial"
+        isolated_rows = {r.nm_id:r for r in isolated.rows}
+        assert isolated_rows[active_nm_ids[0]].recommended_order_qty is None
+        assert isolated_rows[active_nm_ids[1]].recommended_order_qty is not None
+        body, _, _ = runtime.load_supply_calculation_registry_export(isolated.calculation_id)
+        exported = read_first_sheet_rows(body)
+        assert str(active_nm_ids[0]) not in [r[0] for r in exported[1:-3] if r]
+        assert str(active_nm_ids[1]) in [r[0] for r in exported[1:-3] if r]
 
     print("fbs_fulfillment_order_supply_smoke: ok")
     return 0
@@ -512,6 +523,24 @@ def _seed_sales_history(
         ),
         captured_at=NOW_TEXT,
     )
+
+
+def _seed_fbs_demand(runtime, active_nm_ids):
+    from apps.fbs_demand_history_smoke import seed_observer, receipt
+    orders=[]
+    oid=0
+    for day in range(1,18):
+        for index,nm in enumerate(active_nm_ids):
+            value=20+index
+            if day in {10,12}: value=10+index
+            elif day==11: value=1
+            elif day in {9,13}: value=40
+            for warehouse,count in [(1,value),(2,5)]:
+                for _ in range(count):
+                    oid+=1
+                    orders.append((oid,f"2026-04-{day:02d}",warehouse,nm,"complete","sold",True))
+    seed_observer(runtime.runtime_dir/"fbs_observer"/"observations.sqlite3",
+        [receipt("2026-04-01","2026-04-18")],orders)
 
 
 def _assert_target_facility_validation(

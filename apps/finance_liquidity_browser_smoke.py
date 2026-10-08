@@ -255,9 +255,8 @@ def main() -> None:
                 draft = page.locator(".history-row", has_text="Тестовый приход")
                 expect(draft).to_contain_text("Черновик")
                 draft.locator("[data-post-draft]").click()
-                page.wait_for_timeout(200)
-                if "Черновик" in draft.inner_text():
-                    raise AssertionError(f"income draft did not post: {page.locator('[data-error]').inner_text()}")
+                # Posting refreshes the history asynchronously; wait for its
+                # committed state rather than rejecting a still-pending reload.
                 expect(draft).to_contain_text("Проведено")
                 expect(draft).to_contain_text("+1\u202f500,00")
                 expect(failed_expense).to_contain_text("−1\u202f200,00")

@@ -43,11 +43,11 @@ class FbsFulfillmentOrderSettings:
 class FbsFulfillmentOrderRow:
     nm_id: int
     sku_comment: str
-    recommended_order_qty: int
-    national_daily_demand: float
-    target_qty: float
+    recommended_order_qty: int | None
+    national_daily_demand: float | None
+    target_qty: float | None
     coverage_qty: float
-    shortage_qty: float
+    shortage_qty: float | None
     selected_facility_physical_fbs: int | None
     selected_facility_reserved_fbs: int | None
     selected_facility_available_fbs: int
@@ -64,9 +64,12 @@ class FbsFulfillmentOrderRow:
     excluded_sales_dates: tuple[str, ...]
     baseline_daily_sales: float
     valid_day_threshold: float
-    raw_window_daily_demand: float
+    raw_window_daily_demand: float | None
     demand_warning: str
     demand_notes: tuple[str, ...]
+    facility_daily_demand: float | None = None
+    demand_available: bool = True
+    incomplete_sales_dates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
