@@ -214,7 +214,50 @@ class InitialEmptyPolicy:
         if (facts.get('account_key')!=app.key or facts.get('generation')!=self.generation
                 or record and timestamp(intent['created_at'])<timestamp(record['installed_at'])):return False
         daily=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cleaner_daily_occurrences'").fetchone()
-        return not (batch and daily and c.execute('SELECT 1 FROM cleaner_daily_occurrences WHERE account=? AND batch_id=?',(app.key,batch)).fetchone())
+        occurrence=c.execute('SELECT * FROM cleaner_daily_occurrences WHERE account=? AND batch_id=?',(app.key,batch)).fetchone() if batch and daily else None
+        parent=c.execute("SELECT facts,created_at FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence LIMIT 1",(app.key,batch)).fetchone() if batch else None
+        # A native scheduled child needs both halves of the durable binding.
+        # A missing occurrence must never disguise a scheduled batch as manual.
+        if occurrence or parent and json.loads(parent['facts']).get('daily_occurrence'):
+            return self._daily_intent(c,run,scan,facts,occurrence,parent,record)
+        return True
+
+    def _daily_intent(self,c,run,scan,facts,occurrence,parent,record):
+        """Admit only the exact child of a still-authorized native daily slot."""
+        from packages.application.search_cluster_cleaner import batch_child_id
+        from packages.application.search_cluster_cleaner_daily import policy_ready
+        app=self.cleaner
+        if not occurrence or not parent or not policy_ready(app.store.registry.runtime_dir)[0]:return False
+        initial=json.loads(parent['facts']);binding=initial.get('daily_occurrence')
+        if binding!=dict(schedule_id=occurrence['schedule_id'],local_date=occurrence['local_date']):return False
+        schedule=c.execute('SELECT * FROM cleaner_daily_schedules WHERE account=? AND schedule_id=?',(app.key,occurrence['schedule_id'])).fetchone()
+        if not schedule or not schedule['enabled'] or occurrence['state']!='batch_queued':return False
+        details=json.loads(occurrence['details']);settings=app._settings(c)
+        expected=dict(owner=schedule['owner'],authority=schedule['actor_authority'],generation=schedule['generation'],slot_created_at=schedule['created_at'])
+        if (settings['enabled'] or not settings['baseline_ready'] or settings['generation']!=self.generation
+                or schedule['generation']!=self.generation or any(details.get(k)!=v for k,v in expected.items())
+                or initial.get('account_key')!=app.key or initial.get('generation')!=self.generation
+                or initial.get('actor')!=schedule['owner'] or initial.get('actor_authority')!=schedule['actor_authority']
+                or facts.get('actor')!=initial.get('actor') or facts.get('actor_authority')!=initial.get('actor_authority')
+                or schedule['actor_authority'] not in {'configured_owner','bootstrap_operator'}
+                or schedule['actor_authority']=='configured_owner' and schedule['owner']!=app.owner_username.strip().casefold()):return False
+        batch=facts['batch_id'];index=facts.get('batch_index');items=initial.get('items')
+        request=c.execute("SELECT actor FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-batches'",(app.key,batch)).fetchone()
+        latest=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence DESC LIMIT 1",(app.key,batch)).fetchone()
+        current=json.loads(latest['facts']) if latest else {}
+        if (not request or request['actor']!=initial.get('actor') or current.get('state') not in {'queued','running','retry_wait'}
+                or current.get('current_index')!=index or type(index) is not int or not isinstance(items,list)
+                or not 0<=index<len(items) or facts.get('job_id')!=batch_child_id(batch,index)
+                or facts.get('scan_run_id')!=scan
+                or str(index) in current.get('item_updates',{})):return False
+        item=items[index]
+        declared=[dict(target=f"{item['advert_id']}:{item['nm_id']}",advert_id=item['advert_id'],nm_id=item['nm_id'])]
+        targets=json.loads(run['targets'])
+        if (facts.get('advert_id')!=item['advert_id'] or facts.get('nm_id')!=item['nm_id']
+                or run['kind']=='scan' and targets!=declared
+                or run['kind']=='manual_apply' and (not targets or {row.get('target') for row in targets}!={declared[0]['target']})):return False
+        if record and (timestamp(parent['created_at'])<timestamp(record['installed_at']) or timestamp(run['created_at'])<timestamp(record['installed_at'])):return False
+        return True
 
     def resolve(self,snapshot):
         app=self.cleaner;t=snapshot.target

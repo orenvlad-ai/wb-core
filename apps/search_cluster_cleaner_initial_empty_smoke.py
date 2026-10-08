@@ -45,11 +45,38 @@ def missing_when_empty(f,always=False):
 def scan(f,request_id):
     t=f.source.catalog()[0][0]
     job=f.app.start_manual_clean(dict(request_id=request_id,advert_id=11,nm_id=101),OWNER)
+    return execute_scan(f,t,job)
+
+
+def execute_scan(f,t,job):
     f.source.initial_empty_policy=InitialEmptyPolicy(f.app,f.guard.directory,'g1',job['run_id'])
     worker=ManualCleanerWorker(f.app,f.source,f.guard,generation='g1')
     before=worker.preview(run_id=job['run_id'],targets=[t])
-    result=worker.execute(run_id=job['run_id'],targets=[t],expected_prestate=before['prestate_sha256'],expected_candidate=before['candidate_sha256'],production_operation_id=request_id+'-scan')
+    result=worker.execute(run_id=job['run_id'],targets=[t],expected_prestate=before['prestate_sha256'],expected_candidate=before['candidate_sha256'],production_operation_id=job['job_id']+'-scan')
     return t,job,result
+
+
+def daily_job(f):
+    from datetime import datetime
+    from packages.application.search_cluster_cleaner_daily import DailyCleanerScheduler,save_schedules
+    from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator
+    policy=f.store.registry.runtime_dir/'.auto-updates-policy.json'
+    policy.write_text(json.dumps(dict(master_desired=True)))
+    with f.store.read() as c:revision=f.app._settings(c)['revision']
+    save_schedules(f.app,OWNER,'g1',dict(request_id='synthetic-native-daily-schedule',expected_revision=revision,
+        schedules=[dict(id='first-fill',time='05:01',enabled=True)]))
+    f.clock.advance(60)
+    admitted=[dict(advert_id=11,nm_id=101,state='verified')]
+    scheduler=DailyCleanerScheduler(f.app,generation='g1',source_factory=lambda:f.source,
+        fixture_admission=admitted,now=lambda:datetime.fromisoformat(f.clock()))
+    result=scheduler.tick()
+    assert result['state']=='queued',result
+    parent=BatchCleanerCoordinator(f.app,generation='g1',source_factory=lambda:f.source,fixture_admission=admitted)
+    child=f.app.manual_job(parent.tick()['items'][0]['job_id'],OWNER)
+    child['run_id']=child['scan_run_id']
+    t=f.source.catalog()[0][0]
+    f.source.initial_empty_policy=InitialEmptyPolicy(f.app,f.guard.directory,'g1',child['run_id'])
+    return t,child,scheduler,parent
 
 
 def write(f,t,job,hook=None):
@@ -207,7 +234,7 @@ class InitialEmptyTests(unittest.TestCase):
             f.app.rules_digest='f'*64 # A foreign/stranded claim never uses stale bootstrap bindings.
             self.assertFalse(f.source.snapshot(t).complete);self.assertEqual(f.fake.writes,[])
 
-    def test_empty_queries_repeat_without_consumption_and_daily_cannot_use_evidence(self):
+    def test_empty_queries_repeat_without_consumption_and_unbound_daily_is_denied(self):
         with fixture() as f:
             f.fake.targets[11].update(minus=[],stats=[]);install(f);missing_when_empty(f)
             for index in range(2):
@@ -232,6 +259,143 @@ class InitialEmptyTests(unittest.TestCase):
             f.source.initial_empty_policy=InitialEmptyPolicy(f.app,f.guard.directory,'g1',child['scan_run_id'])
             self.assertFalse(f.source.snapshot(t).complete)
             self.assertEqual(journal(f.guard.directory)['pairs']['11:101']['state'],'available');self.assertEqual(f.fake.writes,[])
+
+    def test_native_daily_first_fill_once_and_authoritative_followup(self):
+        with fixture() as f:
+            f.fake.targets[11].update(minus=[],stats=[Q1]);install(f);missing_when_empty(f)
+            t,job,scheduler,parent=daily_job(f)
+            t,job,result=execute_scan(f,t,job)
+            self.assertEqual(result['summary']['would_exclude'],1)
+            run_id,result=write(f,t,job)
+            self.assertEqual(result['summary']['confirmed_pilot'],1)
+            self.assertEqual(f.fake.writes,[dict(advert_id=11,nm_id=101,norm_queries=[Q1])])
+            self.assertEqual(f.rows('cleaner_write_operations')[0]['dispatch_count'],1)
+            self.assertNotEqual(journal(f.guard.directory)['pairs']['11:101']['state'],'available')
+            self.assertTrue(f.source.snapshot(t).complete) # Full nonempty WB state.
+            f.fake.targets[11]['minus']=[]
+            self.assertFalse(f.source.snapshot(t).complete)
+            self.assertEqual(len(f.fake.writes),1)
+
+    def test_native_daily_full_coordinator_stage_e_receipt(self):
+        from datetime import datetime,timezone
+        from apps.search_cluster_cleaner_stage_e_recovery_smoke import Sandbox,RUNTIME_SHA,GENERATION,semantic_fixture_card
+        from apps.search_cluster_cleaner_onboarding_smoke import setup,write_private
+        from apps.search_cluster_cleaner_write_fixture import FakeWB,Clock
+        from apps import search_cluster_cleaner_stage_e as stage_e
+        from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource,AccountLimiter
+        from packages.adapters.official_api_runtime import OfficialApiRuntimeConfig
+        from packages.application.change_registry import ChangeRegistryRepository
+        from packages.application.search_cluster_cleaner_daily import DailyCleanerScheduler,save_schedules,history
+        from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator
+        from packages.application.search_cluster_cleaner_self_service import LocalStageEAdapter
+        with Sandbox() as box:
+            setup(box);clock=Clock();clock.base=datetime(2026,9,24,tzinfo=timezone.utc)
+            service=box.service();service.clock=clock
+            ChangeRegistryRepository(box.runtime).initialize_schema()
+            body=build_declaration(cleaner=service,evidence_id='synthetic-daily-owner-proof',pairs=[dict(advert_id=11,nm_id=101)],
+                runtime_sha=RUNTIME_SHA,confirmed_at=clock(),confirmation='Owner confirmed this exact pair never had minus phrases.')
+            request=dict(mode='initial_empty',evidence_id=body['evidence_id'],evidence_sha256=write_private(box.admission/'initial-empty.synthetic-daily-owner-proof.json',body))
+            args=dict(operation_id='synthetic-daily-install',request=request,cleaner=service,directory=box.admission,generation=GENERATION,runtime_sha=RUNTIME_SHA)
+            preview=execute(action='preview',**args)
+            execute(action='apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],**args)
+            clock.advance(1);(box.runtime/'.auto-updates-policy.json').write_text(json.dumps(dict(master_desired=True)))
+            with service.store.read() as c:revision=service._settings(c)['revision']
+            save_schedules(service,OWNER,GENERATION,dict(request_id='synthetic-integrated-daily-slot',expected_revision=revision,
+                schedules=[dict(id='first-fill',time='05:01',enabled=True)]))
+            fake=FakeWB();fake.targets[11].update(minus=[],stats=[Q1])
+            original_response=fake.response
+            def omit_empty(method,path,payload):
+                status,value=original_response(method,path,payload)
+                return (200,dict(items=[])) if path.endswith('/get-minus') and not fake.targets[11]['minus'] else (status,value)
+            fake.response=omit_empty
+            with fake.server() as url:
+                source=CleanerWbSource(account=service.account,runtime=OfficialApiRuntimeConfig('synthetic',url,2),fixture=True,
+                    clock=clock,monotonic=clock.monotonic,limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
+                card=dict(semantic_fixture_card(),subject_id=1571);original_cleaner=stage_e.KeywordCleaner
+                with patch.object(CleanerWbSource,'from_env',return_value=source),patch.object(stage_e,'fetch_current_card',return_value=card), \
+                     patch.object(stage_e,'KeywordCleaner',side_effect=lambda *args,**kwargs:original_cleaner(*args,clock=clock,**kwargs)):
+                    admitted=[dict(advert_id=11,nm_id=101,state='verified')]
+                    scheduler=DailyCleanerScheduler(service,generation=GENERATION,source_factory=lambda:source,fixture_admission=admitted,now=lambda:datetime.fromisoformat(clock()))
+                    parent=BatchCleanerCoordinator(service,generation=GENERATION,source_factory=lambda:source,fixture_admission=admitted)
+                    child=ManualCleanerCoordinator(service,LocalStageEAdapter(runtime_dir=box.runtime,env_file=box.env,admission_dir=box.admission))
+                    clock.advance(60);self.assertEqual(scheduler.tick()['selected_count'],1)
+                    for _ in range(60):
+                        if parent.pending_batches():parent.tick()
+                        if child.pending_jobs():child.tick()
+                        result=scheduler.reconcile_finished()
+                        if result:break
+                    else:self.fail('native daily coordinator did not finish')
+                    self.assertEqual(result['state'],'complete')
+                    receipt=history(service,OWNER)['items'][0]
+                    self.assertEqual((receipt['checked_campaigns'],receipt['checked_keys'],receipt['excluded']),(1,1,1))
+                    self.assertEqual(len(fake.writes),1)
+                    self.assertEqual(journal(box.admission)['pairs']['11:101']['state'],'claimed')
+                    self.assertTrue(source.snapshot(source.catalog()[0][0]).complete)
+                    self.assertEqual(journal(box.admission)['pairs']['11:101']['state'],'closed')
+                    self.assertIsNone(scheduler.tick())
+                    self.assertEqual(len(fake.writes),1)
+
+    def test_native_daily_no_change_preserves_evidence(self):
+        with fixture() as f:
+            f.fake.targets[11].update(minus=[],stats=['стекло iphone 16 pro max']);install(f);missing_when_empty(f)
+            t,job,_,_=daily_job(f)
+            _,_,result=execute_scan(f,t,job)
+            self.assertEqual(result['state'],'complete');self.assertEqual(result['summary']['would_exclude'],0)
+            self.assertEqual(journal(f.guard.directory)['pairs']['11:101']['state'],'available')
+            self.assertEqual(f.fake.writes,[])
+
+    def test_native_daily_binding_and_policy_fail_closed(self):
+        for drift in ('disabled','owner','generation','slot','occurrence','pair','terminal','old','paused','maintenance','legacy_enabled'):
+            with self.subTest(drift=drift),fixture() as f:
+                f.fake.targets[11].update(minus=[],stats=[Q1]);install(f);missing_when_empty(f)
+                t,job,_,_=daily_job(f)
+                with f.store.transaction() as c:
+                    if drift=='disabled':c.execute('UPDATE cleaner_daily_schedules SET enabled=0')
+                    elif drift=='owner':c.execute("UPDATE cleaner_daily_schedules SET owner='foreign'")
+                    elif drift=='generation':c.execute("UPDATE cleaner_daily_schedules SET generation='foreign'")
+                    elif drift=='slot':c.execute("UPDATE cleaner_daily_schedules SET created_at='2026-09-11T01:00:00Z'")
+                    elif drift=='occurrence':c.execute('DELETE FROM cleaner_daily_occurrences')
+                    elif drift=='pair':
+                        c.execute('UPDATE cleaner_runs SET targets=? WHERE run_id=?',
+                            (canonical([dict(target='11:102',advert_id=11,nm_id=102)]),job['run_id']))
+                    elif drift=='terminal':f.app._event(c,'self_service_batch_stage',dict(batch_id=job['batch_id'],state='complete'))
+                    elif drift=='old':c.execute("UPDATE cleaner_runs SET created_at='2026-09-10T00:00:00Z' WHERE run_id=?",(job['run_id'],))
+                    elif drift=='legacy_enabled':c.execute('UPDATE cleaner_settings SET enabled=1')
+                if drift=='paused':(f.store.registry.runtime_dir/'.auto-updates-policy.json').write_text(json.dumps(dict(master_desired=False)))
+                if drift=='maintenance':(f.store.registry.runtime_dir/'.business-data-maintenance.json').write_text(json.dumps(dict(phase='held')))
+                self.assertFalse(f.source.snapshot(t).complete)
+                self.assertEqual(journal(f.guard.directory)['pairs']['11:101']['state'],'available')
+                self.assertEqual(f.fake.writes,[])
+
+    def test_native_daily_pause_after_scan_prevents_first_fill(self):
+        with fixture() as f:
+            f.fake.targets[11].update(minus=[],stats=[Q1]);install(f);missing_when_empty(f)
+            t,job,_,_=daily_job(f);execute_scan(f,t,job)
+            (f.store.registry.runtime_dir/'.auto-updates-policy.json').write_text(json.dumps(dict(master_desired=False)))
+            with self.assertRaises(CleanerError):write(f,t,job)
+            self.assertEqual(f.fake.writes,[])
+            self.assertEqual(journal(f.guard.directory)['pairs']['11:101']['state'],'available')
+
+    def test_native_daily_crash_or_ambiguous_write_never_rearms(self):
+        for mode in ('crash','timeout'):
+            with self.subTest(mode=mode),fixture() as f:
+                f.fake.targets[11].update(minus=[],stats=[Q1]);install(f);missing_when_empty(f,always=True)
+                t,job,_,_=daily_job(f);execute_scan(f,t,job)
+                if mode=='crash':
+                    def crash(stage,operation):
+                        if stage=='after_prepare':raise Crash()
+                    with self.assertRaises(Crash):write(f,t,job,crash)
+                    self.assertEqual(f.fake.writes,[])
+                else:
+                    f.fake.mode='timeout';run_id,result=write(f,t,job)
+                    self.assertEqual(len(f.fake.writes),1);self.assertEqual(result['summary']['confirmed_pilot'],0)
+                    from packages.application.search_cluster_cleaner_writer import CleanerReadback
+                    f.clock.advance(100);CleanerReadback(f.app,f.source,generation='g1').tick()
+                    self.assertEqual(len(f.fake.writes),1)
+                self.assertNotEqual(journal(f.guard.directory)['pairs']['11:101']['state'],'available')
+                f.fake.targets[11]['minus']=[]
+                f.source.initial_empty_policy=InitialEmptyPolicy(f.app,f.guard.directory,'g1',job['run_id'])
+                self.assertFalse(f.source.snapshot(t).complete)
 
     def test_nonempty_list_with_omitted_pair_closes_durably_and_real_minus_preserved(self):
         with fixture() as f:
