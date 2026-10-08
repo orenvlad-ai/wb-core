@@ -1,7 +1,7 @@
 """Actual Chromium/native CNY HTTP, lost reply and close-tab recovery."""
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import json,sys
+import hashlib,json,sqlite3,sys
 from playwright.sync_api import sync_playwright,expect
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from apps.operator_supplier_financial_native_smoke import setup
@@ -10,6 +10,23 @@ from apps.operator_supplier_shipments_http_smoke import server_for,stop,request
 from packages.adapters import registry_upload_http_entrypoint as http
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application import operator_cny_documents as cny
+
+
+def database_image(path):
+    # A raw main-file hash is not a SQLite snapshot in WAL mode: an already
+    # committed POST may checkpoint after the later GET. Compare one pinned,
+    # query-only image of all native tables and schema instead.
+    conn=sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)
+    try:
+        conn.execute('PRAGMA query_only=ON');conn.execute('BEGIN')
+        schema=conn.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+        data=[]
+        for kind,name,_,_ in schema:
+            if kind=='table':
+                rows=conn.execute('SELECT * FROM "'+name.replace('"','""')+'"').fetchall()
+                data.append((name,sorted(repr(row) for row in rows)))
+        return hashlib.sha256(repr((schema,data)).encode()).hexdigest()
+    finally:conn.close()
 
 
 def main():
@@ -70,9 +87,9 @@ def main():
                     approval_reference='synthetic-fixture',actor='fixture',reason='synthetic maintenance regression')
                 # Matching received 423 is definitive, and does not create a DB receipt.
                 context.unroute('**/cny-account/opening-balance',lose)
-                before=rt.db_path.read_bytes()
+                before=database_image(rt.db_path)
                 refused=submit(amount='300');assert refused.get('error') and not page.evaluate('testLocked')
-                assert rt.db_path.read_bytes()==before
+                assert database_image(rt.db_path)==before
                 def lose_blocked(route):
                     writes.append(route.request.post_data_json['request_id']);reply=route.fetch();assert reply.status==423;route.abort('failed')
                 context.route('**/cny-account/opening-balance',lose_blocked)
@@ -82,7 +99,8 @@ def main():
                 page.locator('[data-supply-mode-button="cny-account"]').click()
                 expect(page.locator('#cnySourceReceipt')).to_contain_text('Проверяем сохранение')
                 expect(page.locator('#cnyOpeningSaveButton')).to_be_disabled()
-                assert len(writes)==count and rt.db_path.read_bytes()==before
+                assert len(writes)==count, ('unexpected resend', count, len(writes))
+                assert database_image(rt.db_path)==before, 'reload changed native DB after maintenance refusal'
                 browser.close()
         finally:stop(server,thread)
     print('Actual Chromium CNY lost reply, foreign domain non-green, close-tab same-ID GET-only, definitive refusal/corrected new identity and no duplicate source: OK')

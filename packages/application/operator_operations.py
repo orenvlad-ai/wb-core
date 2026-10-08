@@ -82,12 +82,14 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
                         (*params, value), reader) for table, key, columns, where, params, reader in sources]
         total = sum(conn.execute(f'SELECT count(*) FROM {table} WHERE {where}', params).fetchone()[0]
                     for table, _, _, where, params, _ in sources)
-        sql = ' UNION ALL '.join(f"SELECT {identity} AS operation_id,accepted_at,'{table}' source_table FROM {table} WHERE {where}"
-            for table, identity, _, where, _, _ in sources)
+        # Distinct action families may share one native table. Keep the
+        # exact scoped reader paired with its own UNION arm.
+        sql = ' UNION ALL '.join(f"SELECT {identity} AS operation_id,accepted_at,'{index}' source_table FROM {table} WHERE {where}"
+            for index, (table, identity, _, where, _, _) in enumerate(sources))
         params = tuple(value for _, _, _, _, values, _ in sources for value in values)
         rows = conn.execute('SELECT * FROM (' + sql + ') ORDER BY accepted_at DESC,operation_id DESC LIMIT ? OFFSET ?',
             (*params, limit, (page-1)*limit)).fetchall() if sources else []
-        readers = {item[0]: item for item in sources}
+        readers = {str(index): item for index, item in enumerate(sources)}
         items = []
         for row in rows:
             table, identity, columns, where, values, reader = readers[row['source_table']]
