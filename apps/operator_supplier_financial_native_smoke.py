@@ -162,5 +162,69 @@ def native_fences_and_restart():
     print('Actual inter-connection commit proof→CAS rejected; native restart/core proof recovery; foreign CNY account source between children guarded: OK')
 
 
+def partial_batch_truth():
+    manifest=[{'child_key':'one','kind':'financial','subject_id':'one'},{'child_key':'two','kind':'financial','subject_id':'two'}]
+    for mode in ('interrupted_second','rejected_second','validation_rejected_all','complete_all'):
+        with TemporaryDirectory(prefix='financial-batch-truth-') as raw:
+            rt,_=setup(raw);document(rt,manifest[0])
+            if mode=='complete_all':document(rt,manifest[1])
+            writes=[]
+            def validate():
+                if mode=='validation_rejected_all':raise ValueError('invalid batch before source')
+                return ['source']
+            def write(child):
+                writes.append(child['child_key'])
+                if child['child_key']=='two' and mode!='complete_all':
+                    if mode=='interrupted_second':raise RuntimeError('process loss before second source')
+                    raise ValueError('second document refusal')
+                financial.adopt_existing(rt,kind='financial',subject_id=child['subject_id'],owners=child['expected_owners'])
+                return {'document_id':child['subject_id']}
+            identity='financial-truth-'+mode
+            kwargs=dict(action='confirm_upload',payload={'request_id':identity},shipment_id='source',actor='alice',request_scope='alice-key',manifest=manifest)
+            result=financial.execute(rt,**kwargs,validate=validate,write_child=write)
+            assert result['settled'],result
+            receipt=result['acceptance']
+            if mode=='validation_rejected_all':
+                assert result['status']=='rejected' and receipt is None and writes==[],result
+                assert [r['status'] for r in result['results']]==['rejected','rejected'],result
+            elif mode=='complete_all':
+                assert receipt['durable_saved'] and not receipt['partial'],result
+                assert receipt['state']=='completed' and receipt['processing']['complete'],result
+                assert [r['status'] for r in result['results']]==['accepted','accepted'],result
+                assert all(r['processing']['kind']=='source_only' and r['processing']['complete'] for r in receipt['children']),result
+            else:
+                assert [r['status'] for r in result['results']]==['accepted','not_saved' if mode=='interrupted_second' else 'rejected'],result
+                assert receipt['durable_saved'] and receipt['partial'] and len(receipt['children'])==1,result
+                assert receipt['state']=='needs_attention' and not receipt['processing']['complete'],result
+                assert 'часть' in receipt['reason_ru'],result
+                child=receipt['children'][0]
+                assert child['durable_saved'] and child['state']=='completed' and child['processing']['kind']=='source_only' and child['processing']['complete'],result
+                assert rt.load_supplier_financial_document(supplier_order_id='source',document_id='two') is None
+            before=rt.db_path.read_bytes()
+            def never(*_):raise AssertionError('same ID resumed validation/source save')
+            assert financial.execute(rt,**kwargs,validate=never,write_child=never)==result
+            assert financial.read_request(rt.runtime_dir,rt.db_path,identity,request_scope='alice-key')==result
+            assert rt.db_path.read_bytes()==before
+    # A later source revision may retire the saved child's cost obligation.
+    # Its retained partial parent must still describe the unfinished manifest.
+    with TemporaryDirectory(prefix='financial-partial-retired-') as raw:
+        rt,_=setup(raw)
+        def write(child):
+            if child['child_key']=='two':raise RuntimeError('before second source')
+            return document(rt,child)
+        result=execute(rt,'financial-truth-retired',manifest,write)
+        assert result['acceptance']['state']=='needs_attention'
+        def replace_source(child):
+            return rt.save_supplier_financial_document(document={**rt.load_supplier_financial_document(supplier_order_id='source',document_id='one'),'total_amount_rub':121},expense_lines=[{**r,'amount':121,'amount_rub':121} for r in rt.list_supplier_financial_expense_lines('source')])
+        execute(rt,'financial-truth-new-revision',[manifest[0]],replace_source)
+        read=financial.read_request(rt.runtime_dir,rt.db_path,'financial-truth-retired',request_scope='alice-key')
+        assert read['acceptance']['children'][0]['processing']['terminal'],read
+        assert read['acceptance']['children'][0]['state']=='delayed',read
+        assert read['acceptance']['state']=='needs_attention' and not read['acceptance']['processing']['complete'],read
+        assert read['acceptance']['partial'] and 'часть' in read['acceptance']['reason_ru'],read
+        assert not read['acceptance']['processing'].get('terminal'),read
+    print('Native mixed completed-child/unsaved-or-rejected batch stays partial attention; saved proofs retained; all refusal/full completion unchanged; exact same-ID no resubmit; superseded subset cannot hide partial: OK')
+
+
 if __name__=='__main__':
-    source_and_partial();core_and_consumer();native_fences_and_restart()
+    source_and_partial();partial_batch_truth();core_and_consumer();native_fences_and_restart()

@@ -301,14 +301,20 @@ def read_request(runtime_dir, db_path, request_id, *, request_scope, shipment_id
         result = {'domain':DOMAIN,'request_id':request_id,'action':'financial_'+row['action'],'wire_digest':row['wire_digest'],'payload_digest':row['payload_digest'],'status':status,'settled':not pending,'results':results,'acceptance':None,'supplier_order_id':row['shipment_id'],'shipment':{'shipment_id':row['shipment_id']},'readback_confirmed':bool(accepted)}
         if accepted:
             identity=row['operation_id']
-            result['acceptance']={'domain':DOMAIN,'operation_id':identity,'durable_saved':True,'accepted_at':row['accepted_at'],'state':'processing' if pending else 'completed' if all(r['processing']['complete'] for r in accepted) else 'accepted','title_ru':TITLES[row['action']],
+            partial=len(accepted)!=len(results)
+            complete=not pending and not partial and all(r['processing']['complete'] for r in accepted)
+            result['acceptance']={'domain':DOMAIN,'operation_id':identity,'durable_saved':True,'accepted_at':row['accepted_at'],'state':'processing' if pending else 'completed' if complete else 'accepted','title_ru':TITLES[row['action']],
                 'fields':[{'label':'Документы сохранены','value':str(len(accepted))},{'label':'Всего','value':str(len(results))}],
                 'source_ref':{'domain':DOMAIN,'entity_id':row['shipment_id'],'action':'financial_'+row['action'],'digest':row['payload_digest']},
-                'children':accepted,'partial':len(accepted)!=len(results),'processing':{'kind':'batch','complete':not pending and all(r['processing']['complete'] for r in accepted)},
-                'reason_ru':'Сохранена часть документов. Результат каждого указан ниже.' if len(accepted)!=len(results) else 'Документы сохранены. Обработка проверяется отдельно.',
+                'children':accepted,'partial':partial,'processing':{'kind':'batch','complete':complete},
+                'reason_ru':'Сохранена часть документов. Результат каждого указан ниже.' if partial else 'Документы сохранены. Обработка проверяется отдельно.',
                 'detail_path':'/sheet-vitrina-v1/supplier?operation_id='+identity,
                 'journal_path':'/sheet-vitrina-v1/operations?operation_id='+identity}
-            if not pending and any(r['state']=='needs_attention' for r in accepted):
+            if partial:
+                # A saved subset retains its child proofs, but cannot certify
+                # this manifest complete or be hidden by a superseded subset.
+                if not pending:result['acceptance']['state']='needs_attention'
+            elif not pending and any(r['state']=='needs_attention' for r in accepted):
                 result['acceptance']['state']='needs_attention'
                 result['acceptance']['reason_ru']='Документы сохранены. Обработка требует внимания. Результат каждого указан ниже.'
             elif accepted and all(r['processing'].get('terminal') and not r['processing']['complete'] for r in accepted):
