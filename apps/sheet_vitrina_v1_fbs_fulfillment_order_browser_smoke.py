@@ -93,6 +93,61 @@ def main() -> int:
                 browser = playwright.chromium.launch()
                 context = browser.new_context(viewport={"width": 1280, "height": 900})
                 page = context.new_page()
+                # Mark a status response only after its text has been consumed
+                # and the application's promise continuation has run. This lets
+                # us release a held old response and assert the resulting UI,
+                # without a timing sleep that could miss the overwrite.
+                page.add_init_script("""(() => {
+                  const originalFetch = window.fetch;
+                  window.__fbsStatusSettled = 0;
+                  window.fetch = (...args) => originalFetch(...args).then(response => {
+                    if (response.url.includes('fbs-fulfillment-order/status')) {
+                      const originalText = response.text.bind(response);
+                      response.text = async () => {
+                        const text = await originalText();
+                        setTimeout(() => { window.__fbsStatusSettled += 1; }, 0);
+                        return text;
+                      };
+                    }
+                    return response;
+                  });
+                })();""")
+                held_status = []
+                hold_next_status = {"enabled": False}
+                def intercept_status(route):
+                    if not hold_next_status["enabled"]:
+                        route.continue_()
+                        return
+                    hold_next_status["enabled"] = False
+                    response = route.fetch()
+                    held_status.append((route, response.json()))
+                    page.evaluate("document.documentElement.dataset.fbsHeldStatus = String(Number(document.documentElement.dataset.fbsHeldStatus || 0) + 1)")
+                page.route("**/fbs-fulfillment-order/status", intercept_status)
+                def hold_status_request():
+                    old_count = page.evaluate("Number(document.documentElement.dataset.fbsHeldStatus || 0)")
+                    hold_next_status["enabled"] = True
+                    page.locator('[data-supply-section-button="fbs-fulfillment"]').click()
+                    page.wait_for_function("count => Number(document.documentElement.dataset.fbsHeldStatus || 0) > count", arg=old_count)
+                def release_status_request():
+                    previous = page.evaluate("window.__fbsStatusSettled")
+                    route, payload = held_status.pop(0)
+                    route.fulfill(json=payload)
+                    page.wait_for_function("count => window.__fbsStatusSettled > count", arg=previous)
+                held_calculations = []
+                hold_next_calculation = {"enabled": False}
+                def intercept_calculation(route):
+                    if not hold_next_calculation["enabled"]:
+                        route.continue_()
+                        return
+                    hold_next_calculation["enabled"] = False
+                    held_calculations.append(route)
+                    page.evaluate("document.documentElement.dataset.fbsHeldCalculation = String(Number(document.documentElement.dataset.fbsHeldCalculation || 0) + 1)")
+                page.route("**/fbs-fulfillment-order/calculate", intercept_calculation)
+                def hold_calculation_request():
+                    old_count = page.evaluate("Number(document.documentElement.dataset.fbsHeldCalculation || 0)")
+                    hold_next_calculation["enabled"] = True
+                    page.locator("#fbsFulfillmentCalculateButton").click()
+                    page.wait_for_function("count => Number(document.documentElement.dataset.fbsHeldCalculation || 0) > count", arg=old_count)
                 page.on("pageerror", lambda error: page_errors.append(str(error)))
                 page.on(
                     "console",
@@ -108,6 +163,7 @@ def main() -> int:
                     )
                     if "fbs-fulfillment-order" in response.url
                     and response.status >= 400
+                    and response.headers.get("x-wbc-fixture-expected-failure") != "1"
                     else None,
                 )
                 page.goto(
@@ -164,6 +220,7 @@ def main() -> int:
                 expect(page.locator("#fbsSalesAvgPeriodDays")).to_be_disabled()
                 page.locator("#fbsSalesDateFrom").fill("2026-04-10")
                 page.locator("#fbsSalesDateTo").fill("2026-04-12")
+                hold_status_request()
                 page.locator("#fbsFulfillmentCalculateButton").click()
                 expect(page.locator("#fbsFulfillmentMessage")).to_contain_text(
                     "Расчёт завершён", timeout=15000
@@ -183,6 +240,30 @@ def main() -> int:
                     "Только для выбранного ФФ"
                 )
                 expect(page.locator("#fbsResultInbound")).to_contain_text("35 шт.")
+                result_qty = page.locator("#fbsTotalQty").inner_text()
+                release_status_request()
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Расчёт завершён")
+
+                # A fresh readiness probe during a repeated POST includes the
+                # previously saved result for the same form. It must not restore
+                # that old preview or re-enable its Excel while the POST is held.
+                hold_calculation_request()
+                settled = page.evaluate("window.__fbsStatusSettled")
+                page.locator('[data-supply-section-button="fbs-fulfillment"]').click()
+                page.wait_for_function("count => window.__fbsStatusSettled > count", arg=settled)
+                expect(page.locator("#fbsTotalQty")).to_have_text("—")
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_disabled()
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_disabled()
+                held_calculations.pop(0).continue_()
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Расчёт завершён", timeout=15000)
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_enabled()
+                expect(page.locator("#fbsTotalQty")).to_have_text(result_qty)
+                expect(page.locator("#fbsDemandWindow")).to_contain_text("2026-04-10 — 2026-04-12")
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_enabled()
+                settled = page.evaluate("window.__fbsStatusSettled")
+                page.locator('[data-supply-section-button="fbs-fulfillment"]').click()
+                page.wait_for_function("count => window.__fbsStatusSettled > count", arg=settled)
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Расчёт завершён")
 
                 with page.expect_download(timeout=15000) as download_info:
                     page.locator("#fbsFulfillmentDownloadButton").click()
@@ -192,12 +273,16 @@ def main() -> int:
                     "FBS-рекомендация скачана"
                 )
 
+                hold_status_request()
                 page.locator("#fbsInboundScope").select_option("all_active")
                 expect(page.locator("#fbsFulfillmentMessage")).to_contain_text(
                     "Параметры изменены"
                 )
                 expect(page.locator("#fbsTotalQty")).to_have_text("—")
                 expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_disabled()
+                release_status_request()
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Параметры изменены")
+                expect(page.locator("#fbsTotalQty")).to_have_text("—")
                 page.locator("#fbsFulfillmentCalculateButton").click()
                 expect(page.locator("#fbsFulfillmentMessage")).to_contain_text(
                     "Расчёт завершён", timeout=15000
@@ -206,6 +291,17 @@ def main() -> int:
                     "Все активные заказы фабрике"
                 )
                 expect(page.locator("#fbsResultInbound")).to_contain_text("535 шт.")
+
+                # A failing older POST must not overwrite the newer form's
+                # changed-parameters warning.
+                hold_calculation_request()
+                page.locator("#fbsOrderBatchQty").fill("251")
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Параметры изменены")
+                held_calculations.pop(0).fulfill(status=500, headers={"X-WBC-Fixture-Expected-Failure": "1"}, json={"error": "delayed_fixture_failure"})
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_have_text("Рассчитать заказ")
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Параметры изменены")
+                expect(page.locator("#fbsTotalQty")).to_have_text("—")
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_disabled()
 
                 page.locator("#fbsHistoryModeLastN").check()
                 expect(page.locator("#fbsSalesAvgPeriodDays")).to_be_enabled()

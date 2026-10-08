@@ -6201,6 +6201,9 @@
       let fbsFulfillmentFacilities = [];
       let fbsSalesHistoryCoverage = {};
       let fbsFulfillmentCurrentResult = null;
+      let fbsFulfillmentUiRevision = 0;
+      let fbsFulfillmentStatusRequest = 0;
+      let fbsFulfillmentCalculating = false;
       const stockReportActiveSkus = normalizeStockReportActiveSkus(config.stock_report_active_skus);
       const allStockReportSkuIds = stockReportActiveSkus.map((item) => item.nm_id);
       let persistedOperatorUiState = readPersistedOperatorUiState();
@@ -14298,7 +14301,7 @@
           ? "Расчёт заблокирован: " + blockers.join("; ")
           : stockSource.warning || "Полный официальный снимок FBS готов к расчёту.";
         fbsReadinessBlockers.className = "section-message " + (blockers.length || stockSource.warning ? "is-warning" : "is-success");
-        fbsFulfillmentCalculateButton.disabled = !facility.calculation_enabled || blockers.length > 0;
+        fbsFulfillmentCalculateButton.disabled = fbsFulfillmentCalculating || !facility.calculation_enabled || blockers.length > 0;
       }
 
       function renderFbsFulfillmentResult(result) {
@@ -14359,12 +14362,16 @@
       }
 
       function invalidateFbsFulfillmentResult() {
-        if (!fbsFulfillmentCurrentResult) return;
+        fbsFulfillmentUiRevision += 1;
+        if (!fbsFulfillmentCurrentResult) {
+          if (fbsFulfillmentCalculating) setFbsFulfillmentMessage("Параметры изменены — пересчитайте заказ.", "warning");
+          return;
+        }
         renderFbsFulfillmentResult(null);
         setFbsFulfillmentMessage("Параметры изменены — пересчитайте заказ.", "warning");
       }
 
-      function renderFbsFulfillmentStatus(payload) {
+      function renderFbsFulfillmentStatus(payload, options) {
         const defaults = payload && payload.defaults ? payload.defaults : {};
         const historyCoverage = payload && payload.sales_history_coverage ? payload.sales_history_coverage : {};
         fbsSalesHistoryCoverage = historyCoverage;
@@ -14379,18 +14386,24 @@
         fbsHistoryCoverage.textContent = historyCoverage.earliest_available_date && historyCoverage.latest_available_date
           ? historyCoverage.earliest_available_date + " — " + historyCoverage.latest_available_date + " · полных дней: " + valueOrDash(historyCoverage.exact_date_snapshot_count)
           : "История пока недоступна";
-        if (firstLoad) {
+        if (firstLoad && !(options && options.preserveUi)) {
           ["inbound_scope", "production_days", "factory_to_target_ff_days", "ff_safety_days", "order_cycle_days", "order_batch_qty", "sales_avg_period_days"].forEach((key) => {
             if (defaults[key] !== undefined && fbsFulfillmentFields[key]) fbsFulfillmentFields[key].value = defaults[key];
           });
         }
         renderFbsFacilityReadiness();
+        if (options && options.preserveUi) return;
         const lastResult = payload ? payload.last_result : null;
+        const currentResult = fbsFulfillmentCurrentResult && fbsResultFingerprint(fbsFulfillmentCurrentResult) === fbsFormFingerprint()
+          ? fbsFulfillmentCurrentResult
+          : null;
+        if (fbsFulfillmentCalculating && !currentResult) return;
         renderFbsFulfillmentResult(
-          lastResult && fbsResultFingerprint(lastResult) === fbsFormFingerprint()
+          currentResult || (lastResult && fbsResultFingerprint(lastResult) === fbsFormFingerprint()
             ? lastResult
-            : null
+            : null)
         );
+        if (currentResult || fbsFulfillmentCalculating) return;
         setFbsFulfillmentMessage(
           fbsFulfillmentFacilities.some((facility) => facility.calculation_enabled)
             ? "Готовность прочитана. Используются официальные остатки FBS; остатки на складах WB (FBO) не учитываются."
@@ -14403,12 +14416,16 @@
 
       async function loadFbsFulfillmentStatus() {
         if (!config.fbs_fulfillment_order_status_path) return;
+        const requestId = ++fbsFulfillmentStatusRequest;
+        const revision = fbsFulfillmentUiRevision;
         try {
           const response = await fetch(config.fbs_fulfillment_order_status_path, {method: "GET", headers: {"Accept": "application/json"}});
           const payload = await readJson(response);
+          if (requestId !== fbsFulfillmentStatusRequest) return;
           if (!response.ok) throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
-          renderFbsFulfillmentStatus(payload);
+          renderFbsFulfillmentStatus(payload, {preserveUi: revision !== fbsFulfillmentUiRevision});
         } catch (error) {
+          if (requestId !== fbsFulfillmentStatusRequest || revision !== fbsFulfillmentUiRevision || fbsFulfillmentCurrentResult || fbsFulfillmentCalculating) return;
           setFbsFulfillmentMessage("Не удалось прочитать готовность FBS-расчёта: " + (error instanceof Error ? error.message : String(error)), "error");
         }
       }
@@ -14439,9 +14456,13 @@
       }
 
       async function calculateFbsFulfillmentOrder() {
+        if (fbsFulfillmentCalculating) return;
+        fbsFulfillmentCalculating = true;
+        const revision = ++fbsFulfillmentUiRevision;
         fbsFulfillmentCalculateButton.disabled = true;
         fbsFulfillmentCalculateButton.textContent = "Считаем...";
         fbsFulfillmentDownloadButton.disabled = true;
+        setFbsFulfillmentMessage("Рассчитываем заказ по выбранным параметрам...", "");
         try {
           const requestPayload = readFbsFulfillmentPayload();
           renderFbsFulfillmentResult(null);
@@ -14452,13 +14473,26 @@
           });
           const payload = await readJson(response);
           if (!response.ok) throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+          if (revision !== fbsFulfillmentUiRevision) {
+            setFbsFulfillmentMessage("Параметры изменены — пересчитайте заказ.", "warning");
+            return;
+          }
           renderFbsFulfillmentResult(payload);
           supplyCalculationRegistryLoaded = false;
           await loadFbsFulfillmentStatus();
+          if (revision !== fbsFulfillmentUiRevision) {
+            setFbsFulfillmentMessage("Параметры изменены — пересчитайте заказ.", "warning");
+            return;
+          }
           setFbsFulfillmentMessage("Расчёт завершён по официальным остаткам FBS. Остатки на складах WB (FBO) не использованы; результат и Excel сохранены.", "success");
         } catch (error) {
-          setFbsFulfillmentMessage("Расчёт завершился с ошибкой: " + (error instanceof Error ? error.message : String(error)), "error");
+          if (revision !== fbsFulfillmentUiRevision) {
+            setFbsFulfillmentMessage("Параметры изменены — пересчитайте заказ.", "warning");
+          } else {
+            setFbsFulfillmentMessage("Расчёт завершился с ошибкой: " + (error instanceof Error ? error.message : String(error)), "error");
+          }
         } finally {
+          fbsFulfillmentCalculating = false;
           fbsFulfillmentCalculateButton.textContent = "Рассчитать заказ";
           renderFbsFacilityReadiness();
         }
