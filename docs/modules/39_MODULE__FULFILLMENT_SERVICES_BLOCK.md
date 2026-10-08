@@ -303,3 +303,54 @@ consume already-delivered warehouse requests but cannot resolve the new pending
 scope requests until a compatible version is restored. Reverting code is not
 completion of pending work. No tariffs, storage allocation, paid-capital rules,
 primary financial records or physical quantities are changed by this delivery.
+
+
+## Подтверждение операторского источника и завершение расчётов
+
+Final upload и delete сохраняют immutable `fulfillment_services` receipt в
+одной native транзакции с источником и существующим recalculation intent.
+Активный SHA сохраняет прежнюю загрузку; delete → новая загрузка создаёт новый
+native источник. `operation_id` относится действию и версии, а не client request.
+Для one-shot HTTP форма заранее сохраняет `request_id` в browser recovery marker;
+immutable native alias `request_scope/request_id` связывает его с точным источником
+и действием. Неоднозначный ответ разрешается только
+`GET /v1/sheet-vitrina-v1/supply/fulfillment-services/uploads?request_id=...`.
+POST/DELETE не повторяются автоматически. Файловый SHA/action связывают readback;
+неизвестный, другой request/domain или diagnostic draft не дают зелёный receipt.
+Alias создаётся атомарно с native source/intent. Старые загрузки не backfill-ятся.
+GET list/detail, receipt и journal работают через SQLite `mode=ro`,
+`PRAGMA query_only=ON`, без bootstrap или фонового потребления очереди.
+
+Общая форма использует `OperatorAcceptance`: «Принято / Документ сохранён»
+отдельно от derived processing. Валидационный diagnostic не final acceptance.
+Доступ совпадает с native FF-services route: `supply` grant. Concrete journal
+adapter — `operator_fulfillment_services._public` и `operator_operations`;
+права фильтруются до table/count/search/detail. HTTP domain детали:
+`GET /v1/sheet-vitrina-v1/operations/{ffsvc_operation_id}`; source-list filter:
+`GET /v1/sheet-vitrina-v1/operations?domain=fulfillment_services`.
+Общий GET-only journal host и его cross-domain navigation интегрирует куратор
+отдельно; legacy FF modal не расширяется этим блоком.
+
+Existing native owner (manual sync/cycle и warehouse runner) сначала использует
+`drain_fulfillment_recalc_intents`, materializes cost и публикует native
+WarehouseFunctional, accounting/ready и Finance. Затем
+`operator_fulfillment_services.reconcile` вызывает настоящее RO доказательство:
+точный immutable upload/delete source, полная current supply goods authority
+включая SKU вне active catalogue, denominator/acceptedQty/per-unit/full amounts,
+native input hash и persisted layers; correlated exact warehouse version и
+датированные cost rows; та же book revision, verified ready bytes; фактическая
+native Finance target projection и отсутствие unmatched units.
+Queue flags или общий green cycle не являются доказательством завершения.
+Heavy proof проходит до короткого receipt writer CAS; исходные живые observer
+connections и book pointer повторно проверяются против concurrent commits.
+При изменении snapshot — truthful retry, не mixed-snapshot completion.
+Недостающая историческая authority/publication сохраняет источник и точную
+причину задержки для отдельного closed-history owner.
+
+Нативный outside-window no-op означает `source_complete` и отсутствие
+applicable derived mutation; это не универсальное `completed` и не нулевая
+Finance-проводка. Нет отдельной очереди, runner, ledger или внешнего resend.
+
+Проверки: `operator_fulfillment_services_smoke.py`, `..._native_smoke.py`,
+`..._integration_smoke.py`, `..._browser_smoke.py` включены в check selector;
+fixtures disposable, publishers/readers настоящие, live API не вызывается.

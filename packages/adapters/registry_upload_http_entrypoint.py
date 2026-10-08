@@ -3294,6 +3294,8 @@ def _build_handler(
                         upload_payload["workbook_bytes"],
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                        request_id=str((upload_payload.get("fields") or {}).get("request_id") or ""),
+                        request_scope=_current_web_user_config_key(self), actor=_current_web_user_actor(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -5092,7 +5094,9 @@ def _build_handler(
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
-                    payload = entrypoint.handle_fulfillment_services_uploads_request()
+                    payload = entrypoint.handle_fulfillment_services_uploads_request(
+                        request_id=_resolve_single_query_param(parsed.query, "request_id") or "",
+                        request_scope=_current_web_user_config_key(self))
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -5163,7 +5167,7 @@ def _build_handler(
                     if parsed.path == prefix:
                         params = {key: values[-1] for key, values in urllib_parse.parse_qs(parsed.query).items()}
                         payload = journal(entrypoint.runtime.db_path, page=int(params.get("page") or 1), limit=int(params.get("limit") or 25),
-                            allowed_domains=allowed_domains, domain=params.get('domain') or 'ff_pool_document')
+                            allowed_domains=allowed_domains, domain=params.get('domain') or 'ff_pool_document', search=params.get('search') or '')
                     else:
                         identity = urllib_parse.unquote(parsed.path[len(prefix) + 1:])
                         acceptance = read_acceptance(entrypoint.runtime.db_path, identity, allowed_domains=allowed_domains)
@@ -6553,7 +6557,9 @@ def _build_handler(
                     return
                 try:
                     upload_id = _resolve_fulfillment_upload_id_from_detail_path(parsed.path)
-                    payload = entrypoint.handle_fulfillment_services_upload_delete_request(upload_id)
+                    payload = entrypoint.handle_fulfillment_services_upload_delete_request(upload_id,
+                        request_id=_resolve_single_query_param(parsed.query, "request_id") or "",
+                        request_scope=_current_web_user_config_key(self), actor=_current_web_user_actor(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
                     return
@@ -10771,7 +10777,7 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
     """Source grants are applied before journal counts, rows and exact reads."""
     domains = set()
     if _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY):
-        domains.update(('ff_pool_document', 'factory_order_dataset'))
+        domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services'))
     if _user_has_section_access(user, WEB_AUTH_SECTION_REPORTS):
         domains.add('plan_report_baseline')
     return frozenset(domains)
@@ -11171,18 +11177,18 @@ def _render_sheet_vitrina_operator_ui(
     load_path: str,
     status_path: str,
     job_path: str,
+    user_config_key: str = "local_operator",
     operator_context: Mapping[str, Any] | None = None,
     embedded_tab: str = "",
-    user_config_key: str = "local_operator",
 ) -> str:
     web_vitrina_url = DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     operator_ui_context = operator_context or {}
     normalized_embedded_tab = embedded_tab if embedded_tab in {"vitrina", "factory-order", "reports"} else ""
     config_payload = {
+        "user_config_key": user_config_key,
         "page_title": "Операторский сайт" if normalized_embedded_tab else "sheet_vitrina_v1",
         "embedded": bool(normalized_embedded_tab),
         "initial_tab": normalized_embedded_tab,
-        "user_config_key": user_config_key,
         "daily_report_path": daily_report_path,
         "stock_report_path": stock_report_path,
         "plan_report_path": plan_report_path,

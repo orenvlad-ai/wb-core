@@ -19,6 +19,7 @@ from apps.sheet_vitrina_v1_fulfillment_services_smoke import _wb_supply_row, _se
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime, _connect
 from packages.application.fulfillment_services import FulfillmentServicesBlock, UPLOADS_TABLE, LINES_TABLE
 from packages.application import fulfillment_recalc_intents as intents, fulfillment_services as fulfillment_services_module
+from packages.application import operator_fulfillment_services as receipts
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.wb_supplies import WbSuppliesBlock
 
@@ -60,9 +61,9 @@ def child(raw, action, phase):
     else:
         block._runtime_path = lambda *args: os._exit(73)
     if action == 'upload':
-        block.upload_xlsx((Path(raw)/'fixture.xlsx').read_bytes())
+        block.upload_xlsx((Path(raw)/'fixture.xlsx').read_bytes(),request_id='crash-upload-client',request_scope='fixture')
     else:
-        block.delete_upload((Path(raw)/'upload-id').read_text())
+        block.delete_upload((Path(raw)/'upload-id').read_text(),request_id='crash-delete-client',request_scope='fixture')
     raise AssertionError('checkpoint not reached')
 
 
@@ -84,12 +85,18 @@ def test_process_crashes():
                 if phase == 'after_commit':
                     assert len(rows) == 1 and bool(rows[0]['deleted_at']) == (action == 'delete')
                     assert len(queue(rt)) == len(before) + 1
+                    assert count(rt, receipts.TABLE) == (2 if action == 'delete' else 1)
+                    assert count(rt, receipts.REQUESTS) == 1
+                    recovered = receipts.read_request(rt.db_path,'crash-'+action+'-client',request_scope='fixture')
+                    assert recovered['status']=='accepted' and recovered['acceptance']['source_ref']['action']==action
                     consume_preparation(rt)
                     assert len(queue(rt)) == len(before) + 1
                 else:
                     assert len(rows) == (1 if action == 'delete' else 0)
                     assert not rows or not rows[0]['deleted_at']
                     assert queue(rt) == before
+                    assert count(rt, receipts.TABLE) == (1 if action == 'delete' else 0)
+                    assert count(rt, receipts.REQUESTS) == 0
     print('hard_process_checkpoints=6; primary+intent atomic before/after commit')
 
 

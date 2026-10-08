@@ -387,8 +387,11 @@ def _run_admitted(
                     finance_cost_recalculation.get("fingerprint") or ""
                 ),
             )
+            from packages.application.operator_fulfillment_services import reconcile as reconcile_fulfillment
+            fulfillment_operations = reconcile_fulfillment(runtime, seller_id=block_from_env(runtime.runtime_dir).seller_id)
             backup_result = result.get("recovery_policy")
             return {
+                "fulfillment_operations": fulfillment_operations,
                 "status": "success",
                 "mode": "reviewed_sync_apply",
                 "reviewed_plan_fingerprint": args.fingerprint,
@@ -596,6 +599,8 @@ def _run_admitted(
                     finance_cost_recalculation.get("fingerprint") or ""
                 ),
             )
+            from packages.application.operator_fulfillment_services import reconcile as reconcile_fulfillment
+            fulfillment_operations = reconcile_fulfillment(runtime, seller_id=block_from_env(runtime.runtime_dir).seller_id)
             reconcile_overheads(runtime)
             from packages.application.fbs_accounting_runtime import current_publication_receipt
             reconcile_operator_documents(runtime,request_ids=operator_documents['request_ids'],
@@ -628,6 +633,7 @@ def _run_admitted(
                 "wb_finance_cost_recalculation": finance_cost_recalculation,
                 "wb_transit_cost_replays": transit_cost_replays,
                 "ff_state": ff_state,
+                "fulfillment_operations": fulfillment_operations,
                 "plan_fingerprint": plan["plan_fingerprint"],
                 "diff": plan["diff"],
                 "active_version": result.get("active_version"),

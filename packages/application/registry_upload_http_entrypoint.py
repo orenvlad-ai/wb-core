@@ -6717,21 +6717,27 @@ class RegistryUploadHttpEntrypoint:
         *,
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
+        request_id: str = "", request_scope: str = "", actor: str = "",
     ) -> dict[str, Any]:
         return self.fulfillment_services_block.upload_xlsx(
             workbook_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
+            request_id=request_id, request_scope=request_scope, actor=actor,
         )
 
-    def handle_fulfillment_services_uploads_request(self) -> dict[str, Any]:
+    def handle_fulfillment_services_uploads_request(self, *, request_id="", request_scope="") -> dict[str, Any]:
+        if request_id:
+            from packages.application.operator_fulfillment_services import read_request
+            return read_request(self.runtime.db_path, request_id, request_scope=request_scope)
         return self.fulfillment_services_block.list_uploads()
 
     def handle_fulfillment_services_upload_detail_request(self, upload_id: str) -> dict[str, Any]:
         return self.fulfillment_services_block.get_upload(upload_id)
 
-    def handle_fulfillment_services_upload_delete_request(self, upload_id: str) -> dict[str, Any]:
-        return self.fulfillment_services_block.delete_upload(upload_id, deleted_by="operator")
+    def handle_fulfillment_services_upload_delete_request(self, upload_id: str, *, request_id="", request_scope="", actor="operator") -> dict[str, Any]:
+        return self.fulfillment_services_block.delete_upload(upload_id, deleted_by=actor,
+            request_id=request_id, request_scope=request_scope)
 
     def handle_fulfillment_services_payment_validation_pdf_request(
         self,
@@ -7477,6 +7483,8 @@ class RegistryUploadHttpEntrypoint:
                 }
 
             dependent = run_phase("dependent_replay_economics", dependent_replay)
+            from packages.application.operator_fulfillment_services import reconcile as reconcile_fulfillment
+            fulfillment_operations = reconcile_fulfillment(self.runtime, seller_id=self.wb_finance_weekly_block.seller_id, now=self.now_factory())
             reconcile_overheads(self.runtime)
             reconcile_operator_documents(self.runtime,request_ids=operator_documents['request_ids'],
                 finance_receipt=dict(dependent.get('finance_cost_recalculation') or {}),
@@ -7491,6 +7499,7 @@ class RegistryUploadHttpEntrypoint:
             payload = {
                 "status": "success",
                 "mode": "manual_sync",
+                "fulfillment_operations": fulfillment_operations,
                 "fbs_snapshot_accounting": result.get("fbs_snapshot_accounting"),
                 "wb_valuation": dict(plan.get("wb_valuation") or {}),
                 "durable_run_id": durable_run_id,

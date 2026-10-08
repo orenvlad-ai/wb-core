@@ -101,8 +101,8 @@ def main() -> None:
                     raise AssertionError(f"downloaded template must expose Номер поставки/Склад, got {template_headers[:2]}")
 
                 operator_frame.locator("#fulfillmentFileInput").set_input_files(str(real_xlsx_path))
-                expect(operator_frame.locator("#fulfillmentServicesMessage")).to_contain_text(
-                    "Документ принят. Все строки смэтчены, PDF-виза сформирована.",
+                expect(operator_frame.locator("#fulfillmentAcceptance")).to_contain_text(
+                    "Документ сохранён.",
                     timeout=10000,
                 )
                 list_status, list_payload = _get_json(f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}")
