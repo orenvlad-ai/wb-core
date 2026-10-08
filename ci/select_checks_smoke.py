@@ -317,6 +317,33 @@ def cleaner_command_checks():
         assert not any(len(c)>1 and c[1].endswith('_browser_smoke.py') and c[1]!=script for c in plan['commands']),plan
 
 
+def payment_pdf_dependency_checks():
+    exists = lambda _, path: (select_checks.ROOT / path).is_file()
+    scripts = (
+        "apps/russian_payment_orders_smoke.py",
+        "apps/ff_pool_surfaces_smoke.py",
+        "apps/operator_ff_overhead_smoke.py",
+    )
+    required = {"openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"}
+    for script in scripts:
+        for path in (script, script.replace("_smoke.py", ".py")):
+            plan = build_plan_from_paths(pull_request=39, base=BASE, head=HEAD,
+                paths=[path], file_exists=lambda revision, candidate: candidate == path or exists(revision, candidate))
+            verify_plan(plan)
+            assert ["python3", script] in plan["commands"], plan
+            assert required <= set(plan["pip"]), plan
+    combined = build_plan_from_paths(pull_request=39, base=BASE, head=HEAD,
+        paths=[*scripts, "apps/operator_acceptance_browser_smoke.py"], file_exists=exists)
+    verify_plan(combined)
+    assert all(combined["pip"].count(package) == 1 for package in required), combined
+    install = ["python3", "-m", "playwright", "install", "--with-deps", "chromium"]
+    browser = ["python3", "apps/operator_acceptance_browser_smoke.py"]
+    isolated = build_plan_from_paths(pull_request=39, base=BASE, head=HEAD,
+        paths=[browser[1]], file_exists=exists)
+    assert isolated["commands"].index(install) < isolated["commands"].index(browser), isolated
+    assert "playwright==1.58.0" in isolated["pip"], isolated
+
+
 def command_dependency_checks():
     # Independent entrypoint expectations: browser dependencies follow commands,
     # not a filename heuristic or an unrelated changed-path group.
@@ -774,6 +801,7 @@ def main() -> None:
     boundary_checks()
     rename_diff_check()
     command_dependency_checks()
+    payment_pdf_dependency_checks()
     ads_dependency_checks()
     buyout_percent_dependency_checks()
     finance_liquidity_checks()
