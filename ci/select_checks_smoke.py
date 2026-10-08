@@ -16,6 +16,13 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    'operator_supplier_journal_http_smoke': ('packages/application/operator_operations.py', 'packages/application/operator_supplier_journal.py', 'packages/adapters/registry_upload_http_entrypoint.py'),
+    'operator_supplier_financial_journal_smoke': ('packages/application/operator_supplier_financial.py', 'packages/application/operator_supplier_journal.py', 'packages/application/operator_operations.py'),
+    'operator_supplier_history_cycle_smoke': ('packages/application/registry_upload_http_entrypoint.py', 'packages/application/operator_supplier_history.py', 'packages/application/owned_history_worker.py'),
+    'historical_dated_inputs_smoke': ('packages/application/historical_dated_inputs.py', 'apps/fixtures/historical_dated_inputs_67138346.json'),
+    'operator_supplier_release_scope_smoke': ('packages/adapters/registry_upload_http_entrypoint.py', 'packages/application/operator_operations.py', 'packages/application/operator_supplier_journal.py'),
+    'warehouse_ff_cost_fold_smoke': ('packages/application/warehouse_functional.py', 'apps/fixtures/warehouse_ff_fold_a46d0dad.json'),
+
     "business_data_cycle_dispatch_smoke": (
         "packages/application/business_data_cycle_dispatch.py",
         "packages/application/business_data_schedule_profile.py",

@@ -3242,8 +3242,36 @@ def _assert_http_api_smoke() -> None:
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_financial/expense-completeness",
                 {"expenses_complete": True},
             )
-            if completeness_status != 200 or completeness_payload.get("expenses_complete") is not True:
-                raise AssertionError(f"expense completeness patch failed: {completeness_status} {completeness_payload}")
+            acceptance = completeness_payload.get("acceptance") or {}
+            if (
+                completeness_status != 200
+                or completeness_payload.get("expenses_complete") not in (True, 1)
+                or not acceptance.get("durable_saved")
+                or acceptance.get("processing", {}).get("complete") is not False
+            ):
+                raise AssertionError(f"expense completeness source save failed: {completeness_status} {completeness_payload}")
+            # HTTP now saves only the source. Run the actual native consumer
+            # before checking its financial certification projection. This
+            # fixture intentionally has no matched SKU scope: preparation
+            # persists certification but must not claim cost publication.
+            from packages.application.registry_upload_db_backed_runtime import _connect
+            from packages.application.supplier_preparation_intents import drain_supplier_preparation_intents
+
+            prepared = drain_supplier_preparation_intents(runtime, shipment_ids=["sup_financial"])
+            prepared_rows = prepared.get("requests") or []
+            if (
+                len(prepared_rows) != 1
+                or prepared_rows[0].get("status") != "pending"
+                or "no proven SKU/date scope" not in prepared_rows[0].get("error", "")
+            ):
+                raise AssertionError(f"unmatched fixture must retain truthful pending cost scope: {prepared}")
+            with _connect(runtime.db_path) as conn:
+                certificate = conn.execute(
+                    "SELECT expenses_complete FROM sheet_vitrina_v1_own_capital_expense_certifications WHERE shipment_id=?",
+                    ("sup_financial",),
+                ).fetchone()
+            if certificate is None or certificate[0] != 1:
+                raise AssertionError(f"native consumer must persist expense certification: {certificate}")
             patched_registry_status, patched_registry = _get_json(f"{base_url}{DEFAULT_SUPPLIER_SHIPMENT_REGISTRY_PATH}")
             if (
                 patched_registry_status != 200

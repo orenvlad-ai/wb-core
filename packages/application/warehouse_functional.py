@@ -3675,6 +3675,173 @@ def _validate_historical_correction_matches_derived(
         )
 
 
+def replay_ff_cost_pools(*, opening_pools, operations, lines, supplier_flow_costs, cost_map,
+                         boundary, expected_quantities):
+    """Pure native Decimal fold, shared by current and dated cost consumers.
+
+    Callers supply the immutable opening, actual operation prefix and exact
+    supplier operands. No runtime, current physical detail or schema fallback.
+    """
+    from copy import deepcopy
+    ff_pools = deepcopy(opening_pools)
+    ff_outbound_wac_by_supply_nm = {}
+    ff_lines_by_operation: defaultdict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in lines:
+        ff_lines_by_operation[str(row.get("operation_id") or "")].append(row)
+    for operation in _ff_operations_for_replay(
+        operations,
+        boundary=boundary,
+    ):
+        if str(operation.get("created_at") or "") <= boundary:
+            continue
+        operation_id = str(operation.get("operation_id") or "")
+        source_type = str(operation.get("source_type") or "")
+        source_object_id = str(operation.get("source_object_id") or "")
+        for raw_line in ff_lines_by_operation.get(operation_id, []):
+            nm_id = int(raw_line.get("nm_id") or 0)
+            delta = _decimal(raw_line.get("quantity_delta"))
+            cost_adjustment = _ff_ledger_line_cost_adjustment(raw_line)
+            if nm_id <= 0 or (delta == ZERO and cost_adjustment is None):
+                continue
+            exact_cost = (
+                _ff_ledger_line_cost_snapshot(raw_line)
+                if delta != ZERO
+                else None
+            )
+            pool = ff_pools.setdefault(
+                nm_id,
+                {"quantity": ZERO, "capital": ZERO, "operations": [], "opening_version_id": ""},
+            )
+            current_qty = _decimal(pool["quantity"])
+            current_capital = _decimal(pool["capital"])
+            current_wac = current_capital / current_qty if current_qty > ZERO else None
+            if cost_adjustment is not None:
+                capital_delta = cost_adjustment["capital_delta_rub"]
+                adjusted_capital, inbound_wac = _ff_cost_adjusted_state(
+                    current_quantity=current_qty,
+                    current_capital=current_capital,
+                    adjustment=cost_adjustment,
+                    operation_id=operation_id,
+                    nm_id=nm_id,
+                )
+                pool["capital"] = adjusted_capital
+                inbound_provenance = {
+                    "quality": "audited_ff_cost_only_allocation",
+                    "source": "append_only_ff_overhead_allocation",
+                    **dict(cost_adjustment["provenance"]),
+                }
+                pool["operations"].append(
+                    {
+                        "operation_id": operation_id,
+                        "created_at": operation.get("created_at"),
+                        "business_effective_date": operation.get("business_effective_date"),
+                        "source_type": source_type,
+                        "source_object_id": source_object_id,
+                        "quantity_delta": "0",
+                        "capital_delta_rub": _text(capital_delta),
+                        "unit_cost_rub": _text(inbound_wac),
+                        "source": inbound_provenance,
+                    }
+                )
+                continue
+            if delta > ZERO:
+                if exact_cost is not None:
+                    inbound_wac = exact_cost["unit_cost_rub"]
+                    inbound_provenance = {
+                        "quality": exact_cost["quality"],
+                        "source": "frozen_ff_ledger_cost_snapshot",
+                        **dict(exact_cost["provenance"]),
+                    }
+                elif source_type == "supplier_shipment":
+                    flow = supplier_flow_costs.get((source_object_id, nm_id))
+                    if flow is None:
+                        raise WarehouseFunctionalError(
+                            f"FF supplier receipt {operation_id}:{nm_id} has no exact supplier-flow capital"
+                        )
+                    flow_qty, flow_capital, _quality, flow_provenance = flow
+                    inbound_wac = flow_capital / flow_qty
+                    inbound_provenance = flow_provenance
+                else:
+                    if current_wac is None:
+                        seed = cost_map.get(nm_id)
+                        if seed is None:
+                            raise WarehouseFunctionalError(
+                                f"positive FF adjustment {operation_id}:{nm_id} has no prior or source cost"
+                            )
+                        current_wac = seed.ff_unit_cost
+                    inbound_wac = current_wac
+                    inbound_provenance = {
+                        "quality": "current_wac_adjustment",
+                        "reason": "non_supplier_positive_FF_ledger_operation",
+                    }
+                pool["quantity"] = current_qty + delta
+                pool["capital"] = current_capital + delta * inbound_wac
+            else:
+                if current_wac is None:
+                    raise WarehouseFunctionalError(
+                        f"FF outbound {operation_id}:{nm_id} has no positive cost pool"
+                    )
+                outbound = abs(delta)
+                if outbound > current_qty:
+                    raise WarehouseFunctionalError(
+                        f"canonical FF replay would be negative for nmId {nm_id} at {operation_id}"
+                    )
+                if exact_cost is None:
+                    (
+                        remaining_qty,
+                        remaining_capital,
+                        outbound_wac,
+                    ) = proportional_ff_outbound(
+                        quantity=current_qty,
+                        capital=current_capital,
+                        outbound_quantity=outbound,
+                    )
+                else:
+                    outbound_wac = exact_cost["unit_cost_rub"]
+                    remaining_qty = current_qty - outbound
+                    remaining_capital = current_capital - outbound * outbound_wac
+                if remaining_capital < ZERO or (
+                    remaining_qty > ZERO and remaining_capital <= ZERO
+                ) or (
+                    remaining_qty == ZERO and remaining_capital != ZERO
+                ):
+                    raise WarehouseFunctionalError(
+                        f"FF outbound {operation_id}:{nm_id} would make capital non-positive"
+                    )
+                pool["quantity"] = remaining_qty
+                pool["capital"] = remaining_capital
+                inbound_wac = outbound_wac
+                inbound_provenance = (
+                    {
+                        "quality": exact_cost["quality"],
+                        "source": "frozen_ff_ledger_cost_snapshot",
+                        **dict(exact_cost["provenance"]),
+                    }
+                    if exact_cost is not None
+                    else {"quality": "proportional_wac_outbound"}
+                )
+                if source_type in {"wb_supply", "wb_supply_targeted_reconciliation"} and source_object_id:
+                    ff_outbound_wac_by_supply_nm[(source_object_id, nm_id)] = outbound_wac
+            pool["operations"].append(
+                {
+                    "operation_id": operation_id,
+                    "created_at": operation.get("created_at"),
+                    "source_type": source_type,
+                    "source_object_id": source_object_id,
+                    "quantity_delta": _text(delta),
+                    "unit_cost_rub": _text(inbound_wac),
+                    "source": inbound_provenance,
+                }
+            )
+    for nm_id, expected_quantity in expected_quantities.items():
+        actual_quantity = _decimal((ff_pools.get(nm_id) or {}).get("quantity"))
+        if expected_quantity < ZERO or actual_quantity != expected_quantity:
+            raise WarehouseFunctionalError(
+                f"canonical FF replay mismatch for nmId {nm_id}: {actual_quantity} != {expected_quantity}"
+            )
+    return ff_pools, ff_outbound_wac_by_supply_nm
+
+
 class WarehouseFunctionalBlock:
     def __init__(
         self,
@@ -4083,6 +4250,9 @@ class WarehouseFunctionalBlock:
             "base_active_version_id": base_active_version_id,
             "local_source_digest": capture["local_source_digest"],
             "wb_supply_source_digest": capture["wb_supply_source_digest"],
+            # Computed outside the writer; native local_source_digest CAS guards
+            # precisely these inputs before publication. No formula changes.
+            "operator_supplier_cost_projection_digest": "sha256:" + _hash(capture["downstream_cost_rows"]),
             "source_watermarks": capture["watermarks"],
             "absorbed_supply_revisions": capture["supply_revisions"] if kind == "functional_cutover" else {},
             "wb_snapshot": capture["wb_snapshot"],
@@ -4731,6 +4901,8 @@ class WarehouseFunctionalBlock:
                     record_functional_publication(conn, request=request, version_id=version_id, plan_fingerprint=fingerprint)
                 from packages.application.operator_fulfillment_services import record_functional_publication as record_fulfillment_publication
                 record_fulfillment_publication(conn, plan=normalized, version_id=version_id)
+                from packages.application.operator_supplier_processing import record_functional_publication as record_supplier_publication
+                record_supplier_publication(conn, plan=normalized, version_id=version_id)
                 if business_date_from_timestamp(self.timestamp_factory()) != planned_effective_date:
                     raise WarehouseFunctionalError(
                         "functional plan crossed the canonical business-date boundary before commit"
@@ -6264,161 +6436,10 @@ class WarehouseFunctionalBlock:
                 }
                 for nm_id, line in self._cutover_stage_lines(STAGE_FF).items()
             }
-            ff_lines_by_operation: defaultdict[str, list[Mapping[str, Any]]] = defaultdict(list)
-            for row in capture["ff_lines"]:
-                ff_lines_by_operation[str(row.get("operation_id") or "")].append(row)
-            boundary = str((cutover or {}).get("cutover_at") or "")
-            for operation in _ff_operations_for_replay(
-                capture["ff_operations"],
-                boundary=boundary,
-            ):
-                if str(operation.get("created_at") or "") <= boundary:
-                    continue
-                operation_id = str(operation.get("operation_id") or "")
-                source_type = str(operation.get("source_type") or "")
-                source_object_id = str(operation.get("source_object_id") or "")
-                for raw_line in ff_lines_by_operation.get(operation_id, []):
-                    nm_id = int(raw_line.get("nm_id") or 0)
-                    delta = _decimal(raw_line.get("quantity_delta"))
-                    cost_adjustment = _ff_ledger_line_cost_adjustment(raw_line)
-                    if nm_id <= 0 or (delta == ZERO and cost_adjustment is None):
-                        continue
-                    exact_cost = (
-                        _ff_ledger_line_cost_snapshot(raw_line)
-                        if delta != ZERO
-                        else None
-                    )
-                    pool = ff_pools.setdefault(
-                        nm_id,
-                        {"quantity": ZERO, "capital": ZERO, "operations": [], "opening_version_id": ""},
-                    )
-                    current_qty = _decimal(pool["quantity"])
-                    current_capital = _decimal(pool["capital"])
-                    current_wac = current_capital / current_qty if current_qty > ZERO else None
-                    if cost_adjustment is not None:
-                        capital_delta = cost_adjustment["capital_delta_rub"]
-                        adjusted_capital, inbound_wac = _ff_cost_adjusted_state(
-                            current_quantity=current_qty,
-                            current_capital=current_capital,
-                            adjustment=cost_adjustment,
-                            operation_id=operation_id,
-                            nm_id=nm_id,
-                        )
-                        pool["capital"] = adjusted_capital
-                        inbound_provenance = {
-                            "quality": "audited_ff_cost_only_allocation",
-                            "source": "append_only_ff_overhead_allocation",
-                            **dict(cost_adjustment["provenance"]),
-                        }
-                        pool["operations"].append(
-                            {
-                                "operation_id": operation_id,
-                                "created_at": operation.get("created_at"),
-                                "business_effective_date": operation.get("business_effective_date"),
-                                "source_type": source_type,
-                                "source_object_id": source_object_id,
-                                "quantity_delta": "0",
-                                "capital_delta_rub": _text(capital_delta),
-                                "unit_cost_rub": _text(inbound_wac),
-                                "source": inbound_provenance,
-                            }
-                        )
-                        continue
-                    if delta > ZERO:
-                        if exact_cost is not None:
-                            inbound_wac = exact_cost["unit_cost_rub"]
-                            inbound_provenance = {
-                                "quality": exact_cost["quality"],
-                                "source": "frozen_ff_ledger_cost_snapshot",
-                                **dict(exact_cost["provenance"]),
-                            }
-                        elif source_type == "supplier_shipment":
-                            flow = supplier_flow_costs.get((source_object_id, nm_id))
-                            if flow is None:
-                                raise WarehouseFunctionalError(
-                                    f"FF supplier receipt {operation_id}:{nm_id} has no exact supplier-flow capital"
-                                )
-                            flow_qty, flow_capital, _quality, flow_provenance = flow
-                            inbound_wac = flow_capital / flow_qty
-                            inbound_provenance = flow_provenance
-                        else:
-                            if current_wac is None:
-                                seed = cost_map.get(nm_id)
-                                if seed is None:
-                                    raise WarehouseFunctionalError(
-                                        f"positive FF adjustment {operation_id}:{nm_id} has no prior or source cost"
-                                    )
-                                current_wac = seed.ff_unit_cost
-                            inbound_wac = current_wac
-                            inbound_provenance = {
-                                "quality": "current_wac_adjustment",
-                                "reason": "non_supplier_positive_FF_ledger_operation",
-                            }
-                        pool["quantity"] = current_qty + delta
-                        pool["capital"] = current_capital + delta * inbound_wac
-                    else:
-                        if current_wac is None:
-                            raise WarehouseFunctionalError(
-                                f"FF outbound {operation_id}:{nm_id} has no positive cost pool"
-                            )
-                        outbound = abs(delta)
-                        if outbound > current_qty:
-                            raise WarehouseFunctionalError(
-                                f"canonical FF replay would be negative for nmId {nm_id} at {operation_id}"
-                            )
-                        if exact_cost is None:
-                            (
-                                remaining_qty,
-                                remaining_capital,
-                                outbound_wac,
-                            ) = proportional_ff_outbound(
-                                quantity=current_qty,
-                                capital=current_capital,
-                                outbound_quantity=outbound,
-                            )
-                        else:
-                            outbound_wac = exact_cost["unit_cost_rub"]
-                            remaining_qty = current_qty - outbound
-                            remaining_capital = current_capital - outbound * outbound_wac
-                        if remaining_capital < ZERO or (
-                            remaining_qty > ZERO and remaining_capital <= ZERO
-                        ) or (
-                            remaining_qty == ZERO and remaining_capital != ZERO
-                        ):
-                            raise WarehouseFunctionalError(
-                                f"FF outbound {operation_id}:{nm_id} would make capital non-positive"
-                            )
-                        pool["quantity"] = remaining_qty
-                        pool["capital"] = remaining_capital
-                        inbound_wac = outbound_wac
-                        inbound_provenance = (
-                            {
-                                "quality": exact_cost["quality"],
-                                "source": "frozen_ff_ledger_cost_snapshot",
-                                **dict(exact_cost["provenance"]),
-                            }
-                            if exact_cost is not None
-                            else {"quality": "proportional_wac_outbound"}
-                        )
-                        if source_type in {"wb_supply", "wb_supply_targeted_reconciliation"} and source_object_id:
-                            ff_outbound_wac_by_supply_nm[(source_object_id, nm_id)] = outbound_wac
-                    pool["operations"].append(
-                        {
-                            "operation_id": operation_id,
-                            "created_at": operation.get("created_at"),
-                            "source_type": source_type,
-                            "source_object_id": source_object_id,
-                            "quantity_delta": _text(delta),
-                            "unit_cost_rub": _text(inbound_wac),
-                            "source": inbound_provenance,
-                        }
-                    )
-            for nm_id, expected_quantity in ff_qty.items():
-                actual_quantity = _decimal((ff_pools.get(nm_id) or {}).get("quantity"))
-                if expected_quantity < ZERO or actual_quantity != expected_quantity:
-                    raise WarehouseFunctionalError(
-                        f"canonical FF replay mismatch for nmId {nm_id}: {actual_quantity} != {expected_quantity}"
-                    )
+            ff_pools, ff_outbound_wac_by_supply_nm = replay_ff_cost_pools(
+                opening_pools=ff_pools, operations=capture["ff_operations"], lines=capture["ff_lines"],
+                supplier_flow_costs=supplier_flow_costs, cost_map=cost_map,
+                boundary=str((cutover or {}).get("cutover_at") or ""), expected_quantities=ff_qty)
             projection_pools = (
                 {
                     int(nm_id): dict(pool)
@@ -7954,6 +7975,10 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
     ensure_material_revisions(conn)
 
 
+# The same numeric native operands are retained by operator publication proof.
+_DOWNSTREAM_COST_ROWS_SQL = 'SELECT wb_supply_id,nm_id,accepted_qty quantity,accepted_date,supply_date,sku_ff_unit_cost_rub ff_unit_cost_rub,transit_cost_status,transit_per_unit_rub,ff_services_per_unit_rub,ff_storage_per_unit_rub,pre_acceptance_unit_cost_rub,wb_acceptance_amount_total,wb_acceptance_per_accepted_unit_rub,our_wb_unit_cost_rub wb_unit_cost_rub,source_status,component_status_json,inputs_hash FROM sheet_vitrina_v1_wb_supply_cost_layers WHERE is_current=1 ORDER BY wb_supply_id,nm_id'
+
+
 def _source_rows(
     conn: sqlite3.Connection,
     *,
@@ -8028,7 +8053,7 @@ def _source_rows(
         "fulfillment_service_uploads": "SELECT * FROM sheet_vitrina_v1_fulfillment_service_uploads ORDER BY upload_id",
         "fulfillment_service_lines": "SELECT * FROM sheet_vitrina_v1_fulfillment_service_lines ORDER BY upload_id,row_index,id",
         "nomenclature_purchase_prices": "SELECT item_id,nm_id,purchase_price_yuan,updated_at FROM sheet_vitrina_v1_nomenclature_items WHERE is_active=1 AND nm_id IS NOT NULL ORDER BY nm_id,item_id",
-        "downstream_cost_rows": "SELECT wb_supply_id,nm_id,accepted_qty quantity,accepted_date,supply_date,sku_ff_unit_cost_rub ff_unit_cost_rub,transit_cost_status,transit_per_unit_rub,ff_services_per_unit_rub,ff_storage_per_unit_rub,pre_acceptance_unit_cost_rub,wb_acceptance_amount_total,wb_acceptance_per_accepted_unit_rub,our_wb_unit_cost_rub wb_unit_cost_rub,source_status,component_status_json,inputs_hash FROM sheet_vitrina_v1_wb_supply_cost_layers WHERE is_current=1 ORDER BY wb_supply_id,nm_id",
+        "downstream_cost_rows": _DOWNSTREAM_COST_ROWS_SQL,
         "historical_wb_daily_quantities": "SELECT as_of_date,nm_id,physical_quantity FROM sheet_vitrina_v1_canonical_cost_daily_state WHERE stage='WB' AND as_of_date>='2026-07-01' ORDER BY as_of_date,nm_id",
         "archival_estimate_active": "SELECT version.version_id,version.effective_date,version.unit_cost_rub,version.quality,version.owner_approval_reference,version.manifest_digest,version.production_dry_run_plan_sha256,version.source_digest,version.plan_fingerprint,row.nm_id,row.unit_cost_rub row_unit_cost_rub,row.quality row_quality,row.lineage_json,row.row_fingerprint FROM sheet_vitrina_v1_warehouse_archival_estimate_active active JOIN sheet_vitrina_v1_warehouse_archival_estimate_versions version ON version.version_id=active.version_id JOIN sheet_vitrina_v1_warehouse_archival_estimate_rows row ON row.version_id=version.version_id WHERE active.slot=1 ORDER BY row.nm_id",
         "targeted_recalc_requests": "SELECT queue_id,stable_source_id,source_revision,effective_date,affected_nm_ids_json,status,requested_at,started_at FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue WHERE status IN ('queued','running') ORDER BY requested_at,queue_id",

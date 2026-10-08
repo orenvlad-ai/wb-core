@@ -522,3 +522,69 @@ production/China→FF and places the same quantity/capital in its business-date
 stage. Same-SKU flows from other shipments and every non-target SKU remain
 byte-semantic invariant. Apply waits for terminal job readback and signals an
 open Vitrina to reread table data automatically.
+
+## Supplier-owned dated cost continuation
+
+`operator_supplier_history_sources.py`, `operator_supplier_history_candidate.py`
+и `operator_supplier_history.py` продолжают уже принятые supplier revisions через
+штатные preparation intents, targeted recalculation, immutable functional
+versions и `ready_publications`. Отдельной очереди или складского документа нет.
+
+- `source_only` завершён собственным коротким native save, если действие не
+  создало нового cost intent. Старые obligations другого действия остаются своими.
+- `derived_no_change` требует собственной сохранённой source/version,
+  before/current native cost operands и собственной проверки current
+  Ready/Finance. Это не фиктивная обработка шести стадий. Structural no-effect
+  допускается только при совпадении source/calculation fingerprints из **raw
+  immutable original** supplier cost state и exact current native state;
+  текущая certification override не заменяет original evidence.
+- Changed cost authority переоценивает только затронутые даты и SKU из
+  собственного native source. Исторические даты требуют сохранённых dated
+  operands: отсутствие данных оставляет операцию ожидающей, не означает ноль.
+
+Современный `guided_china_acceptance` имеет frozen posted capital/expense и
+точную native relation. Supplier continuation не переписывает его receipt или
+debit. Legacy receipt без frozen snapshot допускает ровно существующий native
+FF Decimal fold на saved opening и dated append-only ledger prefix. Current
+physical detail не является историческим operand. Native transit/discrepancy
+reconciliation сохраняет quantity, match identities и pre-acceptance add-ons;
+переоценивается только разрешённая derived money basis. FBS physical state и
+official WB quantities не меняются. До native inventory effective date
+сохраняется proven dated quantity без поздней фиктивной finalization.
+
+Один cost-only cohort ограничен 32 exact sources и 366 датами. Он замыкается
+по пересечению SKU только внутри общей доказанной native publication. Pending
+preparation не включается как готовый участник. Membership/source revisions,
+исходные и revised rows, retained six stages, parameters и Ready повторно
+проверяются до публикации. Превышение лимита даёт явную незавершённую причину,
+а не усечённый кандидат. Каждый участник сохраняет собственное effect/no-change
+доказательство; общий ack не завершает чужой или не включённый source.
+
+`pending(runtime, now=...)` использует bounded oldest-last-check выбор и
+существующие attempt rows. За вызов публикуется максимум один кандидат.
+Known missing inputs/code drift сохраняют причину и позволяют следующему
+источнику продвигаться. Proven native newer source даёт superseded outcome;
+чужая версия не получает authority от старого intent. Unknown evaluator errors
+не превращаются в успешное завершение.
+
+`SupplierHistory` — отдельная typed authority. Existing owned History supervisor
+принимает только exact complete ready publication, independently verified
+immutable manifest и native per-date objects/CURRENT proof. Final ack writer
+повторяет source queries и selected dated Ready digests под `BEGIN IMMEDIATE`.
+Recovery после собственного book append сохраняет operation/attempt identity;
+source/CAS drift не разрешает replay чужого состояния. FF, policy и supplier
+authorities взаимно исключаются в одном History pass. После History остаётся
+собственная exact Finance verification и короткий completion CAS. Зелёная
+source receipt до этого подтверждает сохранение документа, не derived completion.
+
+Новая native functional version с доказанными current/superseded source bindings
+может создать новый attempt того же cohort. Его identity включает exact source
+refs, native versions и queue bindings; время, ошибка, Ready drift или code drift
+новых полномочий не дают. Все исходные unacked dates из retained native attempts
+включаются в новую реальную публикацию и History proof, даже без нового money
+delta. Прежний attempt получает CAS replacement link только после новой
+публикации; его inputs/books/stages и ack остаются своими. Лимит — 32 retained
+attempts. После собственного after-book crash original stages допускаются лишь
+при exact own accounting revision, совпадении current per-date tuple и ghost IDs
+с сохранённым predecessor и независимой проверке original expected-book stage
+hashes. Чужой tuple или неизвестная lineage оставляют recovery незавершённой.

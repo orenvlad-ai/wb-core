@@ -5932,6 +5932,7 @@ class RegistryUploadDbBackedRuntime:
         header: Mapping[str, Any],
         lines: list[Mapping[str, Any]],
         preparation_actions: dict[str, Any] | None = None,
+        operator_request: dict[str, Any] | None = None,
     ) -> None:
         shipment_id = str(header.get("shipment_id") or "").strip()
         if not shipment_id:
@@ -5946,6 +5947,8 @@ class RegistryUploadDbBackedRuntime:
             _ensure_schema(conn)
             from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
             supplier_before = begin_source_change(conn, [shipment_id])
+            from packages.application import operator_supplier_shipments as operator_receipts
+            operator_receipts.before_write(conn, shipment_id, operator_request)
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_supplier_shipments(
@@ -6128,6 +6131,7 @@ class RegistryUploadDbBackedRuntime:
                 ],
             )
             finish_source_change(conn, supplier_before, reset_expenses=False, post_actions=preparation_actions)
+            operator_receipts.record_saved(conn, shipment_id, operator_request)
             conn.commit()
 
     def list_supplier_shipments(self) -> list[dict[str, Any]]:
@@ -6283,6 +6287,7 @@ class RegistryUploadDbBackedRuntime:
         shipment_id: str,
         expenses_complete: bool,
         updated_at: str,
+        operator_request: dict[str, Any] | None = None,
     ) -> bool:
         shipment_id = str(shipment_id or "").strip()
         if not shipment_id:
@@ -6293,6 +6298,8 @@ class RegistryUploadDbBackedRuntime:
             _ensure_schema(conn)
             from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
             supplier_before = begin_source_change(conn, [shipment_id])
+            from packages.application import operator_supplier_shipments as operator_receipts
+            operator_receipts.before_write(conn, shipment_id, operator_request)
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_supplier_shipments
@@ -6303,6 +6310,7 @@ class RegistryUploadDbBackedRuntime:
                 (1 if expenses_complete else 0, updated_at, shipment_id),
             )
             finish_source_change(conn, supplier_before, reset_expenses=False)
+            operator_receipts.record_saved(conn, shipment_id, operator_request)
             conn.commit()
             return cursor.rowcount > 0
 
@@ -6327,6 +6335,7 @@ class RegistryUploadDbBackedRuntime:
         archived_at: str,
         actor: str = "operator",
         reason: str = "operator_delete_controlled_archive",
+        operator_request: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Archive a supplier source without deleting posted evidence.
 
@@ -6350,6 +6359,8 @@ class RegistryUploadDbBackedRuntime:
             conn.execute("BEGIN IMMEDIATE")
             from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
             supplier_before = begin_source_change(conn, [shipment_id])
+            from packages.application import operator_supplier_shipments as operator_receipts
+            operator_receipts.before_write(conn, shipment_id, operator_request)
             header_row = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id = ?",
                 (shipment_id,),
@@ -6366,6 +6377,7 @@ class RegistryUploadDbBackedRuntime:
                     """,
                     (existing_event_id,),
                 ).fetchone()
+                operator_receipts.record_saved(conn, shipment_id, operator_request)
                 conn.commit()
                 if event is not None:
                     payload = dict(event)
@@ -6440,6 +6452,7 @@ class RegistryUploadDbBackedRuntime:
             )
             actions = {"invoice_archive": {"invoice_document_id": str(header_row["invoice_document_id"]), "updated_at": archived_at}} if header_row["invoice_document_id"] else {}
             finish_source_change(conn, supplier_before, reset_expenses=False, post_actions=actions)
+            operator_receipts.record_saved(conn, shipment_id, operator_request)
             conn.commit()
             return {
                 "event_id": event_id,
@@ -6495,6 +6508,9 @@ class RegistryUploadDbBackedRuntime:
             conn.execute("BEGIN IMMEDIATE")
             from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
             previous_order = conn.execute("SELECT supplier_order_id FROM sheet_vitrina_v1_supplier_financial_documents WHERE document_id=?", (document_id,)).fetchone()
+            from packages.application import operator_supplier_financial as operator_financial
+            operator_guard = operator_financial.before_write(conn, kind='financial', subject_id=document_id,
+                owners=[supplier_order_id] + ([str(previous_order[0])] if previous_order else []))
             supplier_before = begin_source_change(conn, [supplier_order_id] + ([str(previous_order[0])] if previous_order else []))
             assignments = [
                 dict(item) for item in (bank_operation_assignments or [])
@@ -6751,6 +6767,11 @@ class RegistryUploadDbBackedRuntime:
                     for item in assignments
                 ],
             )
+            if operator_financial.active() is not None and str(document.get('document_type') or '') == 'bank_transfer_application' and str((document.get('normalized_parse') or {}).get('currency') or document.get('currency') or '').upper() == 'CNY':
+                from packages.application.cny_ledger import supplier_payment_document_from_financial_document
+                native_companion=supplier_payment_document_from_financial_document(document,now=updated_at)
+                if not conn.execute('SELECT 1 FROM sheet_vitrina_v1_cny_documents WHERE natural_key=?',(native_companion['natural_key'],)).fetchone():
+                    cny_documents=[*(cny_documents or []),native_companion]
             for cny_document in cny_documents or []:
                 natural_key = str(
                     cny_document.get("natural_key") or ""
@@ -6788,6 +6809,7 @@ class RegistryUploadDbBackedRuntime:
             stored_lines = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines WHERE supplier_order_id=? AND financial_document_id=? ORDER BY sort_order,line_id", (supplier_order_id, document_id)).fetchall()
             loaded = _supplier_financial_document_to_dict(stored_row)
             loaded["expense_lines"] = [_supplier_financial_expense_line_to_dict(line) for line in stored_lines]
+            operator_financial.record_saved(conn, kind='financial', subject_id=document_id, guard=operator_guard)
             conn.commit()
         return loaded
 
@@ -6861,6 +6883,15 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            conn.execute('BEGIN IMMEDIATE')
+            from packages.application import operator_supplier_financial as operator_financial
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            from packages.application.supplier_financial_documents import supplier_payment_fee_fingerprint
+            payment_row = conn.execute('SELECT * FROM sheet_vitrina_v1_cny_documents WHERE document_id=?', (values['payment_document_id'],)).fetchone()
+            if not payment_row or str(payment_row['source_order_id']) != values['supplier_order_id'] or supplier_payment_fee_fingerprint(_cny_document_to_dict(payment_row)) != values['payment_fingerprint']:
+                raise ValueError('zero-fee payment source revision changed before save')
+            operator_guard = operator_financial.before_write(conn, kind='zero_fee', subject_id=values['confirmation_id'], owners=[values['supplier_order_id']])
+            supplier_before = begin_source_change(conn, [values['supplier_order_id']])
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_supplier_payment_fee_confirmations(
@@ -6889,6 +6920,8 @@ class RegistryUploadDbBackedRuntime:
                     values["confirmed_at"],
                 ),
             )
+            finish_source_change(conn, supplier_before)
+            operator_financial.record_saved(conn, kind='zero_fee', subject_id=values['confirmation_id'], guard=operator_guard)
             conn.commit()
         confirmation = next(
             (
@@ -7382,6 +7415,10 @@ class RegistryUploadDbBackedRuntime:
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            if not conn.in_transaction:
+                conn.execute('BEGIN IMMEDIATE')
+            from packages.application import operator_supplier_financial as operator_financial
+            operator_guard = operator_financial.before_write(conn, kind='financial', subject_id=document_id, owners=[supplier_order_id])
             supplier_before = begin_source_change(conn, [supplier_order_id])
             cursor = conn.execute(
                 """
@@ -7398,6 +7435,13 @@ class RegistryUploadDbBackedRuntime:
                     str(document_id or "").strip(),
                 ),
             )
+            if operator_guard is not None:
+                from packages.application.cny_ledger import _document_status_for_parse
+                companions = conn.execute('SELECT * FROM sheet_vitrina_v1_cny_documents WHERE linked_financial_document_id=? ORDER BY document_id', (document_id,)).fetchall()
+                for item in companions:
+                    companion = _cny_document_to_dict(item)
+                    status = 'excluded' if parse_status == 'excluded' else _document_status_for_parse(companion['document_type'], companion.get('parsed_payload') or {}, companion.get('warnings') or [], companion.get('errors') or [])
+                    _save_cny_document_in_connection(conn, {**companion, 'status': status, 'updated_at': updated_at})
             finish_source_change(conn, supplier_before, reset_expenses=True)
             stored_row = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_documents WHERE supplier_order_id=? AND document_id=?", (supplier_order_id, document_id)).fetchone()
             if stored_row is None:
@@ -7405,6 +7449,7 @@ class RegistryUploadDbBackedRuntime:
             stored_lines = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines WHERE supplier_order_id=? AND financial_document_id=? ORDER BY sort_order,line_id", (supplier_order_id, document_id)).fetchall()
             loaded = _supplier_financial_document_to_dict(stored_row)
             loaded["expense_lines"] = [_supplier_financial_expense_line_to_dict(line) for line in stored_lines]
+            operator_financial.record_saved(conn, kind='financial', subject_id=document_id, guard=operator_guard)
             conn.commit()
             if cursor.rowcount <= 0:
                 raise ValueError(f"financial document not found: {document_id}")
@@ -7427,8 +7472,14 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            conn.execute('BEGIN IMMEDIATE')
+            from packages.application import operator_supplier_financial as operator_financial
+            subject_id = str(document.get('document_id') or '')
+            old = conn.execute('SELECT source_order_id FROM sheet_vitrina_v1_cny_documents WHERE document_id=?', (subject_id,)).fetchone()
+            operator_guard = operator_financial.before_write(conn, kind='cny', subject_id=subject_id, owners=[str(document.get('source_order_id') or '')] + ([str(old[0])] if old else []))
             document_id = _save_cny_document_in_connection(conn, document)
             loaded = _cny_document_to_dict(conn.execute("SELECT * FROM sheet_vitrina_v1_cny_documents WHERE document_id=?", (document_id,)).fetchone())
+            operator_financial.record_saved(conn, kind='cny', subject_id=document_id, guard=operator_guard)
             conn.commit()
         return loaded
 
@@ -7446,6 +7497,10 @@ class RegistryUploadDbBackedRuntime:
             _ensure_schema(conn)
             from packages.application.cny_preparation_intents import begin_source_change, finish_source_change
             before = begin_source_change(conn)
+            from packages.application import operator_supplier_financial as operator_financial
+            old = conn.execute('SELECT source_order_id FROM sheet_vitrina_v1_cny_documents WHERE document_id=?', (document_id,)).fetchone()
+            operator_guard = operator_financial.before_write(conn, kind='cny', subject_id=document_id, owners=[source_order_id] + ([str(old[0])] if old else []))
+
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_cny_documents
@@ -7466,6 +7521,7 @@ class RegistryUploadDbBackedRuntime:
             if stored is None:
                 raise ValueError(f"CNY document not found: {document_id}")
             loaded = _cny_document_to_dict(stored)
+            operator_financial.record_saved(conn, kind='cny', subject_id=document_id, guard=operator_guard)
             conn.commit()
             if cursor.rowcount <= 0:
                 raise ValueError(f"CNY document not found: {document_id}")

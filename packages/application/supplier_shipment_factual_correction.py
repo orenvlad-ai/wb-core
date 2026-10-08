@@ -148,6 +148,7 @@ class SupplierShipmentFactualCorrectionBlock:
         shipment_id: str,
         new_actual_shipment_date: Any,
         actor: str,
+        operator_request: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         shipment_id = _required_text(shipment_id, "shipment_id")
         actor = _required_text(actor or "operator", "actor")
@@ -164,6 +165,8 @@ class SupplierShipmentFactualCorrectionBlock:
         new_value = str(new_actual_shipment_date or "").strip()
         old_value = str(raw_header.get("actual_shipment_date") or "").strip()
         if new_value == old_value:
+            if operator_request is not None:
+                raise ValueError("factual source already changed; request a new preview")
             dry_run = self.dry_run(
                 shipment_id=shipment_id,
                 new_actual_shipment_date=new_value,
@@ -190,12 +193,20 @@ class SupplierShipmentFactualCorrectionBlock:
             _ensure_correction_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             try:
+                if operator_request is not None:
+                    from packages.application.operator_supplier_factual_dates import before_accept
+                    before_accept(conn, operator_request)
                 active = conn.execute(
                     f"SELECT * FROM {CORRECTION_TABLE} WHERE shipment_id=? AND status IN ('queued','running') ORDER BY requested_at DESC LIMIT 1",
                     (shipment_id,),
                 ).fetchone()
                 if active is not None:
                     if str(active["request_fingerprint"] or "") == request_fingerprint:
+                        if operator_request is not None:
+                            from packages.application.operator_supplier_factual_dates import record_accepted
+                            record_accepted(conn, operator_request, dict(active))
+                            conn.commit()
+                            return {**_correction_row_to_dict(active), "deduplicated": True}
                         conn.rollback()
                         return {**_correction_row_to_dict(active), "deduplicated": True}
                     raise SupplierShipmentFactualCorrectionError(
@@ -233,6 +244,10 @@ class SupplierShipmentFactualCorrectionBlock:
                         "",
                     ),
                 )
+                if operator_request is not None:
+                    from packages.application.operator_supplier_factual_dates import record_accepted
+                    saved = conn.execute(f"SELECT * FROM {CORRECTION_TABLE} WHERE correction_id=?", (correction_id,)).fetchone()
+                    record_accepted(conn, operator_request, dict(saved))
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -494,6 +509,7 @@ class SupplierShipmentFactualCorrectionBlock:
                 plan,
                 confirm_fingerprint=approved_fingerprint,
                 lock_wait_ms=max(lock_wait_ms, int(nested_lock["wait_ms"])),
+                _native_correction_id=correction_id,
             )
 
         # Migration evidence below is intentionally unreachable.  It remains

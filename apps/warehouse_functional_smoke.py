@@ -527,7 +527,9 @@ def _test_http_manual_snapshot_publication_order() -> None:
              patch("packages.application.operator_ff_overhead.complete_current_cycle", return_value={"processed_count":0}), \
              patch("packages.application.operator_warehouse_documents.drain", return_value={"request_ids":[]}) as operator_drain, \
              patch("packages.application.operator_warehouse_documents.reconcile", return_value={"processed_count":0}) as operator_reconcile, \
-             patch("packages.application.operator_fulfillment_services.reconcile", return_value={"processed_count":0}) as fulfillment_reconcile:
+             patch("packages.application.operator_fulfillment_services.reconcile", return_value={"processed_count":0}) as fulfillment_reconcile, \
+             patch("packages.application.operator_supplier_processing.reconcile", return_value={"status":"ok", "operations":[]}), \
+             patch("packages.application.fbs_accounting_runtime.current_publication_receipt", return_value={"status":"not_active"}):
             entry.runtime.runtime_dir = Path(temporary)
             entry.runtime.db_path = Path(temporary) / "registry.sqlite3"
             if status == "failed":

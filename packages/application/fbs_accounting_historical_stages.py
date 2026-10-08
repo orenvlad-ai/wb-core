@@ -351,6 +351,6 @@ def publish_dated_stages(conn, *, manifest):
                 conn.execute(f'INSERT INTO {P}{table}({",".join(row)}) VALUES({",".join("?" for _ in row)})',tuple(row.values()))
         reservations=[{k:v for k,v in row.items() if k!='version_id'} for row in edition['companions']['functional_ff_reservations']]
         unmatched=[{**row,'provenance':json.loads(row['provenance_json'])} for row in edition['companions']['unmatched_doprinato']]
-        _materialize_compact_warehouse_read_models(conn,version_id=edition["version_id"],plan={"plan_kind":"historical_receipt_revision","plan_fingerprint":edition["version"]["plan_fingerprint"],"lines":edition["balances"],"ff_reservations":reservations,"unmatched_doprinato":unmatched},created_at=edition["version"]["created_at"],effective_at=edition["version"]["effective_at"],business_effective_date=day)
+        _materialize_compact_warehouse_read_models(conn,version_id=edition["version_id"],plan={"plan_kind":edition["version"]["version_kind"],"plan_fingerprint":edition["version"]["plan_fingerprint"],"lines":edition["balances"],"ff_reservations":reservations,"unmatched_doprinato":unmatched},created_at=edition["version"]["created_at"],effective_at=edition["version"]["effective_at"],business_effective_date=day)
         receipts[day]=publish_functional_version_business_projection(conn,published_version_id=edition["version_id"],business_effective_date=day,published_at=edition["version"]["published_at"],source_revision=manifest["manifest_digest"])
     return receipts
