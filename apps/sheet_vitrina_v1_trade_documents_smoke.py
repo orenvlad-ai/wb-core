@@ -517,6 +517,10 @@ def main() -> None:
                     for key in ("invoice_document_id", "contract_document_id", "invoice_download_path", "contract_download_path")
                 ):
                     raise AssertionError(f"supplier response must not expose linked document metadata: {create_payload}")
+                # The source save durably schedules native invoice/contract preparation.
+                # Exercise its real worker before checking the derived document link.
+                from packages.application.supplier_preparation_intents import drain_supplier_preparation_intents
+                drain_supplier_preparation_intents(runtime, shipment_ids=[shipment_id])
                 operator_detail_code, operator_detail = _opener_json(
                     operator,
                     f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}",
