@@ -59,6 +59,16 @@ normalization. Original raw baseline/fingerprint and final raw receipt remain
 unchanged; volatile fields do not enter delta/authority equality. The committed
 receipt uses this SAME strict comparison when the timer deadline advances.
 
+The supported calendar subset is deliberately bounded: `*-*-*` or a valid
+literal ISO date, three hour/minute/second components with valid ranges, ordered
+unique two-digit lists or `*`, and the observed normalized hour interval form.
+Only no timezone, UTC, Europe/Moscow, Asia/Yekaterinburg or Asia/Tbilisi is accepted. Other
+calendar forms need a separate reviewed extension. Duration tokens have bounded
+integer/fraction lengths, native ordered units and an exact sum below the uint64
+infinity sentinel; sub-microsecond values, numeric/aggregate overflow and malformed
+dates/time ranges fail closed. This checks BOTH static intervals and volatile
+deadlines and never rewrites the static operand into an equivalent schedule.
+
 ## Review, apply, recover
 
 Use the existing maintenance pause and completed canonical deploy first. This

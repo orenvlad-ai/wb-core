@@ -35,6 +35,67 @@ CONFIG_PROPERTIES = ('FragmentPath', 'DropInPaths', 'ExecStart', 'Triggers', 'Pe
     'TimersCalendar', 'TimersMonotonic', 'AccuracyUSec', 'RandomizedDelayUSec', 'RemainAfterElapse')
 
 
+def _validate_duration(value):
+    if value == '0':
+        return
+    # systemd usec_t is uint64; UINT64_MAX is the unsupported infinity sentinel.
+    # Native constants: systemd/v255/src/basic/time-util.h (month = 2629800s).
+    units = {'month': 2629800000000, 'w': 604800000000, 'd': 86400000000,
+             'h': 3600000000, 'min': 60000000, 's': 1000000, 'ms': 1000, 'us': 1}
+    if len(value) > 256:
+        raise RuntimeError('formula resume invalid loaded duration')
+    total, previous = 0, -1
+    for token in value.split(' '):
+        match = re.fullmatch(r'(0|[1-9][0-9]{0,19})(?:\.([0-9]{1,6}))?(month|w|d|h|min|s|ms|us)', token)
+        if match is None:
+            raise RuntimeError('formula resume invalid loaded duration')
+        whole, fraction, unit = match.groups()
+        rank = tuple(units).index(unit)
+        if rank <= previous:
+            raise RuntimeError('formula resume invalid loaded duration')
+        previous = rank
+        usecs = int(whole) * units[unit]
+        if fraction:
+            numerator, denominator = int(fraction) * units[unit], 10 ** len(fraction)
+            if numerator % denominator:
+                raise RuntimeError('formula resume invalid loaded duration')
+            usecs += numerator // denominator
+        if usecs == 0 or total + usecs >= (1 << 64) - 1:
+            raise RuntimeError('formula resume invalid loaded duration')
+        total += usecs
+
+
+def _validate_calendar(value):
+    # Only the normalized operand families present in our native readback.
+    # Validation never rewrites/sorts the retained static schedule text.
+    parts = value.split(' ')
+    if len(parts) not in {2, 3} or (len(parts) == 3 and parts[2] not in {
+            'UTC', 'Europe/Moscow', 'Asia/Yekaterinburg', 'Asia/Tbilisi'}):
+        raise RuntimeError('formula resume unsupported loaded calendar')
+    if parts[0] != '*-*-*':
+        try:
+            if re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', parts[0]) is None or datetime.strptime(parts[0], '%Y-%m-%d').strftime('%Y-%m-%d') != parts[0]:
+                raise ValueError('invalid date')
+        except ValueError:
+            raise RuntimeError('formula resume invalid loaded calendar date') from None
+    fields = parts[1].split(':')
+    if len(fields) != 3:
+        raise RuntimeError('formula resume unsupported loaded calendar')
+    for index, (field, maximum) in enumerate(zip(fields, (23, 59, 59))):
+        if field == '*':
+            continue
+        if '/' in field:
+            match = re.fullmatch(r'([0-9]{2})/([1-9][0-9]?)', field)
+            if index != 0 or match is None or int(match[1]) > maximum or int(match[2]) > maximum:
+                raise RuntimeError('formula resume invalid loaded calendar range')
+        else:
+            if re.fullmatch(r'[0-9]{2}(?:,[0-9]{2})*', field) is None:
+                raise RuntimeError('formula resume invalid loaded calendar range')
+            values = [int(v) for v in field.split(',')]
+            if any(v > maximum for v in values) or values != sorted(set(values)):
+                raise RuntimeError('formula resume invalid loaded calendar range')
+
+
 def _loaded_records(value, property_name):
     """Parse the complete native serialization, retaining every static operand.
 
@@ -89,10 +150,11 @@ def _loaded_records(value, property_name):
         elif property_name == 'TimersCalendar':
             # Native systemctl expands these captured calendars to date/time
             # operands; retain their exact timezone and all schedule tokens.
-            if re.fullmatch(r'[0-9*.,/\-]+ [0-9*.,:/\-]+(?: [A-Za-z][A-Za-z0-9_+/\-]*)?', fields['operand']) is None:
-                raise RuntimeError('formula resume unsupported loaded calendar')
+            _validate_calendar(fields['operand'])
             static = ('OnCalendar', fields['operand'])
         else:
+            _validate_duration(fields['operand'])
+            _validate_duration(fields['next'])
             static = (fields['trigger'], fields['operand'])
         if static in result:
             raise RuntimeError('formula resume duplicate loaded record')

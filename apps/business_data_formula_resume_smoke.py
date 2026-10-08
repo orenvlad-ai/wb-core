@@ -190,13 +190,39 @@ class FormulaResumeTests(unittest.TestCase):
             calendar.replace('2026-10-08', '2026-02-30'),
             calendar.replace('next_elapse=', 'foreign='), calendar.replace(' ; next_elapse=', ' ; injected=1 ; next_elapse='),
             calendar.replace('OnCalendar=', 'Unknown='), calendar.replace('21:17:00', '25:17:00'),
+            '{ OnCalendar=9999-99-99 99:99:99 Europe/Moscow ; next_elapse=(null) }',
+            '{ OnCalendar=* * ; next_elapse=(null) }',
+            calendar.replace('*-*-*', '2026-02-30'), calendar.replace('*-*-*', '0000-01-01'),
+            calendar.replace('00/2:17:00', '24:17:00'), calendar.replace('00/2:17:00', '00:60:00'),
+            calendar.replace('00/2:17:00', '00:17:60'), calendar.replace('00/2:17:00', '00/0:17:00'),
+            calendar.replace('00/2:17:00', '00/24:17:00'), calendar.replace('00/2:17:00', '00:17/2:00'),
+            calendar.replace('00/2:17:00', '00:17,17:00'), calendar.replace('00/2:17:00', '00:20,17:00'),
+            calendar.replace('Asia/Yekaterinburg', 'Foreign/Unknown'),
         )] + [('TimersMonotonic', value) for value in (
             monotonic.replace('10min }', '-1min }'), monotonic.replace('10min }', 'unknown }'),
             monotonic.replace('OnBootUSec', 'OnForeignUSec'), monotonic + ' ', monotonic + '\r',
+            monotonic.replace('next_elapse=10min', 'next_elapse=' + '9' * 69 + 'min'),
+            monotonic.replace('OnBootUSec=10min', 'OnBootUSec=' + '9' * 69 + 'min'),
+            monotonic.replace('next_elapse=10min', 'next_elapse=18446744073709551615us'),
+            monotonic.replace('next_elapse=10min', 'next_elapse=18446744073709551616us'),
+            monotonic.replace('next_elapse=10min', 'next_elapse=1min 18446744073649551615us'),
+            monotonic.replace('next_elapse=10min', 'next_elapse=18446744073710s'),
+            monotonic.replace('next_elapse=10min', 'next_elapse=01min'),
+            monotonic.replace('next_elapse=10min', 'next_elapse=0.0000001s'),
+            monotonic.replace('next_elapse=10min', 'next_elapse=0.1us'),
+            monotonic.replace('next_elapse=10min', 'next_elapse=1min 1h'),
         )]
         for name, raw in cases:
             with self.subTest(property=name, raw=raw), self.assertRaises(RuntimeError):
                 formula._loaded_records(raw, name)
+        # Accepted finite boundary and observed normalized families retain
+        # exact text; validation must not collapse different static schedules.
+        for operand in ('*-*-* 00/2:17:00 Asia/Yekaterinburg', '*-*-* 00,03,06,09,12,15,18,21:00:00 Europe/Moscow',
+                        '*-*-* *:00,10,20,30,40,50:00', '*-*-* 01/2:55:00 Asia/Tbilisi', '2024-02-29 23:59:59 UTC'):
+            raw = '{ OnCalendar=' + operand + ' ; next_elapse=(null) }'
+            self.assertEqual(formula._loaded_records(raw, 'TimersCalendar'), (('OnCalendar', operand),))
+        for duration in ('18446744073709551614us', '2month 4w 1d 20h 13min 33.498883s', '0.000001s', '0'):
+            formula._validate_duration(duration)
         unit = self.systemd.unit_state('wb-core-sheet-vitrina-canary-restore.service')
         for value in (None, '', 'sha256:bad'):
             bad = deepcopy(unit); bad['properties']['UnitContentDigest'] = value
