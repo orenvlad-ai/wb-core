@@ -65,7 +65,7 @@ def execute(envelope: Mapping[str, Any], *, runtime_dir: Path, env_file: Path,
     path = _claim_path(runtime_dir, operation_id)
     deployed = domain._deployed_runtime_evidence(str(envelope.get("expected_runtime_sha") or ""))
     request = envelope.get("request")
-    if not isinstance(request, dict) or set(request) - {"manifest", "approval_reference", "recovery_reference", "capture_only"}:
+    if not isinstance(request, dict) or set(request) - {"manifest", "approval_reference", "recovery_reference", "capture_only", "replacement_policy"}:
         raise ValueError("invalid-request")
     if action == "readback":
         return _readback(runtime_dir, operation_id, request)
@@ -94,7 +94,7 @@ def execute(envelope: Mapping[str, Any], *, runtime_dir: Path, env_file: Path,
     def preview_plan():
         remote, details = domain.fetch_remote_evidence(source, manifest)
         with closing(domain._open(runtime_dir, read_only=True)) as conn:
-            plan = domain.build_plan(conn, runtime_dir=runtime_dir, manifest=manifest, remote=remote)
+            plan = domain.build_plan(conn, runtime_dir=runtime_dir, manifest=manifest, remote=remote, replacement_policy=request.get("replacement_policy"))
         if not plan["coverage_confirmed"]:
             raise ValueError("recovery-preconditions-failed")
         preview = {"operation_id": operation_id, "target": TARGET,
@@ -131,7 +131,7 @@ def execute(envelope: Mapping[str, Any], *, runtime_dir: Path, env_file: Path,
         try:
             domain.apply_plan(runtime_dir, manifest=manifest, remote=remote, details=details,
                               expected_fingerprint=preview["candidate_sha256"], actor=str(envelope.get("actor") or "github-production-apply"),
-                              approval_reference=str(request["approval_reference"]))
+                              approval_reference=str(request["approval_reference"]), replacement_policy=request.get("replacement_policy"))
         except Exception as exc:
             raise AmbiguousSubmit("recovery-submit-readback-only") from exc
         return {"operation_id": operation_id, "disposition": "submitted", "wb_post_count": 0, "provider_call_count": 0}

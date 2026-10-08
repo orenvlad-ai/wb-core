@@ -10,6 +10,7 @@ import {allocateCaseCode, assertCaseCode} from "./case_code.mjs";
 import {MAX_REWRITES, PROMPT_BUNDLE_VERSION} from "./constants.mjs";
 import {calculateJobCost, usageRecord} from "./cost_accounting.mjs";
 import {runDraftGuard} from "./draft_guard.mjs";
+import {applyReturnQuestionPolicy, RETURN_QUESTION_POLICY} from "./return_question_policy.mjs";
 import {selectApprovedFallback} from "./fallback.mjs";
 import {isReusableJob, makeIdempotencyKey} from "./idempotency.mjs";
 import {MemoryStore} from "./memory_store.mjs";
@@ -248,7 +249,12 @@ export async function runJob(rawInput, dependencies = {}) {
     const rawClassification = await callRole("classifier", classifierRequest);
     await transition("classified");
 
-    const builtWriter = await buildWriterRequest(reviewInput, rawClassification);
+    const ownerClassification = applyReturnQuestionPolicy(rawClassification, reviewInput);
+    const builtWriter = await buildWriterRequest(reviewInput, ownerClassification);
+    if (ownerClassification !== rawClassification) {
+      builtWriter.request.draft_constraints.must_include.push("Напишите, пожалуйста, в чат с продавцом — мы постараемся разобраться в вашей ситуации. Указать единственный выделенный case code.");
+      builtWriter.guard_events.push({guard_id: RETURN_QUESTION_POLICY, from: rawClassification.route, to: "seller_chat", reason: ownerClassification.route_reason});
+    }
     const classification = builtWriter.request.classification;
     await assertRoleOutput("classifier", classification);
     const invariantErrors = assertGuardInvariants(classification);

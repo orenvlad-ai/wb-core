@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import shlex
 import sqlite3
+import subprocess
 import sys
 import time
 from typing import Any, Callable, Mapping
@@ -61,6 +62,9 @@ from packages.application.wb_autoanswers_runtime import (  # noqa: E402
 )
 
 
+from packages.application.wb_autoanswers_chat_public import promote_chat_invitation
+
+RETURN_QUESTION_REPLACEMENT = "generic_return_question_v1"
 CONTRACT = "wb_autoanswers_backlog_recovery_v1"
 T0_CONTRACT = "wb_autoanswers_t0_manifest_v1"
 DATABASE_FILENAME = AUTOANSWERS_DB_FILENAME
@@ -342,6 +346,8 @@ def fetch_remote_evidence(
         detail = source.fetch_detail(feedback_id)
         if detail is None:
             raise RuntimeError(f"WB detail is missing for {feedback_id}")
+        if str(detail.get("id") or "") != feedback_id:
+            raise RuntimeError("WB detail identity changed")
         details[feedback_id] = detail
         answer = _answer_text(detail)
         content_hash = _content_hash(detail)
@@ -540,6 +546,136 @@ def _legacy_safe_public_repair(
                       "previous_result_sha256": sha256_text(str(job["result_json"])), "publication_reply_sha256": sha}
 
 
+def _return_question_replacement(
+    conn: sqlite3.Connection,
+    job: Mapping[str, Any],
+    feedback: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Explicit replacement of this reviewed error class, never fallback approval."""
+    job, feedback = dict(job), dict(feedback)
+    result = json.loads(str(job["result_json"] or "{}"))
+    raw = json.loads(str(feedback["raw_json"]))
+    content = content_projection(raw)
+    # Check all publication generations for the feedback, not only current key.
+    publication = conn.execute(
+        """SELECT 1 FROM sheet_vitrina_v1_wb_publication_jobs p
+        JOIN sheet_vitrina_v1_wb_autoanswer_jobs j ON j.processing_key=p.processing_key
+        WHERE p.feedback_id=? OR j.feedback_id=?""",
+        (job["feedback_id"], job["feedback_id"]),
+    ).fetchone()
+    archived = conn.execute(
+        """SELECT 1 FROM sheet_vitrina_v1_wb_autoanswer_job_revisions
+        WHERE processing_key=? AND media_processing_version=?""",
+        (job["processing_key"], job["media_processing_version"]),
+    ).fetchone()
+    valid = (
+        not archived and str(raw.get("id") or "") == str(job["feedback_id"])
+        and job["state"] == "needs_review" and job["final_route"] == "wb_support"
+        and job["fallback_used"] and result.get("fallback_used") is True
+        and job["hard_gates_passed"] and result.get("hard_gates_passed") is True
+        and job["node_contract_valid"] and result.get("node_contract_valid") is True
+        and not job["media_uncertain"] and not result.get("media_uncertain")
+        and not job["manual_started"] and not job["manual_edit_revision"]
+        and not job["manual_reply"] and not job["manual_reviewed_by"]
+        and not job["approved_by"] and not job["approved_at"]
+        and not job["last_error_code"] and not job["regeneration_required"]
+        and not job["lease_owner"] and not job["lease_until"] and not publication
+        and json.loads(str(job["review_reasons_json"])) == ["fallback_used"]
+        and (result.get("pipeline_result") or {}).get("primary_issue") == "WB_REFUND_STATUS"
+        and result.get("final_route") == "wb_support"
+        and result.get("final_reply") == job["final_reply"]
+        and final_reply_hash(str(job["final_reply"])) == job["final_reply_sha256"]
+        and not job["case_code"] and not result.get("case_code")
+        and not _answer_text(raw) and not feedback["answer_text"] and raw.get("state") != "wbRu"
+        and content == json.loads(str(feedback["content_json"]))
+        and sha256_text(canonical_json(content)) == job["content_version_hash"] == feedback["content_version_hash"]
+        and job["content_version"] == feedback["content_version"]
+    )
+    if not valid:
+        raise RuntimeError("generic return replacement source is not an untouched reviewed fallback")
+    existing = [
+        {"idempotency_key": row["processing_key"], "case_code": row["case_code"], "active": True}
+        for row in conn.execute(
+            """SELECT processing_key,case_code FROM sheet_vitrina_v1_wb_autoanswer_jobs
+            WHERE COALESCE(case_code,'')<>'' ORDER BY processing_key"""
+        ).fetchall()
+    ]
+    payload = {
+        "review": {
+            "review_id": job["feedback_id"], "review_version": str(job["content_version"]),
+            "text": content["text"], "pros": content["pros"], "cons": content["cons"],
+            "wb_tags": content["tags"],
+        },
+        "media": {"photos": content["media"], "video": {"present": bool(raw.get("video"))}},
+        "processingKey": job["processing_key"], "existing": existing,
+    }
+    script = ROOT / "packages/node/wb_autoanswers_v1_4_2/make_mvp/scripts/return_question_replacement.mjs"
+    completed = subprocess.run(
+        ["node", str(script)], input=canonical_json(payload), text=True,
+        capture_output=True, timeout=20, check=False,
+    )
+    if completed.returncode:
+        raise RuntimeError("generic return replacement deterministic guard rejected: " + completed.stderr[:200])
+    replacement = json.loads(completed.stdout)
+    promoted = promote_chat_invitation(replacement)
+    # Retain settled usage for audit; this replacement itself has no paid calls.
+    promoted["usage"] = result.get("usage") or {}
+    promoted["pipeline_result"] = {
+        "route": "seller_chat", "primary_issue": "OTHER_SPECIFIC", "outcome": "ready",
+        "publication_action": "reply", "policy_version": replacement["policy_version"],
+        "model_call_count": 0,
+    }
+    proof = {
+        "policy_version": replacement["policy_version"],
+        "source_result_sha256": sha256_text(str(job["result_json"])),
+        "source_content_hash": job["content_version_hash"],
+        "source_reply_sha256": job["final_reply_sha256"],
+        "case_code": replacement["case_code"], "replacement_reply": replacement["final_reply"],
+        "replacement_reply_sha256": final_reply_hash(replacement["final_reply"]),
+        "provider_calls": 0,
+    }
+    return promoted, proof
+
+
+def _apply_return_question_replacement(
+    repo: AutoanswersRepository, conn: sqlite3.Connection, *, job: Mapping[str, Any],
+    feedback: Mapping[str, Any], planned: Mapping[str, Any], policy_epoch: int,
+    actor: str, at: datetime,
+) -> None:
+    result, proof = _return_question_replacement(conn, job, feedback)
+    if proof != planned["return_question_replacement"]:
+        raise RuntimeError("generic return replacement changed after preview")
+    _archive_original_job(conn, job, reason=proof["policy_version"], at=at)
+    reply, code = result["final_reply"], result["case_code"]
+    conn.execute(
+        """UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET state=?,policy_epoch=?,policy_version=?,
+        final_route='public_only',case_code=?,final_reply=?,final_reply_sha256=?,result_json=?,
+        hard_gates_passed=1,node_contract_valid=1,fallback_used=0,media_uncertain=0,
+        review_reasons_json='[]',last_error_code=NULL,completed_at=?,updated_at=? WHERE processing_key=?""",
+        (STATE_APPROVED, policy_epoch, DEFAULT_POLICY_VERSION, code, reply,
+         final_reply_hash(reply), canonical_json(result), iso_utc(at), iso_utc(at), job["processing_key"]),
+    )
+    adopted = dict(job)
+    adopted.update(
+        policy_epoch=policy_epoch, policy_version=DEFAULT_POLICY_VERSION, final_route="public_only",
+        case_code=code, final_reply=reply, final_reply_sha256=final_reply_hash(reply),
+        result_json=canonical_json(result), fallback_used=0, media_uncertain=0,
+        hard_gates_passed=1, node_contract_valid=1, review_reasons_json="[]",
+    )
+    repo._create_publication_job(
+        conn, job=adopted, reply=reply, reply_sha=final_reply_hash(reply),
+        request_source="automatic", requested_by=None, mode_at_enqueue="auto_all",
+        manual_edit_revision=None, at=at,
+    )
+    repo._audit(
+        conn, aggregate_type="processing_job", aggregate_id=str(job["processing_key"]),
+        event_type="generic_return_question_policy_replaced", actor_type="recovery", actor_id=actor,
+        details={"proof": proof, "source_usage": result["usage"],
+                 "retained_actual_cost_usd": job["actual_cost_usd"], "wb_posts": 0},
+        at=at, previous_state=str(job["state"]), next_state=STATE_APPROVED,
+    )
+
+
 def _classify_action(
     row: Mapping[str, Any] | None,
     *,
@@ -571,7 +707,10 @@ def build_plan(
     runtime_dir: Path,
     manifest: Mapping[str, Any],
     remote: Mapping[str, Any],
+    replacement_policy: str | None = None,
 ) -> dict[str, Any]:
+    if replacement_policy not in {None, RETURN_QUESTION_REPLACEMENT}:
+        raise ValueError("unsupported replacement policy")
     feedback_ids = sorted(str(item["feedback_id"]) for item in manifest["items"])
     rows = {str(row["feedback_id"]): row for row in _target_rows(conn, feedback_ids)}
     settings = conn.execute(
@@ -595,6 +734,17 @@ def build_plan(
                 completed_evidence is not None
                 and completed_evidence.get("outcome") == "ready"
             )
+        return_proof = None
+        if replacement_policy and not details_by_id[feedback_id]["answer_present"]:
+            if row is None or not row.get("processing_key"):
+                raise RuntimeError("generic return replacement requires an existing reviewed job")
+            full_job = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?", (row["processing_key"],)).fetchone()
+            full_feedback = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?", (feedback_id,)).fetchone()
+            _, return_proof = _return_question_replacement(conn, full_job, full_feedback)
+            if return_proof["source_content_hash"] != details_by_id[feedback_id]["content_hash"]:
+                raise RuntimeError("generic return replacement remote content changed")
+        elif row and row.get("fallback_used") and not details_by_id[feedback_id]["answer_present"]:
+            raise RuntimeError("semantic fallback requires an explicit supported replacement policy")
         repair_proof = None
         if row is not None and row.get("publication_key") and not details_by_id[feedback_id]["answer_present"] and not row.get("write_started_at") and not row.get("write_attempt_count"):
             full_job = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?", (row["processing_key"],)).fetchone()
@@ -609,6 +759,8 @@ def build_plan(
             answer_present=bool(details_by_id[feedback_id]["answer_present"]),
             audited_complete=audited_complete,
         )
+        if return_proof:
+            action = "replace_generic_return_question"
         if action == "readback_only":
             # A possible prior POST can never be repeated by this runner.
             if not details_by_id[feedback_id]["answer_present"]:
@@ -620,6 +772,7 @@ def build_plan(
                 "feedback_id": feedback_id,
                 "action": action,
                 "safe_public_provenance_repair": repair_proof,
+                "return_question_replacement": return_proof,
                 "remote_content_hash": details_by_id[feedback_id]["content_hash"],
                 "content_version": row.get("content_version") if row else None,
                 "content_version_hash": row.get("content_version_hash") if row else None,
@@ -692,6 +845,7 @@ def build_plan(
     )
     identity = {
         "contract": CONTRACT,
+        "replacement_policy": replacement_policy,
         "manifest_sha256": manifest["manifest_sha256"],
         "expected_feedback_count": len(feedback_ids),
         "current_policy": {
@@ -951,15 +1105,20 @@ def apply_plan(
     expected_fingerprint: str,
     actor: str,
     approval_reference: str,
+    replacement_policy: str | None = None,
 ) -> dict[str, Any]:
     if not str(approval_reference).strip():
         raise ValueError("backlog recovery apply requires an exact human approval reference")
     if not str(actor).strip():
         raise ValueError("backlog recovery apply requires an explicit actor")
     repo = AutoanswersRepository(runtime_dir=runtime_dir)
+    if replacement_policy and not repo.settings().effective_enabled:
+        raise RuntimeError("generic return replacement requires effectively enabled autoanswers")
     feedback_ids = sorted(str(item["feedback_id"]) for item in manifest["items"])
     if set(details) != set(feedback_ids):
         raise RuntimeError("apply details do not match the exact T0 manifest")
+    if any(str(details[key].get("id") or "") != key for key in feedback_ids):
+        raise RuntimeError("apply detail identity changed")
     recovery_id = "backlog-recovery:" + expected_fingerprint.removeprefix("sha256:")
     with closing(repo._connect()) as conn:
         persisted = conn.execute(
@@ -983,6 +1142,7 @@ def apply_plan(
             runtime_dir=runtime_dir,
             manifest=manifest,
             remote=remote,
+            replacement_policy=replacement_policy,
         )
     if persisted is not None:
         persisted_evidence = json.loads(str(persisted["evidence_json"] or "{}"))
@@ -1243,6 +1403,15 @@ def apply_plan(
                     next_state=STATE_APPROVED,
                 )
                 applied_actions.append({"feedback_id": feedback_id, "action": "safe_public_provenance_repaired" if repaired is not None else "publication_rebound"})
+                continue
+            if planned["action"] == "replace_generic_return_question":
+                if _content_hash(details[feedback_id]) != planned["remote_content_hash"]:
+                    raise RuntimeError("generic return replacement fresh remote content changed")
+                _apply_return_question_replacement(
+                    repo, conn, job=job, feedback=feedback, planned=planned,
+                    policy_epoch=next_epoch, actor=actor, at=at,
+                )
+                applied_actions.append({"feedback_id": feedback_id, "action": "generic_return_question_replaced"})
                 continue
             evidence = AutoanswersRepository._completed_node_evidence(
                 conn, str(job["processing_key"])

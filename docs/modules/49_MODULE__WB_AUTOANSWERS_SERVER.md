@@ -109,7 +109,7 @@ Read-only capture request: `{"capture_only":true}`. Запускать толь�
 {
   "manifest": "<полный объект wb_autoanswers_t0_manifest_v1 из capture>",
   "approval_reference": "<точная ссылка на разрешение владельца для этого cohort>",
-  "recovery_reference": "/opt/wb-core-runtime/evidence/<task>/before.sqlite3"
+  "recovery_reference": "/opt/wb-core-runtime/state/backups/private-evidence/<task>/before.sqlite3"
 }
 ```
 
@@ -140,3 +140,38 @@ revision, source hash, текущий template ID/rating, точный reply/has
 Требуется новая одобренная операция зарегистрированного adapter; предыдущая
 применённая операция не отправляется повторно. Поддельное доказательство,
 реальные chat/case-code сведения и возможный прошлый POST не переоткрываются.
+
+## Общий вопрос о возврате без причины
+
+Unfrozen orchestration policy `generic-return-question-2026-10-08-v1`
+проверяет всё `text + pros + cons` до штатного case-code allocation. Общие
+«Как оформить возврат?», «Как вернуть деньги?» и вежливые вариации направляются
+в `seller_chat`: сначала продавец уточняет ситуацию и пробует помочь.
+Само слово «деньги» не доказывает уже оформленный возврат. Факты об одобренном
+возврате/задержке выплаты сохраняют `wb_support`; описанный дефект сохраняет
+действующие товарные guards. Неизвестное добавленное содержание, медиа и tags
+не поглощаются этим правилом. Frozen bundle и manifest не изменены.
+
+Публичный ответ содержит только приглашение в чат и единственный штатный код,
+без обещания возврата/денег или требования публичных материалов. Существующий
+`promote_chat_invitation` и его проверка на каждой публикационной границе
+сохраняются. CTA guard различает действие «Оформите/заполните заявку на возврат»
+и существительное «Оформление возврата»/«статус заявки на возврат».
+
+Для ошибочно обработанного старой политикой `needs_review / fallback_used /
+WB_REFUND_STATUS` разрешена отдельная exact-cohort операция зарегистрированного
+adapter с дополнительным полем request:
+`"replacement_policy": "generic_return_question_v1"`. Поле входит в fingerprints
+и durable operation claim. Без него semantic fallback не принимается.
+Preview показывает `replace_generic_return_question`, полный новый текст,
+case code, source/result/content hashes и нулевые новые provider calls.
+
+Replacement повторно под control lock проверяет свежий WB content, отсутствие
+ответа, manual/error/lease/media blockers и любых publication generations для
+feedback. Canonical Node allocator учитывает занятые коды и стабильный key;
+штатные draft/chat-promotion guards проверяют новый детерминированный текст.
+Исходный результат и стоимость архивируются. Processing key, attempts,
+settled costs и usage сохраняются; enqueue создаёт обычную публикацию без POST.
+Повтор retained operation допускает только readback. Возможный начавшийся POST
+никогда не переоткрывается. Это замена по явному новому правилу владельца,
+а не одобрение исходного fallback или массовое разрешение fallback-ответов.

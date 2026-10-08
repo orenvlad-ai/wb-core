@@ -186,6 +186,146 @@ class BacklogRecoveryTest(unittest.TestCase):
                         build_plan(conn, runtime_dir=runtime_dir, manifest=manifest, remote=remote)
                 self.assertEqual(repo.get_feedback("safe-public")["publications"][0]["publication_key"], publication["publication_key"])
 
+    def prepare_return_question(self, runtime_dir: Path):
+        clock = MutableClock()
+        repo = AutoanswersRepository(runtime_dir=runtime_dir, now_factory=clock, env={})
+        repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        detail = feedback("generic-return", text="Как можно оформить возврат?")
+        detail.update(pros="", photoLinks=None, productValuation=1)
+        repo.upsert_feedback(detail, source_stream="unanswered", run_kind="steady")
+        job = repo.enqueue_processing("generic-return", trigger_source="steady_sync", actor_id="sync")
+        repo.claim_processing_job(worker_id="ai")
+        repo.settle_budget(job["processing_key"], actual_cost_usd="0.05014125")
+        repo.complete_generation(job["processing_key"], worker_id="ai", result=successful_result(
+            "wb_support", final_reply="Здравствуйте. Обратитесь в поддержку Wildberries по заказу.",
+            case_code=None, fallback_used=True, usage={"api_calls":{"total":7}},
+            pipeline_result={"primary_issue":"WB_REFUND_STATUS","outcome":"fallback","model_call_count":7}))
+        backup = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}" / "verified.sqlite3"
+        backup.parent.mkdir(parents=True)
+        with sqlite3.connect(repo.db_path) as source, sqlite3.connect(backup) as target:
+            source.backup(target)
+        source = FakeSource({"generic-return":detail})
+        manifest = capture_t0_manifest(source)
+        remote, details = fetch_remote_evidence(source, manifest)
+        return repo, clock, detail, source, manifest, remote, details, backup
+
+    def test_explicit_return_question_replacement_retains_cost_audit_and_posts_once(self):
+        with TemporaryDirectory() as directory:
+            runtime_dir = Path(directory)
+            repo,clock,detail,source,manifest,remote,details,_backup = self.prepare_return_question(runtime_dir)
+            original = repo.get_feedback("generic-return")["ai_jobs"][0]
+            with _open(runtime_dir,read_only=True) as conn:
+                with self.assertRaisesRegex(RuntimeError,"semantic fallback"):
+                    build_plan(conn,runtime_dir=runtime_dir,manifest=manifest,remote=remote)
+                plan = build_plan(conn,runtime_dir=runtime_dir,manifest=manifest,remote=remote,replacement_policy="generic_return_question_v1")
+            self.assertEqual(plan["target_actions"][0]["action"],"replace_generic_return_question")
+            self.assertEqual(plan["provider_call_count"],0)
+            with patch("apps.wb_autoanswers_backlog_recovery._now",clock):
+                apply_plan(runtime_dir,manifest=manifest,remote=remote,details=details,expected_fingerprint=plan["plan_fingerprint"],actor="test",approval_reference="owner-generic-rule",replacement_policy="generic_return_question_v1")
+                replay=apply_plan(runtime_dir,manifest=manifest,remote=remote,details=details,expected_fingerprint=plan["plan_fingerprint"],actor="test",approval_reference="owner-generic-rule",replacement_policy="generic_return_question_v1")
+            self.assertTrue(replay["idempotent"])
+            stored=repo.get_feedback("generic-return")
+            replaced,pub=stored["ai_jobs"][0],stored["publications"][0]
+            for field in ("processing_key","attempts","actual_cost_usd"):
+                self.assertEqual(replaced[field],original[field])
+            result=json.loads(replaced["result_json"])
+            self.assertEqual(result["usage"],json.loads(original["result_json"])["usage"])
+            self.assertIn("server_policy_transform",result)
+            self.assertIn("мы постараемся разобраться",pub["exact_reply"])
+            self.assertEqual(pub["exact_reply"].count(replaced["case_code"]),1)
+            with _open(runtime_dir,read_only=True) as conn:
+                revision=dict(conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswer_job_revisions").fetchone())
+                self.assertEqual(revision["result_json"],original["result_json"])
+                self.assertEqual(revision["actual_cost_usd"],"0.05014125")
+            events=[]
+            class Transport(FakeWbTransport):
+                def create_answer(self,*,feedback_id,text):
+                    events.append("POST");return super().create_answer(feedback_id=feedback_id,text=text)
+                def fetch_detail(self,feedback_id):
+                    events.append("GET");return super().fetch_detail(feedback_id)
+            transport=Transport();transport.current_details["generic-return"]=detail
+            transport.readbacks=[{**detail,"answer":{"text":pub["exact_reply"]}}]
+            worker=AutoanswersPublicationWorker(repository=repo,transport=transport,worker_id="publisher")
+            self.assertEqual(worker.run_once()["state"],"publish_pending_readback")
+            self.assertEqual(worker.run_once()["state"],"published")
+            self.assertIsNone(worker.run_once())
+            self.assertEqual(events,["GET","POST","GET"])
+
+    def test_return_question_replacement_rejects_drift_manual_leases_and_other_fallbacks(self):
+        for changed in ("reason","status","lease","manual","error","hash","result","publication","identity"):
+            with self.subTest(changed=changed),TemporaryDirectory() as directory:
+                runtime_dir=Path(directory)
+                repo,clock,detail,source,manifest,remote,details,_backup=self.prepare_return_question(runtime_dir)
+                original=repo.get_feedback("generic-return")["ai_jobs"][0]
+                with _open(runtime_dir,read_only=True) as conn:
+                    plan=build_plan(conn,runtime_dir=runtime_dir,manifest=manifest,remote=remote,replacement_policy="generic_return_question_v1")
+                with repo.transaction() as conn:
+                    if changed in {"reason","status"}:
+                        raw=dict(detail);raw["cons"]="Пришло разбитое" if changed=="reason" else "Возврат одобрен, деньги не пришли"
+                        conn.execute("UPDATE sheet_vitrina_v1_wb_feedbacks SET raw_json=?",(canonical_json(raw),))
+                    if changed=="identity":
+                        raw=dict(detail);raw["id"]="other"
+                        conn.execute("UPDATE sheet_vitrina_v1_wb_feedbacks SET raw_json=?",(canonical_json(raw),))
+                    if changed=="lease":conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET lease_owner='worker'")
+                    if changed=="manual":conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET manual_started=1")
+                    if changed=="error":conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET last_error_code='OPENAI_AUTH'")
+                    if changed=="hash":conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET final_reply_sha256='forged'")
+                    if changed=="result":
+                        result=json.loads(original["result_json"]);result["pipeline_result"]["primary_issue"]="DEFECT_OUT_OF_BOX"
+                        conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET result_json=?",(canonical_json(result),))
+                    if changed=="publication":
+                        repo._create_publication_job(conn,job=original,reply=original["final_reply"],reply_sha=original["final_reply_sha256"],request_source="automatic",requested_by=None,mode_at_enqueue="auto_all",manual_edit_revision=None,at=clock())
+                with patch("apps.wb_autoanswers_backlog_recovery._now",clock):
+                    with self.assertRaises(RuntimeError):
+                        apply_plan(runtime_dir,manifest=manifest,remote=remote,details=details,expected_fingerprint=plan["plan_fingerprint"],actor="test",approval_reference="owner-generic-rule",replacement_policy="generic_return_question_v1")
+
+    def test_future_return_question_node_generation_promotes_and_publishes_once(self):
+        import os
+        from packages.application.wb_autoanswers_worker import AutoanswersProcessingWorker
+        from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge
+        class NoopMedia:
+            def process(self, **kwargs):
+                return {"media_uncertain":False}
+        with TemporaryDirectory() as directory:
+            clock=MutableClock()
+            repo=AutoanswersRepository(runtime_dir=Path(directory),now_factory=clock,env={})
+            repo.update_settings(master_enabled=True,mode="auto_all",actor_id="admin")
+            detail=feedback("future-return",text="Как вернуть деньги?")
+            detail.update(pros="",photoLinks=None,productValuation=1)
+            repo.upsert_feedback(detail,source_stream="unanswered",run_kind="steady")
+            repo.enqueue_processing("future-return",trigger_source="steady_sync",actor_id="sync")
+            worker=AutoanswersProcessingWorker(repository=repo,bridge=NodeAutoanswersBridge(env={**os.environ,"WB_AUTOANSWERS_TEST_MODE":"1"}),media_processor=NoopMedia(),worker_id="ai")
+            generated=worker.run_once(execution_mode="fixture",fixture_scenario="generic_return_question")
+            self.assertEqual(generated["state"],"approved")
+            stored=repo.get_feedback("future-return")
+            self.assertEqual(stored["ai_jobs"][0]["final_route"],"public_only")
+            self.assertFalse(stored["ai_jobs"][0]["fallback_used"])
+            transport=FakeWbTransport();transport.current_details["future-return"]=detail
+            transport.readbacks=[{**detail,"answer":{"text":stored["publications"][0]["exact_reply"]}}]
+            publisher=AutoanswersPublicationWorker(repository=repo,transport=transport,worker_id="pub")
+            self.assertEqual(publisher.run_once()["state"],"publish_pending_readback")
+            self.assertEqual(publisher.run_once()["state"],"published")
+            self.assertIsNone(publisher.run_once())
+            self.assertEqual(len(transport.write_calls),1)
+
+    def test_registered_return_question_operation_has_one_submit_and_bound_readback(self):
+        from apps.wb_autoanswers_recovery_apply import execute
+        with TemporaryDirectory() as directory:
+            runtime_dir=Path(directory)
+            repo,clock,detail,source,manifest,remote,details,backup=self.prepare_return_question(runtime_dir)
+            request={"manifest":manifest,"approval_reference":"owner-generic-rule","recovery_reference":str(backup),"replacement_policy":"generic_return_question_v1"}
+            envelope={"action":"preview","operation_id":"synthetic-return-replacement","request":request,"expected_runtime_sha":"a"*40,"actor":"test"}
+            with patch("apps.wb_autoanswers_backlog_recovery._deployed_runtime_evidence",return_value={"deployed_sha":"a"*40}),patch("apps.wb_autoanswers_backlog_recovery._now",clock):
+                preview=execute(envelope,runtime_dir=runtime_dir,env_file=runtime_dir/"unused",source=source)
+                envelope.update(action="apply",expected_prestate=preview["prestate_sha256"],expected_candidate=preview["candidate_sha256"])
+                self.assertEqual(execute(envelope,runtime_dir=runtime_dir,env_file=runtime_dir/"unused",source=source)["disposition"],"submitted")
+                self.assertEqual(execute(envelope,runtime_dir=runtime_dir,env_file=runtime_dir/"unused",source=source)["disposition"],"already_applied")
+                envelope["action"]="readback"
+                self.assertEqual(execute(envelope,runtime_dir=runtime_dir,env_file=runtime_dir/"unused",source=source)["state"],"applied")
+                envelope["request"]={**request,"replacement_policy":"forged"}
+                with self.assertRaisesRegex(ValueError,"operation-request-mismatch"):
+                    execute(envelope,runtime_dir=runtime_dir,env_file=runtime_dir/"unused",source=source)
+
     def test_recovery_gets_are_paced_and_retry_429_with_server_delay(self) -> None:
         class Clock:
             def __init__(self) -> None:
