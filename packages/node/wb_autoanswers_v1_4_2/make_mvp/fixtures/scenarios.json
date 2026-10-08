@@ -250,5 +250,45 @@
     "validator_statuses": ["pass"],
     "expected_route": "wb_return",
     "expected_calls": 3
+  },
+  "generic_return_question": {
+    "raw": {
+      "ingestion_id": "tg-support-1",
+      "review_id": "generic-return-question",
+      "review_version": "1",
+      "rating": 2,
+      "text": "Как вернуть деньги?",
+      "pros": "",
+      "cons": "",
+      "seller_article": "(Anti-Spy) iPhone 14 Pro",
+      "nm_id": 428849827,
+      "media": {
+        "photos": [],
+        "video": {
+          "present": false
+        }
+      }
+    },
+    "classification": {
+      "review_mode": "negative",
+      "primary_issue": "WB_REFUND_STATUS",
+      "issue_codes": [
+        "WB_REFUND_STATUS"
+      ],
+      "route": "wb_support",
+      "seller_investigation_subject": false,
+      "evidence_potential": true,
+      "required_evidence": [
+        "status_screenshot"
+      ]
+    },
+    "drafts": [
+      "Здравствуйте. Напишите, пожалуйста, в чат с продавцом — мы постараемся разобраться в вашей ситуации. Код обращения: {{case_code}}."
+    ],
+    "validator_statuses": [
+      "pass"
+    ],
+    "expected_route": "seller_chat",
+    "expected_calls": 3
   }
 }
