@@ -7,7 +7,7 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +21,7 @@ from apps.sheet_vitrina_v1_fulfillment_services_smoke import (  # noqa: E402
     _pdf_text,
     _reserve_free_port,
     _seed_wb_supplies,
+    _storage_row,
     _valid_row,
     _wb_supply_row,
 )
@@ -45,9 +46,9 @@ def main() -> None:
         runtime_dir = Path(tmp) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         _seed_wb_supplies(runtime)
-        real_xlsx_path = _find_real_fulfillment_xlsx()
-        real_xlsx_info = _inspect_real_fulfillment_xlsx(real_xlsx_path)
-        _seed_real_wb_supplies(runtime, real_xlsx_info)
+        fixture_xlsx_path = _build_fulfillment_xlsx(Path(tmp) / "fulfillment-services-fixture.xlsx")
+        fixture_xlsx_info = _inspect_fulfillment_xlsx(fixture_xlsx_path)
+        _seed_fixture_wb_supplies(runtime, fixture_xlsx_info)
         port = _reserve_free_port()
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
@@ -100,7 +101,7 @@ def main() -> None:
                 if template_headers[:2] != ["Номер поставки", "Склад"]:
                     raise AssertionError(f"downloaded template must expose Номер поставки/Склад, got {template_headers[:2]}")
 
-                operator_frame.locator("#fulfillmentFileInput").set_input_files(str(real_xlsx_path))
+                operator_frame.locator("#fulfillmentFileInput").set_input_files(str(fixture_xlsx_path))
                 expect(operator_frame.locator("#fulfillmentAcceptance")).to_contain_text(
                     "Документ сохранён.",
                     timeout=10000,
@@ -109,11 +110,11 @@ def main() -> None:
                 latest_upload = (list_payload.get("uploads") or [{}])[0]
                 upload_id = str(latest_upload.get("upload_id") or "")
                 if list_status != 200 or latest_upload.get("validation_status") != "ok" or not upload_id:
-                    raise AssertionError(f"real XLSX upload must be latest OK upload, got {list_status} {list_payload}")
+                    raise AssertionError(f"fixture XLSX upload must be latest OK upload, got {list_status} {list_payload}")
                 fulfillment_section_text = _normalize_ui_text(operator_frame.locator(".fulfillment-services-block").inner_text())
                 for expected in (
                     "Дата загрузки",
-                    real_xlsx_path.name,
+                    fixture_xlsx_path.name,
                     f"{latest_upload.get('rows_matched')}/{latest_upload.get('rows_total')}",
                     _format_ru_rub(latest_upload.get("amount_without_vat_total")),
                     _format_ru_rub(latest_upload.get("vat_total")),
@@ -137,7 +138,7 @@ def main() -> None:
                     str(latest_upload.get("payment_validation_id") or ""),
                     str(latest_upload.get("short_file_hash") or ""),
                     "Хранение",
-                    str(real_xlsx_info["ordinary_supply_ids"][0]),
+                    str(fixture_xlsx_info["ordinary_supply_ids"][0]),
                 ):
                     if pdf_status != 200 or expected not in pdf_text:
                         raise AssertionError(f"PDF validation text missing {expected!r}: {pdf_text!r}")
@@ -145,31 +146,31 @@ def main() -> None:
                 operator_frame.get_by_role("button", name="Wildberries", exact=True).click()
                 expect(operator_frame.locator("#wbSuppliesTitle")).to_contain_text("Все поставки", timeout=10000)
                 operator_frame.locator("#wbSuppliesSizeFilterSelect").select_option("all")
-                real_supply_id = str(real_xlsx_info["ordinary_supply_ids"][0])
-                operator_frame.locator("#wbSuppliesSearchInput").fill(real_supply_id)
-                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text(real_supply_id, timeout=10000)
+                fixture_supply_id = str(fixture_xlsx_info["ordinary_supply_ids"][0])
+                operator_frame.locator("#wbSuppliesSearchInput").fill(fixture_supply_id)
+                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text(fixture_supply_id, timeout=10000)
                 actual_columns = operator_frame.locator("#wbSuppliesTableBody").locator("xpath=ancestor::table[1]//thead//th").evaluate_all(
                     "(nodes) => nodes.map((node) => node.textContent.trim())"
                 )
                 if "Стоимость" in actual_columns or "Транзит" not in actual_columns or "Услуги ФФ" not in actual_columns:
                     raise AssertionError(f"WB supplies columns must expose new overlay contract, got {actual_columns}")
-                row_real_text = _normalize_ui_text(
-                    operator_frame.locator("#wbSuppliesTableBody tr", has_text=real_supply_id).inner_text()
+                fixture_row_text = _normalize_ui_text(
+                    operator_frame.locator("#wbSuppliesTableBody tr", has_text=fixture_supply_id).inner_text()
                 )
                 for expected in ("₽/шт", "в т.ч. хранение"):
-                    if expected not in row_real_text:
-                        raise AssertionError(f"WB row {real_supply_id} must show FF amount/per-unit/storage note {expected!r}: {row_real_text}")
-                wb_real_status, wb_real_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?search={real_supply_id}&size_filter=all")
-                wb_real_row = (wb_real_payload.get("rows") or [{}])[0]
+                    if expected not in fixture_row_text:
+                        raise AssertionError(f"WB row {fixture_supply_id} must show FF amount/per-unit/storage note {expected!r}: {fixture_row_text}")
+                fixture_wb_status, fixture_wb_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?search={fixture_supply_id}&size_filter=all")
+                fixture_wb_row = (fixture_wb_payload.get("rows") or [{}])[0]
                 if (
-                    wb_real_status != 200
-                    or wb_real_row.get("fulfillment_amount_with_vat_total") is None
-                    or not wb_real_row.get("fulfillment_storage_allocated_amount_with_vat_total")
-                    or "₽/шт" not in str(wb_real_row.get("fulfillment_storage_per_unit_display") or "")
+                    fixture_wb_status != 200
+                    or fixture_wb_row.get("fulfillment_amount_with_vat_total") is None
+                    or not fixture_wb_row.get("fulfillment_storage_allocated_amount_with_vat_total")
+                    or "₽/шт" not in str(fixture_wb_row.get("fulfillment_storage_per_unit_display") or "")
                 ):
-                    raise AssertionError(f"WB API overlay must include storage allocation, got {wb_real_status} {wb_real_payload}")
-                if "Seller Portal" in row_real_text:
-                    raise AssertionError(f"transit cell must show per-unit instead of Seller Portal source label: {row_real_text}")
+                    raise AssertionError(f"WB API overlay must include storage allocation, got {fixture_wb_status} {fixture_wb_payload}")
+                if "Seller Portal" in fixture_row_text:
+                    raise AssertionError(f"transit cell must show per-unit instead of Seller Portal source label: {fixture_row_text}")
 
                 ff_tab.click()
                 operator_frame.locator("#fulfillmentUploadsBody [data-fulfillment-delete]").first.click()
@@ -178,7 +179,7 @@ def main() -> None:
                     timeout=10000,
                 )
                 operator_frame.locator("#fulfillmentUploadsBody [data-fulfillment-delete-cancel]").first.click()
-                expect(operator_frame.locator("#fulfillmentUploadsBody")).to_contain_text(real_xlsx_path.name)
+                expect(operator_frame.locator("#fulfillmentUploadsBody")).to_contain_text(fixture_xlsx_path.name)
                 if operator_frame.locator("#fulfillmentUploadsBody [data-fulfillment-delete-confirm]").count() != 0:
                     raise AssertionError("cancel must close Fulfillment delete confirmation")
                 operator_frame.locator("#fulfillmentUploadsBody [data-fulfillment-delete]").first.click()
@@ -186,8 +187,8 @@ def main() -> None:
                 expect(operator_frame.locator("#fulfillmentUploadsBody")).to_contain_text("Загруженных документов пока нет", timeout=10000)
                 if "fulfillment-ok.xlsx" in operator_frame.locator("#fulfillmentUploadsBody").inner_text():
                     raise AssertionError("deleted accepted document must disappear from accepted table")
-                if real_xlsx_path.name in operator_frame.locator("#fulfillmentUploadsBody").inner_text():
-                    raise AssertionError("deleted real accepted document must disappear from accepted table")
+                if fixture_xlsx_path.name in operator_frame.locator("#fulfillmentUploadsBody").inner_text():
+                    raise AssertionError("deleted fixture accepted document must disappear from accepted table")
                 pdf_after_delete_status, _, _ = _get_bytes(
                     f"{base_url}{DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH}/{upload_id}/payment-validation.pdf"
                 )
@@ -195,17 +196,17 @@ def main() -> None:
                     raise AssertionError(f"deleted upload PDF must be unavailable, got HTTP {pdf_after_delete_status}")
                 operator_frame.get_by_role("button", name="Wildberries", exact=True).click()
                 operator_frame.locator("#wbSuppliesSizeFilterSelect").select_option("all")
-                operator_frame.locator("#wbSuppliesSearchInput").fill(real_supply_id)
-                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text(real_supply_id, timeout=10000)
-                row_real_after_delete = _normalize_ui_text(
-                    operator_frame.locator("#wbSuppliesTableBody tr", has_text=real_supply_id).inner_text()
+                operator_frame.locator("#wbSuppliesSearchInput").fill(fixture_supply_id)
+                expect(operator_frame.locator("#wbSuppliesTableBody")).to_contain_text(fixture_supply_id, timeout=10000)
+                fixture_row_after_delete = _normalize_ui_text(
+                    operator_frame.locator("#wbSuppliesTableBody tr", has_text=fixture_supply_id).inner_text()
                 )
-                if "в т.ч. хранение" in row_real_after_delete:
-                    raise AssertionError(f"deleted upload storage allocation must disappear from WB overlay: {row_real_after_delete}")
-                wb_real_after_status, wb_real_after_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?search={real_supply_id}&size_filter=all")
-                wb_real_after_row = (wb_real_after_payload.get("rows") or [{}])[0]
-                if wb_real_after_status != 200 or wb_real_after_row.get("fulfillment_amount_with_vat_total") is not None:
-                    raise AssertionError(f"deleted upload must disappear from WB API overlay, got {wb_real_after_status} {wb_real_after_payload}")
+                if "в т.ч. хранение" in fixture_row_after_delete:
+                    raise AssertionError(f"deleted upload storage allocation must disappear from WB overlay: {fixture_row_after_delete}")
+                fixture_wb_after_status, fixture_wb_after_payload = _get_json(f"{base_url}{DEFAULT_WB_SUPPLIES_PATH}?search={fixture_supply_id}&size_filter=all")
+                fixture_wb_after_row = (fixture_wb_after_payload.get("rows") or [{}])[0]
+                if fixture_wb_after_status != 200 or fixture_wb_after_row.get("fulfillment_amount_with_vat_total") is not None:
+                    raise AssertionError(f"deleted upload must disappear from WB API overlay, got {fixture_wb_after_status} {fixture_wb_after_payload}")
 
                 ff_tab.click()
                 unmatched_xlsx_path = Path(tmp) / "fulfillment-unmatched.xlsx"
@@ -262,32 +263,22 @@ def _fill_downloaded_template(template_path: Path, output_path: Path, rows: list
     workbook.save(output_path)
 
 
-def _find_real_fulfillment_xlsx() -> Path:
-    downloads = Path.home() / "Downloads"
-    patterns = [
-        "fulfillment_services_filled_2026-07-07_batch*.xlsx",
-        "fulfillment_services_filled_2026-07-06_second_batch*.xlsx",
-        "fulfillment_services_filled*.xlsx",
-    ]
-    checked: list[str] = []
-    errors: list[str] = []
-    for pattern in patterns:
-        for path in sorted(downloads.glob(pattern)):
-            checked.append(str(path))
-            try:
-                _inspect_real_fulfillment_xlsx(path)
-            except AssertionError as exc:
-                errors.append(f"{path}: {exc}")
-                continue
-            return path
-    raise AssertionError(
-        "real Fulfillment XLSX with STORAGE was not found; checked paths: "
-        + ", ".join(checked or [str(downloads / pattern) for pattern in patterns])
-        + ("; errors: " + " | ".join(errors) if errors else "")
-    )
+def _build_fulfillment_xlsx(path: Path) -> Path:
+    """A reproducible ordinary/storage document; never use personal Downloads."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(TEMPLATE_HEADERS)
+    rows = [_valid_row("1001"), _valid_row("1002"), _storage_row()]
+    for row in rows:
+        sheet.append(row)
+    sheet.append(["", "", "", "", "", "", "", "",
+                  sum(float(row[8]) for row in rows), sum(float(row[9]) for row in rows)])
+    workbook.save(path)
+    workbook.close()
+    return path
 
 
-def _inspect_real_fulfillment_xlsx(path: Path) -> dict:
+def _inspect_fulfillment_xlsx(path: Path) -> dict:
     workbook = load_workbook(path, read_only=True, data_only=True)
     sheet = workbook.worksheets[0]
     header_row = 0
@@ -333,7 +324,7 @@ def _inspect_real_fulfillment_xlsx(path: Path) -> dict:
     }
 
 
-def _seed_real_wb_supplies(runtime: RegistryUploadDbBackedRuntime, info: dict) -> None:
+def _seed_fixture_wb_supplies(runtime: RegistryUploadDbBackedRuntime, info: dict) -> None:
     rows = []
     for item in info.get("ordinary_rows") or []:
         supply_id = str(item.get("supply_id") or "").strip()
