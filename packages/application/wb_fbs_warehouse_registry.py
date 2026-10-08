@@ -44,6 +44,116 @@ MAX_STOCK_CHUNK = 1000
 COMPLETE_CATALOG_OMISSION_ZERO_POLICY = (
     "complete_catalog_stable_http200_omission_zero_v1"
 )
+STABILITY_KEYS = ('registry_stable', 'catalog_stable', 'warehouse_scope_stable', 'stock_sources_stable')
+FBS_FAILURE_REASONS = frozenset({
+    'initial_stock_request_failed', 'confirmation_stock_request_failed',
+    'initial_stock_read_incomplete', 'confirmation_stock_read_incomplete',
+    'stock_amount_changed', 'stock_provenance_changed', 'stock_identity_changed',
+    'stock_digest_changed', 'stock_sources_unstable', 'registry_changed',
+    'catalog_changed', 'warehouse_scope_changed', 'generation_incomplete',
+    'generation_acquisition_failed',
+    'new_generation_missing', 'generation_binding_mismatch',
+    'duplicate_stock_identity', 'official_fbs_timeout',
+})
+MAX_CONFIRMATION_PROOFS = 8
+
+
+def _stock_confirmation_proofs(first_runs, confirmation_runs):
+    """Bounded metadata only; leave source acceptance and its digests untouched."""
+    proofs = []
+    for first, second in zip(first_runs[:MAX_CONFIRMATION_PROOFS], confirmation_runs[:MAX_CONFIRMATION_PROOFS]):
+        reasons = []
+        if not first.get('complete'):
+            reasons.append('initial_stock_request_failed' if first.get('status') == 'failed' else 'initial_stock_read_incomplete')
+        if not second.get('complete'):
+            reasons.append('confirmation_stock_request_failed' if second.get('status') == 'failed' else 'confirmation_stock_read_incomplete')
+        reasons.extend(r['failure_reason_code'] for r in (first, second)
+            if r.get('failure_reason_code') in {'duplicate_stock_identity', 'official_fbs_timeout'})
+        before = {r['chrt_id']: r for r in first.get('rows', [])}
+        after = {r['chrt_id']: r for r in second.get('rows', [])}
+        comparable = bool(first.get('complete') and second.get('complete'))
+        common = before.keys() & after.keys() if comparable else set()
+        amounts = sum(before[k]['amount'] != after[k]['amount'] for k in common)
+        provenance = sum(before[k]['provenance'] != after[k]['provenance'] for k in common)
+        identity_keys = (before.keys() ^ after.keys()) | {
+            k for k in common if before[k]['nm_id'] != after[k]['nm_id']} if comparable else set()
+        identities = len(identity_keys)
+        changed = sorted(identity_keys | {k for k in common
+            if before[k]['amount'] != after[k]['amount'] or before[k]['provenance'] != after[k]['provenance']})
+        if comparable:
+            reasons.extend(code for code, count in (
+                ('stock_amount_changed', amounts), ('stock_provenance_changed', provenance),
+                ('stock_identity_changed', identities)) if count)
+            if first.get('source_digest') != second.get('source_digest') and not reasons:
+                reasons.append('stock_digest_changed')
+        proofs.append({'seller_warehouse_id': first['seller_warehouse_id'],
+            'first_complete': bool(first.get('complete')), 'confirmation_complete': bool(second.get('complete')),
+            'first_digest': first.get('source_digest'), 'confirmation_digest': second.get('source_digest'),
+            'reason_codes': reasons, 'amount_change_count': amounts,
+            'provenance_change_count': provenance, 'identity_change_count': identities,
+            'changed_identity_count': len(changed), 'changed_identities_truncated': len(changed) > 10,
+            'changed_identities': [{'chrt_id': k, 'nm_id': (before.get(k) or after[k])['nm_id']}
+                for k in changed[:10]]})
+    return proofs
+
+
+def fbs_generation_failure(latest, reason_code='generation_incomplete'):
+    """Whitelist a saved generation proof before exposing it in a cycle receipt."""
+    import re
+    latest = dict(latest) if latest is not None else {}
+    def integer(value):
+        return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
+    def hashed(value):
+        return value if isinstance(value, str) and re.fullmatch(r'sha256:[0-9a-f]{64}', value) else None
+    def reasons(value):
+        return sorted({v for v in value[:32] if isinstance(v, str) and v in FBS_FAILURE_REASONS}) if isinstance(value, list) else []
+    try:
+        scope = json.loads(latest.get('catalog_scope_json') or '{}')
+    except (ValueError, TypeError):
+        scope = {}
+    scope = scope if isinstance(scope, dict) else {}
+    raw_stability = scope.get('stability', {})
+    stability = {k: raw_stability[k] for k in STABILITY_KEYS
+        if isinstance(raw_stability, dict) and type(raw_stability.get(k)) is bool}
+    details = scope.get('generation_diagnostics', {})
+    details = details if isinstance(details, dict) else {}
+    reason_code = reason_code if isinstance(reason_code, str) and reason_code in FBS_FAILURE_REASONS else 'generation_incomplete'
+    codes = [reason_code]
+    if reason_code == 'generation_incomplete':
+        codes = reasons(details.get('reason_codes'))
+        codes.extend(code for key, code in zip(STABILITY_KEYS, (
+            'registry_changed', 'catalog_changed', 'warehouse_scope_changed', 'stock_sources_unstable'))
+            if stability.get(key) is False and code not in codes)
+    proofs = []
+    raw = details.get('stock_confirmations', [])
+    for proof in raw[:MAX_CONFIRMATION_PROOFS] if isinstance(raw, list) else []:
+        if not isinstance(proof, dict):
+            continue
+        safe = {'reason_codes': reasons(proof.get('reason_codes'))}
+        for key in ('seller_warehouse_id', 'amount_change_count', 'provenance_change_count', 'identity_change_count', 'changed_identity_count'):
+            value = integer(proof.get(key))
+            if value is not None:
+                safe[key] = value
+        for key in ('first_complete', 'confirmation_complete', 'changed_identities_truncated'):
+            if type(proof.get(key)) is bool:
+                safe[key] = proof[key]
+        for key in ('first_digest', 'confirmation_digest'):
+            value = hashed(proof.get(key))
+            if value is not None:
+                safe[key] = value
+        changes = proof.get('changed_identities', [])
+        safe['changed_identities'] = [{k: v for k in ('chrt_id', 'nm_id')
+            if (v := integer(item.get(k))) is not None}
+            for item in changes[:10] if isinstance(item, dict)] if isinstance(changes, list) else []
+        proofs.append(safe)
+    run_id = latest.get('run_id')
+    return {'error_code': 'fbs_new_complete_generation_missing',
+        'reason_code': reason_code,
+        'reason_codes': codes or ['generation_incomplete'],
+        'registry_run_id': run_id if isinstance(run_id, str) and re.fullmatch(r'fbsreg_[0-9a-f]{28}', run_id) else None,
+        'registry_run_sequence': integer(latest.get('run_sequence')),
+        'stability': stability, 'stock_confirmations': proofs,
+        'stock_confirmation_count': integer(details.get('stock_confirmation_count'))}
 
 
 class WbFbsWarehouseRegistryError(ValueError):
@@ -54,6 +164,10 @@ class WbFbsWarehouseRegistryError(ValueError):
         self.code = str(code)
         self.details = details
         self.http_status = int(http_status)
+
+
+class _DuplicateStockIdentity(ValueError):
+    pass
 
 
 def ensure_wb_fbs_warehouse_registry_schema(conn: sqlite3.Connection) -> None:
@@ -267,6 +381,8 @@ class WbFbsWarehouseRegistry:
             "warehouse_count": 0,
         }
         stock_runs: list[dict[str, Any]] = []
+        confirmation_proofs = []
+        stock_confirmation_count = 0
         try:
             warehouses_before = self.source.list_seller_warehouses()
             offices_before = self.source.list_offices()
@@ -289,17 +405,18 @@ class WbFbsWarehouseRegistry:
                         identity_scope=catalog_scope,
                     )
                 )
-            stock_confirmation_runs = [
-                self._read_warehouse_stocks(
+            stock_confirmation_runs = []
+            for warehouse in warehouse_scope.get("warehouses") or []:
+                stock_confirmation_count += 1
+                stock_confirmation_runs.append(self._read_warehouse_stocks(
                     registry_run_id=run_id,
                     seller_warehouse_id=int(warehouse["seller_warehouse_id"]),
                     snapshot_at=snapshot_at,
                     chrt_ids=sorted(chrt_to_nm),
                     chrt_to_nm=chrt_to_nm,
                     identity_scope=catalog_scope,
-                )
-                for warehouse in warehouse_scope.get("warehouses") or []
-            ]
+                ))
+            confirmation_proofs = _stock_confirmation_proofs(stock_runs, stock_confirmation_runs)
             warehouses_after = self.source.list_seller_warehouses()
             offices_after = self.source.list_offices()
             _, registry_after_digest, registry_after_complete = (
@@ -387,7 +504,11 @@ class WbFbsWarehouseRegistry:
                     "office_count": office_count,
                     "source_digest": _fingerprint(generation_material),
                     "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
-                    "catalog_scope": {**catalog_scope, "stability": stability},
+                    "catalog_scope": {**catalog_scope, "stability": stability,
+                        "generation_diagnostics": {
+                            "reason_codes": sorted({code for proof in confirmation_proofs for code in proof['reason_codes']}),
+                            "stock_confirmations": confirmation_proofs,
+                            "stock_confirmation_count": stock_confirmation_count}},
                     "warehouse_scope": warehouse_scope,
                     "catalog_digest": str(catalog_scope.get("scope_digest") or ""),
                     "mapping_digest": str(warehouse_scope.get("scope_digest") or ""),
@@ -415,7 +536,10 @@ class WbFbsWarehouseRegistry:
                     "office_count": office_count,
                     "source_digest": _fingerprint({"run_id": run_id, "status": "failed"}),
                     "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
-                    "catalog_scope": catalog_scope,
+                    "catalog_scope": {**catalog_scope, "generation_diagnostics": {
+                        "reason_codes": ['generation_acquisition_failed'],
+                        "stock_confirmations": confirmation_proofs,
+                        "stock_confirmation_count": stock_confirmation_count}},
                     "warehouse_scope": warehouse_scope,
                     "catalog_digest": str(catalog_scope.get("scope_digest") or ""),
                     "mapping_digest": str(warehouse_scope.get("scope_digest") or ""),
@@ -696,7 +820,7 @@ class WbFbsWarehouseRegistry:
                     warehouse_id=seller_warehouse_id, chrt_ids=chunk
                 ):
                     if int(item.chrt_id) in returned:
-                        raise ValueError("duplicate chrtId across stock chunks")
+                        raise _DuplicateStockIdentity("duplicate chrtId across stock chunks")
                     returned[int(item.chrt_id)] = int(item.amount)
         except Exception as exc:
             return {
@@ -722,6 +846,7 @@ class WbFbsWarehouseRegistry:
                     }
                 ),
                 "error": _safe_error(exc),
+                "failure_reason_code": _safe_error(exc),
             }
         rows = [
             {
@@ -1626,7 +1751,10 @@ def _actor(value: Any) -> str:
 
 
 def _safe_error(exc: Exception) -> str:
-    return " ".join(str(exc).split())[:1000]
+    # Provider messages may include credentials or raw response bodies.
+    if type(exc) is _DuplicateStockIdentity:
+        return 'duplicate_stock_identity'
+    return 'official_fbs_timeout' if type(exc) is TimeoutError else 'official_fbs_acquisition_failed'
 
 
 def _freshness(snapshot_at: str, observed_at: str, *, max_age_seconds: int = 30 * 60) -> str:
