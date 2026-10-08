@@ -24,7 +24,83 @@ def edit(page,name):
     return page.locator('[data-ff-facility-form]')
 
 
+def held_preview_snapshot():
+    """Native preview operands stay exact across held replies and explicit edits."""
+    with TemporaryDirectory(prefix='facility-held-preview-') as raw:
+        rt,entry=setup(raw);server,thread,base=server_for(entry)
+        try:
+            with sync_playwright() as pw:
+                browser=pw.chromium.launch();page=browser.new_page();held=[];previews=[];writes=[];errors=[]
+                page.on('pageerror',lambda error:errors.append(str(error)))
+                hold=True;fail=False
+                def intercept(route):
+                    if route.request.method!='POST':route.continue_();return
+                    if route.request.url.endswith('/facilities/preview') and fail:
+                        route.fulfill(status=500,content_type='application/json',body=json.dumps({'error':'Synthetic preview failure'}));return
+                    reply=route.fetch();value=reply.json()
+                    if route.request.url.endswith('/facilities/preview'):
+                        previews.append(route.request.post_data_json)
+                        if hold:
+                            held.append((route,reply));page.evaluate('window.previewHeld=true');return
+                    else:writes.append(value)
+                    route.fulfill(response=reply)
+                page.route('**'+PATH+'/**',intercept)
+                open_modal(page,base);page.locator('[data-ff-pool-facility-new]').click()
+                form=page.locator('[data-ff-facility-form]')
+                form.get_by_label('Название').fill('PREVIEW-A');form.get_by_label('Город').fill('CITY-A')
+                form.get_by_label('Часовой пояс').fill('Europe/Moscow')
+                form.get_by_role('button',name='Проверить создание',exact=True).click()
+                page.wait_for_function('window.previewHeld===true')
+                for label in ('Название','Город','Часовой пояс','Статус'):expect(form.get_by_label(label)).to_be_disabled()
+                expect(form.locator('[data-ff-directory-final]')).to_be_disabled()
+                expect(page.locator('[data-ff-pool-facility-new]')).to_be_disabled()
+                # Force late DOM changes despite disabled controls, duplicate submit,
+                # and attempts to replace the editor while the native reply is held.
+                form.evaluate('form=>{form.elements.name.value="LATE-B";form.elements.city.value="LATE-CITY";form.elements.display_timezone.value="Asia/Yekaterinburg";form.requestSubmit();form.requestSubmit();}')
+                page.locator('[data-ff-pool-facility-new]').evaluate('button=>button.dispatchEvent(new MouseEvent("click"))')
+                page.locator('[data-ff-pool-wb-warehouses]').get_by_role('button',name='Привязать',exact=True).first.evaluate('button=>button.click()')
+                assert form.count()==1 and not page.locator('[data-ff-binding-form]').count()
+                assert len(previews)==1 and not writes
+                hold=False;held[0][0].fulfill(response=held[0][1])
+                expect(form.get_by_role('button',name='Подтвердить создание',exact=True)).to_be_visible()
+                expect(form).to_contain_text('склад «PREVIEW-A»');expect(form).to_contain_text('Город: CITY-A. Часовой пояс: Europe/Moscow.')
+                assert form.get_by_label('Название').input_value()=='PREVIEW-A'
+                assert form.get_by_label('Город').input_value()=='CITY-A'
+                assert form.get_by_label('Часовой пояс').input_value()=='Europe/Moscow'
+                assert not writes and not page.locator('[data-ff-facility-acceptance] .ff-operation-check').count()
+                # Editing a confirmed preview requires explicit discard and a new ID.
+                form.get_by_role('button',name='Изменить черновик',exact=True).click()
+                for label in ('Название','Город','Часовой пояс'):expect(form.get_by_label(label)).to_be_enabled()
+                expect(form.get_by_label('Статус')).to_be_disabled()
+                form.get_by_label('Название').fill('EDITED-C');form.get_by_label('Город').fill('CITY-C')
+                form.get_by_label('Часовой пояс').fill('Asia/Yekaterinburg')
+                form.get_by_role('button',name='Проверить создание',exact=True).click()
+                expect(form.get_by_role('button',name='Подтвердить создание',exact=True)).to_be_visible()
+                expect(form).to_contain_text('склад «EDITED-C»');expect(form).to_contain_text('Город: CITY-C. Часовой пояс: Asia/Yekaterinburg.')
+                assert len(previews)==2 and previews[0]['request_id']!=previews[1]['request_id'] and not writes
+                form.get_by_role('button',name='Подтвердить создание',exact=True).evaluate('button=>{button.click();button.click();}')
+                expect(page.locator('[data-ff-facility-acceptance] .ff-operation-check')).to_be_visible()
+                assert len(writes)==1 and writes[0]['status']=='accepted'
+                fid=writes[0]['acceptance']['source_ref']['entity_id'];actual=entry.ff_pool_surface.facility_detail(fid)['facility']
+                assert {key:actual[key] for key in ('name','city','display_timezone','active')}=={'name':'EDITED-C','city':'CITY-C','display_timezone':'Asia/Yekaterinburg','active':False}
+                # A failed preview unlocks its draft without creating a durable source marker.
+                page.locator('[data-ff-pool-facility-new]').click();form=page.locator('[data-ff-facility-form]')
+                form.get_by_label('Название').fill('RETRY-D');fail=True
+                form.get_by_role('button',name='Проверить создание',exact=True).click();expect(form).to_contain_text('Synthetic preview failure')
+                for label in ('Название','Город','Часовой пояс'):expect(form.get_by_label(label)).to_be_enabled()
+                expect(form.get_by_role('button',name='Проверить создание',exact=True)).to_be_enabled()
+                expect(page.locator('[data-ff-pool-facility-new]')).to_be_enabled()
+                assert page.evaluate('Object.keys(localStorage).filter(k=>k.startsWith("wbc_facility_source_pending_v1:")).length')==0
+                fail=False;form.get_by_role('button',name='Проверить создание',exact=True).click()
+                expect(form.get_by_role('button',name='Подтвердить создание',exact=True)).to_be_visible()
+                assert len(previews)==3 and len(writes)==1 and not errors,errors
+                browser.close()
+        finally:stop(server,thread)
+    print('Actual FF held preview: immutable name/city/timezone, blocked switches/double submit, explicit edit/new ID, no source POST until confirmation, native equality, preview-error controls: OK')
+
+
 def main():
+    held_preview_snapshot()
     with TemporaryDirectory(prefix='facility-browser-') as raw:
         rt,entry=setup(raw);server,thread,base=server_for(entry)
         try:

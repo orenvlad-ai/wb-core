@@ -28566,11 +28566,13 @@
       updateOverheadBusinessDate();
     }
     async function loadFacilityDetail(id) {
+      if (facilityEditorBusy) return;
       nodes.facilityDetail.hidden = false;
       clear(nodes.facilityDetail);
       nodes.facilityDetail.appendChild(make("p", "warehouse-empty", "Загрузка…"));
       try {
         const payload = await api("/facilities/" + encodeURIComponent(id));
+        if (facilityEditorBusy) return;
         clear(nodes.facilityDetail);
         const title = make("h3", "", payload.facility.name + " · " + payload.facility.code);
         const meta = make("p", "ff-pool-note", (payload.facility.active ? "Активен" : "Неактивен") + " · " + payload.facility.display_timezone + " · ID " + payload.facility.facility_id);
@@ -28623,14 +28625,19 @@
     const facilityReceipt = make("div", "ff-pool-alert"); facilityReceipt.hidden = true;
     facilityReceipt.dataset.ffFacilityAcceptance = "";
     nodes.facilityDetail.parentNode.insertBefore(facilityReceipt, nodes.facilityDetail);
+    let facilityEditorBusy = false, facilityEditorLock = null;
     const facilityAcceptance = window.FacilitySourceAcceptance.create({
       scope: WEB_VITRINA_CONFIG.user_config_key || "local_operator", path: base,
       container: facilityReceipt,
-      onLock: locked => modal.querySelectorAll("[data-ff-directory-final]").forEach(button => {button.disabled = locked;}),
+      onLock: locked => {
+        modal.querySelectorAll("[data-ff-directory-final]").forEach(button => {button.disabled = locked || facilityEditorBusy || button.dataset.sourceAccepted === "true";});
+        if (facilityEditorLock) facilityEditorLock(locked);
+      },
       onError: error => {if (!facilityAcceptance.isPending()) setAlert(facilityReceipt, error.message, "error");},
       onRecovered: async () => {await loadFacilities(); await loadWbWarehouses();}
     });
     function showFacilityEditor(facility) {
+      if (facilityEditorBusy) return;
       nodes.facilityDetail.hidden = false;
       clear(nodes.facilityDetail);
       nodes.facilityDetail.appendChild(make("h3", "", facility ? "Изменить склад" : "Новый склад FF"));
@@ -28643,8 +28650,32 @@
       const result = make("div", "ff-pool-alert"); result.hidden = true;
       form.append(nameLabel, cityLabel, tzLabel, activeLabel, submit, result);
       let pendingPreview = null;
+      const editDraft = make("button", "button secondary", "Изменить черновик");
+      editDraft.type = "button"; editDraft.hidden = true; editDraft.dataset.ffFacilityEditDraft = "";
+      form.appendChild(editDraft);
+      function lockEditor(locked) {
+        const blocked = locked || facilityEditorBusy || submit.dataset.sourceAccepted === "true";
+        submit.disabled = blocked;
+        [name, tz].forEach(control => {control.disabled = blocked || Boolean(pendingPreview);});
+        city.disabled = blocked || Boolean(pendingPreview) || Boolean(facility);
+        active.disabled = blocked || Boolean(pendingPreview) || !facility;
+        editDraft.hidden = !pendingPreview || submit.dataset.sourceAccepted === "true";
+        editDraft.disabled = blocked;
+        const newButton = modal.querySelector("[data-ff-pool-facility-new]");
+        if (newButton) newButton.disabled = locked || facilityEditorBusy || !((state.capabilities || {}).feature || {}).writer_effective;
+      }
+      facilityEditorLock = lockEditor;
+      editDraft.addEventListener("click", function () {
+        if (editDraft.disabled || !pendingPreview) return;
+        name.value = pendingPreview.facility.name; city.value = pendingPreview.facility.city;
+        tz.value = pendingPreview.facility.display_timezone;
+        pendingPreview = null; submit.textContent = "Проверить создание";
+        setAlert(result, "Измените черновик и проверьте создание ещё раз.", "neutral");
+        lockEditor(facilityAcceptance.isPending()); name.focus();
+      });
       form.addEventListener("submit", async function (event) {
-        event.preventDefault(); if(submit.disabled)return;submit.disabled = true;
+        event.preventDefault(); if(submit.disabled || facilityEditorBusy)return;
+        facilityEditorBusy = true; lockEditor(facilityAcceptance.isPending());
         try {
           if (facility) {
             let body={name:name.value,display_timezone:tz.value,active:active.value==="true",expected_updated_at:facility.updated_at,expected_source_digest:facility.operator_source_digest};
@@ -28652,18 +28683,26 @@
               body={active:true,expected_updated_at:facility.updated_at,expected_source_digest:facility.operator_source_digest};
             await facilityAcceptance.mutate(base+"/facilities/"+encodeURIComponent(facility.facility_id),body.active&&!Object.hasOwn(body,"name")?"activate":"update",body,facility.facility_id);
           } else if (!pendingPreview) {
-            pendingPreview = await jsonPost("/facilities/preview",{request_id:"fffui_"+crypto.randomUUID().replaceAll("-",""),name:name.value,city:city.value,display_timezone:tz.value,active:false});
-            setAlert(result,"Предпросмотр: будет создан пустой неактивный склад «"+name.value+"». Остаток, капитал, документы и WB не изменятся.","neutral");
-            submit.textContent="Подтвердить создание";name.disabled=true;city.disabled=true;tz.disabled=true;
+            const selected = Object.freeze({name:name.value.trim(),city:city.value.trim(),display_timezone:tz.value,active:false});
+            const requestId = "fffui_"+crypto.randomUUID().replaceAll("-","");
+            const preview = await jsonPost("/facilities/preview",{request_id:requestId,...selected});
+            const accepted = (preview.manifest || {}).facility;
+            if (preview.request_id !== requestId || !accepted || Object.keys(selected).some(key => accepted[key] !== selected[key]))
+              throw new Error("Предпросмотр не соответствует выбранному черновику. Проверьте создание ещё раз.");
+            pendingPreview = Object.freeze({request_id:preview.request_id,preview_fingerprint:preview.preview_fingerprint,facility:Object.freeze({...accepted})});
+            name.value=accepted.name;city.value=accepted.city;tz.value=accepted.display_timezone;
+            setAlert(result,"Предпросмотр: будет создан пустой неактивный склад «"+pendingPreview.facility.name+"». Город: "+(pendingPreview.facility.city || "не указан")+". Часовой пояс: "+pendingPreview.facility.display_timezone+". Остаток, капитал, документы и WB не изменятся.","neutral");
+            submit.textContent="Подтвердить создание";
           } else {
             await facilityAcceptance.mutate(base+"/facilities/onboarding/"+encodeURIComponent(pendingPreview.request_id)+"/confirm","create",
               {confirm:true,preview_request_id:pendingPreview.request_id,preview_fingerprint:pendingPreview.preview_fingerprint},"");
             submit.textContent="Склад создан";submit.dataset.sourceAccepted="true";
           }
         } catch(error) {setAlert(result,error.message,"error");}
-        finally {submit.disabled=facilityAcceptance.isPending()||submit.dataset.sourceAccepted==="true";}
+        finally {facilityEditorBusy=false;lockEditor(facilityAcceptance.isPending());}
       });
       nodes.facilityDetail.appendChild(form);
+      lockEditor(facilityAcceptance.isPending());
     }
     async function loadWbWarehouses() {
       if (!nodes.wbWarehouses) return;
@@ -28712,6 +28751,7 @@
       }
     }
     function showBindingEditor(selection) {
+      if (facilityEditorBusy) return;
       nodes.facilityDetail.hidden = false;
       clear(nodes.facilityDetail);
       nodes.facilityDetail.appendChild(make("h3", "", "Точная привязка склада WB"));
