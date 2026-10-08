@@ -127,6 +127,13 @@ def main() -> None:
     missing = sorted(required_paths - route_paths)
     if missing:
         raise AssertionError(f"public route allowlist missing required paths: {missing}")
+    journal_route = next((route for route in routes if route["path"] == "/sheet-vitrina-v1/operations"), None)
+    if not journal_route or journal_route["match"] != "exact" or journal_route["methods"] != ["GET"]:
+        raise AssertionError("Operator receipts must link to a published GET-only journal page")
+    for path, match in (("/v1/sheet-vitrina-v1/operations", "exact"), ("/v1/sheet-vitrina-v1/operations/", "prefix")):
+        route = next((route for route in routes if route["path"] == path), None)
+        if not route or route["match"] != match or route["methods"] != ["GET"]:
+            raise AssertionError(f"Operator journal read route must be GET-only: {path}")
     proxy_v4_route = next(
         route
         for route in routes
