@@ -1497,9 +1497,9 @@ class RegistryUploadHttpEntrypoint:
         return self.partner_report_block.options()
 
     def handle_partner_report_settings_save_request(
-        self, payload: Mapping[str, Any], *, actor: str
+        self, payload: Mapping[str, Any], *, actor: str, operation_id: str | None = None
     ) -> dict[str, Any]:
-        return self.partner_report_block.save_settings(payload, actor=actor)
+        return self.partner_report_block.save_settings(payload, actor=actor, operation_id=operation_id)
 
     def handle_partner_report_preview_request(
         self, payload: Mapping[str, Any]

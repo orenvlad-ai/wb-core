@@ -1062,7 +1062,7 @@ def _build_handler(
                     actor = _current_web_user_config_key(self)
                     if parsed.path == DEFAULT_PARTNER_REPORT_SETTINGS_PATH:
                         payload = entrypoint.handle_partner_report_settings_save_request(
-                            body, actor=actor
+                            body, actor=actor, operation_id=self.headers.get("X-Operator-Operation-Id")
                         )
                     elif parsed.path == DEFAULT_PARTNER_REPORT_PREVIEW_PATH:
                         payload = entrypoint.handle_partner_report_preview_request(body)
@@ -1095,6 +1095,9 @@ def _build_handler(
                         status,
                         {"error": str(exc), "code": exc.code, "blockers": exc.blockers},
                     )
+                    return
+                except ValueError as exc:
+                    _write_json_response(self,HTTPStatus.UNPROCESSABLE_ENTITY,{"error":str(exc)})
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -10779,7 +10782,7 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
     if _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY):
         domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services'))
     if _user_has_section_access(user, WEB_AUTH_SECTION_REPORTS):
-        domains.add('plan_report_baseline')
+        domains.update(('plan_report_baseline', 'partner_report_settings'))
     return frozenset(domains)
 
 

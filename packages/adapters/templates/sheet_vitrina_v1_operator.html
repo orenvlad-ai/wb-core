@@ -14873,15 +14873,16 @@
 
       async function savePartnerReportSettings() {
         partnerReportSaveSettings.disabled = true;
-        partnerReportStatus.textContent = "Сохраняем server-owned параметры...";
+        partnerReportStatus.textContent = "Сохраняем настройки…";
         try {
-          const saved = await partnerReportJsonRequest(config.partner_report_settings_path, partnerSettingsPayload());
-          const card = (partnerReportOptions.cards || []).find((item) => String(item.nm_id) === String(saved.nm_id));
-          if (card) card.settings = saved;
+          const result = await submitSourceOperation(config.partner_report_settings_path,"POST",JSON.stringify(partnerSettingsPayload()));
+          const saved=result.payload;
+          const card = saved && (partnerReportOptions.cards || []).find((item) => String(item.nm_id) === String(saved.nm_id));
+          if (card)card.settings=saved;
           invalidatePartnerReportPreview();
-          partnerReportStatus.textContent = "Настройки сохранены: " + saved.settings_version_id + ".";
+          partnerReportStatus.textContent = result.pendingResolved?"Предыдущее изменение сохранено. Для новых настроек нажмите «Сохранить» ещё раз.":"Принято. Настройки сохранены.";
           partnerReportStatus.className = "section-message success";
-          partnerReportNotes.innerHTML = "<p>Fingerprint настроек: " + escapeHtml(saved.fingerprint) + ".</p>";
+          partnerReportNotes.textContent = "Новый расчёт отчёта можно открыть отдельно.";
         } catch (error) {
           partnerReportStatus.textContent = "Не удалось сохранить настройки: " + (error instanceof Error ? error.message : String(error));
           partnerReportStatus.className = "section-message error";
@@ -15637,6 +15638,7 @@
       const sourceReceiptDialog = document.getElementById("operatorSourceReceiptDialog");
       const sourceReceiptBox = document.getElementById("operatorSourceReceipt");
       function sourceOperationScope(path) {
+        if (path === config.partner_report_settings_path)return {domain:"partner_report_settings",entity:"settings"};
         if (path === config.plan_report_baseline_upload_path) return {domain:"plan_report_baseline",entity:"monthly_baseline"};
         for (const [suffix, entity] of [["stock_ff","stock_ff"],["inbound_factory","inbound_factory_to_ff"],["inbound_ff_to_wb","inbound_ff_to_wb"]]) {
           if (path === config["factory_order_upload_"+suffix+"_path"] || path === config["factory_order_delete_"+suffix+"_path"]) return {domain:"factory_order_dataset",entity};
@@ -15660,7 +15662,7 @@
       }
       function showSourceRefused() {
         if (!sourceReceiptDialog.open)sourceReceiptDialog.showModal();
-        const note=document.createElement("p");note.textContent="Изменение не принято. Проверьте файл и загрузите исправленный вариант.";
+        const note=document.createElement("p");note.textContent="Изменение не принято. Проверьте данные и отправьте исправленный вариант.";
         const close=document.createElement("button");close.type="button";close.textContent="Закрыть";
         close.addEventListener("click",()=>sourceReceiptDialog.close());
         sourceReceiptBox.replaceChildren(note,close);close.focus();
@@ -15704,12 +15706,12 @@
         const scope=sourceOperationScope(path), key=sourceOperationKey(scope);
         return withSourceLock(key,async()=>{
         const pending=localStorage.getItem(key);
-        const ref={domain:scope.domain,operation_id:pending || "ors_"+crypto.randomUUID()};
+        const ref={domain:scope.domain,operation_id:pending || (scope.domain==="partner_report_settings"?"ops_partner_":"ors_")+crypto.randomUUID()};
         if (!pending) localStorage.setItem(key,ref.operation_id); // Persist identity before the only submit.
         let payload=null, response=null;
         if (!pending) {
           try {
-            response=await fetch(path,{method,body,headers:{Accept:"application/json","X-Operator-Operation-Id":ref.operation_id}});
+            response=await fetch(path,{method,body,headers:{Accept:"application/json","X-Operator-Operation-Id":ref.operation_id,...(scope.domain==="partner_report_settings"?{"Content-Type":"application/json"}:{})}});
             if (sourceRefusalStatuses.includes(response.status))localStorage.setItem(key+":refusal",JSON.stringify({operation_id:ref.operation_id,status:response.status}));
             payload=await readJson(response);
           } catch (_) { /* Same-identity read resolves a lost response. */ }
@@ -15732,7 +15734,7 @@
         });
       }
       queueMicrotask(async()=>{
-        for (const path of [config.plan_report_baseline_upload_path,config.factory_order_upload_stock_ff_path,
+        for (const path of [config.partner_report_settings_path,config.plan_report_baseline_upload_path,config.factory_order_upload_stock_ff_path,
                             config.factory_order_upload_inbound_factory_path,config.factory_order_upload_inbound_ff_to_wb_path]) {
           if (!path)continue;
           try {

@@ -106,7 +106,7 @@ def main():
                     controls['lose_read']=False
                     page.close();page=context.new_page()
                     page.goto(base+http.DEFAULT_SHEET_OPERATOR_UI_PATH+'?embedded_tab=reports')
-                    page.locator('#operatorSourceReceipt').get_by_text('Изменение не принято. Проверьте файл и загрузите исправленный вариант.',exact=True).wait_for()
+                    page.locator('#operatorSourceReceipt').get_by_text('Изменение не принято. Проверьте данные и отправьте исправленный вариант.',exact=True).wait_for()
                     assert len(posts)==2
                     assert page.locator('#operatorSourceReceipt .ff-operation-check').count()==0
                     page.locator('#operatorSourceReceipt').get_by_role('button',name='Закрыть',exact=True).click()

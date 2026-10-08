@@ -4,13 +4,15 @@ from packages.application import operator_ff_overhead as overhead
 from packages.application import operator_warehouse_documents as warehouse
 from packages.application import operator_report_source_versions as report_sources
 from packages.application import operator_fulfillment_services as fulfillment
+from packages.application import operator_partner_report as partner_report
 
 DOMAIN_LABELS = {'ff_pool_document': 'Складские документы', fulfillment.DOMAIN: 'Услуги фулфилмента',
     'plan_report_baseline': 'Исходные данные отчётов',
-    'factory_order_dataset': 'Исходные данные планирования'}
+    'factory_order_dataset': 'Исходные данные планирования',
+    partner_report.DOMAIN: 'Настройки партнёрского отчёта'}
 DEFAULT_DOMAINS = frozenset({'ff_pool_document', fulfillment.DOMAIN})
 DOMAIN_SECTIONS = {'ff_pool_document': 'supply', fulfillment.DOMAIN: 'supply',
-    'plan_report_baseline': 'reports', 'factory_order_dataset': 'supply'}
+    'plan_report_baseline': 'reports', 'factory_order_dataset': 'supply', partner_report.DOMAIN: 'reports'}
 
 
 def _allowed(allowed_domains, allowed_sections):
@@ -54,13 +56,15 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
         if fulfillment.DOMAIN in selected and fulfillment._exists(conn, fulfillment.TABLE):
             sources.append((fulfillment.TABLE, 'operation_id', '*', '1', (), fulfillment._public))
         reports = tuple(sorted(selected.intersection(report_sources.DOMAINS)))
+        if partner_report.DOMAIN in selected and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (partner_report.TABLE,)).fetchone():
+            sources.append((partner_report.TABLE, 'operation_id', '*', '1', (), partner_report.public))
         if reports and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (report_sources.TABLE,)).fetchone():
             sources.append((report_sources.TABLE, 'operation_id', report_sources.PUBLIC_COLUMNS,
                 'domain IN (' + ','.join('?' for _ in reports) + ')', reports,
                 lambda connection, row: report_sources.public(dict(row))))
         if search:
             value = '%' + search.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
-            sources = [(table, key, columns, where + " AND lower(" + ('after_json' if table == report_sources.TABLE else 'source_json') + ") LIKE lower(?) ESCAPE '\\'",
+            sources = [(table, key, columns, where + " AND lower(" + ({report_sources.TABLE: 'after_json', partner_report.TABLE: "product_name || ' ' || nm_id"}.get(table, 'source_json')) + ") LIKE lower(?) ESCAPE '\\'",
                         (*params, value), reader) for table, key, columns, where, params, reader in sources]
         total = sum(conn.execute(f'SELECT count(*) FROM {table} WHERE {where}', params).fetchone()[0]
                     for table, _, _, where, params, _ in sources)
@@ -100,6 +104,10 @@ def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections
                     if row:
                         return _common(reader(conn,row))
         reports = tuple(sorted(allowed.intersection(report_sources.DOMAINS)))
+        if partner_report.DOMAIN in allowed and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (partner_report.TABLE,)).fetchone():
+            row=conn.execute(f'SELECT * FROM {partner_report.TABLE} WHERE operation_id=?', (identity,)).fetchone()
+            if row is not None:
+                return _common(partner_report.public(conn,row))
         if reports and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (report_sources.TABLE,)).fetchone():
             row = conn.execute(f"SELECT {report_sources.PUBLIC_COLUMNS} FROM {report_sources.TABLE} WHERE operation_id=? AND domain IN ({','.join('?' for _ in reports)})",
                                (identity, *reports)).fetchone()
