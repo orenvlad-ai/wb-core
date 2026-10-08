@@ -135,7 +135,12 @@ class CompatTests(unittest.TestCase):
             with patch.object(http, '_web_auth_config', return_value={'configured': True, 'enabled': True}), \
                  patch.object(http, '_authenticated_web_user', return_value=source_role):
                 self.assertEqual(req(path+'?dataset_version=operator-fixture')[0], 403)
-                self.assertEqual(req('/v1/sheet-vitrina-v1/operations/'+ack['operation_id'])[0], 403)
+                # The shared journal hides records outside the source grant.
+                status, hidden = req('/v1/sheet-vitrina-v1/operations/'+ack['operation_id'])
+                self.assertEqual((status, hidden), (404, {'code': 'operation_not_found'}))
+                status, listing = req('/v1/sheet-vitrina-v1/operations?domain=cost_price_upload')
+                self.assertEqual(status, 200)
+                self.assertEqual((listing['total'], listing['items']), (0, []))
             self.assertEqual(self.rt.list_cost_price_dataset_versions(), ['operator-fixture'])
         finally:
             server.shutdown(); thread.join(timeout=5); server.server_close()
