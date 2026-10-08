@@ -1,4 +1,5 @@
 """Read-only complete official FBS quantities, independent of lifecycle and costing."""
+from contextlib import closing
 from datetime import datetime
 from decimal import Decimal
 import json
@@ -20,8 +21,14 @@ def _number(value):
     return result
 
 def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list[int] | None,
-                                    day: str, now: datetime) -> dict:
+                                    day: str, now: datetime,
+                                    planning_max_age_seconds: int | None = None) -> dict:
     freshness = resolve_current_snapshot_policy(connection=conn)
+    if planning_max_age_seconds is not None and (isinstance(planning_max_age_seconds, bool)
+            or not isinstance(planning_max_age_seconds, int)
+            or not 0 < planning_max_age_seconds <= 72 * 3600):
+        raise ValueError("invalid_planning_stock_age_limit")
+    max_age = planning_max_age_seconds or freshness.official_max_age_seconds
     if universe is None:
         current_scope = read_stock_catalog_scope(conn)
         if not current_scope["complete"]:
@@ -59,11 +66,14 @@ def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list
             (run["run_id"], warehouse["seller_warehouse_id"]),
         ).fetchone()
         timestamp = str(stock_run["snapshot_at"])
-        if (current_business_date_iso(datetime.fromisoformat(timestamp.replace("Z", "+00:00"))) != day
-                or _freshness(timestamp, now.isoformat(), max_age_seconds=freshness.official_max_age_seconds) != "fresh"):
+        if ((planning_max_age_seconds is None and
+             current_business_date_iso(datetime.fromisoformat(timestamp.replace("Z", "+00:00"))) != day)
+                or _freshness(timestamp, now.isoformat(), max_age_seconds=max_age) != "fresh"):
             raise ValueError("official_snapshot_not_fresh_current_day")
         captured.append(timestamp)
         facility_evidence[facility] = {**warehouse, "captured_at": timestamp,
+            **({"date": current_business_date_iso(datetime.fromisoformat(timestamp.replace("Z", "+00:00")))}
+               if planning_max_age_seconds is not None else {}),
             "stock_run_id": stock_run["run_id"], "stock_digest": stock_run["source_digest"]}
         stock_rows = conn.execute(
             f"SELECT chrt_id,nm_id,amount,provenance FROM {STOCK_ROWS_TABLE} WHERE run_id=?",
@@ -86,18 +96,23 @@ def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list
     if any(set(value) != set(facilities) for value in stocks.values()):
         raise ValueError("displayed_sku_outside_complete_catalog")
     result: dict[str, Any] = {
-        "available": True, "date": day, "source": OFFICIAL_STOCK_SOURCE,
+        "available": True, "date": (current_business_date_iso(datetime.fromisoformat(min(captured).replace("Z", "+00:00")))
+            if planning_max_age_seconds is not None else day), "report_date": day, "source": OFFICIAL_STOCK_SOURCE,
         "generation_id": run["run_id"], "generation_digest": run["generation_digest"],
         "captured_at": min(captured), "catalog_sku_count": catalog["active_nm_id_count"],
         "sku_count": len(stocks), "facilities": sorted(facilities), "skus": {},
         "facility_evidence": facility_evidence,
-        "freshness_max_age_seconds": freshness.official_max_age_seconds,
+        "freshness_max_age_seconds": max_age,
+        "planning_stock_age_seconds": max(0, int((now - datetime.fromisoformat(min(captured).replace("Z", "+00:00"))).total_seconds())),
+        "planning_stock_warning": ("Использован полный снимок старше 9 часов; количество с даты снимка не корректировалось."
+            if planning_max_age_seconds is not None and
+            _freshness(min(captured), now.isoformat(), max_age_seconds=9 * 3600) != "fresh" else ""),
     }
     result["skus"] = {nm: {"facilities": values} for nm, values in stocks.items()}
     return result
 
 
-def current_official_fbs_facilities(db_path, *, requested_nm_ids, now):
+def current_official_fbs_facilities(db_path, *, requested_nm_ids, now, planning_max_age_seconds=None):
     """Freeze quantities and source identity; None requests the full admitted catalog."""
     from decimal import InvalidOperation
     from packages.application.wb_fbs_warehouse_registry import _connect_readonly
@@ -106,7 +121,7 @@ def current_official_fbs_facilities(db_path, *, requested_nm_ids, now):
     day = current_business_date_iso(now)
     result = {"source": OFFICIAL_STOCK_SOURCE, "date": day, "facilities": []}
     try:
-        with _connect_readonly(db_path) as conn:
+        with closing(_connect_readonly(db_path)) as conn:
             conn.execute("BEGIN")
             facilities = [dict(row) for row in conn.execute(
                 f"SELECT f.facility_id,f.code,f.name,f.active,COALESCE(p.city,'') AS city "
@@ -116,15 +131,22 @@ def current_official_fbs_facilities(db_path, *, requested_nm_ids, now):
                 freshness = resolve_current_snapshot_policy(connection=conn)
                 if universe == []:
                     raise ValueError("empty_active_catalog")
-                stock = read_complete_official_fbs_stock(conn, universe=universe, day=day, now=now)
+                stock = read_complete_official_fbs_stock(conn, universe=universe, day=day, now=now,
+                    planning_max_age_seconds=planning_max_age_seconds)
             except (sqlite3.Error, ValueError, TypeError, KeyError, InvalidOperation) as exc:
                 stock = {"available": False, "reason": str(exc)}
             result["requested_nm_ids"] = sorted(stock.get("skus", {})) if universe is None else universe
             result["catalog_sku_count"] = stock.get("catalog_sku_count")
+            result["snapshot_date"] = stock.get("date")
+            result["captured_at"] = stock.get("captured_at")
+            result["warning"] = stock.get("planning_stock_warning", "")
+            result["age_seconds"] = stock.get("planning_stock_age_seconds")
             for facility in facilities:
                 fid = facility["facility_id"]
                 available = stock.get("available") and fid in stock["facilities"]
-                evidence = {"source": OFFICIAL_STOCK_SOURCE, "date": day,
+                evidence = {"source": OFFICIAL_STOCK_SOURCE, "date": stock.get("date", day),
+                            "report_date": day, "warning": stock.get("planning_stock_warning", ""),
+                            "age_seconds": stock.get("planning_stock_age_seconds"),
                             "generation_id": stock.get("generation_id"),
                             "generation_digest": stock.get("generation_digest"),
                             **stock.get("facility_evidence", {}).get(fid, {})}
@@ -134,7 +156,9 @@ def current_official_fbs_facilities(db_path, *, requested_nm_ids, now):
                 max_age = freshness.official_max_age_seconds if reason == "official_snapshot_not_fresh_current_day" else 0
                 age_label = "9 часов" if max_age == 9 * 3600 else "30 минут"
                 reason_ru = (
-                    f"Официальный снимок остатков FBS устарел: нужен снимок за сегодня не старше {age_label}."
+                    (f"Официальный снимок остатков FBS устарел: нужен полный снимок не старше {planning_max_age_seconds / 3600:g} часов."
+                     if planning_max_age_seconds is not None else
+                     f"Официальный снимок остатков FBS устарел: нужен снимок за сегодня не старше {age_label}.")
                     if reason == "official_snapshot_not_fresh_current_day" else
                     "Изменилась привязка склада WB к фулфилменту; нужен новый полный снимок."
                     if reason == "mapping_changed" else

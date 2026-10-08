@@ -447,6 +447,7 @@ DEFAULT_WAREHOUSES_PREFIX = f"{DEFAULT_WAREHOUSES_PATH}/"
 DEFAULT_WAREHOUSES_SYNC_PATH = f"{DEFAULT_WAREHOUSES_PATH}/sync"
 DEFAULT_WAREHOUSES_SYNC_STATUS_PATH = f"{DEFAULT_WAREHOUSES_SYNC_PATH}/status"
 DEFAULT_INVENTORY_PLANNING_PATH = f"{DEFAULT_WAREHOUSES_PATH}/planning-inventory"
+DEFAULT_STOCK_MONITOR_PATH = "/v1/sheet-vitrina-v1/stock-monitor"
 DEFAULT_WAREHOUSES_RECOVERY_PATH = f"{DEFAULT_WAREHOUSES_PATH}/recovery"
 DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/preview"
 DEFAULT_WAREHOUSES_EMERGENCY_APPLY_PATH = f"{DEFAULT_WAREHOUSES_PATH}/emergency-rebuild/apply"
@@ -540,7 +541,8 @@ def _web_vitrina_ui_base_template() -> str:
     """Cache source text only; request-owned config and barriers stay dynamic."""
 
     template = WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
-    for marker, filename in (("<!-- KEYWORD_CLEANER_PANEL -->", "sheet_vitrina_v1_keyword_cleaner.html"),
+    for marker, filename in (("{{STOCK_MONITOR_PANEL}}", "stock_monitor.html"),
+                             ("<!-- KEYWORD_CLEANER_PANEL -->", "sheet_vitrina_v1_keyword_cleaner.html"),
                              ("/* KEYWORD_CLEANER_SCRIPT */", "sheet_vitrina_v1_keyword_cleaner.js"),
                              ("<!-- BUYER_SUPPORT_PANEL -->", "wb_buyer_support.html"),
                              ("/* BUYER_SUPPORT_SCRIPT */", "wb_buyer_support.js")):
@@ -791,6 +793,27 @@ def _build_handler(
                 _write_empty_private_response(self, HTTPStatus.NO_CONTENT)
                 return
             if not _ensure_business_data_write_allowed(self, parsed.path):
+                return
+            if parsed.path == DEFAULT_STOCK_MONITOR_PATH + "/refresh":
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                if not _ensure_ff_pool_csrf(self, parsed.path):
+                    return
+                try:
+                    body = _load_request_payload(self, max_request_bytes=4096)
+                    if set(body) - {"period_days"}:
+                        raise ValueError("Неизвестные параметры мониторинга.")
+                    payload = entrypoint.handle_stock_monitor_refresh_request(body)
+                except FfPoolSurfaceError as exc:
+                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc)})
+                    return
+                except (TypeError, ValueError) as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                except HeavyAdmissionBusy:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": "Сейчас выполняется общий пересчёт."})
+                    return
+                _write_json_response(self, HTTPStatus.ACCEPTED, payload, extra_headers={"Cache-Control": "private, no-store"})
                 return
             if parsed.path.startswith(DEFAULT_SHEET_FEEDBACKS_PATH + "/buyer-support/pilot/"):
                 _handle_buyer_support_pilot_post(self, parsed, entrypoint)
@@ -5179,6 +5202,25 @@ def _build_handler(
                     )
                     return
                 _write_etag_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if parsed.path == DEFAULT_STOCK_MONITOR_PATH:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    query = _flatten_query_params(parsed.query)
+                    if set(query) - {"period_days", "horizon_days", "date_offset", "view_days"}:
+                        raise ValueError("Неизвестные параметры мониторинга.")
+                    payload = entrypoint.handle_stock_monitor_request(
+                        period_days=int(query.get("period_days", 14)),
+                        horizon_days=int(query.get("horizon_days", 60)),
+                        date_offset=int(query.get("date_offset", 0)),
+                        view_days=int(query.get("view_days", 90)),
+                    )
+                except (TypeError, ValueError) as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload, extra_headers={"Cache-Control": "private, no-store"})
                 return
 
             if parsed.path == DEFAULT_WAREHOUSES_PATH or parsed.path.startswith(DEFAULT_WAREHOUSES_PREFIX):
@@ -10698,6 +10740,8 @@ def _required_section_for_path(path: str) -> str:
     if normalized.startswith("/v1/sheet-vitrina-v1/research/"):
         return WEB_AUTH_SECTION_RESEARCH
     if normalized == "/v1/sheet-vitrina-v1/operations" or normalized.startswith("/v1/sheet-vitrina-v1/operations/"):
+        return WEB_AUTH_SECTION_SUPPLY
+    if normalized in {DEFAULT_STOCK_MONITOR_PATH, DEFAULT_STOCK_MONITOR_PATH + "/refresh"}:
         return WEB_AUTH_SECTION_SUPPLY
     if normalized == DEFAULT_WAREHOUSES_PATH or normalized.startswith(DEFAULT_WAREHOUSES_PREFIX):
         return WEB_AUTH_SECTION_SUPPLY

@@ -43,6 +43,8 @@ from packages.application.ff_document_workflow import (
 from packages.application.ff_pool_surfaces import FfPoolSurface
 from packages.application.ff_wb_supply_origins import FfWbSupplyOriginAssignments
 from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
+from packages.application.stock_monitor import StockMonitorService
+from packages.application.stock_monitor_jobs import StockMonitorJobs
 from packages.application.wb_fbs_orders import WbFbsOrdersCollector
 from packages.application.wb_fbs_warehouse_registry import WbFbsWarehouseRegistry
 from packages.application.fulfillment_services import FulfillmentServicesBlock
@@ -1352,6 +1354,8 @@ class RegistryUploadHttpEntrypoint:
             ),
         )
         self.inventory_planning = InventoryPlanningReadModel(db_path=self.runtime.db_path)
+        self.stock_monitor = StockMonitorService(runtime=self.runtime, now_factory=self.now_factory)
+        self.stock_monitor_jobs = StockMonitorJobs(service=self.stock_monitor, operator_jobs=self.operator_jobs)
         self.warehouse_stocks_block = WarehouseStocksBlock(
             runtime=self.runtime,
             stocks_block=self.factory_order_supply_block.stocks_block,
@@ -3300,7 +3304,18 @@ class RegistryUploadHttpEntrypoint:
         proof = build_owned_cycle_history(runtime=self.runtime, config=config, cycle_owner=owner, now=self.now_factory(),
             backfill_dates=backfill_dates, closed_receipt=closed_receipt)
         self._cycle_verify_ready(ready)
-        return StageProof({'history_' + key: str(value) for key,value in proof.items()})
+        versions = {'history_' + key: str(value) for key,value in proof.items()}
+        monitor = StockMonitorJobs(
+            service=StockMonitorService(runtime=self.runtime, now_factory=self.now_factory),
+            operator_jobs=self.operator_jobs,
+        ).refresh_cycle()
+        versions['stock_monitor_publication'] = json.dumps(monitor, sort_keys=True)
+        warnings = tuple(
+            {'source_key': 'stock_monitor', 'policy': 'last_good_retained',
+             'period_days': str(item['period_days']), 'error_code': item['error_code']}
+            for item in monitor['snapshots'] if item['status'] == 'retained'
+        )
+        return StageProof(versions, warnings)
 
     def start_sheet_refresh_job(
         self,
@@ -6677,6 +6692,14 @@ class RegistryUploadHttpEntrypoint:
             if functional.get("status") == "ready"
             else self.warehouse_stocks_block.warehouse_detail(warehouse_key)
         )
+
+    def handle_stock_monitor_request(self, *, period_days: int = 14, horizon_days: int = 60,
+                                     date_offset: int = 0, view_days: int = 90) -> dict[str, Any]:
+        return self.stock_monitor.get_snapshot(period_days=period_days, horizon_days=horizon_days,
+            date_offset=date_offset, view_days=view_days)
+
+    def handle_stock_monitor_refresh_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.stock_monitor_jobs.request_refresh(payload.get('period_days', 14))
 
     def handle_inventory_planning_request(self) -> dict[str, Any]:
         candidate = getattr(self.web_vitrina_block, "fbs_inventory_snapshot", None)

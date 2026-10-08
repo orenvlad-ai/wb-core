@@ -140,21 +140,17 @@ def build_fbs_fulfillment_order_calculation_evidence(
     demand_basis = {
         "scope": str(result.get("national_demand_scope") or ""),
         "sales_window": dict(sales_window),
-        "outside_window_samples_used": False,
+        "outside_window_samples_used": bool(sales_window.get("outside_window_samples_used")),
         "per_sku": per_sku_demand_basis,
         "per_sku_fingerprint": canonical_fingerprint(per_sku_demand_basis),
         "order_count_samples_by_nm_fingerprint": canonical_fingerprint(
             order_count_samples_by_nm
         ),
-        "source": runtime.describe_temporal_source_window(
-            source_key=SALES_HISTORY_SOURCE_KEY,
-            date_from=date_from,
-            date_to=date_to,
-        ),
+        "source": dict(sales_window.get("source_coverage") or {}),
     }
     return {
         "contract_name": "wb-core.supply-calculation-evidence.fbs-fulfillment-order",
-        "contract_version": 2,
+        "contract_version": 3,
         "calculation_type": "fbs_fulfillment_order",
         "national_demand_scope": str(result.get("national_demand_scope") or ""),
         "wb_stock_used": False,
@@ -170,18 +166,14 @@ def build_fbs_fulfillment_order_calculation_evidence(
             "actual_date_from": date_from,
             "actual_date_to": date_to,
             "calendar_day_count": sales_window.get("calendar_day_count"),
-            "outside_window_samples_used": False,
+            "outside_window_samples_used": bool(sales_window.get("outside_window_samples_used")),
             "order_count_samples_by_nm_fingerprint": canonical_fingerprint(
                 order_count_samples_by_nm
             ),
             "result_rows_demand_basis_fingerprint": canonical_fingerprint(
                 per_sku_demand_basis
             ),
-            "source": runtime.describe_temporal_source_window(
-                source_key=SALES_HISTORY_SOURCE_KEY,
-                date_from=date_from,
-                date_to=date_to,
-            ),
+            "source": dict(sales_window.get("source_coverage") or {}),
         },
         "coverage": {
             "wb_stock_used": False,

@@ -23,6 +23,7 @@ from apps.fbs_fulfillment_order_supply_smoke import (  # noqa: E402
     ORENBURG_ID,
     _seed_facilities,
     _seed_sales_history,
+    _seed_fbs_demand,
     _seed_shipments,
 )
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
@@ -61,6 +62,7 @@ def main() -> int:
         ]
         _seed_facilities(runtime, active_nm_ids)
         _seed_sales_history(runtime, active_nm_ids)
+        _seed_fbs_demand(runtime, active_nm_ids)
         _seed_shipments(runtime, active_nm_ids)
 
         port = _reserve_free_port()
@@ -149,14 +151,12 @@ def main() -> int:
                 expect(page.locator("#fbsReadinessReserved")).not_to_have_text("-")
                 expect(page.locator("#fbsReadinessAvailable")).not_to_have_text("-")
                 expect(page.locator("#fbsHistoryCoverage")).to_contain_text(
-                    "2026-04-01 — 2026-04-17"
+                    "2026-04-02 — 2026-04-17"
                 )
 
                 facility.select_option(ORENBURG_ID)
-                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_disabled()
-                expect(page.locator("#fbsReadinessBlockers")).to_contain_text(
-                    "Расчёт заблокирован"
-                )
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
+                expect(fbs_panel.locator(".source-pill").first).to_have_text("Спрос выбранного склада")
                 facility.select_option(MOSCOW_ID)
                 expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
 
@@ -182,7 +182,7 @@ def main() -> int:
                 expect(page.locator("#fbsResultInboundScope")).to_have_text(
                     "Только для выбранного ФФ"
                 )
-                expect(page.locator("#fbsResultInbound")).to_contain_text("15 шт.")
+                expect(page.locator("#fbsResultInbound")).to_contain_text("35 шт.")
 
                 with page.expect_download(timeout=15000) as download_info:
                     page.locator("#fbsFulfillmentDownloadButton").click()

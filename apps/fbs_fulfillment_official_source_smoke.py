@@ -35,6 +35,17 @@ def main():
         assert read()[0]['available'] == 3
         assert read(now + timedelta(minutes=30))[0]['available'] is None
         assert 'устарел' in read(now + timedelta(days=1))[0]['source_blocker']
+        # Planning admits the frozen full snapshot for 72 hours, including a
+        # previous business day, with its actual date and explicit warning.
+        def planning(at):
+            return current_official_fbs_facilities(path, requested_nm_ids=[1,2], now=at,
+                planning_max_age_seconds=72 * 3600)
+        old = planning(now + timedelta(days=2))
+        assert old['facilities'][0]['available'] == 3
+        assert old['snapshot_date'] == '2026-09-05'
+        assert old['warning']
+        assert old['facilities'][0]['stock_source']['date'] == '2026-09-05'
+        assert planning(now + timedelta(days=3))['facilities'][0]['available'] is None
         assert read(ids=(1, 2, 3))[0]['available'] is None
         # Quantity reader succeeds while SQLite explicitly denies every costing/lifecycle table.
         def authorize(action, table, *_):
