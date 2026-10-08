@@ -1,6 +1,15 @@
 {
   "schema": "wb-core.check-map/v1",
   "command_dependencies": {
+    "payment_pdf_fixtures": {
+      "scripts": [
+        "apps/russian_payment_orders_smoke.py",
+        "apps/ff_pool_surfaces_smoke.py",
+        "apps/operator_ff_overhead_smoke.py"
+      ],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"]
+    },
     "ads_partial_imports": {
       "scripts": [
         "apps/ads_partial_adapter_smoke.py",
@@ -39,6 +48,7 @@
     },
     "playwright_chromium": {
       "scripts": [
+        "apps/operator_acceptance_browser_smoke.py",
         "apps/finance_liquidity_browser_smoke.py",
         "apps/registry_upload_http_entrypoint_users_admin_smoke.py",
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
