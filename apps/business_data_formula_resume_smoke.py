@@ -4,6 +4,7 @@ from copy import deepcopy
 from contextlib import contextmanager
 from datetime import timedelta
 import json
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -34,11 +35,24 @@ class FileSystemd(FakeSystemd):
     def unit_state(self, unit):
         return SystemdClient.unit_state(self, unit)
 
+    def disable_now(self, unit):
+        props = self.states[unit]['properties']
+        for key, next_value in (('TimersCalendar', '(null)'), ('TimersMonotonic', '0')):
+            if key in props:
+                props[key] = re.sub(r'next_elapse=[^}]+', 'next_elapse=' + next_value + ' ', props[key])
+        return super().disable_now(unit)
+
     def _run(self, args):
         if args[0] == 'show':
             value = self.states[args[1]]
             props = dict(value['properties'],UnitFileState=value['is_enabled'],ActiveState=value['is_active'])
             return SimpleNamespace(returncode=0,stdout='\n'.join(k+'='+v for k,v in props.items()),stderr='')
+        if args[0] in {'start', 'stop'} and args[1].endswith('.timer'):
+            props = self.states[args[1]]['properties']
+            for key in ('TimersCalendar', 'TimersMonotonic'):
+                if key in props:
+                    next_value = ('Thu 2026-10-08 19:40:00 UTC' if key == 'TimersCalendar' else '5min') if args[0] == 'start' else ('(null)' if key == 'TimersCalendar' else '0')
+                    props[key] = re.sub(r'next_elapse=[^}]+', 'next_elapse=' + next_value + ' ', props[key])
         return super()._run(args)
 
 
@@ -81,10 +95,18 @@ class FormulaResumeTests(unittest.TestCase):
             fragment = self.units / unit
             data = self.original_artifact if unit == formula.UNIT else b'[Unit]\nDescription=Synthetic ordinary unit\n'
             fragment.write_bytes(data)
-            value['properties'].update(FragmentPath=str(fragment), DropInPaths='')
+            value['properties'].update(FragmentPath=str(fragment), DropInPaths='', ExecStart='{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 apps/synthetic.py ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }')
+            if unit.endswith('.timer'):
+                value['properties'].pop('ExecStart')
+                value['properties']['TimersCalendar'] = '{ OnCalendar=*-*-* *:00,10,20,30,40,50:00 ; next_elapse=Thu 2026-10-08 19:40:00 UTC }'
+                if unit == pause.TIMERS[0]:
+                    value['properties'].pop('TimersCalendar')
+                    value['properties']['TimersMonotonic'] = '{ OnActiveUSec=5min ; next_elapse=2month 4w 1d 20h 13min 33.498883s }'
             if unit == formula.UNIT:
                 exec_line = next(line for line in data.decode().splitlines() if line.startswith('ExecStart='))[10:]
-                value['properties']['ExecStart'] = '{ path=/usr/bin/python3 ; argv[]=' + exec_line + ' ; ignore_errors=no ; }'
+                value['properties']['ExecStart'] = '{ path=/usr/bin/python3 ; argv[]=' + exec_line + ' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }'
+            if unit in {formula.UNIT, 'wb-core-sheet-vitrina-canary-restore.service'}:
+                value['properties']['ExecStart'] = value['properties']['ExecStart'].replace('start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0', 'start_time=[Thu 2026-10-08 19:31:08 UTC] ; stop_time=[Thu 2026-10-08 19:31:09 UTC] ; pid=2419611 ; code=exited ; status=0')
         self.dropin = self.units / (formula.UNIT + '.d') / '10-fixture.conf'
         self.dropin.parent.mkdir(); self.dropin.write_bytes(b'[Service]\nEnvironment=UNRELATED_FIXTURE=1\n')
         self.systemd.states[formula.UNIT]['properties']['DropInPaths'] = str(self.dropin)
@@ -104,6 +126,9 @@ class FormulaResumeTests(unittest.TestCase):
         (self.units / formula.UNIT).write_bytes(self.new_artifact)
         props = self.systemd.states[formula.UNIT]['properties']
         props['ExecStart'] = props['ExecStart'].replace(self.old_epoch, self.new_epoch, 1)
+        for unit in (formula.UNIT, 'wb-core-sheet-vitrina-canary-restore.service'):
+            props = self.systemd.states[unit]['properties']
+            props['ExecStart'] = re.sub(r' ; start_time=.*', ' ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }', props['ExecStart'])
         (self.app / '.wb-core-runtime-sha').write_text(SHA + '\n')
         (self.app / '.wb-core-deploy.json').write_text(json.dumps(dict(schema_version='wb_core_deploy_metadata_v2',
             commit=SHA,deployment_complete=True,deployed_at='2026-10-08T10:00:00Z')))
@@ -122,6 +147,92 @@ class FormulaResumeTests(unittest.TestCase):
         plan = plan or self.prepare()
         return formula.apply(self.runtime, reviewed_plan=plan, expected_fingerprint=plan['fingerprint'],
             **self.apply_options, **options)
+
+    def test_realistic_runtime_reset_and_committed_timer_rearm_keep_static_proof(self):
+        plan = self.prepare()
+        current = self.systemd.unit_state(pause.TIMERS[0])
+        original = self.baseline['units'][pause.TIMERS[0]]
+        self.assertEqual(original['properties']['TimersMonotonic'], '{ OnActiveUSec=5min ; next_elapse=2month 4w 1d 20h 13min 33.498883s }')
+        self.assertEqual(current['properties']['TimersMonotonic'], '{ OnActiveUSec=5min ; next_elapse=0 }')
+        self.assertTrue(formula._same_unit_configuration(original, current))
+        canary = 'wb-core-sheet-vitrina-canary-restore.service'
+        self.assertIn('pid=2419611 ; code=exited ; status=0', self.baseline['units'][canary]['properties']['ExecStart'])
+        self.assertIn('pid=0 ; code=(null) ; status=0/0', self.systemd.unit_state(canary)['properties']['ExecStart'])
+        self.assertTrue(formula._same_unit_configuration(self.baseline['units'][canary], self.systemd.unit_state(canary)))
+        with self.assertRaisesRegex(RuntimeError, 'synthetic committed crash'):
+            self.apply(plan, _fault=lambda point: (_ for _ in ()).throw(RuntimeError('synthetic committed crash')) if point == 'committed' else None)
+        calls = list(self.systemd.calls)
+        for unit in pause.TIMERS:
+            props = self.systemd.states[unit]['properties']
+            if 'TimersCalendar' in props:
+                props['TimersCalendar'] = props['TimersCalendar'].replace('Thu 2026-10-08 19:40:00 UTC', 'Fri 2026-10-09 01:30:00 UTC')
+        formula.prove_committed(self.runtime, OP, **self.options)
+        self.apply(plan)
+        self.assertEqual(calls, self.systemd.calls)
+        self.assertEqual(self.baseline, pause.load_state(self.runtime)['baseline'])
+
+    def test_unknown_or_malformed_full_native_shapes_never_get_equality_fallback(self):
+        exec_raw = self.systemd.unit_state(formula.UNIT)['properties']['ExecStart']
+        calendar = '{ OnCalendar=*-*-* 00/2:17:00 Asia/Yekaterinburg ; next_elapse=Thu 2026-10-08 21:17:00 UTC }'
+        monotonic = '{ OnBootUSec=10min ; next_elapse=10min }'
+        cases = [('ExecStart', value) for value in (
+            exec_raw + ' extra', exec_raw + ' ' + exec_raw,
+            exec_raw.replace(' ; pid=', ' ; unknown=1 ; pid='),
+            exec_raw.replace('status=0/0', 'status=0/SUCCESS'),
+            exec_raw.replace('pid=0', 'pid=-1'), exec_raw.replace('pid=0', 'pid=999999999999'),
+            exec_raw.replace('pid=0', 'pid=42'), exec_raw.replace('ignore_errors=no', 'ignore_errors=maybe'),
+            exec_raw.replace(' ; start_time=', '\n ; start_time='), exec_raw + '\x00',
+            exec_raw.replace(' ; ignore_errors=', ' ; injected=1 ; ignore_errors='),
+            '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 apps/test.py ; ignore_errors=no ; }',
+        )] + [('TimersCalendar', value) for value in (
+            calendar + ' garbage', calendar + ' ' + calendar,
+            calendar.replace('Thu 2026-10-08', 'Fri 2026-10-08'),
+            calendar.replace('2026-10-08', '2026-02-30'),
+            calendar.replace('next_elapse=', 'foreign='), calendar.replace(' ; next_elapse=', ' ; injected=1 ; next_elapse='),
+            calendar.replace('OnCalendar=', 'Unknown='), calendar.replace('21:17:00', '25:17:00'),
+        )] + [('TimersMonotonic', value) for value in (
+            monotonic.replace('10min }', '-1min }'), monotonic.replace('10min }', 'unknown }'),
+            monotonic.replace('OnBootUSec', 'OnForeignUSec'), monotonic + ' ', monotonic + '\r',
+        )]
+        for name, raw in cases:
+            with self.subTest(property=name, raw=raw), self.assertRaises(RuntimeError):
+                formula._loaded_records(raw, name)
+        unit = self.systemd.unit_state('wb-core-sheet-vitrina-canary-restore.service')
+        for value in (None, '', 'sha256:bad'):
+            bad = deepcopy(unit); bad['properties']['UnitContentDigest'] = value
+            with self.subTest(digest=value), self.assertRaises(RuntimeError):
+                formula._same_unit_configuration(bad, bad)
+        missing = deepcopy(unit); missing['properties'].pop('ExecStart')
+        empty = deepcopy(missing); empty['properties']['ExecStart'] = ''
+        self.assertFalse(formula._same_unit_configuration(missing, empty))
+
+    def test_real_command_schedule_and_loaded_flag_drift_block_without_timer_action(self):
+        plan = self.prepare(); calls = list(self.systemd.calls)
+        canary = 'wb-core-sheet-vitrina-canary-restore.service'
+        calendar_unit = next(u for u in pause.TIMERS if 'TimersCalendar' in self.systemd.states[u]['properties'])
+        changes = [
+            (canary, 'ExecStart', lambda v: v.replace('path=/usr/bin/python3', 'path=/usr/bin/python4')),
+            (canary, 'ExecStart', lambda v: v.replace('apps/synthetic.py', 'apps/foreign.py')),
+            (canary, 'ExecStart', lambda v: v.replace('ignore_errors=no', 'ignore_errors=yes')),
+            (pause.TIMERS[0], 'TimersMonotonic', lambda v: v.replace('OnActiveUSec', 'OnBootUSec')),
+            (pause.TIMERS[0], 'TimersMonotonic', lambda v: v.replace('5min', '6min')),
+            (calendar_unit, 'TimersCalendar', lambda v: v.replace('*:00,10,20,30,40,50:00', '*:01,10,20,30,40,50:00')),
+            (calendar_unit, 'TimersCalendar', lambda v: v.replace(' ; next_elapse', ' Europe/Moscow ; next_elapse')),
+        ]
+        for unit, key, mutate in changes:
+            props = self.systemd.states[unit]['properties']; previous = props[key]; props[key] = mutate(previous)
+            try:
+                with self.subTest(unit=unit, field=key), self.assertRaisesRegex(RuntimeError, 'foreign unit configuration'):
+                    self.apply(plan)
+                self.assertEqual(self.systemd.calls, calls)
+                self.assertFalse((self.runtime / formula.DIRECTORY).exists())
+            finally:
+                props[key] = previous
+        self.systemd.states[canary].update(is_active='active')
+        self.systemd.states[canary]['properties'].update(MainPID='42', SubState='running')
+        with self.assertRaisesRegex(RuntimeError, 'quiet|idle'):
+            self.prepare()
+        self.assertTrue(barrier.barrier_status(self.runtime)['active'])
 
     def test_exact_formula_target_preserves_original_baseline_and_repeated_read(self):
         plan = self.prepare(); calls = list(self.systemd.calls)
