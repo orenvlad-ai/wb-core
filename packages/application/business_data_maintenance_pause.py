@@ -133,6 +133,8 @@ def _discover(systemd) -> None:
 def preflight(runtime_dir: Path, *, systemd, activity_reader: Callable[[], dict]) -> dict:
     """Complete readonly validation, before state/barrier/timer mutation."""
     runtime_dir = runtime_dir.resolve()
+    from packages.application.business_data_formula_resume import assert_no_partial_transition as assert_no_formula_transition
+    assert_no_formula_transition(runtime_dir)
     existing = load_state(runtime_dir)
     if existing and existing["phase"] != "restored":
         raise RuntimeError("existing pause requires the same identity resume/status")
@@ -200,11 +202,14 @@ def pause(runtime_dir: Path, *, window_id: str, actor: str, reason: str,
     _validate_actor(actor)
     if not str(reason).strip():
         raise RuntimeError("audited pause reason is required")
+    from packages.application.business_data_formula_resume import assert_no_partial_transition as assert_no_formula_transition
+    assert_no_formula_transition(runtime_dir)
     state = load_state(runtime_dir)
     fresh = None
     if state is None or state["phase"] == "restored":
         fresh = preflight(runtime_dir, systemd=systemd, activity_reader=activity_reader)
     with _ExclusiveRestoreLock(runtime_dir):
+        assert_no_formula_transition(runtime_dir)
         current_state = load_state(runtime_dir)
         if fresh is not None:
             if current_state != state:
@@ -269,15 +274,18 @@ def resume(runtime_dir: Path, *, window_id: str, actor: str, reason: str,
     if not str(reason).strip():
         raise RuntimeError("audited restore reason is required")
     from packages.application.business_data_schedule_profile import assert_no_partial_transition
+    from packages.application.business_data_formula_resume import assert_no_partial_transition as assert_no_formula_transition
     # Loaded unit digests can still equal baseline before daemon-reload even
     # when a target preset is already on disk. Never escape that operation.
     assert_no_partial_transition(runtime_dir)
+    assert_no_formula_transition(runtime_dir)
     state = load_state(runtime_dir)
     if state is None:
         raise RuntimeError("no pause baseline")
     _identity(state, window_id)
     with _ExclusiveRestoreLock(runtime_dir):
         assert_no_partial_transition(runtime_dir)
+        assert_no_formula_transition(runtime_dir)
         state = load_state(runtime_dir)
         _identity(state, window_id)
         before = readback(runtime_dir, systemd=systemd, activity_reader=activity_reader, proc_root=proc_root)

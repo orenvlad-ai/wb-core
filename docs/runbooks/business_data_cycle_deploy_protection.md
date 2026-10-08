@@ -47,6 +47,12 @@ barrier; сервисы не убиваются, sync не начинается.
 обычный exact resume честно откажет при drift. Успешный deploy не разрешает
 перезапись baseline; такой случай требует отдельного согласованного recovery.
 
+Для единственного изменения literal formula-epoch в установленном
+finished-snapshot service после exact completed deploy предусмотрен отдельный
+[проверяемый formula resume](business_data_formula_resume.md): он доказывает
+точную before/after конфигурацию и сохраняет исходный baseline. Во всех остальных
+случаях действует прежний exact resume; редактирование baseline не разрешено.
+
 ## Диагностика и неопределённость
 
 Owner можно прочитать без изменения через:

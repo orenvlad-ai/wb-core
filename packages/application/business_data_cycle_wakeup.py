@@ -78,11 +78,43 @@ def arm_before_release(runtime, state, released_at, restore_readback):
     final bookkeeping gap sees the same intent. An already accepted slot is never
     replayed, irrespective of its terminal/uncertain outcome.
     """
-    from packages.application.business_data_cycle_dispatch import latest_slot, selected
-    from packages.application.business_data_schedule_profile import WAREHOUSE_TIMER
+    from packages.application.business_data_cycle_dispatch import selected
     if (state.get('window_kind') != 'maintenance_pause'
             or restore_readback.get('exact_prior_state_restored') is not True or not selected(runtime)):
         return
+    _arm_restored_timers(runtime, state, released_at, restore_readback)
+
+
+def arm_formula_before_release(runtime, state, released_at, restore_readback):
+    """Only the independently committed formula transition can retain wakeup.
+
+    Called by its typed barrier release under the barrier lock, immediately
+    after live prove_committed. No generic target/success flags are accepted.
+    """
+    from packages.application import business_data_formula_resume as formula
+    from packages.application.business_data_cycle_dispatch import selected
+    operation = restore_readback.get('operation_id')
+    if not operation:
+        raise RuntimeError('formula wakeup operation is absent')
+    transition = formula.load(runtime, operation)
+    plan = (transition or {}).get('plan') or {}
+    if (not transition or transition['phase'] not in {'committed', 'released'}
+            or transition.get('receipt') != restore_readback
+            or restore_readback.get('schema_version') != formula.RECEIPT_SCHEMA
+            or restore_readback.get('exact_target_state_restored') is not True
+            or restore_readback.get('exact_prior_state_restored') is not False
+            or restore_readback.get('target_fingerprint') != plan.get('fingerprint')
+            or restore_readback.get('window_id') != state.get('window_id')
+            or restore_readback.get('baseline_fingerprint') != state.get('plan_fingerprint')
+            or state.get('window_kind') != 'maintenance_pause'):
+        raise RuntimeError('formula wakeup exact committed binding differs')
+    if selected(runtime):
+        _arm_restored_timers(runtime, state, released_at, restore_readback)
+
+
+def _arm_restored_timers(runtime, state, released_at, restore_readback):
+    from packages.application.business_data_cycle_dispatch import latest_slot
+    from packages.application.business_data_schedule_profile import WAREHOUSE_TIMER
     owner = (restore_readback.get('units') or {}).get(WAREHOUSE_TIMER) or {}
     if (owner.get('is_enabled'), owner.get('is_active')) != ('enabled', 'active'):
         return  # A deliberately disabled owner did not miss a scheduled launch.
