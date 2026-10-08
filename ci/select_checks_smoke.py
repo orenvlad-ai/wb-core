@@ -534,6 +534,8 @@ def command_dependency_checks():
         verify_plan(narrow)
         assert narrow['commands'].count(['python3', script]) == 1, narrow
         assert 'openpyxl==3.1.5' in narrow['pip'], narrow
+        if script == 'apps/operator_autoanswers_settings_smoke.py':
+            assert 'apsw==3.53.4.0' in narrow['pip'], narrow
         if script in next_browsers:
             check(narrow, [script])
         else:
