@@ -53,6 +53,16 @@ finished-snapshot service после exact completed deploy предусмотр
 точную before/after конфигурацию и сохраняет исходный baseline. Во всех остальных
 случаях действует прежний exact resume; редактирование baseline не разрешено.
 
+Этот typed путь строго разделяет неизменную loaded configuration и только
+распознанные native runtime tails (timer next_elapse, ExecStart execution).
+Digest/path/drop-ins, команда, флаги и расписание остаются точными; неизвестный
+формат блокирует resume. Если старый tool уже находится в исходном held окне,
+новый deploy.claim не обходят: только после independent review + trusted Gate
+допустим описанный в linked runbook private exact-base recovery из полного
+проверенного дерева с четырьмя allowlisted путями. Installed app, исходный
+completed owner, baseline и canonical claim guard не изменяют. После same-ID
+resume исправление выпускают обычным порядком в новом штатном окне.
+
 ## Диагностика и неопределённость
 
 Owner можно прочитать без изменения через:

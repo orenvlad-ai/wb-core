@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shlex
 import stat
+from datetime import datetime
 
 from packages.application import business_data_maintenance_pause as pause
 from packages.application import business_data_deploy_protection as deploy
@@ -32,6 +33,161 @@ EPOCH = r'wbc0069k16-reviewed-native-v1:[0-9a-f]{64}'
 PIN = re.compile(r'--formula-epoch (' + EPOCH + r')(?=\s|;|$)')
 CONFIG_PROPERTIES = ('FragmentPath', 'DropInPaths', 'ExecStart', 'Triggers', 'Persistent',
     'TimersCalendar', 'TimersMonotonic', 'AccuracyUSec', 'RandomizedDelayUSec', 'RemainAfterElapse')
+
+
+def _validate_duration(value):
+    if value == '0':
+        return
+    # systemd usec_t is uint64; UINT64_MAX is the unsupported infinity sentinel.
+    # Native constants: systemd/v255/src/basic/time-util.h (month = 2629800s).
+    units = {'month': 2629800000000, 'w': 604800000000, 'd': 86400000000,
+             'h': 3600000000, 'min': 60000000, 's': 1000000, 'ms': 1000, 'us': 1}
+    if len(value) > 256:
+        raise RuntimeError('formula resume invalid loaded duration')
+    total, previous = 0, -1
+    for token in value.split(' '):
+        match = re.fullmatch(r'(0|[1-9][0-9]{0,19})(?:\.([0-9]{1,6}))?(month|w|d|h|min|s|ms|us)', token)
+        if match is None:
+            raise RuntimeError('formula resume invalid loaded duration')
+        whole, fraction, unit = match.groups()
+        rank = tuple(units).index(unit)
+        if rank <= previous:
+            raise RuntimeError('formula resume invalid loaded duration')
+        previous = rank
+        usecs = int(whole) * units[unit]
+        if fraction:
+            numerator, denominator = int(fraction) * units[unit], 10 ** len(fraction)
+            if numerator % denominator:
+                raise RuntimeError('formula resume invalid loaded duration')
+            usecs += numerator // denominator
+        if usecs == 0 or total + usecs >= (1 << 64) - 1:
+            raise RuntimeError('formula resume invalid loaded duration')
+        total += usecs
+
+
+def _validate_calendar(value):
+    # Only the normalized operand families present in our native readback.
+    # Validation never rewrites/sorts the retained static schedule text.
+    parts = value.split(' ')
+    if len(parts) not in {2, 3} or (len(parts) == 3 and parts[2] not in {
+            'UTC', 'Europe/Moscow', 'Asia/Yekaterinburg', 'Asia/Tbilisi'}):
+        raise RuntimeError('formula resume unsupported loaded calendar')
+    if parts[0] != '*-*-*':
+        try:
+            if re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', parts[0]) is None or datetime.strptime(parts[0], '%Y-%m-%d').strftime('%Y-%m-%d') != parts[0]:
+                raise ValueError('invalid date')
+        except ValueError:
+            raise RuntimeError('formula resume invalid loaded calendar date') from None
+    fields = parts[1].split(':')
+    if len(fields) != 3:
+        raise RuntimeError('formula resume unsupported loaded calendar')
+    for index, (field, maximum) in enumerate(zip(fields, (23, 59, 59))):
+        if field == '*':
+            continue
+        if '/' in field:
+            match = re.fullmatch(r'([0-9]{2})/([1-9][0-9]?)', field)
+            if index != 0 or match is None or int(match[1]) > maximum or int(match[2]) > maximum:
+                raise RuntimeError('formula resume invalid loaded calendar range')
+        else:
+            if re.fullmatch(r'[0-9]{2}(?:,[0-9]{2})*', field) is None:
+                raise RuntimeError('formula resume invalid loaded calendar range')
+            values = [int(v) for v in field.split(',')]
+            if any(v > maximum for v in values) or values != sorted(set(values)):
+                raise RuntimeError('formula resume invalid loaded calendar range')
+
+
+def _loaded_records(value, property_name):
+    """Parse the complete native serialization, retaining every static operand.
+
+    Only documented runtime tails are separated. Unknown shapes do not fall
+    back to raw equality, even when two malformed observations are identical.
+    """
+    if not isinstance(value, str) or len(value) > 65536 or re.search(r'[\x00-\x1f\x7f]', value):
+        raise RuntimeError('formula resume malformed loaded property: ' + property_name)
+    if value == '':
+        return ()
+    duration = r'(?:0|(?:[0-9]+(?:\.[0-9]+)?(?:month|w|d|h|min|s|ms|us)(?: [0-9]+(?:\.[0-9]+)?(?:month|w|d|h|min|s|ms|us))*))'
+    timestamp = r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC'
+    if property_name == 'ExecStart':
+        pattern = (r'\{ path=(?P<path>[^;{}]+) ; argv\[\]=(?P<argv>[^;{}]+) ; ignore_errors=(?P<ignore>yes|no)'
+            r' ; start_time=\[(?P<start>n/a|' + timestamp + r')\] ; stop_time=\[(?P<stop>n/a|' + timestamp + r')\]'
+            r' ; pid=(?P<pid>0|[1-9][0-9]*) ; code=(?P<code>\(null\)|exited|killed|dumped)'
+            r' ; status=(?P<status>[0-9]+(?:/[0-9]+)?) \}')
+    elif property_name == 'TimersCalendar':
+        pattern = r'\{ OnCalendar=(?P<operand>[^;{}]+) ; next_elapse=(?P<next>\(null\)|' + timestamp + r') \}'
+    elif property_name == 'TimersMonotonic':
+        pattern = r'\{ (?P<trigger>OnActiveUSec|OnBootUSec|OnStartupUSec|OnUnitActiveUSec|OnUnitInactiveUSec)=(?P<operand>' + duration + r') ; next_elapse=(?P<next>' + duration + r') \}'
+    else:
+        raise RuntimeError('formula resume unknown loaded property')
+    result, offset = [], 0
+    while offset < len(value):
+        match = re.compile(pattern).match(value, offset)
+        if match is None:
+            raise RuntimeError('formula resume malformed loaded property: ' + property_name)
+        fields = match.groupdict()
+        for field in ('start', 'stop', 'next'):
+            observed = fields.get(field, '')
+            if re.fullmatch(timestamp, observed):
+                try:
+                    parsed = datetime.strptime(observed, '%a %Y-%m-%d %H:%M:%S UTC')
+                    if parsed.strftime('%a %Y-%m-%d %H:%M:%S UTC') != observed:
+                        raise ValueError('weekday mismatch')
+                except ValueError:
+                    raise RuntimeError('formula resume invalid loaded timestamp') from None
+        if property_name == 'ExecStart':
+            if not fields['path'].startswith('/') or fields['path'].strip() != fields['path'] or fields['argv'].strip() != fields['argv']:
+                raise RuntimeError('formula resume invalid loaded command')
+            if len(fields['pid']) > 10 or int(fields['pid']) > 2147483647 or any(
+                    len(v) > 3 or int(v) > 255 for v in fields['status'].split('/')):
+                raise RuntimeError('formula resume invalid loaded execution number')
+            if fields['code'] == '(null)':
+                if (fields['pid'], fields['start'], fields['stop'], fields['status']) != ('0', 'n/a', 'n/a', '0/0'):
+                    raise RuntimeError('formula resume unproven loaded execution state')
+            elif (fields['pid'] == '0' or 'n/a' in (fields['start'], fields['stop'])
+                    or datetime.strptime(fields['stop'], '%a %Y-%m-%d %H:%M:%S UTC') < datetime.strptime(fields['start'], '%a %Y-%m-%d %H:%M:%S UTC')):
+                raise RuntimeError('formula resume unproven loaded execution state')
+            static = (fields['path'], fields['argv'], fields['ignore'])
+        elif property_name == 'TimersCalendar':
+            # Native systemctl expands these captured calendars to date/time
+            # operands; retain their exact timezone and all schedule tokens.
+            _validate_calendar(fields['operand'])
+            static = ('OnCalendar', fields['operand'])
+        else:
+            _validate_duration(fields['operand'])
+            _validate_duration(fields['next'])
+            static = (fields['trigger'], fields['operand'])
+        if static in result:
+            raise RuntimeError('formula resume duplicate loaded record')
+        result.append(static)
+        offset = match.end()
+        if offset < len(value):
+            if value[offset:offset + 2] != ' {':
+                raise RuntimeError('formula resume extra loaded tokens')
+            offset += 1
+    return tuple(result)
+
+
+def _loaded_configuration(properties):
+    result = {}
+    for key in CONFIG_PROPERTIES:
+        present = key in properties
+        value = properties.get(key)
+        if present and key in {'ExecStart', 'TimersCalendar', 'TimersMonotonic'}:
+            value = _loaded_records(value, key)
+        result[key] = (present, value)  # Missing and empty are different evidence.
+    return result
+
+
+def _same_unit_configuration(original, actual):
+    left, right = original.get('properties') or {}, actual.get('properties') or {}
+    digest = left.get('UnitContentDigest')
+    if not isinstance(digest, str) or re.fullmatch(r'sha256:[0-9a-f]{64}', digest) is None:
+        raise RuntimeError('formula resume loaded content digest absent/invalid')
+    for properties in (left, right):
+        if (not isinstance(properties.get('FragmentPath'), str) or not properties['FragmentPath'].startswith('/')
+                or not isinstance(properties.get('DropInPaths'), str)):
+            raise RuntimeError('formula resume loaded fragment/dropin evidence absent')
+    return digest == right.get('UnitContentDigest') and _loaded_configuration(left) == _loaded_configuration(right)
 
 
 def _bytes(path: Path, bound: int = 1024 * 1024) -> bytes:
@@ -177,10 +333,18 @@ def _delta(baseline, current, app, unit_directory, epoch):
     if len(old_matches) != 1 or new_matches != [epoch] or old_matches[0] == epoch:
         raise RuntimeError('formula resume requires exactly one changed loaded epoch')
     old = old_matches[0]
-    if actual.get('ExecStart', '').replace(epoch, old, 1) != original['ExecStart']:
+    try:
+        _loaded_records(original['ExecStart'], 'ExecStart')
+        _loaded_records(actual['ExecStart'], 'ExecStart')
+    except RuntimeError as exc:
+        raise RuntimeError('formula resume loaded ExecStart has another delta') from exc
+    before_config, after_config = _loaded_configuration(original), _loaded_configuration(actual)
+    restored = tuple((path, argv.replace(epoch, old, 1), ignore)
+                     for path, argv, ignore in after_config['ExecStart'][1])
+    if restored != before_config['ExecStart'][1]:
         raise RuntimeError('formula resume loaded ExecStart has another delta')
     for key in CONFIG_PROPERTIES:
-        if key != 'ExecStart' and actual.get(key) != original.get(key):
+        if key != 'ExecStart' and after_config[key] != before_config[key]:
             raise RuntimeError('formula resume non-epoch loaded property differs: ' + key)
     installed = _bytes(fragment)
     if installed != _bytes(app / UNIT_RELATIVE):
@@ -219,9 +383,13 @@ def _observe(runtime, plan, systemd, activity_reader, proc_root, *, final=False)
         raise RuntimeError('formula resume raw controls/idle writer proof differs')
     for unit, original in plan['baseline']['units'].items():
         actual = current['units'][unit]
-        if unit != UNIT and (pause._unit_fingerprint(actual) != pause._unit_fingerprint(original)
-                or any(actual['properties'].get(k) != original['properties'].get(k) for k in CONFIG_PROPERTIES)):
-            raise RuntimeError('formula resume foreign unit configuration differs: ' + unit)
+        if unit != UNIT:
+            try:
+                same = _same_unit_configuration(original, actual)
+            except RuntimeError as exc:
+                raise RuntimeError('formula resume foreign unit configuration differs: ' + unit) from exc
+            if not same:
+                raise RuntimeError('formula resume foreign unit configuration differs: ' + unit)
         if unit.endswith('.timer'):
             pair = [original['is_enabled'], original['is_active']]
             allowed_enabled = {pair[0]} if final else {'disabled', pair[0]}
@@ -285,8 +453,7 @@ def prove_committed(runtime, operation_id, *, systemd, activity_reader, proc_roo
         raise RuntimeError('formula resume committed unit inventory differs')
     for unit, actual in current['units'].items():
         saved = (receipt.get('units') or {}).get(unit) or {}
-        if (pause._unit_fingerprint(saved) != pause._unit_fingerprint(actual)
-                or any((saved.get('properties') or {}).get(k) != actual['properties'].get(k) for k in CONFIG_PROPERTIES)):
+        if not _same_unit_configuration(saved, actual):
             raise RuntimeError('formula resume committed unit receipt differs')
         if unit.endswith('.timer') and [saved.get('is_enabled'), saved.get('is_active')] != [actual['is_enabled'], actual['is_active']]:
             raise RuntimeError('formula resume committed timer receipt differs')

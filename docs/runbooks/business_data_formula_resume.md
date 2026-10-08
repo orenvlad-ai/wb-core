@@ -24,7 +24,7 @@ barrier only after its exact target is independently proven. Receipt fields are
   full hash map; every named actual formula source file passes its saved hash.
 - Only `wb-core-web-vitrina-finished-snapshot.service` may differ. Its installed
   fragment is byte-for-byte the canonical artifact in that completed deploy.
-  Loaded ExecStart has exactly one literal formula-epoch replacement. All other
+  Loaded ExecStart static command has exactly one literal formula-epoch replacement. All other
   loaded configuration properties, fragment and drop-in paths remain exact.
 - Reverse exactly that one pin in installed bytes. Hash the reconstructed
   fragment plus **all actual unchanged drop-ins in their loaded order** and
@@ -42,11 +42,32 @@ paths). No missing input, timeout, unknown response, caller success flag or
 synthetic substitute grants authority. A drifted or unverifiable proof leaves
 the barrier held and requires exact same-operation status/readback.
 
-Loaded ExecStart comparison is deliberately exact, including its serialized
-suffix. If systemd daemon-reload changes per-command runtime fields (pid/time/
-code/status) independently of the literal, this route fails closed. It does not
-silently normalize those fields; real before/after readback must establish this
-precondition before production use. Synthetic PASS is not that live witness.
+Loaded configuration comparison parses the COMPLETE native serialization.
+ExecStart preserves ordered `path`, `argv[]`, `ignore_errors`; only recognized
+`start_time`, `stop_time`, `pid`, `code`, `status` execution tails are separated.
+Recorded terminated PID/time is not a live process: current MainPID, service
+state, processes and authenticated admission still prove idle. Timers preserve
+ordered exact OnCalendar (including timezone) or known On*USec interval operands;
+only recognized `next_elapse` is separated. Valid UTC timestamps/durations,
+execution numbers and terminated/reset states are checked. This narrow grammar
+does not support arbitrary systemd serializations: unknown/partial/duplicate
+records, extra fields/tokens, delimiter/control injection, invalid values or
+missing-versus-empty config evidence fail closed, even when raw strings match.
+Every foreign unit still needs the SAME valid UnitContentDigest, fragment path,
+drop-ins and all other loaded configuration. No digest fallback or recursive
+normalization. Original raw baseline/fingerprint and final raw receipt remain
+unchanged; volatile fields do not enter delta/authority equality. The committed
+receipt uses this SAME strict comparison when the timer deadline advances.
+
+The supported calendar subset is deliberately bounded: `*-*-*` or a valid
+literal ISO date, three hour/minute/second components with valid ranges, ordered
+unique two-digit lists or `*`, and the observed normalized hour interval form.
+Only no timezone, UTC, Europe/Moscow, Asia/Yekaterinburg or Asia/Tbilisi is accepted. Other
+calendar forms need a separate reviewed extension. Duration tokens have bounded
+integer/fraction lengths, native ordered units and an exact sum below the uint64
+infinity sentinel; sub-microsecond values, numeric/aggregate overflow and malformed
+dates/time ranges fail closed. This checks BOTH static intervals and volatile
+deadlines and never rewrites the static operand into an equivalent schedule.
 
 ## Review, apply, recover
 
@@ -55,6 +76,45 @@ feature is an explicit release prerequisite; it does not perform either step.
 The prerequisite itself changes no unit or formula contract and can therefore
 be deployed with the old ordinary exact resume before the formula-changing
 release. Root reviews the change before any production use.
+
+### One bounded recovery when the formula-changing deploy is already held
+
+If the completed original deploy changed the formula pin and its older resume
+tool rejects ONLY the recognized runtime tails above, another canonical deploy
+claim cannot pass the original baseline. Do not reset claim or rewrite baseline.
+Root may authorize a private recovery ONLY after independent review and trusted
+Gate PASS of the exact fix. This is no generic force/fallback command.
+
+Use a full isolated verified candidate tree whose exact base equals the actual
+installed runtime SHA. Its ONLY differences are these four reviewed paths:
+`packages/application/business_data_formula_resume.py`,
+`apps/business_data_formula_resume_smoke.py`, this runbook, and
+`docs/runbooks/business_data_cycle_deploy_protection.md`. Retain private full Git
+identity, candidate/archive/file manifests and actual installed source hashes.
+Independently prove every other applicable candidate runtime source equals the
+installed source and that the installed app is unchanged before/after recovery.
+No extra/untracked executable shadow files or symlink source paths are allowed.
+Do not copy candidate files into the installed app or mutate production business
+databases, formula files, units, controls, owner or baseline. Only the existing
+resume timer/barrier/private transition actions are authorized; no new cycle.
+
+The unchanged CLI runs from that FULL private tree in isolated Python mode
+(`-I`), with canonical package imports and no PYTHONPATH/alias overlay. Prove all
+apps/packages import origins/hashes belong to that reviewed tree; native barrier
+and wakeup must resolve the SAME canonical formula module object as the CLI.
+`--app-dir` remains the actual installed app, which _authority reads independently
+with the original completed deploy owner, expected SHA, window, original baseline,
+installed artifact and native formula hashes. Explicit runtime/env/systemd paths
+remain actual native authority, never candidate fixture defaults. The candidate
+must never impersonate the installed app or supply replacement runtime metadata.
+Save exact same-operation preview privately, root reviews its fingerprint and
+full evidence, then submit one apply and use same-ID status/readback for any
+uncertain result. Partial recovery requires the SAME reviewed candidate. Saved
+committed/released schemas remain compatible with the original installed helper
+and native wakeup; no fresh candidate receipt format is invented. After proven
+resume, a fresh native pause/window and ordinary canonical release can deploy the
+fix. No new deploy claim is attempted under the blocked original window, and
+canonical deploy guards remain intact.
 
 Preview/status never provision transition records or submit timer commands.
 Preview takes `--runtime-dir`, `--app-dir`, `--env-file`, `--operation-id` (the
