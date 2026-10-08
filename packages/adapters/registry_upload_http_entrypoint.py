@@ -1244,7 +1244,7 @@ def _build_handler(
                     return
 
                 try:
-                    result = entrypoint.handle_bundle_payload(payload)
+                    result = entrypoint.handle_bundle_payload(payload, actor=_current_web_user_actor(self))
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -1253,10 +1253,14 @@ def _build_handler(
                     )
                     return
 
+                response = asdict(result)
+                if result.status == "accepted":
+                    from packages.application.operator_compat_uploads import read_version
+                    response["acceptance"] = read_version(entrypoint.runtime.db_path, "registry_bundle_upload", result.bundle_version)
                 _write_json_response(
                     self,
                     _http_status_for_result(result),
-                    asdict(result),
+                    response,
                 )
                 return
 
@@ -1272,7 +1276,7 @@ def _build_handler(
                     return
 
                 try:
-                    result = entrypoint.handle_cost_price_payload(payload)
+                    result = entrypoint.handle_cost_price_payload(payload, actor=_current_web_user_actor(self))
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -1281,10 +1285,14 @@ def _build_handler(
                     )
                     return
 
+                response = asdict(result)
+                if result.status == "accepted":
+                    from packages.application.operator_compat_uploads import read_version
+                    response["acceptance"] = read_version(entrypoint.runtime.db_path, "cost_price_upload", result.dataset_version)
                 _write_json_response(
                     self,
                     _http_status_for_cost_price_result(result),
-                    asdict(result),
+                    response,
                 )
                 return
 
@@ -5204,6 +5212,25 @@ def _build_handler(
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path in {upload_path, cost_price_upload_path}:
+                from packages.application.operator_compat_uploads import read_version
+                domain = 'registry_bundle_upload' if parsed.path == upload_path else 'cost_price_upload'
+                key = 'bundle_version' if domain == 'registry_bundle_upload' else 'dataset_version'
+                params = urllib_parse.parse_qs(parsed.query)
+                try:
+                    if set(params) != {key} or len(params[key]) != 1:
+                        raise ValueError('one_exact_source_version_required')
+                    operation = read_version(entrypoint.runtime.db_path, domain, params[key][0])
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {'error': str(exc)})
+                    return
+                if operation is None:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {'code': 'compatibility_upload_not_tracked',
+                        'reason_ru': 'Нет квитанции этой версии. Это не доказывает отсутствие сохранённых данных.'})
+                    return
+                _write_json_response(self, HTTPStatus.OK, {'contract_name': 'operator_operations_v1', 'operation': operation})
                 return
 
             if parsed.path == "/sheet-vitrina-v1/operations":
@@ -10897,6 +10924,8 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
         domains.add('supplier_contract')
     if _user_has_section_access(user, WEB_AUTH_SECTION_REPORTS):
         domains.update(('plan_report_baseline', 'partner_report_settings'))
+    if _role_has_full_operator_access(str(user.get('role') or '').strip()):
+        domains.update(('registry_bundle_upload', 'cost_price_upload'))
     return frozenset(domains)
 
 

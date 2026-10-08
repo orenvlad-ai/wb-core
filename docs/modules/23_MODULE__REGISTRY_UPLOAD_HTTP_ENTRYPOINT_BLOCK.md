@@ -1059,3 +1059,23 @@ evidence. Multipart Content-Length is rejected before buffering above the
 Stage 2 request limit, then the canonical XLSX envelope/file/OOXML checks run.
 The writer feature epoch remains the authoritative business gate, so default
 deployment returns the explicit read-only state and creates no business data.
+
+## Подтверждение явных compatibility-загрузок
+
+Явные POST `/v1/registry-upload/bundle` и `/v1/cost-price/upload` возвращают
+добавочное `acceptance` после атомарного сохранения native версии и квитанции.
+Результат подтверждает источник; `calculation_completed=false` и
+`consumer_status=not_tracked` не утверждают, что версия использована расчётом.
+Native current pointer, проверка входа и отказ повторной версии сохраняются.
+
+После потери ответа клиент читает тот же endpoint методом GET с единственным
+`bundle_version` либо `dataset_version`. Новую версию для повтора не создают.
+GET работает read-only, без bootstrap и обработки. `compatibility_upload_not_tracked`
+не доказывает отсутствие старой native загрузки: прежние записи автоматически
+не получают квитанции. Внутренние сборы также не становятся действиями оператора.
+
+Общий журнал использует domains `registry_bundle_upload` и `cost_price_upload`.
+Их разрешение повторяет существующую границу compatibility API: full operator
+role, а не отдельный section grant. Поставщику эти операции не доступны.
+Проекция показывает версию и число строк, не содержимое исходного набора и цены.
+Проверка: `apps/operator_compat_uploads_smoke.py` (только временные данные).

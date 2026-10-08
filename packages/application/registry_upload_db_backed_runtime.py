@@ -272,6 +272,7 @@ class RegistryUploadDbBackedRuntime:
         self,
         bundle_input: RegistryUploadBundleV1 | Mapping[str, Any],
         activated_at: str,
+        *, operator_actor: str | None = None,
     ) -> RegistryUploadResult:
         bundle = _coerce_bundle(bundle_input)
         errors = self._collect_validation_errors(bundle, activated_at)
@@ -281,6 +282,10 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            if operator_actor is not None:
+                from packages.application import operator_compat_uploads as operator_receipts
+                operator_receipts.ensure_schema(conn)
+                conn.execute("BEGIN IMMEDIATE")
             if _bundle_version_exists(conn, bundle.bundle_version):
                 return _rejected_result(
                     bundle.bundle_version,
@@ -295,6 +300,8 @@ class RegistryUploadDbBackedRuntime:
                 activated_at=activated_at,
             )
             _persist_bundle(conn, bundle, result)
+            if operator_actor is not None:
+                operator_receipts.record(conn, domain="registry_bundle_upload", source=bundle, result=result, actor=operator_actor)
             conn.commit()
             return result
 
@@ -324,6 +331,7 @@ class RegistryUploadDbBackedRuntime:
         self,
         payload_input: CostPriceUploadPayload | Mapping[str, Any],
         activated_at: str,
+        *, operator_actor: str | None = None,
     ) -> CostPriceUploadResult:
         payload = _coerce_cost_price_payload(payload_input)
         errors = self._collect_cost_price_validation_errors(payload, activated_at)
@@ -333,6 +341,10 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            if operator_actor is not None:
+                from packages.application import operator_compat_uploads as operator_receipts
+                operator_receipts.ensure_schema(conn)
+                conn.execute("BEGIN IMMEDIATE")
             if _cost_price_dataset_version_exists(conn, payload.dataset_version):
                 return _rejected_cost_price_result(
                     payload.dataset_version,
@@ -347,6 +359,8 @@ class RegistryUploadDbBackedRuntime:
                 activated_at=activated_at,
             )
             _persist_cost_price_payload(conn, payload, result)
+            if operator_actor is not None:
+                operator_receipts.record(conn, domain="cost_price_upload", source=payload, result=result, actor=operator_actor)
             conn.commit()
             return result
 

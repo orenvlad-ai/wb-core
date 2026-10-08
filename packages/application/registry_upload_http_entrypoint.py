@@ -1481,10 +1481,11 @@ class RegistryUploadHttpEntrypoint:
             runner=self._run_warehouse_manual_sync_job,
         )
 
-    def handle_bundle_payload(self, payload: Mapping[str, Any]) -> RegistryUploadResult:
+    def handle_bundle_payload(self, payload: Mapping[str, Any], *, actor: str | None = None) -> RegistryUploadResult:
         return self.runtime.ingest_bundle(
             payload,
             activated_at=self.activated_at_factory(),
+            operator_actor=actor,
         )
 
     def handle_wb_finance_weekly_request(self) -> dict[str, Any]:
@@ -1515,10 +1516,11 @@ class RegistryUploadHttpEntrypoint:
             expected_source_digest=str(payload.get("expected_source_digest") or ""),
         )
 
-    def handle_cost_price_payload(self, payload: Mapping[str, Any]) -> CostPriceUploadResult:
+    def handle_cost_price_payload(self, payload: Mapping[str, Any], *, actor: str | None = None) -> CostPriceUploadResult:
         return self.runtime.ingest_cost_price_payload(
             payload,
             activated_at=self.activated_at_factory(),
+            operator_actor=actor,
         )
 
     def handle_sheet_plan_request(self, as_of_date: str | None = None) -> dict[str, Any]:

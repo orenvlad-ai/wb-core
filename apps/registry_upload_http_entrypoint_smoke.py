@@ -1,6 +1,7 @@
 """Интеграционный smoke-check для HTTP entrypoint registry upload."""
 
 from dataclasses import asdict
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -113,6 +114,7 @@ def main() -> None:
     input_bundle = _load_json(INPUT_BUNDLE_FIXTURE)
     with TemporaryDirectory(prefix="registry-upload-http-entrypoint-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
+        runtime_dir.mkdir()
         port = _reserve_free_port()
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
@@ -158,7 +160,7 @@ def main() -> None:
             if accepted_status != 200:
                 raise AssertionError(f"accepted request must return 200, got {accepted_status}")
             accepted_expected = _load_json(TARGET_DIR / "http_result__accepted__fixture.json")
-            if accepted_payload != accepted_expected:
+            if {k:v for k,v in accepted_payload.items() if k != 'acceptance'} != accepted_expected:
                 raise AssertionError("accepted HTTP result differs from target fixture")
             if accepted_payload["accepted_counts"]["config_v2"] != len(input_bundle["config_v2"]):
                 raise AssertionError("HTTP entrypoint must persist all config_v2 rows from request body")
@@ -321,6 +323,7 @@ def main() -> None:
             operator_ui_config = _extract_operator_ui_config(operator_ui_html)
             expected_operator_ui_config = {
                 "page_title": "Операторский сайт",
+                "user_config_key": "webcore_user_" + hashlib.sha256(b"admin:local_operator").hexdigest()[:32],
                 "embedded": True,
                 "initial_tab": "vitrina",
                 "refresh_path": config.sheet_refresh_path,
@@ -332,11 +335,14 @@ def main() -> None:
                 "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
                 "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
                 "seller_recovery_stop_path": DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
+                "seller_recovery_finish_path": registry_http_adapter.DEFAULT_SELLER_PORTAL_RECOVERY_FINISH_PATH,
+                "seller_recovery_viewer_path": registry_http_adapter.DEFAULT_SELLER_PORTAL_VIEWER_PREFIX,
                 "seller_recovery_launcher_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
                 "daily_report_path": DEFAULT_SHEET_DAILY_REPORT_PATH,
                 "stock_report_path": DEFAULT_SHEET_STOCK_REPORT_PATH,
                 "plan_report_path": DEFAULT_SHEET_PLAN_REPORT_PATH,
                 "wb_finance_report_path": DEFAULT_SHEET_WB_FINANCE_REPORT_PATH,
+                "wb_finance_daily_path": registry_http_adapter.DEFAULT_SHEET_WB_FINANCE_DAILY_PATH,
                 **(
                     {
                         "partner_report_options_path": registry_http_adapter.DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
@@ -370,6 +376,9 @@ def main() -> None:
                 "factory_order_upload_stock_ff_path": DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
                 "factory_order_upload_inbound_factory_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
                 "factory_order_upload_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
+                "factory_order_delete_stock_ff_path": registry_http_adapter.DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH,
+                "factory_order_delete_inbound_factory_path": registry_http_adapter.DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH,
+                "factory_order_delete_inbound_ff_to_wb_path": registry_http_adapter.DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH,
                 "factory_order_calculate_path": DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
                 "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
                 "fbs_fulfillment_order_status_path": DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH,

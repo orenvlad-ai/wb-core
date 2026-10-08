@@ -9,8 +9,9 @@ from packages.application import operator_supplier_journal as supplier_journal
 from packages.application import operator_trade_documents as trade
 from packages.application import operator_supplier_contracts as contracts
 from packages.application import operator_facility_mappings as facilities
+from packages.application import operator_compat_uploads as compat_uploads
 
-DOMAIN_LABELS = {'ff_pool_document': 'Складские документы', fulfillment.DOMAIN: 'Услуги фулфилмента',
+DOMAIN_LABELS = {'registry_bundle_upload': 'Справочники через API', 'cost_price_upload': 'Себестоимость через API', 'ff_pool_document': 'Складские документы', fulfillment.DOMAIN: 'Услуги фулфилмента',
     'plan_report_baseline': 'Исходные данные отчётов',
     'factory_order_dataset': 'Исходные данные планирования',
     partner_report.DOMAIN: 'Настройки партнёрского отчёта'}
@@ -91,6 +92,10 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
                 sources.append((warehouse.TABLE, 'request_id', '*', '1', (), warehouse._public))
         if fulfillment.DOMAIN in selected and fulfillment._exists(conn, fulfillment.TABLE):
             sources.append((fulfillment.TABLE, 'operation_id', '*', '1', (), fulfillment._public))
+        compatibility = tuple(sorted(selected.intersection(compat_uploads.DOMAINS)))
+        if compatibility and compat_uploads.exists(conn):
+            sources.append((compat_uploads.TABLE, 'operation_id', '*',
+                'domain IN (' + ','.join('?' for _ in compatibility) + ')', compatibility, compat_uploads.public))
         reports = tuple(sorted(selected.intersection(report_sources.DOMAINS)))
         if partner_report.DOMAIN in selected and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (partner_report.TABLE,)).fetchone():
             sources.append((partner_report.TABLE, 'operation_id', '*', '1', (), partner_report.public))
@@ -189,6 +194,11 @@ def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections
                     row=conn.execute(f'SELECT * FROM {table} WHERE request_id=?',(canonical,)).fetchone()
                     if row:
                         return _common(reader(conn,row))
+        compatibility = tuple(sorted(allowed.intersection(compat_uploads.DOMAINS)))
+        if compatibility and compat_uploads.exists(conn):
+            row = conn.execute(f"SELECT * FROM {compat_uploads.TABLE} WHERE operation_id=? AND domain IN ({','.join('?' for _ in compatibility)})", (identity, *compatibility)).fetchone()
+            if row is not None:
+                return _common(compat_uploads.public(conn, row))
         reports = tuple(sorted(allowed.intersection(report_sources.DOMAINS)))
         if partner_report.DOMAIN in allowed and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (partner_report.TABLE,)).fetchone():
             row=conn.execute(f'SELECT * FROM {partner_report.TABLE} WHERE operation_id=?', (identity,)).fetchone()
