@@ -17,6 +17,7 @@ def seed_observer(path, receipts, orders=()):
     with sqlite3.connect(path) as conn:
         conn.executescript(f'''CREATE TABLE observer_runs(result_json TEXT);
             CREATE TABLE {OBSERVATIONS_TABLE}(observation_sequence INTEGER PRIMARY KEY,order_id INTEGER,source_created_at TEXT,warehouse_id INTEGER,nm_id INTEGER,is_zero_order INTEGER);
+            CREATE INDEX wb_fbs_observations_by_order ON {OBSERVATIONS_TABLE}(order_id,observation_sequence DESC);
             CREATE TABLE {STATUS_CURRENT_TABLE}(order_id INTEGER PRIMARY KEY,supplier_status TEXT,wb_status TEXT);
             CREATE TABLE {STATUS_OBSERVATIONS_TABLE}(observation_sequence INTEGER PRIMARY KEY,order_id INTEGER,supplier_status TEXT,wb_status TEXT);''')
         conn.executemany('INSERT INTO observer_runs VALUES(?)', [(json.dumps(r),) for r in receipts])

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import socket
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -43,6 +44,7 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import (  # noqa: E402
     RegistryUploadHttpEntrypointConfig,
 )
+from packages.application.wb_fbs_orders import OBSERVATIONS_TABLE  # noqa: E402
 
 
 NOW = datetime(2026, 4, 18, 9, 0, tzinfo=timezone.utc)
@@ -63,6 +65,12 @@ def main() -> int:
         _seed_facilities(runtime, active_nm_ids)
         _seed_sales_history(runtime, active_nm_ids)
         _seed_fbs_demand(runtime, active_nm_ids)
+        # The full-volume fixture must have the collector's order index. Without
+        # it, the reader's per-order latest-revision lookup becomes quadratic;
+        # a Linux CI runner spends >15 seconds in each readiness GET.
+        with sqlite3.connect(runtime_dir / "fbs_observer" / "observations.sqlite3") as observer:
+            plan = observer.execute(f"EXPLAIN QUERY PLAN SELECT MAX(observation_sequence) FROM {OBSERVATIONS_TABLE} WHERE order_id=?", (1,)).fetchall()
+            assert any("wb_fbs_observations_by_order" in row[3] for row in plan), plan
         _seed_shipments(runtime, active_nm_ids)
 
         port = _reserve_free_port()
@@ -120,7 +128,11 @@ def main() -> int:
                         return
                     hold_next_status["enabled"] = False
                     response = route.fetch()
-                    held_status.append((route, response.json()))
+                    try:
+                        payload = response.json()
+                    finally:
+                        response.dispose()
+                    held_status.append((route, payload))
                     page.evaluate("document.documentElement.dataset.fbsHeldStatus = String(Number(document.documentElement.dataset.fbsHeldStatus || 0) + 1)")
                 page.route("**/fbs-fulfillment-order/status", intercept_status)
                 def hold_status_request():
@@ -221,7 +233,12 @@ def main() -> int:
                 page.locator("#fbsSalesDateFrom").fill("2026-04-10")
                 page.locator("#fbsSalesDateTo").fill("2026-04-12")
                 hold_status_request()
+                secondary_marker = page.evaluate("Number(document.documentElement.dataset.fbsHeldStatus || 0)")
+                hold_next_status["enabled"] = True
                 page.locator("#fbsFulfillmentCalculateButton").click()
+                # Also hold the follow-up GET issued after the POST. A completed
+                # recommendation must not wait for this unrelated readiness read.
+                page.wait_for_function("count => Number(document.documentElement.dataset.fbsHeldStatus || 0) > count", arg=secondary_marker)
                 expect(page.locator("#fbsFulfillmentMessage")).to_contain_text(
                     "Расчёт завершён", timeout=15000
                 )
@@ -235,12 +252,15 @@ def main() -> int:
                 expect(page.locator("#fbsTotalQty")).not_to_have_text("-")
                 expect(page.locator("#fbsHorizonDays")).to_have_text("89")
                 expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_enabled()
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
                 expect(page.locator("#fbsPreviewNote")).to_contain_text("Рассчитано")
                 expect(page.locator("#fbsResultInboundScope")).to_have_text(
                     "Только для выбранного ФФ"
                 )
                 expect(page.locator("#fbsResultInbound")).to_contain_text("35 шт.")
                 result_qty = page.locator("#fbsTotalQty").inner_text()
+                release_status_request()
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Расчёт завершён")
                 release_status_request()
                 expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Расчёт завершён")
 

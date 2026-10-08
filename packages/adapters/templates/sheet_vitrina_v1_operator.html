@@ -14479,12 +14479,10 @@
           }
           renderFbsFulfillmentResult(payload);
           supplyCalculationRegistryLoaded = false;
-          await loadFbsFulfillmentStatus();
-          if (revision !== fbsFulfillmentUiRevision) {
-            setFbsFulfillmentMessage("Параметры изменены — пересчитайте заказ.", "warning");
-            return;
-          }
           setFbsFulfillmentMessage("Расчёт завершён по официальным остаткам FBS. Остатки на складах WB (FBO) не использованы; результат и Excel сохранены.", "success");
+          // The POST result is complete. A slow readiness probe must not keep
+          // its preview, success state or controls waiting for another GET.
+          void loadFbsFulfillmentStatus();
         } catch (error) {
           if (revision !== fbsFulfillmentUiRevision) {
             setFbsFulfillmentMessage("Параметры изменены — пересчитайте заказ.", "warning");
