@@ -506,6 +506,23 @@ def command_dependency_checks():
         verify_plan(non_browser)
         assert install not in non_browser["commands"], non_browser
         assert "playwright==1.58.0" not in non_browser["pip"], non_browser
+    # These operator leaves arrive after this trusted prerequisite. Direct new
+    # smoke selection must install its own imports, even without a broad group.
+    next_backend = ['apps/operator_nomenclature_smoke.py', 'apps/operator_nomenclature_journal_smoke.py', 'apps/operator_compat_uploads_smoke.py', 'apps/operator_supplier_shipments_smoke.py', 'apps/operator_supplier_shipments_http_smoke.py', 'apps/operator_supplier_factual_dates_smoke.py', 'apps/fbs_accounting_historical_revision_smoke.py', 'apps/fbs_accounting_historical_revision_writer_smoke.py', 'apps/fbs_accounting_historical_cohort_smoke.py', 'apps/fbs_accounting_historical_stages_smoke.py', 'apps/fbs_accounting_historical_publication_smoke.py', 'apps/fbs_accounting_historical_history_smoke.py']
+    next_browsers = ['apps/operator_nomenclature_browser_smoke.py', 'apps/operator_supplier_shipments_browser_smoke.py', 'apps/operator_supplier_factual_dates_browser_smoke.py']
+    for script in next_backend + next_browsers:
+        narrow = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD,
+            paths=[script], file_exists=lambda _, p: p == script)
+        verify_plan(narrow)
+        assert narrow['commands'].count(['python3', script]) == 1, narrow
+        assert 'openpyxl==3.1.5' in narrow['pip'], narrow
+        if script in next_browsers:
+            check(narrow, [script])
+        else:
+            assert install not in narrow['commands'], narrow
+            assert 'playwright==1.58.0' not in narrow['pip'], narrow
+    print('next operator leaves: narrow backend/browser prerequisite selection OK')
+
     print("command dependencies: direct/sibling/group/mixed browser routes and backend isolation OK")
 
 

@@ -1,6 +1,7 @@
 {
   "schema": "wb-core.check-map/v1",
   "command_dependencies": {
+    "operator_next_imports": {"scripts": ["apps/operator_nomenclature_smoke.py", "apps/operator_nomenclature_journal_smoke.py", "apps/operator_compat_uploads_smoke.py", "apps/operator_supplier_shipments_smoke.py", "apps/operator_supplier_shipments_http_smoke.py", "apps/operator_supplier_factual_dates_smoke.py", "apps/fbs_accounting_historical_revision_smoke.py", "apps/fbs_accounting_historical_revision_writer_smoke.py", "apps/fbs_accounting_historical_cohort_smoke.py", "apps/fbs_accounting_historical_stages_smoke.py", "apps/fbs_accounting_historical_publication_smoke.py", "apps/fbs_accounting_historical_history_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "payment_pdf_fixtures": {
       "scripts": [
         "apps/russian_payment_orders_smoke.py",
@@ -50,6 +51,9 @@
       "scripts": [
         "apps/operator_acceptance_browser_smoke.py",
         "apps/operator_acceptance_component_smoke.py",
+        "apps/operator_nomenclature_browser_smoke.py",
+        "apps/operator_supplier_shipments_browser_smoke.py",
+        "apps/operator_supplier_factual_dates_browser_smoke.py",
         "apps/finance_liquidity_browser_smoke.py",
         "apps/registry_upload_http_entrypoint_users_admin_smoke.py",
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
