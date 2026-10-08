@@ -133,13 +133,15 @@ class SheetVitrinaV1PlanReportBlock:
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
         note: str | None = None,
+        operation_id: str | None = None,
+        actor: str = "system",
     ) -> dict[str, Any]:
         parsed_rows = _parse_baseline_workbook(workbook_bytes)
         uploaded_at = _timestamp_from_now(self.now_factory())
         normalized_filename = str(uploaded_filename or "").strip() or BASELINE_TEMPLATE_FILENAME
         normalized_content_type = str(uploaded_content_type or "").strip() or BASELINE_CONTENT_TYPE
         workbook_checksum = hashlib.sha256(workbook_bytes).hexdigest()
-        self.runtime.save_plan_report_monthly_baseline(
+        acceptance = self.runtime.save_plan_report_monthly_baseline(
             rows=parsed_rows,
             uploaded_at=uploaded_at,
             source_kind=MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
@@ -147,12 +149,15 @@ class SheetVitrinaV1PlanReportBlock:
             uploaded_content_type=normalized_content_type,
             workbook_checksum=workbook_checksum,
             note=note,
+            operation_id=operation_id,
+            actor=actor,
         )
         return {
             "status": "accepted",
             "message": "Исторические данные для отчёта приняты.",
             "source_kind": MANUAL_MONTHLY_BASELINE_SOURCE_KIND,
-            "uploaded_at": uploaded_at,
+            "uploaded_at": acceptance["accepted_at"],
+            "acceptance": acceptance,
             "uploaded_filename": normalized_filename,
             "workbook_checksum": workbook_checksum,
             "accepted_months": [row["month"] for row in parsed_rows],

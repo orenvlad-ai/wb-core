@@ -374,11 +374,20 @@ class PartnerReportBlock:
             "export_contract": "UI preview first; source-digest-bound XLSX only",
         }
 
-    def save_settings(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+    def save_settings(self, payload: Mapping[str, Any], *, actor: str, operation_id: str | None = None) -> dict[str, Any]:
+        from packages.application import operator_partner_report as operator_receipt
         self.ensure_schema()
         parameters = self._validate_parameters(payload)
         nm_id = parameters["nm_id"]
+        request = operator_receipt.intent(operation_id=operation_id, seller_id=self.seller_id,
+            actor=actor, parameters=parameters)
         with self._connect() as conn:
+            operator_receipt.ensure_schema(conn)  # Explicit save bootstrap; journal/options do not create receipts.
+            conn.execute("BEGIN IMMEDIATE")
+            previous = operator_receipt.existing(conn, request)
+            if previous is not None:
+                version, acceptance = previous
+                return {**self._settings_payload(version), "acceptance": acceptance}
             product = self._nomenclature_product(conn, nm_id)
             if product is None:
                 raise PartnerReportError(
@@ -402,7 +411,9 @@ class PartnerReportBlock:
                 (self.seller_id, nm_id),
             ).fetchone()
             if current is not None and str(current["fingerprint"]) == fingerprint:
-                return self._settings_payload(current)
+                acceptance = operator_receipt.record(conn, request, current, accepted_at=now)
+                conn.commit()
+                return {**self._settings_payload(current), "acceptance": acceptance}
             version_id = "prs_" + hashlib.sha256(
                 (
                     f"{fingerprint}|{now}|{actor}|"
@@ -439,12 +450,13 @@ class PartnerReportBlock:
                 payload_digest=fingerprint,
                 created_at=now,
             )
-            conn.commit()
             row = conn.execute(
                 "SELECT * FROM partner_report_settings_versions WHERE settings_version_id=?",
                 (version_id,),
             ).fetchone()
-            return self._settings_payload(row)
+            acceptance = operator_receipt.record(conn, request, row, accepted_at=now)
+            conn.commit()
+            return {**self._settings_payload(row), "acceptance": acceptance}
 
     def preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()

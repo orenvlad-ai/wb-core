@@ -5293,6 +5293,7 @@
               </div>
             </div>
             <p id="fulfillmentServicesMessage" class="wb-supplies-message" hidden></p>
+            <div id="fulfillmentAcceptance" hidden></div>
             <section class="fulfillment-errors-block" id="fulfillmentErrorsBlock" hidden>
               <div class="wb-supplies-table-wrap">
                 <table class="wb-supplies-table" aria-label="Ошибки загрузки услуг ФФ">
@@ -5625,6 +5626,9 @@
     </section>
   </main>
 
+  <dialog id="operatorSourceReceiptDialog" style="max-width:600px;width:calc(100% - 48px);border:1px solid #414654;border-radius:14px;background:#191d25;color:#e7e8ec;padding:20px">
+    <div id="operatorSourceReceipt"></div>
+  </dialog>
   <script id="sheet-vitrina-v1-operator-config" type="application/json">__SHEET_VITRINA_V1_OPERATOR_CONFIG_JSON__</script>
   <script>
     (() => {
@@ -6259,6 +6263,11 @@
       let fulfillmentServicesLoading = false;
       let fulfillmentServicesUploading = false;
       let fulfillmentServicesPayload = null;
+      const fulfillmentAcceptance = document.getElementById("fulfillmentAcceptance");
+      const fulfillmentRecoveryKey = "fulfillment-operation-v1:" + String(config.user_config_key || "local_operator");
+      let fulfillmentPending = null;
+      try { fulfillmentPending = JSON.parse(localStorage.getItem(fulfillmentRecoveryKey) || "null"); } catch (_) {}
+
       let fulfillmentDeleteConfirmUploadId = "";
       let fulfillmentDeletingUploadId = "";
       let ffStockPayload = null;
@@ -12137,7 +12146,7 @@
 
       function updateFulfillmentServicesBusyState() {
         if (fulfillmentUploadButton) {
-          fulfillmentUploadButton.disabled = fulfillmentServicesLoading || fulfillmentServicesUploading;
+          fulfillmentUploadButton.disabled = fulfillmentServicesLoading || fulfillmentServicesUploading || Boolean(fulfillmentPending);
           fulfillmentUploadButton.textContent = fulfillmentServicesUploading ? "Загружаем..." : "Загрузить заполненный файл";
         }
         if (fulfillmentTemplateButton) {
@@ -12151,6 +12160,7 @@
         }
         fulfillmentServicesInitialized = true;
         loadFulfillmentServices();
+        if (fulfillmentPending) recoverFulfillmentOperation();
       }
 
       async function loadFulfillmentServices(options) {
@@ -12200,55 +12210,108 @@
         return payload;
       }
 
+      function rememberFulfillmentOperation(value) {
+        fulfillmentPending = value;
+        try { if (value) localStorage.setItem(fulfillmentRecoveryKey, JSON.stringify(value)); else localStorage.removeItem(fulfillmentRecoveryKey); } catch (_) {}
+        updateFulfillmentServicesBusyState();
+      }
+
+      function fulfillmentRequestMatches(payload, ref) {
+        const operation = payload && payload.acceptance, source = operation && operation.source_ref;
+        return Boolean(payload && ref && payload.request_id === ref.request_id && payload.domain === "fulfillment_services"
+          && payload.action === ref.action && payload.payload_digest === ref.payload_digest
+          && source && source.domain === "fulfillment_services" && source.action === ref.action
+          && operation.domain === "fulfillment_services" && source.entity_id === payload.upload_id
+          && (ref.action !== "delete" || source.entity_id === ref.upload_id)
+          && (ref.action !== "upload" || source.source_sha256 === ref.payload_digest)
+          && window.OperatorAcceptance.acceptedOperation(operation));
+      }
+
+      function showFulfillmentUnknown() {
+        fulfillmentAcceptance.hidden = false;
+        fulfillmentAcceptance.replaceChildren();
+        const text = document.createElement("p"); text.textContent = "Проверяем сохранение. Повторно отправлять документ не нужно.";
+        const check = document.createElement("button"); check.type = "button"; check.className = "action-button secondary-button";
+        check.textContent = "Проверить статус";
+        check.addEventListener("click", function(){check.disabled=true;recoverFulfillmentOperation();});
+        fulfillmentAcceptance.append(text, check);
+      }
+
+      async function recoverFulfillmentOperation() {
+        const ref = fulfillmentPending;
+        if (!ref) return false;
+        showFulfillmentUnknown();
+        try {
+          const response = await fetch(config.fulfillment_services_uploads_path + "?request_id=" + encodeURIComponent(ref.request_id), {headers:{Accept:"application/json"}});
+          const payload = await readJson(response);
+          if (fulfillmentPending !== ref) return false;
+          if (!response.ok) throw new Error("acceptance_unavailable");
+          if (fulfillmentRequestMatches(payload, ref)) {
+            const identity = {operation_id:payload.acceptance.operation_id, domain:"fulfillment_services"};
+            const checked = await window.OperatorAcceptance.readSameOperation(identity, async function(){return payload;});
+            if (checked.status !== "accepted") throw new Error("acceptance_identity_unknown");
+            rememberFulfillmentOperation(null);
+            fulfillmentDeleteConfirmUploadId = "";
+            fulfillmentAcceptance.hidden = false;
+            window.OperatorAcceptance.renderReceipt(fulfillmentAcceptance, checked.operation, {
+              onClose:function(){fulfillmentAcceptance.hidden=true;},
+              onJournal:function(operation){window.top.location.assign("/sheet-vitrina-v1/operations?operation_id="+encodeURIComponent(operation.operation_id));}
+            });
+            if (checked.operation.processing_not_applicable === true) {
+              const stage = fulfillmentAcceptance.querySelector(".ff-operation-status");
+              if (stage) { stage.textContent="Обработка не требуется"; stage.dataset.state="not_applicable"; }
+            }
+            setFulfillmentServicesMessage(ref.action === "delete" ? "Документ удалён." : "", "");
+            await loadFulfillmentServices({preserveMessage:true});
+            return true;
+          }
+          // Only the native same-request saved diagnostic proves rejection.
+          if (payload.request_id === ref.request_id && payload.domain === "fulfillment_services"
+              && payload.action === ref.action && payload.payload_digest === ref.payload_digest && payload.status === "rejected" && payload.acceptance === null) {
+            rememberFulfillmentOperation(null); fulfillmentAcceptance.hidden=true;
+            setFulfillmentServicesMessage("Документ не принят. Исправьте ошибки и загрузите файл заново.", "warning");
+            return false;
+          }
+        } catch (_) {}
+        if (fulfillmentPending === ref) showFulfillmentUnknown();
+        return false;
+      }
+
       async function uploadFulfillmentWorkbook() {
         const file = fulfillmentFileInput && fulfillmentFileInput.files ? fulfillmentFileInput.files[0] : null;
-        if (!file || fulfillmentServicesUploading) {
-          setFulfillmentServicesMessage("Сначала выберите заполненный XLSX-файл.", "error");
-          return;
+        if (!file || fulfillmentServicesUploading || fulfillmentPending) return;
+        if (!/\.xlsx$/i.test(file.name) || !file.size) {
+          setFulfillmentServicesMessage("Выберите непустой XLSX-файл.","error");return;
         }
         fulfillmentServicesUploading = true;
         updateFulfillmentServicesBusyState();
-        setFulfillmentServicesMessage("Загружаем XLSX...", "");
         renderFulfillmentErrors(null);
-        let operationApplied = false;
         try {
-          const formData = new FormData();
-          formData.append("file", file, file.name || "fulfillment-services.xlsx");
-          const response = await fetch(config.fulfillment_services_uploads_path, {
-            method: "POST",
-            headers: { "Accept": "application/json" },
-            body: formData
-          });
-          const payload = await readJson(response);
-          if (!response.ok) {
-            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
-          }
-          operationApplied = !!payload.operation_applied && (payload.upload || {}).validation_status === "ok";
-          if (fulfillmentFileInput) {
-            fulfillmentFileInput.value = "";
-          }
-          const upload = payload && payload.upload ? payload.upload : {};
-          const isOk = upload.validation_status === "ok";
-          const processing = payload.warehouse_targeted_recalculation || {};
-          setFulfillmentServicesMessage(
-            isOk
-              ? (payload.duplicate ? "Этот документ уже принят." : (payload.pdf_available ? "Документ принят. Все строки смэтчены, PDF-виза сформирована." : "Документ принят.")) + (processing.terminal_no_op ? " Пересчёт не требуется." : (processing.status === "complete" ? " Пересчёт завершён." : " Пересчёт сохранён и ожидает обработки."))
-              : "Документ не принят. Исправьте ошибки и загрузите файл заново.",
-            isOk ? "success" : "warning"
-          );
-          await loadFulfillmentServices({ preserveMessage: true, detail: payload });
-          if (isOk && wbSuppliesInitialized) {
-            await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
-          }
+          const hash = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+          const sha = Array.from(new Uint8Array(hash)).map(function(value){return value.toString(16).padStart(2,"0");}).join("");
+          const ref = {request_id:"ffsvc_client_"+crypto.randomUUID().replace(/-/g,""), action:"upload", payload_digest:sha};
+          rememberFulfillmentOperation(ref);
+          const formData = new FormData(); formData.append("file", file, file.name || "fulfillment-services.xlsx");
+          formData.append("request_id",ref.request_id);
+          setFulfillmentServicesMessage("Загружаем XLSX...", "");
+          try {
+            const response = await fetch(config.fulfillment_services_uploads_path, {method:"POST",headers:{Accept:"application/json"},body:formData});
+            const payload = await readJson(response);
+            if (payload && payload.upload) renderFulfillmentErrors(payload);
+            if (!response.ok && payload.code === "business_data_maintenance") {
+              rememberFulfillmentOperation(null); fulfillmentAcceptance.hidden=true;
+              setFulfillmentServicesMessage("Обслуживание системы. Документ не отправлен; повторите после завершения обслуживания.","warning");
+              return;
+            }
+          } catch (_) {} // One mutation only; all uncertainty resolves by GET.
+          if (fulfillmentFileInput) fulfillmentFileInput.value="";
+          await recoverFulfillmentOperation();
+          if (!fulfillmentPending && wbSuppliesInitialized) await loadWbSupplies({skipInitialSync:true,preserveMessage:true});
         } catch (error) {
-          setFulfillmentServicesMessage(
-            (operationApplied ? "Документ сохранён. Не удалось обновить отображение; повторная загрузка не требуется. " : "Не удалось подтвердить загрузку. Проверьте список документов. ") + (error instanceof Error ? error.message : String(error)),
-            "error"
-          );
+          if (fulfillmentPending) showFulfillmentUnknown();
+          else setFulfillmentServicesMessage(error instanceof Error ? error.message : String(error),"error");
         } finally {
-          fulfillmentServicesUploading = false;
-          updateFulfillmentServicesBusyState();
-          scheduleEmbeddedHeightPost();
+          fulfillmentServicesUploading=false; updateFulfillmentServicesBusyState(); scheduleEmbeddedHeightPost();
         }
       }
 
@@ -12295,7 +12358,7 @@
         if (!uploadId) {
           return "—";
         }
-        const isDeleting = fulfillmentDeletingUploadId === uploadId;
+        const isDeleting = fulfillmentDeletingUploadId === uploadId || Boolean(fulfillmentPending);
         if (fulfillmentDeleteConfirmUploadId === uploadId) {
           return [
             "<div class=\"fulfillment-delete-confirm\">",
@@ -12383,39 +12446,27 @@
       }
 
       async function deleteFulfillmentUpload(uploadId) {
-        const normalizedId = String(uploadId || "").trim();
-        if (!normalizedId || !config.fulfillment_services_uploads_path || fulfillmentDeletingUploadId) {
-          return;
-        }
-        fulfillmentDeletingUploadId = normalizedId;
-        setFulfillmentServicesMessage("Удаляем документ...", "");
-        renderFulfillmentServices(fulfillmentServicesPayload || { list: { uploads: [] }, detail: null });
-        let operationApplied = false;
+        const normalizedId=String(uploadId||"").trim();
+        if (!normalizedId || fulfillmentDeletingUploadId || fulfillmentPending) return;
+        const ref={request_id:"ffsvc_client_"+crypto.randomUUID().replace(/-/g,""),action:"delete",upload_id:normalizedId,payload_digest:normalizedId};
+        rememberFulfillmentOperation(ref); fulfillmentDeletingUploadId=normalizedId;
+        setFulfillmentServicesMessage("Удаляем документ...","");
+        renderFulfillmentServices(fulfillmentServicesPayload || {list:{uploads:[]},detail:null});
         try {
-          const response = await fetch(config.fulfillment_services_uploads_path.replace(/\/$/, "") + "/" + encodeURIComponent(normalizedId), {
-            method: "DELETE",
-            headers: { "Accept": "application/json" }
-          });
-          const payload = await readJson(response);
-          if (!response.ok) {
-            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
-          }
-          operationApplied = !!payload.operation_applied;
-          fulfillmentDeleteConfirmUploadId = "";
-          setFulfillmentServicesMessage("Документ удалён." + ((payload.warehouse_targeted_recalculation || {}).terminal_no_op ? " Пересчёт не требуется." : " Пересчёт сохранён и ожидает обработки."), "success");
-          await loadFulfillmentServices({ preserveMessage: true });
-          if (wbSuppliesInitialized) {
-            await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
-          }
-        } catch (error) {
-          setFulfillmentServicesMessage(
-            (operationApplied ? "Документ удалён. Не удалось обновить отображение; повторять удаление не требуется. " : "Не удалось подтвердить удаление. Проверьте список документов. ") + (error instanceof Error ? error.message : String(error)),
-            "error"
-          );
+          try {
+            const response=await fetch(config.fulfillment_services_uploads_path.replace(/\/$/,"")+"/"+encodeURIComponent(normalizedId)+"?request_id="+encodeURIComponent(ref.request_id),{method:"DELETE",headers:{Accept:"application/json"}});
+            const payload=await readJson(response);
+            if (!response.ok && payload.code === "business_data_maintenance") {
+              rememberFulfillmentOperation(null);fulfillmentAcceptance.hidden=true;
+              setFulfillmentServicesMessage("Обслуживание системы. Удаление не отправлено; повторите после завершения обслуживания.","warning");return;
+            }
+          } catch (_) {}
+          await recoverFulfillmentOperation();
+          if (!fulfillmentPending && wbSuppliesInitialized) await loadWbSupplies({skipInitialSync:true,preserveMessage:true});
         } finally {
-          fulfillmentDeletingUploadId = "";
-          renderFulfillmentServices(fulfillmentServicesPayload || { list: { uploads: [] }, detail: null });
-          scheduleEmbeddedHeightPost();
+          fulfillmentDeletingUploadId="";
+          renderFulfillmentServices(fulfillmentServicesPayload || {list:{uploads:[]},detail:null});
+          updateFulfillmentServicesBusyState();scheduleEmbeddedHeightPost();
         }
       }
 
@@ -14822,15 +14873,16 @@
 
       async function savePartnerReportSettings() {
         partnerReportSaveSettings.disabled = true;
-        partnerReportStatus.textContent = "Сохраняем server-owned параметры...";
+        partnerReportStatus.textContent = "Сохраняем настройки…";
         try {
-          const saved = await partnerReportJsonRequest(config.partner_report_settings_path, partnerSettingsPayload());
-          const card = (partnerReportOptions.cards || []).find((item) => String(item.nm_id) === String(saved.nm_id));
-          if (card) card.settings = saved;
+          const result = await submitSourceOperation(config.partner_report_settings_path,"POST",JSON.stringify(partnerSettingsPayload()));
+          const saved=result.payload;
+          const card = saved && (partnerReportOptions.cards || []).find((item) => String(item.nm_id) === String(saved.nm_id));
+          if (card)card.settings=saved;
           invalidatePartnerReportPreview();
-          partnerReportStatus.textContent = "Настройки сохранены: " + saved.settings_version_id + ".";
+          partnerReportStatus.textContent = result.pendingResolved?"Предыдущее изменение сохранено. Для новых настроек нажмите «Сохранить» ещё раз.":"Принято. Настройки сохранены.";
           partnerReportStatus.className = "section-message success";
-          partnerReportNotes.innerHTML = "<p>Fingerprint настроек: " + escapeHtml(saved.fingerprint) + ".</p>";
+          partnerReportNotes.textContent = "Новый расчёт отчёта можно открыть отдельно.";
         } catch (error) {
           partnerReportStatus.textContent = "Не удалось сохранить настройки: " + (error instanceof Error ? error.message : String(error));
           partnerReportStatus.className = "section-message error";
@@ -15583,6 +15635,123 @@
         }
       }
 
+      const sourceReceiptDialog = document.getElementById("operatorSourceReceiptDialog");
+      const sourceReceiptBox = document.getElementById("operatorSourceReceipt");
+      function sourceOperationScope(path) {
+        if (path === config.partner_report_settings_path)return {domain:"partner_report_settings",entity:"settings"};
+        if (path === config.plan_report_baseline_upload_path) return {domain:"plan_report_baseline",entity:"monthly_baseline"};
+        for (const [suffix, entity] of [["stock_ff","stock_ff"],["inbound_factory","inbound_factory_to_ff"],["inbound_ff_to_wb","inbound_ff_to_wb"]]) {
+          if (path === config["factory_order_upload_"+suffix+"_path"] || path === config["factory_order_delete_"+suffix+"_path"]) return {domain:"factory_order_dataset",entity};
+        }
+        throw new Error("Неизвестный источник данных.");
+      }
+      function sourceOperationKey(scope) { return "operator-report-source-v1:"+config.user_config_key+":"+scope.domain+":"+scope.entity; }
+      function withSourceLock(key,action) {
+        if (!navigator.locks)throw new Error("Для надёжного сохранения обновите браузер и откройте сервис по защищённому соединению.");
+        return navigator.locks.request(key,action);
+      }
+      const sourceRefusalStatuses = [400,401,403,413,415,422,423];
+      function clearSourcePending(key) { localStorage.removeItem(key);localStorage.removeItem(key+":refusal"); }
+      function sourceRefused(ref,key,result) {
+        if (result.read_http_status!==404)return false;
+        try {
+          const saved=JSON.parse(localStorage.getItem(key+":refusal") || "null");
+          if (!saved || saved.operation_id!==ref.operation_id || !sourceRefusalStatuses.includes(saved.status))return false;
+          clearSourcePending(key);return true;
+        } catch (_) { return false; }
+      }
+      function showSourceRefused() {
+        if (!sourceReceiptDialog.open)sourceReceiptDialog.showModal();
+        const note=document.createElement("p");note.textContent="Изменение не принято. Проверьте данные и отправьте исправленный вариант.";
+        const close=document.createElement("button");close.type="button";close.textContent="Закрыть";
+        close.addEventListener("click",()=>sourceReceiptDialog.close());
+        sourceReceiptBox.replaceChildren(note,close);close.focus();
+      }
+      function showSourceReceipt(receipt) {
+        if (!sourceReceiptDialog.open) sourceReceiptDialog.showModal();
+        window.OperatorAcceptance.renderReceipt(sourceReceiptBox,receipt,{onClose:()=>sourceReceiptDialog.close()});
+      }
+      async function readSourceOperation(ref) {
+        let readStatus=null;
+        const result=await window.OperatorAcceptance.readSameOperation(ref,async()=>{
+          const response=await fetch("/v1/sheet-vitrina-v1/operations/"+encodeURIComponent(ref.operation_id),{cache:"no-store",headers:{Accept:"application/json"}});
+          readStatus=response.status;
+          if (!response.ok) throw new Error("read_unavailable");
+          return response.json();
+        });
+        return {...result,read_http_status:readStatus};
+      }
+      function showSourceUnknown(ref, key) {
+        if (!sourceReceiptDialog.open) sourceReceiptDialog.showModal();
+        window.OperatorAcceptance.renderState(sourceReceiptBox,null);
+        const actions=document.createElement("div"); actions.className="ff-operation-actions";
+        const check=document.createElement("button"); check.type="button"; check.textContent="Проверить сохранение";
+        check.addEventListener("click",async()=>{
+          check.disabled=true;
+          try {
+            await withSourceLock(key,async()=>{
+              const result=await readSourceOperation(ref);
+              if (result.status==="accepted") {if(localStorage.getItem(key)===ref.operation_id)clearSourcePending(key);showSourceReceipt(result.operation);}
+              else if (localStorage.getItem(key)===ref.operation_id && sourceRefused(ref,key,result)) {showSourceRefused();}
+              else {check.disabled=false;}
+            });
+          } catch (_) {check.disabled=false;}
+        });
+        const close=document.createElement("button"); close.type="button"; close.textContent="Закрыть";
+        close.addEventListener("click",()=>sourceReceiptDialog.close());
+        const journal=document.createElement("a"); journal.href="/sheet-vitrina-v1/operations?operation_id="+encodeURIComponent(ref.operation_id);journal.textContent="Журнал операций";
+        actions.append(check,close,journal);sourceReceiptBox.append(actions);
+      }
+      async function submitSourceOperation(path, method, body) {
+        const scope=sourceOperationScope(path), key=sourceOperationKey(scope);
+        return withSourceLock(key,async()=>{
+        const pending=localStorage.getItem(key);
+        const ref={domain:scope.domain,operation_id:pending || (scope.domain==="partner_report_settings"?"ops_partner_":"ors_")+crypto.randomUUID()};
+        if (!pending) localStorage.setItem(key,ref.operation_id); // Persist identity before the only submit.
+        let payload=null, response=null;
+        if (!pending) {
+          try {
+            response=await fetch(path,{method,body,headers:{Accept:"application/json","X-Operator-Operation-Id":ref.operation_id,...(scope.domain==="partner_report_settings"?{"Content-Type":"application/json"}:{})}});
+            if (sourceRefusalStatuses.includes(response.status))localStorage.setItem(key+":refusal",JSON.stringify({operation_id:ref.operation_id,status:response.status}));
+            payload=await readJson(response);
+          } catch (_) { /* Same-identity read resolves a lost response. */ }
+        }
+        const observed=payload && response && response.ok
+          ? await window.OperatorAcceptance.readSameOperation(ref,async()=>({acceptance:payload.acceptance}))
+          : {status:"unknown"};
+        const result=observed.status==="accepted"?observed:await readSourceOperation(ref);
+        if (result.status==="accepted") {
+          clearSourcePending(key);showSourceReceipt(result.operation);
+          return {payload,receipt:result.operation,recovered:!response || !response.ok,pendingResolved:Boolean(pending)};
+        }
+        // A completed validation/permission refusal plus absent receipt is a
+        // definitive non-acceptance. Network/5xx ambiguity keeps the identity.
+        if (sourceRefused(ref,key,result)) {
+          throw new Error(payload && payload.error?String(payload.error):"Изменение не принято. Проверьте данные и доступ.");
+        }
+        showSourceUnknown(ref,key);
+        throw new Error("Подтверждение ещё не получено. Повторно отправлять файл не нужно; проверьте сохранение в открытом окне.");
+        });
+      }
+      queueMicrotask(async()=>{
+        for (const path of [config.partner_report_settings_path,config.plan_report_baseline_upload_path,config.factory_order_upload_stock_ff_path,
+                            config.factory_order_upload_inbound_factory_path,config.factory_order_upload_inbound_ff_to_wb_path]) {
+          if (!path)continue;
+          try {
+            const scope=sourceOperationScope(path),key=sourceOperationKey(scope);
+            const unresolved=await withSourceLock(key,async()=>{
+              const identity=localStorage.getItem(key);if(!identity)return false;
+              const ref={domain:scope.domain,operation_id:identity},result=await readSourceOperation(ref);
+              if (result.status==="accepted") {clearSourcePending(key);showSourceReceipt(result.operation);}
+              else if (sourceRefused(ref,key,result)) {showSourceRefused();}
+              else {showSourceUnknown(ref,key);return true;}
+              return false;
+            });
+            if(unresolved)break;
+          } catch (_) { /* No submission or identity replacement during recovery. */ }
+        }
+      });
+
       async function uploadDataset(path, fileInput, setMessage, reloaders, options) {
         const file = fileInput.files && fileInput.files[0];
         if (!file) {
@@ -15594,20 +15763,13 @@
         try {
           const formData = new FormData();
           formData.append("file", file, file.name);
-          const response = await fetch(path, {
-            method: "POST",
-            body: formData
-          });
-          const payload = await readJson(response);
-          if (!response.ok) {
-            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
-          }
-          setMessage(valueOrDash(payload.message), "success");
-          if (options && typeof options.onSuccess === "function") {
-            options.onSuccess(payload);
+          const result = await submitSourceOperation(path,"POST",formData);
+          setMessage(result.pendingResolved?"Ранее отправленный файл сохранён. Для загрузки нового выберите его ещё раз.":"Принято. Документ сохранён.", "success");
+          if (!result.pendingResolved && result.payload && options && typeof options.onSuccess === "function") {
+            try {options.onSuccess(result.payload);} catch (_) { /* Source acceptance is already confirmed. */ }
           }
           fileInput.value = "";
-          await Promise.all((Array.isArray(reloaders) ? reloaders : []).map((loader) => loader()));
+          await Promise.allSettled((Array.isArray(reloaders) ? reloaders : []).map((loader) => Promise.resolve().then(loader)));
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
           setMessage(
@@ -15651,16 +15813,9 @@
         busyButton.textContent = "Удаляем...";
         setMessage("Удаляем файл из текущего server-side состояния...", "");
         try {
-          const response = await fetch(deletePath, {
-            method: "DELETE",
-            headers: { "Accept": "application/json" }
-          });
-          const payload = await readJson(response);
-          if (!response.ok) {
-            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
-          }
-          setMessage(valueOrDash(payload.message), "success");
-          await Promise.all((Array.isArray(reloaders) ? reloaders : []).map((loader) => loader()));
+          const result=await submitSourceOperation(deletePath,"DELETE");
+          setMessage(result.pendingResolved?"Ранее отправленное изменение сохранено. Для удаления нажмите кнопку ещё раз.":"Принято. Изменение сохранено.", "success");
+          await Promise.allSettled((Array.isArray(reloaders) ? reloaders : []).map((loader) => Promise.resolve().then(loader)));
         } catch (error) {
           setMessage(
             "Удаление файла завершилось с ошибкой: " + (error instanceof Error ? error.message : String(error)),

@@ -15,7 +15,8 @@ from packages.application.operator_ff_overhead import readonly, _resolve
 
 TABLE = "sheet_vitrina_v1_ff_pool_operator_confirmations"
 KINDS = ("china_acceptance", "transfer_root", "transfer_shipment", "transfer_receipt",
-         "transfer_loss", "transfer_discrepancy", "transfer_cancellation", "pool_reallocation")
+         "transfer_loss", "transfer_discrepancy", "transfer_cancellation", "pool_reallocation",
+         "pool_inventory", "correction", "storno", "late_expense")
 SOURCE_KEYS = ("request_identity", "source_revision", "source_sha256", "business_date", "document_kind", "idempotency_epoch")
 
 
@@ -31,6 +32,8 @@ def ensure_schema(conn):
         CREATE INDEX IF NOT EXISTS ff_operator_confirmations_time ON {TABLE}(accepted_at,request_id);
         CREATE UNIQUE INDEX IF NOT EXISTS ff_operator_guided_single_source ON {TABLE}(json_extract(source_json,'$.source_id'))
             WHERE json_extract(source_json,'$.document_kind')='china_acceptance';
+        CREATE UNIQUE INDEX IF NOT EXISTS ff_operator_single_storno_target ON {TABLE}(json_extract(source_json,'$.manifest.target_document_id'))
+            WHERE json_extract(source_json,'$.document_kind')='storno';
         CREATE TRIGGER IF NOT EXISTS ff_operator_confirmation_immutable BEFORE UPDATE ON {TABLE}
         WHEN NEW.request_id IS NOT OLD.request_id OR NEW.source_json IS NOT OLD.source_json
           OR NEW.source_digest IS NOT OLD.source_digest OR NEW.accepted_at IS NOT OLD.accepted_at OR NEW.actor IS NOT OLD.actor
@@ -81,10 +84,89 @@ def assert_accepted_epoch(conn, request):
             raise FfPoolDocumentError('feature_epoch_changed','Складской режим изменился после подтверждения')
 
 
-def assert_effect(conn, request, plan):
+def inventory_snapshot(conn, manifest, epoch):
+    """Full active identity roster and both pools; no derived publication dependency."""
+    from packages.application.ff_pool_documents import _fingerprint, _validate_manifest, _scope, _positive_int, _nonnegative_int, FfPoolDocumentError
+    _validate_manifest('pool_inventory',manifest)
+    roster = [dict(r) for r in conn.execute("SELECT item_id,nm_id,barcode,barcodes_json FROM sheet_vitrina_v1_nomenclature_items WHERE is_active=1 AND is_hidden=0 AND nm_id IS NOT NULL ORDER BY nm_id,item_id")]
+    nm_ids = [int(r['nm_id']) for r in roster]
+    if not nm_ids or len(nm_ids) != len(set(nm_ids)):
+        raise FfPoolDocumentError('inventory_roster_ambiguous','Активный состав номенклатуры отсутствует или неоднозначен')
+    targets = manifest.get('targets', [])
+    if not isinstance(targets,list) or any(not isinstance(t,dict) for t in targets):
+        raise FfPoolDocumentError('inventory_targets_required','Нужна таблица целевых остатков')
+    if sorted(_positive_int(t.get('nm_id'),field='inventory nm_id') for t in targets) != nm_ids:
+        raise FfPoolDocumentError('inventory_incomplete_active_roster','Инвентаризация должна содержать весь активный состав, включая явные нули')
+    scope=_scope(str(manifest['scope']))
+    pools = ('FBS', 'FBO') if scope == 'both' else (scope,)
+    for target in targets:
+        for pool in pools:
+            value = target.get('target_' + pool.lower())
+            try:
+                _nonnegative_int(value,field='inventory target '+pool)
+            except FfPoolDocumentError as exc:
+                raise FfPoolDocumentError('inventory_explicit_target_required','Для каждого товара нужен явный целый остаток, включая ноль') from exc
+    rows = []
+    for nm in nm_ids:
+        for pool in ('FBS', 'FBO'):
+            row = conn.execute("SELECT quantity,capital_rub,wac_rub,source_watermark FROM sheet_vitrina_v1_ff_pool_balances WHERE facility_id=? AND pool=? AND nm_id=? AND projection_epoch=?", (manifest['facility_id'],pool,nm,epoch)).fetchone()
+            rows.append({'nm_id':nm,'pool':pool,'balance':dict(row) if row else None})
+    return {'roster_digest':_fingerprint(roster),'facility_id':manifest['facility_id'],'epoch':epoch,'rows':rows}
+
+
+def pin_inventory_manifest(conn, manifest, epoch):
+    """Pin documentary surplus prices before the operator reviews the preview."""
+    from packages.application.ff_pool_documents import _fingerprint, _scope, canonical_decimal_text
+    manifest['scope']=_scope(str(manifest.get('scope') or ''))
+    manifest['operator_inventory_snapshot']=inventory_snapshot(conn,manifest,epoch)
+    bases={str(k):v for k,v in (manifest.get('cost_basis_by_nm') or {}).items()}
+    from packages.application.ff_pool_documents import _inventory_cost_basis
+    for target in manifest['targets']:
+        nm=int(target['nm_id'])
+        if isinstance(bases.get(str(nm)),dict):
+            continue  # explicitly authorized existing native basis contract
+        pools=('FBS','FBO') if manifest['scope']=='both' else (manifest['scope'],)
+        before={r['pool']:r['balance'] for r in manifest['operator_inventory_snapshot']['rows'] if r['nm_id']==nm}
+        if not any(int(target['target_'+pool.lower()])>int((before[pool] or {}).get('quantity',0)) for pool in pools):
+            continue
+        rows=[dict(r) for r in conn.execute("SELECT pool,quantity,capital_rub,source_watermark FROM sheet_vitrina_v1_ff_pool_balances WHERE projection_epoch=? AND facility_id=? AND nm_id=? AND quantity>0 ORDER BY pool",(epoch,manifest['facility_id'],nm))]
+        unit=_inventory_cost_basis(conn,facility_id=manifest['facility_id'],nm_id=nm,epoch=epoch,explicit=bases.get(str(nm)))
+        bases[str(nm)]={'unit_cost_rub':canonical_decimal_text(unit),
+                        'source_digest':_fingerprint({'epoch':epoch,'facility_id':manifest['facility_id'],'nm_id':nm,'rows':rows})}
+    manifest['cost_basis_by_nm']=bases
+    return manifest
+
+
+def assert_inventory_inputs(conn, request):
+    if request['document_kind'] != 'pool_inventory':
+        return
+    from packages.application.ff_pool_documents import FfPoolDocumentError
+    manifest=json.loads(request['request_payload_json'])
+    pinned=manifest.get('operator_inventory_snapshot')
+    if not pinned and exists(conn):
+        row=conn.execute(f'SELECT source_json FROM {TABLE} WHERE request_id=?',(request['request_id'],)).fetchone()
+        pinned=json.loads(row['source_json']).get('inventory_input_snapshot') if row else None
+    if pinned and inventory_snapshot(conn,manifest,request['idempotency_epoch']) != pinned:
+        raise FfPoolDocumentError('inventory_source_prestate_changed','Состав или исходные остатки изменились после проверки инвентаризации')
+
+
+def affected_nm_ids(plan):
+    # Root inventories, open-transit late expenses and evidence-only reversals
+    # still own documentary cost operands even when they have no movement.
+    movements={int(m['nm_id']) for d in plan['documents'] for m in d.get('movements',[])}
+    if any(d['document_kind'] in {'pool_inventory','correction','storno','late_expense'} for d in plan['documents']):
+        movements |= {int(l['nm_id']) for d in plan['documents'] for l in d.get('lines',[]) if l.get('nm_id')}
+    return sorted(movements)
+
+
+def assert_effect(conn, request, plan, *, before_physical=True):
     if exists(conn) and conn.execute(f"SELECT 1 FROM {TABLE} WHERE request_id=?", (request["request_id"],)).fetchone():
         from packages.application.ff_pool_documents import _fingerprint, FfPoolDocumentError
         source = assert_source(conn, request)
+        if before_physical:
+            assert_inventory_inputs(conn,request)
+        if source.get('native_recovery') and source['native_recovery'] != plan.get('domain_manifest',{}).get('guided_acceptance_recovery'):
+            raise FfPoolDocumentError('operator_authorized_effect_changed','Основание восстановления приёмки изменилось')
         if _fingerprint(effect(plan)) != source["effect_digest"]:
             raise FfPoolDocumentError("operator_authorized_effect_changed", "Количество, стоимость или основание подтверждённого движения изменились")
 
@@ -192,7 +274,7 @@ def _supplier_input_snapshot(conn, shipment_id):
 
 def confirm_source(surface, identity, *, actor=None):
     from packages.application.ff_pool_documents import (_connect, REQUESTS_TABLE, _fingerprint, _build_posting_plan,
-        _validate_manifest, _writer_epoch, _is_guided_china_request, _guided_request_source_revision, _require_guided_acceptance_activation, FfPoolDocumentError)
+        _validate_manifest, _validate_physical_plan, _writer_epoch, _is_guided_china_request, _guided_request_source_revision, _require_guided_acceptance_activation, FfPoolDocumentError)
     from packages.application.warehouse_domain_write_guard import assert_warehouse_domain_write_allowed
     from packages.application.ff_pool_surfaces import _actor
     # Readback first: retries after factual posting must not revalidate an already received shipment.
@@ -237,7 +319,15 @@ def confirm_source(surface, identity, *, actor=None):
             prior = conn.execute(f"SELECT request_id FROM {TABLE} WHERE json_extract(source_json,'$.document_kind')='china_acceptance' AND json_extract(source_json,'$.source_id')=?",(request['source_id'],)).fetchone()
             if prior:
                 raise FfPoolDocumentError('supplier_confirmation_exists','Приёмка этой поставки уже подтверждена; откройте сохранённую операцию',details={'request_id':prior[0]})
+        assert_inventory_inputs(conn,request)
+        if request['document_kind']=='pool_inventory' and not manifest.get('operator_inventory_snapshot'):
+            inventory_snapshot(conn,manifest,epoch)  # old unconfirmed previews still require the full roster
+        if request['document_kind']=='storno':
+            prior=conn.execute(f"SELECT request_id FROM {TABLE} WHERE json_extract(source_json,'$.document_kind')='storno' AND json_extract(source_json,'$.manifest.target_document_id')=?",(manifest['target_document_id'],)).fetchone()
+            if prior:
+                raise FfPoolDocumentError('storno_confirmation_exists','Сторно этого документа уже подтверждено',details={'request_id':prior[0]})
         plan = _build_posting_plan(conn, request=request, manifest=manifest, epoch=epoch, intrinsic_only=True)
+        _validate_physical_plan(conn,plan,epoch)
         try:
             assert_reservations(conn, plan=plan, epoch=epoch)
         except FfPoolDocumentError as exc:
@@ -248,7 +338,9 @@ def confirm_source(surface, identity, *, actor=None):
                 raise
         source = {k: request[k] for k in SOURCE_KEYS}
         source.update(manifest=manifest, effect_digest=_fingerprint(effect(plan)), effect=effect(plan),
-                      filename=request["source_filename"], source_id=request["source_id"], source_type=request["source_type"], supplier_input_snapshot=supplier_snapshot, preview_actor=request['actor'])
+                      filename=request["source_filename"], source_id=request["source_id"], source_type=request["source_type"], supplier_input_snapshot=supplier_snapshot, preview_actor=request['actor'],
+                      native_recovery=plan.get('domain_manifest',{}).get('guided_acceptance_recovery') or {},
+                      inventory_input_snapshot=inventory_snapshot(conn,manifest,epoch) if request['document_kind']=='pool_inventory' else None)
         conn.execute(f"INSERT INTO {TABLE}(request_id,source_json,source_digest,accepted_at,actor,state,updated_at) VALUES(?,?,?,?,?,'accepted',?)",
                      (canonical, json.dumps(source,ensure_ascii=False,sort_keys=True,separators=(',',':')), _fingerprint(source), now, _actor(actor if actor is not None else request['actor']), now))
         conn.commit()
@@ -258,8 +350,8 @@ def enqueue_posted(conn, *, request, plan, posted_at):
     if not exists(conn) or not conn.execute(f"SELECT 1 FROM {TABLE} WHERE request_id=?", (request["request_id"],)).fetchone():
         return
     from packages.application.ff_pool_documents import _fingerprint, TARGETED_RECALC_QUEUE_TABLE
-    assert_effect(conn, request, plan)
-    nm_ids = sorted({int(m["nm_id"]) for d in plan["documents"] for m in d.get("movements", [])})
+    assert_effect(conn, request, plan, before_physical=False)
+    nm_ids = affected_nm_ids(plan)
     if not nm_ids:
         return
     stable = "ff_pool_document:" + plan["primary_document_id"]
@@ -269,6 +361,14 @@ def enqueue_posted(conn, *, request, plan, posted_at):
         effective_date=request['business_date'],affected_nm_ids_json=json.dumps(nm_ids),requested_at=posted_at)
     if queued['effective_date']!=request['business_date'] or json.loads(queued['affected_nm_ids_json'])!=nm_ids:
         raise ValueError('operator_targeted_identity_conflict')
+    recovery=plan.get('domain_manifest',{}).get('guided_acceptance_recovery') or {}
+    if recovery:
+        extra=enqueue_source_replay_in_connection(conn,stable_source_id='supplier_shipment:'+recovery['shipment_id'],
+            source_revision=request['request_identity'],effective_date=request['business_date'],
+            affected_nm_ids_json=json.dumps(sorted(recovery['affected_nm_ids'])),requested_at=posted_at)
+        if extra['effective_date']!=request['business_date'] or json.loads(extra['affected_nm_ids_json'])!=sorted(recovery['affected_nm_ids']):
+            raise ValueError('operator_recovery_targeted_identity_conflict')
+
 
 
 def _update(db_path, identity, state, reason, receipt=None):
@@ -284,7 +384,26 @@ def _public(conn, row):
     doc = conn.execute("SELECT document_id,root_document_id,posted_manifest_sha256 FROM sheet_vitrina_v1_ff_pool_documents WHERE document_id=?", (native['posted_document_id'],)).fetchone() if native and native['posted_document_id'] else None
     summary = {k:source['manifest'][k] for k in ('facility_id','source','destination','source_pool','destination_pool','root_document_id') if k in source['manifest']}
     summary['quantity'] = sum(l['quantity'] for d in source['effect']['documents'] if d['document_role']!='china_discrepancy' for l in d.get('lines', []))
+    kind=source['document_kind']
+    if kind in {'pool_inventory','correction','storno','late_expense'}:
+        summary.pop('quantity',None)
+        summary['child_document_ids']=[d['document_id'] for d in source['effect']['documents'] if d['document_id']!=source['effect']['primary_document_id']]
+        if kind=='pool_inventory':
+            summary.update(scope=source['manifest']['scope'],target_count=len(source['manifest']['targets']),
+                surplus_quantity=sum(l['quantity'] for d in source['effect']['documents'] if d['document_kind']=='inventory_surplus' for l in d['lines']),
+                shortage_quantity=sum(l['quantity'] for d in source['effect']['documents'] if d['document_kind']=='inventory_shortage' for l in d['lines']))
+        elif kind=='correction':
+            summary.update(target_document_id=source['manifest']['target_document_id'],
+                quantity_delta=sum(m['quantity_delta'] for d in source['effect']['documents'] for m in d['movements']),
+                capital_delta_rub=str(sum(Decimal(m['capital_delta_cents']) for d in source['effect']['documents'] for m in d['movements'])/100))
+        elif kind=='storno':
+            summary['target_document_id']=source['manifest']['target_document_id']
+        else:
+            summary['amount_rub']=str(sum(Decimal(e['amount_rub']) for e in source['manifest']['expenses']))
     fields=[{'label':'Дата документа','value':source['business_date']}]
+    for label,key in [('Сегменты','scope'),('Товаров в инвентаризации','target_count'),('Излишек','surplus_quantity'),('Недостача','shortage_quantity'),('Изменение количества','quantity_delta'),('Изменение капитала, ₽','capital_delta_rub'),('Сумма, ₽','amount_rub'),('Исходный документ','target_document_id')]:
+        if key in summary:
+            fields.append({'label':label,'value':str(summary[key])})
     for label,key in [('Склад','facility_id'),('Исходный сегмент','source_pool'),('Целевой сегмент','destination_pool'),('Количество','quantity'),('Основание','root_document_id')]:
         if summary.get(key) is not None:
             value=summary[key]
@@ -306,7 +425,7 @@ def _public(conn, row):
         'kind':source['document_kind'],'document_kind':source['document_kind'],'title':DOCUMENT_LABELS_RU[source['document_kind']], 'title_ru':DOCUMENT_LABELS_RU[source['document_kind']],
         'accepted_at':row['accepted_at'],'actor':row['actor'],'business_date':source['business_date'],'state':row['state'],'label_ru':labels[row['state']],
         'reason_code':row['reason_code'],'reason_ru':reasons.get(row['reason_code'],'Документ сохранён. Повторная отправка не требуется.'),
-        'summary':summary,'fields':fields,'domain':'ff_pool_document','journal_path':'/sheet-vitrina-v1/vitrina?operation_id='+row['request_id'],
+        'summary':summary,'fields':fields,'domain':'ff_pool_document','journal_path':'/sheet-vitrina-v1/operations?operation_id='+row['request_id'],
         'source_document':{'request_id':row['request_id'],'source_revision':source['source_revision'],'source_sha256':source['source_sha256'],'filename':source['filename']},
         'document':dict(doc) if doc else None,'processing_receipt':json.loads(row['receipt_json']),
         'detail_path':'/v1/sheet-vitrina-v1/operations/'+row['request_id'],
@@ -368,7 +487,8 @@ def try_post(db_path, runtime_dir, identity, *, timestamp_factory=None, owned_cy
             _update(db_path,identity,'processing','publication_pending')
         except Exception as exc:
             code = getattr(exc,'code','') or type(exc).__name__
-            permanent = code in {'operator_source_changed','operator_authorized_effect_changed','reserved_stock_unavailable','supplier_source_revision_changed','feature_epoch_changed','supplier_shipment_already_accepted','transfer_outcome_exceeds_open','transfer_shipment_exists','insufficient_source_balance'}
+            permanent = code in {'operator_source_changed','operator_authorized_effect_changed','reserved_stock_unavailable','supplier_source_revision_changed','feature_epoch_changed','supplier_shipment_already_accepted','transfer_outcome_exceeds_open','transfer_shipment_exists','insufficient_source_balance','inventory_source_prestate_changed','inventory_incomplete_active_roster','storno_exists','negative_pool_balance','pool_quantity_capital_zero_mismatch'}
+            permanent=permanent or (code.startswith('guided_recovery_') and code.endswith('_drift'))
             _update(db_path,identity,'needs_attention' if permanent else 'delayed',code)
         finally:
             fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
@@ -386,9 +506,15 @@ def drain(runtime, *, limit=100, timestamp_factory=None):
         try_post(runtime.db_path,runtime.runtime_dir,identity,timestamp_factory=timestamp_factory,owned_cycle=True)
         with closing(_connect(runtime.db_path,query_only=True)) as conn:
             request=conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?",(identity,)).fetchone()
-        if request['posted_document_id'] and _is_guided_china_request(request):
+        if request['posted_document_id'] and (_is_guided_china_request(request) or service._guided_recovery_target(request)):
             try:
-                service._replay_guided_acceptance(request)
+                if _is_guided_china_request(request):
+                    with closing(readonly(runtime.db_path)) as conn:
+                        compensated=conn.execute('SELECT 1 FROM sheet_vitrina_v1_ff_guided_acceptance_recoveries WHERE target_request_id=?',(identity,)).fetchone()
+                    if not compensated:
+                        service._replay_guided_acceptance(request)
+                else:
+                    service._replay_guided_recovery(request)
             except Exception as exc:
                 _update(runtime.db_path,identity,'delayed',getattr(exc,'code','') or type(exc).__name__)
     return {'processed_count':len(rows),'request_ids':[r['request_id'] for r in rows]}
@@ -410,17 +536,24 @@ def may_finalize(db_path, runtime_dir, identity):
 
 def record_functional_publication(conn, *, request, version_id, plan_fingerprint):
     """Called only inside the actual native functional publication transaction."""
-    if not request['stable_source_id'].startswith('ff_pool_document:') or not exists(conn):
+    if not exists(conn):
         return
-    doc_id = request['stable_source_id'].split(':',1)[1]
-    row = conn.execute(f"SELECT c.* FROM {TABLE} c JOIN sheet_vitrina_v1_ff_pool_documents d USING(request_id) WHERE d.document_id=?",(doc_id,)).fetchone()
-    if row is None:
+    if request['stable_source_id'].startswith('ff_pool_document:'):
+        doc_id = request['stable_source_id'].split(':',1)[1]
+        rows = conn.execute(f"SELECT c.* FROM {TABLE} c JOIN sheet_vitrina_v1_ff_pool_documents d USING(request_id) WHERE d.document_id=?",(doc_id,)).fetchall()
+        key='functional_publication'
+    elif request['stable_source_id'].startswith('supplier_shipment:'):
+        rows=conn.execute(f"SELECT * FROM {TABLE} WHERE json_extract(source_json,'$.native_recovery.shipment_id')=? AND json_extract(source_json,'$.request_identity')=?",(request['stable_source_id'].split(':',1)[1],request['source_revision'])).fetchall()
+        key='recovery_functional_publication'
+        doc_id=''
+    else:
         return
-    receipt = json.loads(row['receipt_json'])
     from packages.application.warehouse_functional import _targeted_recalc_request_identity
-    receipt['functional_publication'] = _targeted_recalc_request_identity(request)
-    receipt['functional_publication'].update(version_id=version_id,plan_fingerprint=plan_fingerprint,document_id=doc_id)
-    conn.execute(f"UPDATE {TABLE} SET receipt_json=? WHERE request_id=?",(json.dumps(receipt,ensure_ascii=False),row['request_id']))
+    for row in rows:
+        receipt = json.loads(row['receipt_json'])
+        receipt[key] = _targeted_recalc_request_identity(request)
+        receipt[key].update(version_id=version_id,plan_fingerprint=plan_fingerprint,document_id=doc_id)
+        conn.execute(f"UPDATE {TABLE} SET receipt_json=? WHERE request_id=?",(json.dumps(receipt,ensure_ascii=False),row['request_id']))
 
 
 def reconcile(runtime, *, request_ids, finance_receipt, economics_receipt=None, now=None):
@@ -462,7 +595,7 @@ def reconcile(runtime, *, request_ids, finance_receipt, economics_receipt=None, 
             functional=receipt.get('functional_publication',{})
             primary=source['effect']['primary_document_id']
             expected_revision=_fingerprint({'request_identity':source['request_identity'],'effect':source['effect'],'business_date':source['business_date']})
-            expected_nm=sorted({int(m['nm_id']) for d in source['effect']['documents'] for m in d.get('movements',[])})
+            expected_nm=affected_nm_ids(source['effect'])
             if (functional.get('stable_source_id')!='ff_pool_document:'+primary
                     or functional.get('source_revision')!=expected_revision
                     or functional.get('effective_date')!=source['business_date']
@@ -474,6 +607,20 @@ def reconcile(runtime, *, request_ids, finance_receipt, economics_receipt=None, 
             if (not queue or queue['status']!='complete' or not version or version['status']!='good'
                     or version['plan_fingerprint']!=functional.get('plan_fingerprint')):
                 continue
+            recovery=source.get('native_recovery') or {}
+            if recovery:
+                extra=receipt.get('recovery_functional_publication',{})
+                if (extra.get('stable_source_id')!='supplier_shipment:'+recovery['shipment_id']
+                        or extra.get('source_revision')!=source['request_identity']
+                        or extra.get('effective_date')!=source['business_date']
+                        or extra.get('affected_nm_ids')!=sorted(recovery['affected_nm_ids'])):
+                    continue
+                with closing(readonly(runtime.db_path)) as conn:
+                    extra_queue=conn.execute("SELECT status FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue WHERE queue_id=? AND stable_source_id=? AND source_revision=?",(extra.get('queue_id',''),extra['stable_source_id'],extra['source_revision'])).fetchone()
+                    extra_version=conn.execute("SELECT status,plan_fingerprint FROM sheet_vitrina_v1_warehouse_functional_versions WHERE version_id=?",(extra.get('version_id',''),)).fetchone()
+                if (not extra_queue or extra_queue['status']!='complete' or not extra_version
+                        or extra_version['status']!='good' or extra_version['plan_fingerprint']!=extra.get('plan_fingerprint')):
+                    continue
             if (finance_receipt.get('status') not in {'applied','already_current'}
                     or finance_receipt.get('accounting_version')!=book_version
                     or finance_receipt.get('accounting_version_before')!=book_version

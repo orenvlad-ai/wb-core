@@ -3220,11 +3220,26 @@ class RegistryUploadDbBackedRuntime:
         uploaded_filename: str,
         uploaded_content_type: str,
         workbook_bytes: bytes,
-    ) -> None:
+        operation_id: str | None = None,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        from packages.application import operator_report_source_versions as versions
         _validate_timestamp(uploaded_at, field_name="uploaded_at")
+        after = {"dataset_type": dataset_type, "rows": list(rows), "row_count": len(rows),
+                 "uploaded_filename": uploaded_filename, "uploaded_content_type": uploaded_content_type,
+                 "workbook_checksum": hashlib.sha256(workbook_bytes).hexdigest()}
+        intent = versions.request(domain="factory_order_dataset", source_id=dataset_type,
+                                  action="upload", actor=actor, operands=after, operation_id=operation_id)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            previous = versions.existing(conn, intent)
+            if previous is not None:
+                return previous
+            before_row = conn.execute("SELECT * FROM sheet_vitrina_v1_factory_order_dataset_state WHERE dataset_type=?", (dataset_type,)).fetchone()
+            before = dict(before_row) if before_row is not None else None
+            before_file = before.pop("workbook_blob", None) if before is not None else None
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_factory_order_dataset_state(
@@ -3255,7 +3270,10 @@ class RegistryUploadDbBackedRuntime:
                     sqlite3.Binary(workbook_bytes),
                 ),
             )
+            acknowledgement = versions.record(conn, intent, accepted_at=uploaded_at,
+                before=before, after=after, before_file=before_file, after_file=workbook_bytes)
             conn.commit()
+            return acknowledgement
 
     def load_factory_order_dataset_state(
         self,
@@ -3298,10 +3316,26 @@ class RegistryUploadDbBackedRuntime:
                 payload["workbook_bytes"] = bytes(row["workbook_blob"] or b"")
             return payload
 
-    def delete_factory_order_dataset_state(self, dataset_type: str) -> bool:
+    def delete_factory_order_dataset_state(self, dataset_type: str, *, operation_id: str | None = None,
+            actor: str = "system", deleted_at: str | None = None,
+            include_acceptance: bool = False) -> bool | tuple[bool, dict[str, Any]]:
+        from packages.application import operator_report_source_versions as versions
+        intent = versions.request(domain="factory_order_dataset", source_id=dataset_type,
+            action="delete", actor=actor, operands={"dataset_type": dataset_type}, operation_id=operation_id)
+        accepted_at = deleted_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        _validate_timestamp(accepted_at, field_name="deleted_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            previous = versions.existing(conn, intent)
+            if previous is not None:
+                old = conn.execute(f"SELECT before_json FROM {versions.TABLE} WHERE operation_id=?", (intent["operation_id"],)).fetchone()
+                deleted = json.loads(old[0]) is not None
+                return (deleted, previous) if include_acceptance else deleted
+            before_row = conn.execute("SELECT * FROM sheet_vitrina_v1_factory_order_dataset_state WHERE dataset_type=?", (dataset_type,)).fetchone()
+            before = dict(before_row) if before_row is not None else None
+            before_file = before.pop("workbook_blob", None) if before is not None else None
             cursor = conn.execute(
                 """
                 DELETE FROM sheet_vitrina_v1_factory_order_dataset_state
@@ -3309,8 +3343,11 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (dataset_type,),
             )
+            deleted = cursor.rowcount > 0
+            acknowledgement = versions.record(conn, intent, accepted_at=accepted_at,
+                before=before, after=None, before_file=before_file)
             conn.commit()
-            return cursor.rowcount > 0
+            return (deleted, acknowledgement) if include_acceptance else deleted
 
     def save_ff_stock_operation_preview(
         self,
@@ -8470,13 +8507,28 @@ class RegistryUploadDbBackedRuntime:
         uploaded_content_type: str,
         workbook_checksum: str,
         note: str | None = None,
-    ) -> None:
+        operation_id: str | None = None,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        from packages.application import operator_report_source_versions as versions
         _validate_timestamp(uploaded_at, field_name="uploaded_at")
         if not rows:
             raise ValueError("plan-report monthly baseline rows must not be empty")
+        intent = versions.request(domain="plan_report_baseline", source_id="monthly_baseline",
+            action="upload", actor=actor, operation_id=operation_id,
+            operands={"rows": list(rows), "source_kind": source_kind, "filename": uploaded_filename,
+                      "content_type": uploaded_content_type, "checksum": workbook_checksum, "note": str(note or "").strip()})
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            previous = versions.existing(conn, intent)
+            if previous is not None:
+                return previous
+            months = sorted({str(row.get("month", "") or "").strip() for row in rows})
+            placeholders = ",".join("?" for _ in months)
+            before = [dict(row) for row in conn.execute(
+                f"SELECT * FROM sheet_vitrina_v1_plan_report_monthly_baseline WHERE month IN ({placeholders}) ORDER BY month", months)]
             for row in rows:
                 month = str(row.get("month", "") or "").strip()
                 _validate_month(month, field_name="month")
@@ -8522,7 +8574,11 @@ class RegistryUploadDbBackedRuntime:
                         str(note or "").strip(),
                     ),
                 )
+            after = [dict(row) for row in conn.execute(
+                f"SELECT * FROM sheet_vitrina_v1_plan_report_monthly_baseline WHERE month IN ({placeholders}) ORDER BY month", months)]
+            acknowledgement = versions.record(conn, intent, accepted_at=uploaded_at, before=before, after=after)
             conn.commit()
+            return acknowledgement
 
     def load_plan_report_monthly_baseline(self) -> list[dict[str, Any]]:
         with _connect(self.db_path) as conn:
@@ -11996,6 +12052,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ensure_supplier_preparation_schema(conn)
         from packages.application.cny_preparation_intents import ensure_schema as ensure_cny_preparation_schema
         ensure_cny_preparation_schema(conn)
+        from packages.application.operator_report_source_versions import ensure_schema as ensure_report_source_versions
+        ensure_report_source_versions(conn)
         if not was_in_transaction and conn.in_transaction:
             conn.commit()
         _SCHEMA_READY_KEYS.add(_schema_ready_key(conn))

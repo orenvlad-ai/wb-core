@@ -71,6 +71,9 @@
         "apps/operator_policy_browser_smoke.py",
         "apps/operator_external_operations_browser_smoke.py",
         "apps/operator_external_forms_browser_smoke.py",
+        "apps/operator_report_sources_browser_smoke.py",
+        "apps/operator_fulfillment_services_browser_smoke.py",
+        "apps/operator_partner_report_browser_smoke.py",
         "apps/finance_liquidity_browser_smoke.py",
         "apps/registry_upload_http_entrypoint_users_admin_smoke.py",
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
@@ -114,6 +117,20 @@
       ]
     }
 ,
+    "operator_fulfillment_imports": {
+      "scripts": [
+        "apps/operator_fulfillment_services_smoke.py",
+        "apps/operator_fulfillment_services_native_smoke.py",
+        "apps/operator_fulfillment_services_integration_smoke.py",
+        "apps/operator_fulfillment_services_browser_smoke.py"
+      ],
+      "commands": [],
+      "pip": [
+        "openpyxl==3.1.5",
+        "pypdf==6.4.1",
+        "reportlab==4.4.5"
+      ]
+    },
     "operator_warehouse_imports": {
       "scripts": [
         "apps/operator_warehouse_documents_smoke.py",
@@ -639,6 +656,43 @@
       ],
       "commands": [["python3", "apps/cny_ledger_smoke.py"]],
       "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]
+    },
+    "operator_fulfillment_acceptance": {
+      "patterns": [
+        "packages/application/operator_fulfillment_services*.py",
+        "packages/application/fulfillment_services.py",
+        "packages/application/fulfillment_recalc_intents.py",
+        "packages/application/warehouse_functional.py",
+        "packages/application/operator_operations.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/adapters/templates/sheet_vitrina_v1_operator.html",
+        "apps/warehouse_functional_runner.py",
+        "apps/operator_fulfillment_services*_smoke.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/operator_fulfillment_services_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_fulfillment_services_native_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_fulfillment_services_integration_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_fulfillment_services_browser_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "pypdf==6.4.1",
+        "reportlab==4.4.5"
+      ]
     },
     "fulfillment_source_operations": {
       "patterns": [

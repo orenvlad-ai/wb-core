@@ -67,6 +67,12 @@ def main() -> None:
                         "nm_id": "101101",
                         "parameters": body,
                         "fingerprint": "sha256:settings",
+                        "acceptance": {"contract_name":"operator_operations_v1",
+                            "operation_id":self.headers.get("X-Operator-Operation-Id"),
+                            "domain":"partner_report_settings","durable_saved":True,
+                            "accepted_at":"2026-10-08T10:00:00Z","primary_effect":"source_saved",
+                            "state":"completed","title_ru":"Настройки партнёрского отчёта",
+                            "journal_path":"/sheet-vitrina-v1/operations"},
                     },
                 )
             elif self.path == DEFAULT_PARTNER_REPORT_PREVIEW_PATH:
@@ -152,6 +158,8 @@ def main() -> None:
                 page.locator(selector).fill(value)
             page.locator("#partnerReportSaveSettings").click()
             page.wait_for_function("document.getElementById('partnerReportStatus').innerText.includes('Настройки сохранены')")
+            page.locator('#operatorSourceReceipt .ff-operation-check').wait_for()
+            page.locator('#operatorSourceReceipt').get_by_role('button',name='Закрыть',exact=True).click()
 
             page.locator("#partnerReportGenerate").click()
             loading = page.locator("#partnerReportStatus").inner_text()

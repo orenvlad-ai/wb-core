@@ -213,6 +213,19 @@ def run(browser, base: str, directory: Path) -> None:
     if os.environ.get("OPERATOR_ACCEPTANCE_SCREENSHOT_PREFIX"):
         page.screenshot(path=os.environ["OPERATOR_ACCEPTANCE_SCREENSHOT_PREFIX"] + "-desktop-receipt.png", full_page=False)
     receipt.get_by_role("link", name="Журнал операций", exact=True).click()
+    page.get_by_role('heading',name='Журнал операций',exact=True).wait_for()
+    global_detail=page.locator('#journal-detail [data-ff-operation-receipt]')
+    global_detail.wait_for()
+    assert global_detail.get_attribute('data-ff-operation-receipt')==manual
+    assert confirmations==[manual]
+    # The original contextual FF journal remains available as a filtered view.
+    page.go_back(wait_until='domcontentloaded')
+    page.locator('[data-unified-tab-button="warehouses"]').click()
+    page.locator('[data-warehouse-key="ff"]').click()
+    page.locator('[data-ff-pool-open]').click()
+    receipt.wait_for()
+    page.locator('[data-ff-pool-tab="journal"]').click()
+    page.locator('[data-ff-operations-list]').get_by_role('button',name='Подробнее').click()
     detail = page.locator('[data-ff-operations-detail]')
     detail.get_by_text("Ожидает обработки", exact=True).wait_for()
     assert "при задержке" in detail.inner_text()
@@ -315,8 +328,12 @@ def run(browser, base: str, directory: Path) -> None:
     mobile_close.scroll_into_view_if_needed()
     assert mobile_close.is_visible() and mobile_close.bounding_box()["y"] < 844
     receipt.get_by_role("link", name="Журнал операций", exact=True).click()
-    detail.get_by_text("Ожидает обработки", exact=True).wait_for()
-    detail.get_by_role("button", name="Открыть подтверждение").click()
+    page.locator('#journal-detail .ff-operation-receipt').wait_for()
+    assert page.evaluate('document.documentElement.scrollWidth<=window.innerWidth')
+    page.go_back(wait_until='domcontentloaded')
+    page.locator('[data-unified-tab-button="warehouses"]').click()
+    page.locator('[data-warehouse-key="ff"]').click()
+    page.locator('[data-ff-pool-open]').click()
     receipt.wait_for()
     assert page.locator('.ff-pool-dialog').evaluate("node => node.scrollHeight > node.clientHeight")
     page.locator('.ff-pool-dialog').evaluate("node => { node.scrollTop = 0; }")
@@ -330,6 +347,11 @@ def run(browser, base: str, directory: Path) -> None:
     # A proved server rejection is a real error, never green and never a permanent uncertain marker.
     controls.update(malformed_confirm=False, reject_confirm=True)
     page.locator('[data-ff-pool-tab="create"]').click()
+    page.locator('[data-ff-pool-action-kind]').select_option("pool_overhead")
+    page.locator('[data-ff-pool-facility]').select_option(index=1)
+    page.locator('[data-ff-pool-scope]').select_option("FBS")
+    page.locator('[data-ff-pool-overhead-category]').select_option("other")
+    page.locator('[data-ff-pool-overhead-comment]').fill("Расход для проверки отказа")
     page.locator('[data-ff-pool-amount]').fill("61.25")
     page.locator('[data-ff-pool-preview]').click()
     page.get_by_role("button", name="Подтвердить проведение", exact=True).click()
@@ -530,6 +552,25 @@ def run(browser, base: str, directory: Path) -> None:
     row.get_by_role('button',name='Подробнее').click()
     detail.locator('.ff-operation-accepted').wait_for()
     assert len(confirmations)==before_count+1
+    # Each W2 family uses the real host's same-ID read-only recovery after a
+    # lost confirmation response. Green certifies durable source, not movement.
+    for kind in ('pool_inventory','correction','storno','late_expense'):
+        page.locator('[data-ff-pool-tab="create"]').click()
+        page.locator('[data-ff-pool-action-kind]').select_option('pool_overhead')
+        page.locator('[data-ff-pool-amount]').fill('87.25')
+        page.locator('[data-ff-pool-preview]').click()
+        page.get_by_role('button',name='Подтвердить проведение',exact=True).wait_for()
+        identity=page.locator('[data-ff-pool-request-id]').input_value()
+        previews[identity]['document_kind']=kind
+        controls['receipt_domain']='ff_pool_document';controls['receipt_source_domain']=None
+        controls['lose_confirm']=True
+        before_count=len(confirmations)
+        page.get_by_role('button',name='Подтвердить проведение',exact=True).click()
+        receipt.wait_for()
+        assert receipt.get_attribute('data-ff-operation-receipt')==identity
+        assert len(confirmations)==before_count+1 and reads[-1]==identity
+        assert accepted[identity]['document'] is None
+        controls['lose_confirm']=False
     assert not errors, errors
     context.close()
 

@@ -345,13 +345,29 @@ def payment_pdf_dependency_checks():
 
 
 def operator_warehouse_dependency_checks():
-    script='apps/operator_warehouse_documents_smoke.py'
+    for script in ('apps/operator_warehouse_documents_smoke.py','apps/operator_inventory_documents_smoke.py'):
+        _operator_warehouse_dependency_check(script)
+
+def _operator_warehouse_dependency_check(script):
     exists=lambda revision,path: path==script or (select_checks.ROOT/path).is_file()
     for path in (script,script.replace('_smoke.py','.py')):
         plan=build_plan_from_paths(pull_request=137,base=BASE,head=HEAD,paths=[path],file_exists=lambda revision,candidate:candidate==path or exists(revision,candidate))
         verify_plan(plan)
         assert ['python3',script] in plan['commands'],plan
         assert 'openpyxl==3.1.5' in plan['pip'],plan
+
+
+def operator_fulfillment_dependency_checks():
+    script='apps/operator_fulfillment_services_browser_smoke.py'
+    commands={('python3','apps/operator_fulfillment_services'+suffix+'_smoke.py') for suffix in ('','_native','_integration','_browser')}
+    for path in ('packages/application/operator_fulfillment_services.py',
+                 'packages/application/operator_fulfillment_services_proof.py',
+                 'packages/application/operator_operations.py',
+                 'apps/warehouse_functional_runner.py',script):
+        plan=build_plan_from_paths(pull_request=137,base=BASE,head=HEAD,paths=[path],file_exists=lambda revision,candidate:(select_checks.ROOT/candidate).is_file())
+        verify_plan(plan)
+        assert commands <= {tuple(command) for command in plan['commands']},plan
+        assert {'openpyxl==3.1.5','pypdf==6.4.1','reportlab==4.4.5','playwright==1.58.0'} <= set(plan['pip']),plan
 
 
 def command_dependency_checks():
@@ -854,6 +870,7 @@ def main() -> None:
     boundary_checks()
     rename_diff_check()
     operator_warehouse_dependency_checks()
+    operator_fulfillment_dependency_checks()
     command_dependency_checks()
     payment_pdf_dependency_checks()
     ads_dependency_checks()

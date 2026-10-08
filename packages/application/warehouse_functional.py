@@ -4729,6 +4729,8 @@ class WarehouseFunctionalBlock:
                         )
                     from packages.application.operator_warehouse_documents import record_functional_publication
                     record_functional_publication(conn, request=request, version_id=version_id, plan_fingerprint=fingerprint)
+                from packages.application.operator_fulfillment_services import record_functional_publication as record_fulfillment_publication
+                record_fulfillment_publication(conn, plan=normalized, version_id=version_id)
                 if business_date_from_timestamp(self.timestamp_factory()) != planned_effective_date:
                     raise WarehouseFunctionalError(
                         "functional plan crossed the canonical business-date boundary before commit"

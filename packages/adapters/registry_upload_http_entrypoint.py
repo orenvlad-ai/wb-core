@@ -1062,7 +1062,7 @@ def _build_handler(
                     actor = _current_web_user_config_key(self)
                     if parsed.path == DEFAULT_PARTNER_REPORT_SETTINGS_PATH:
                         payload = entrypoint.handle_partner_report_settings_save_request(
-                            body, actor=actor
+                            body, actor=actor, operation_id=self.headers.get("X-Operator-Operation-Id")
                         )
                     elif parsed.path == DEFAULT_PARTNER_REPORT_PREVIEW_PATH:
                         payload = entrypoint.handle_partner_report_preview_request(body)
@@ -1095,6 +1095,9 @@ def _build_handler(
                         status,
                         {"error": str(exc), "code": exc.code, "blockers": exc.blockers},
                     )
+                    return
+                except ValueError as exc:
+                    _write_json_response(self,HTTPStatus.UNPROCESSABLE_ENTITY,{"error":str(exc)})
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -2428,6 +2431,8 @@ def _build_handler(
                         upload_payload["workbook_bytes"],
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                        operation_id=self.headers.get("X-Operator-Operation-Id"),
+                        actor=_current_web_user_actor(self),
                     )
                 except ValueError as exc:
                     _write_json_response(
@@ -2986,6 +2991,8 @@ def _build_handler(
                         upload_payload["workbook_bytes"],
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                        operation_id=self.headers.get("X-Operator-Operation-Id"),
+                        actor=_current_web_user_actor(self),
                     )
                 except ValueError as exc:
                     _write_json_response(
@@ -3290,6 +3297,8 @@ def _build_handler(
                         upload_payload["workbook_bytes"],
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
+                        request_id=str((upload_payload.get("fields") or {}).get("request_id") or ""),
+                        request_scope=_current_web_user_config_key(self), actor=_current_web_user_actor(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -3742,6 +3751,7 @@ def _build_handler(
                         status_path=sheet_status_path,
                         job_path=sheet_job_path,
                         operator_context=entrypoint.build_sheet_operator_ui_context(),
+                        user_config_key=_current_web_user_config_key(self),
                         embedded_tab=embedded_tab,
                     ),
                 )
@@ -5087,7 +5097,9 @@ def _build_handler(
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
-                    payload = entrypoint.handle_fulfillment_services_uploads_request()
+                    payload = entrypoint.handle_fulfillment_services_uploads_request(
+                        request_id=_resolve_single_query_param(parsed.query, "request_id") or "",
+                        request_scope=_current_web_user_config_key(self))
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -5140,18 +5152,28 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == "/sheet-vitrina-v1/operations":
+                html = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_operator_journal.html").read_text(encoding="utf-8")
+                _write_html_response(self, HTTPStatus.OK, _inject_sheet_vitrina_ui_system(html))
+                return
+
             if parsed.path == "/v1/sheet-vitrina-v1/operations" or parsed.path.startswith("/v1/sheet-vitrina-v1/operations/"):
-                if not _ensure_supply_operator_role(self, parsed.path):
-                    return
                 try:
                     from packages.application.operator_operations import journal, read_acceptance
+                    auth_config = _web_auth_config()
+                    if auth_config["enabled"]:
+                        allowed_domains = _operator_domains_for_user(_authenticated_web_user(self, auth_config) or {})
+                    else:
+                        from packages.application.operator_operations import DOMAIN_LABELS
+                        allowed_domains = frozenset(DOMAIN_LABELS)
                     prefix = "/v1/sheet-vitrina-v1/operations"
                     if parsed.path == prefix:
                         params = {key: values[-1] for key, values in urllib_parse.parse_qs(parsed.query).items()}
-                        payload = journal(entrypoint.runtime.db_path, page=int(params.get("page") or 1), limit=int(params.get("limit") or 25))
+                        payload = journal(entrypoint.runtime.db_path, page=int(params.get("page") or 1), limit=int(params.get("limit") or 25),
+                            allowed_domains=allowed_domains, domain=params.get('domain') or 'ff_pool_document', search=params.get('search') or '')
                     else:
                         identity = urllib_parse.unquote(parsed.path[len(prefix) + 1:])
-                        acceptance = read_acceptance(entrypoint.runtime.db_path, identity)
+                        acceptance = read_acceptance(entrypoint.runtime.db_path, identity, allowed_domains=allowed_domains)
                         if acceptance is None:
                             _write_json_response(self, HTTPStatus.NOT_FOUND, {"code": "operation_not_found"})
                             return
@@ -6498,7 +6520,9 @@ def _build_handler(
             }:
                 try:
                     dataset_type = _resolve_factory_order_dataset_type_from_delete_path(parsed.path)
-                    payload = entrypoint.handle_factory_order_delete_request(dataset_type)
+                    payload = entrypoint.handle_factory_order_delete_request(dataset_type,
+                        operation_id=self.headers.get("X-Operator-Operation-Id"),
+                        actor=_current_web_user_actor(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -6536,7 +6560,9 @@ def _build_handler(
                     return
                 try:
                     upload_id = _resolve_fulfillment_upload_id_from_detail_path(parsed.path)
-                    payload = entrypoint.handle_fulfillment_services_upload_delete_request(upload_id)
+                    payload = entrypoint.handle_fulfillment_services_upload_delete_request(upload_id,
+                        request_id=_resolve_single_query_param(parsed.query, "request_id") or "",
+                        request_scope=_current_web_user_config_key(self), actor=_current_web_user_actor(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
                     return
@@ -10750,9 +10776,21 @@ def _required_section_for_path(path: str) -> str:
     return ""
 
 
+def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
+    """Source grants are applied before journal counts, rows and exact reads."""
+    domains = set()
+    if _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY):
+        domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services'))
+    if _user_has_section_access(user, WEB_AUTH_SECTION_REPORTS):
+        domains.update(('plan_report_baseline', 'partner_report_settings'))
+    return frozenset(domains)
+
+
 def _user_can_access_path(user: Mapping[str, Any], path: str, *, query: str = "") -> bool:
     normalized = str(path or "").split("?", 1)[0]
     role = str(user.get("role") or "").strip()
+    if normalized == '/sheet-vitrina-v1/operations' or normalized == '/v1/sheet-vitrina-v1/operations' or normalized.startswith('/v1/sheet-vitrina-v1/operations/'):
+        return bool(_operator_domains_for_user(user))
     if normalized == DEFAULT_AUTO_UPDATES_MONITORING_PATH:
         return role != WEB_AUTH_ROLE_SUPPLIER and any(
             _user_has_section_access(user, section)
@@ -11142,6 +11180,7 @@ def _render_sheet_vitrina_operator_ui(
     load_path: str,
     status_path: str,
     job_path: str,
+    user_config_key: str = "local_operator",
     operator_context: Mapping[str, Any] | None = None,
     embedded_tab: str = "",
 ) -> str:
@@ -11149,6 +11188,7 @@ def _render_sheet_vitrina_operator_ui(
     operator_ui_context = operator_context or {}
     normalized_embedded_tab = embedded_tab if embedded_tab in {"vitrina", "factory-order", "reports"} else ""
     config_payload = {
+        "user_config_key": user_config_key,
         "page_title": "Операторский сайт" if normalized_embedded_tab else "sheet_vitrina_v1",
         "embedded": bool(normalized_embedded_tab),
         "initial_tab": normalized_embedded_tab,
@@ -11186,6 +11226,9 @@ def _render_sheet_vitrina_operator_ui(
         "factory_order_upload_stock_ff_path": DEFAULT_FACTORY_ORDER_UPLOAD_STOCK_FF_PATH,
         "factory_order_upload_inbound_factory_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FACTORY_PATH,
         "factory_order_upload_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_UPLOAD_INBOUND_FF_TO_WB_PATH,
+        "factory_order_delete_stock_ff_path": DEFAULT_FACTORY_ORDER_DELETE_STOCK_FF_PATH,
+        "factory_order_delete_inbound_factory_path": DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH,
+        "factory_order_delete_inbound_ff_to_wb_path": DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FF_TO_WB_PATH,
         "factory_order_calculate_path": DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
         "factory_order_recommendation_path": DEFAULT_FACTORY_ORDER_RECOMMENDATION_PATH,
         "fbs_fulfillment_order_status_path": DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH,

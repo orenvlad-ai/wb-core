@@ -28,6 +28,7 @@ from packages.application.business_data_procedure_admission import initialize_ad
 from packages.application.web_vitrina_snapshot_admission import ApiJobMarkers, api_jobs_admission
 from packages.application.wb_finance_daily import WbFinanceDailyBlock
 from packages.application import sheet_vitrina_v1_live_plan as live
+from packages.application import operator_fulfillment_services as fulfillment_receipts
 from packages.application.sheet_vitrina_v1_cycle_sources import SheetVitrinaCycleSources, CollectedLivePlanSources
 from apps import sheet_vitrina_v1_local_derive_smoke as local_fixture
 from apps.wb_finance_daily_smoke import _rows, _seed_canonical_cost
@@ -707,6 +708,7 @@ class BoundWarehouseTests(unittest.TestCase):
             entry=Entry.__new__(Entry)
             entry.runtime=SimpleNamespace(runtime_dir=root,db_path=db,finalize_completed_wb_transit_cost_recalculations=Mock(return_value={}))
             entry.activated_at_factory=lambda:STAMP
+            entry.now_factory=lambda:NOW
             entry.warehouse_update_journal=WarehouseUpdateJournal(db_path=db,runtime_dir=root,timestamp_factory=lambda:STAMP)
             entry.wb_supplies_block=SimpleNamespace(sync_functional_sources=Mock(return_value={'sync':{'run_id':'supply'}}),
                 collect_all_due_transit_costs=Mock(return_value={}),reconcile_functional_ff_state=Mock(return_value={}))
@@ -714,7 +716,7 @@ class BoundWarehouseTests(unittest.TestCase):
             entry.calculation_parameters_block=SimpleNamespace(prepare_functional_economics_backup=Mock(return_value={}),
                 process_pending_targeted_recalculations=Mock(return_value={'request_count':0}),
                 publish_current_functional_economics=Mock(return_value={'plan_fingerprint':'economics'}))
-            entry.wb_finance_weekly_block=SimpleNamespace(recalculate_stale_cost_weeks=Mock(return_value={'status':'applied','fingerprint':'weekly-cost'}))
+            entry.wb_finance_weekly_block=SimpleNamespace(seller_id='canonical',recalculate_stale_cost_weeks=Mock(return_value={'status':'applied','fingerprint':'weekly-cost'}))
             def apply(plan,**kwargs):
                 with sqlite3.connect(db) as conn:
                     conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_active VALUES(1,'functional')")
@@ -735,6 +737,7 @@ class BoundWarehouseTests(unittest.TestCase):
                  patch('packages.application.fbs_accounting_runtime.current_publication_receipt',return_value=publication) as publication_read, \
                  patch('packages.application.operator_warehouse_documents.drain',return_value={'request_ids':['receipt-1']}) as operator_drain, \
                  patch('packages.application.operator_warehouse_documents.reconcile',return_value={}) as operator_reconcile, \
+                 patch('packages.application.operator_fulfillment_services.reconcile',wraps=fulfillment_receipts.reconcile) as fulfillment_reconcile, \
                  heavy_admitted(root, operation='cycle'):
                 proof=entry._cycle_warehouse(store,receipt,{'fbs_generation':'fbs','fbs_digest':'fbs-digest'})
             self.assertEqual(proof.versions['fbs_book'],'book')
@@ -744,6 +747,7 @@ class BoundWarehouseTests(unittest.TestCase):
             self.assertEqual(refresh.call_count,1)
             publication_read.assert_called_once_with(entry.runtime)
             operator_drain.assert_called_once_with(entry.runtime)
+            fulfillment_reconcile.assert_called_once_with(entry.runtime,seller_id='canonical',now=NOW)
             operator_reconcile.assert_called_once_with(entry.runtime,request_ids=['receipt-1'],
                 finance_receipt={'status':'applied','fingerprint':'weekly-cost','accounting_version':'book',
                     'accounting_version_before':'book','accounting_version_unchanged':True},

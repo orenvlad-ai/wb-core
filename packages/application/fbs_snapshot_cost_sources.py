@@ -180,6 +180,7 @@ def _documents(conn: sqlite3.Connection) -> list[dict]:
         own_expenses = by_expense.get(identity, [])
         own_movements = by_movement.get(document["operation_id"], [])
         posted = _verified_manifest(document)
+        _verify_typed_lines(document, posted, own_lines, own_movements)
         # Read the authoritative scope and total, not the old allocation's
         # nonzero SKU set or old pool split. Both-pool scope can have allocated
         # lines in only one pool in the legacy state.
@@ -202,7 +203,7 @@ def _documents(conn: sqlite3.Connection) -> list[dict]:
                       "events": _events(document, own_lines, own_expenses, own_movements),
                       "cost_document": {
                           "contract": "ff_pool_posted_cost_document_v1",
-                          "domain": domain, "lines": own_lines, "expense_lines": own_expenses,
+                          "domain": domain, "document_role":posted.get("document_role"), "lines": own_lines, "expense_lines": own_expenses,
                           "relations": by_relation.get(identity, []), "movements": own_movements,
                           "posted_manifest_sha256": document["posted_manifest_sha256"],
                       }}
@@ -210,6 +211,40 @@ def _documents(conn: sqlite3.Connection) -> list[dict]:
     if (set(by_id) | set(by_expense)) - seen:
         raise ValueError("orphan_document_lines")
     return result
+
+
+def _verify_typed_lines(document, posted, lines, movements):
+    """The native saved bytes own W2 operands, before normalized hashing."""
+    kind = document['document_kind']
+    if kind not in {'correction', 'inventory_surplus', 'inventory_shortage', 'storno', 'late_expense', 'pool_inventory'} and posted.get('document_role')!='china_discrepancy':
+        return
+    saved = posted.get('lines')
+    # Existing zero-effect opening inventory manifests predate typed lines.
+    if saved is None and kind == 'pool_inventory' and not movements:
+        return
+    if not isinstance(saved, list) or len(saved) != len(lines):
+        raise ValueError('typed_document_saved_lines_missing')
+    for ordinal, (canonical, line) in enumerate(zip(saved, lines), 1):
+        if (line['line_no'] != ordinal
+                or any(canonical.get(k) != line[k] for k in ('line_role', 'facility_id', 'pool', 'nm_id', 'quantity'))
+                or any(_money(canonical[k]) != _money(line[k]) for k in ('capital_rub', 'expense_rub'))
+                or canonical.get('metadata') != json.loads(line['metadata_json'])):
+            raise ValueError('typed_document_saved_line_mismatch')
+    if kind == 'correction':
+        from packages.application.fbs_document_cost import correction_operands
+        correction_operands({'lines': lines, 'movements': movements})
+        target = posted['domain'].get('target_document_id')
+        if not target or any(json.loads(m['metadata_json']).get('target_document_id') != target for m in movements):
+            raise ValueError('correction_saved_target_mismatch')
+    elif kind in {'inventory_surplus', 'inventory_shortage'}:
+        sign = 1 if kind == 'inventory_surplus' else -1
+        if len(lines) != len(movements):
+            raise ValueError('inventory_child_movement_missing')
+        for line, movement in zip(lines, movements):
+            if (any(line[k] != movement[k] for k in ('line_no', 'facility_id', 'pool', 'nm_id'))
+                    or Decimal(str(movement['quantity_delta'])) != sign * _quantity(line['quantity'])
+                    or Decimal(str(movement['capital_delta_rub'])) != sign * _money(line['capital_rub'])):
+                raise ValueError('inventory_child_movement_mismatch')
 
 
 def _verified_manifest(document: dict) -> dict:

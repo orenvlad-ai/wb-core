@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import closing
+
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,6 +25,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sqlite_contention import connect_sqlite
 from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
 from packages.application import fulfillment_recalc_intents as recalc_intents
+from packages.application import operator_fulfillment_services as operator_receipts
 
 
 CONTRACT_NAME = "sheet_vitrina_v1_fulfillment_services"
@@ -141,8 +144,10 @@ class FulfillmentServicesBlock:
         *,
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
+        request_id: str = "", request_scope: str = "", actor: str = "",
     ) -> dict[str, Any]:
         del uploaded_content_type
+        request_id, request_scope = operator_receipts.request_identity(request_id, request_scope)
         if not workbook_bytes:
             raise ValueError("Fulfillment XLSX file is empty")
         filename = _safe_filename(uploaded_filename or "fulfillment-services.xlsx")
@@ -153,12 +158,21 @@ class FulfillmentServicesBlock:
         file_sha256 = hashlib.sha256(workbook_bytes).hexdigest()
         with self._connect() as conn:
             self._ensure_service_schema(conn)
+            bound = operator_receipts.request_ref(conn, request_id=request_id, request_scope=request_scope,
+                action="upload", payload_digest=file_sha256)
+            if bound is not None:
+                return operator_receipts.read_request(self.runtime.db_path, request_id, request_scope=request_scope)
             existing = conn.execute(f"SELECT * FROM {UPLOADS_TABLE} WHERE file_sha256=? AND validation_status='ok' AND deleted_at IS NULL ORDER BY created_at,upload_id LIMIT 1", (file_sha256,)).fetchone()
-            if existing is not None:
+            if existing is not None and not request_id:
                 recalculation = recalc_intents.read_request(conn, existing["upload_id"], recalc_intents.source_revision(existing))
                 if recalculation.get("durable_saved"):
-                    result = self.get_upload(existing["upload_id"])
+                    try:
+                        result = self.get_upload(existing["upload_id"])
+                    except Exception as exc:
+                        result = {"upload": {"upload_id": existing["upload_id"], "validation_status": "ok"},
+                                  "status": "pending", "readback_error": str(exc).replace("\n", " ")[:300]}
                     result.update(operation_applied=True, durable_saved=True, duplicate=True)
+                    self._attach_acceptance(result, existing["upload_id"], action="upload", source_revision=existing["file_sha256"])
                     return result
         stored_file_path = self._store_uploaded_file(upload_id, filename, workbook_bytes)
         parsed_lines, parse_errors = self._parse_workbook(workbook_bytes)
@@ -205,6 +219,7 @@ class FulfillmentServicesBlock:
             created_at=now,
             updated_at=now,
             lines=validated_lines,
+            request_id=request_id, request_scope=request_scope, actor=actor,
         )
         if saved_id != upload_id:
             # A competing identical upload won; these unreferenced candidates
@@ -220,14 +235,16 @@ class FulfillmentServicesBlock:
         except Exception as exc:  # The committed source must not be reported unsaved.
             result = {"upload": {"upload_id": saved_id, "validation_status": validation_status}, "validation_status": validation_status,
                 "status": "pending", "readback_error": str(exc).replace("\n", " ")[:300]}
-        result.update(operation_applied=True, durable_saved=True, duplicate=saved_id != upload_id)
+        saved_status = (result.get("upload") or {}).get("validation_status") or validation_status
+        result.update(operation_applied=True, durable_saved=saved_status == VALIDATION_OK, duplicate=saved_id != upload_id,
+                      request_id=request_id)
         result["warehouse_targeted_recalculation"] = recalculation
+        self._attach_acceptance(result, saved_id, action="upload", source_revision=file_sha256)
         return result
 
     def list_uploads(self, *, limit: int = 20) -> dict[str, Any]:
         normalized_limit = max(1, min(int(limit or 20), 100))
-        with self._connect() as conn:
-            self._ensure_service_schema(conn)
+        with closing(operator_receipts.readonly(self.runtime.db_path)) as conn:
             rows = conn.execute(
                 f"""
                 SELECT *
@@ -238,7 +255,7 @@ class FulfillmentServicesBlock:
                 LIMIT ?
                 """,
                 (VALIDATION_OK, normalized_limit),
-            ).fetchall()
+            ).fetchall() if operator_receipts._exists(conn, UPLOADS_TABLE) else []
         uploads = [_upload_row_to_dict(row, include_links=True) for row in rows]
         latest = uploads[0] if uploads else None
         return {
@@ -254,12 +271,23 @@ class FulfillmentServicesBlock:
             },
         }
 
+    def _attach_acceptance(self, result: dict[str, Any], upload_id: str, *, action: str, source_revision: str) -> None:
+        # Called after durable source commit. A lost receipt read is not rejection.
+        try:
+            result["acceptance"] = operator_receipts.read_source_acceptance(
+                self.runtime.db_path, upload_id, action=action, source_revision=source_revision)
+        except Exception as exc:
+            result["acceptance"] = None
+            result["acceptance_readback_pending"] = True
+            result["acceptance_readback_error_code"] = type(exc).__name__
+
     def get_upload(self, upload_id: str) -> dict[str, Any]:
         normalized_id = str(upload_id or "").strip()
         if not normalized_id:
             raise ValueError("upload_id is required")
-        with self._connect() as conn:
-            self._ensure_service_schema(conn)
+        with closing(operator_receipts.readonly(self.runtime.db_path)) as conn:
+            if not operator_receipts._exists(conn, UPLOADS_TABLE):
+                raise ValueError("Fulfillment upload not found")
             upload_row = conn.execute(
                 f"SELECT * FROM {UPLOADS_TABLE} WHERE upload_id = ? AND deleted_at IS NULL",
                 (normalized_id,),
@@ -283,6 +311,8 @@ class FulfillmentServicesBlock:
             "contract_version": CONTRACT_VERSION,
             "upload": upload,
             "warehouse_targeted_recalculation": recalculation,
+            "acceptance": operator_receipts.read_source_acceptance(self.runtime.db_path,
+                normalized_id, action="upload", source_revision=upload_row["file_sha256"]),
             "lines": lines,
             "validation_status": upload["validation_status"],
             "row_errors": [
@@ -323,10 +353,12 @@ class FulfillmentServicesBlock:
         *,
         deleted_by: str = "",
         delete_reason: str = "operator_delete",
+        request_id: str = "", request_scope: str = "",
     ) -> dict[str, Any]:
         normalized_id = str(upload_id or "").strip()
         if not normalized_id:
             raise ValueError("upload_id is required")
+        request_id, request_scope = operator_receipts.request_identity(request_id, request_scope)
         now = self.timestamp_factory()
         pdf_file_path = ""
         already_deleted = False
@@ -336,6 +368,10 @@ class FulfillmentServicesBlock:
             self._ensure_service_schema(conn)
             self._ensure_recalculation_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
+            bound = operator_receipts.request_ref(conn, request_id=request_id, request_scope=request_scope,
+                action="delete", payload_digest=normalized_id)
+            if bound is not None:
+                return operator_receipts.read_request(self.runtime.db_path, request_id, request_scope=request_scope)
             upload_row = conn.execute(
                 f"SELECT * FROM {UPLOADS_TABLE} WHERE upload_id = ?",
                 (normalized_id,),
@@ -377,16 +413,21 @@ class FulfillmentServicesBlock:
                     ),
                 )
             recalculation = recalc_intents.capture_request(conn, normalized_id, requested_at=now)
+            if not already_deleted:
+                operator_receipts.record_source(conn, normalized_id, action="delete")
+            operator_receipts.bind_request(conn, request_id=request_id, request_scope=request_scope, action="delete",
+                payload_digest=normalized_id, upload_id=normalized_id)
             conn.commit()
         if pdf_file_path:
             try:
                 self._runtime_path(pdf_file_path).unlink(missing_ok=True)
             except OSError:
                 pass
-        return {
+        result = {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "upload_id": normalized_id,
+            "request_id": request_id,
             "deleted": True,
             "operation_applied": True,
             "durable_saved": True,
@@ -398,6 +439,8 @@ class FulfillmentServicesBlock:
             "pdf_available": False,
             "message": "Документ удалён. Данные услуг ФФ удалены из overlay WB-поставок.",
         }
+        self._attach_acceptance(result, normalized_id, action="delete", source_revision="deleted:" + deleted_at)
+        return result
 
     def approved_overlay_by_supply(self) -> dict[str, dict[str, Any]]:
         with self._connect() as conn:
@@ -472,6 +515,8 @@ class FulfillmentServicesBlock:
             workbook = load_workbook(BytesIO(workbook_bytes), data_only=True)
         except Exception as exc:  # pragma: no cover - openpyxl owns exact exception types
             return [], [f"XLSX parse failed: {exc}"]
+        if not workbook.worksheets:
+            return [], ["XLSX does not contain a worksheet with supply detail rows"]
         sheet = workbook.worksheets[0]
         header_row, columns = _detect_header_row(sheet)
         if header_row <= 0:
@@ -630,6 +675,7 @@ class FulfillmentServicesBlock:
         created_at: str,
         updated_at: str,
         lines: list[_ParsedLine],
+        request_id: str = "", request_scope: str = "", actor: str = "",
     ) -> tuple[str, dict[str, Any]]:
         with warehouse_functional_write_lock(
             self.runtime.runtime_dir, timeout_seconds=5
@@ -637,12 +683,19 @@ class FulfillmentServicesBlock:
             self._ensure_service_schema(conn)
             self._ensure_recalculation_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
+            bound = operator_receipts.request_ref(conn, request_id=request_id, request_scope=request_scope,
+                action="upload", payload_digest=file_sha256)
+            if bound is not None:
+                conn.commit()
+                return bound["upload_id"], recalc_intents.read_request(conn, bound["upload_id"], file_sha256)
             # The exact accepted file is the document identity for a retry.
             # A different file or a re-upload after deletion remains a new source.
             prior = conn.execute(f"SELECT upload_id FROM {UPLOADS_TABLE} WHERE file_sha256=? AND validation_status='ok' AND deleted_at IS NULL ORDER BY created_at,upload_id LIMIT 1", (file_sha256,)).fetchone()
             if prior is not None:
                 existing_id = str(prior["upload_id"])
                 recalculation = recalc_intents.capture_request(conn, existing_id, requested_at=updated_at)
+                operator_receipts.bind_request(conn, request_id=request_id, request_scope=request_scope, action="upload",
+                    payload_digest=file_sha256, upload_id=existing_id)
                 conn.commit()
                 return existing_id, recalculation
             conn.execute(
@@ -726,6 +779,9 @@ class FulfillmentServicesBlock:
                 [_line_insert_values(upload_id, line, created_at) for line in lines],
             )
             recalculation = recalc_intents.capture_request(conn, upload_id, requested_at=updated_at)
+            operator_receipts.record_source(conn, upload_id, action="upload", actor=actor)
+            operator_receipts.bind_request(conn, request_id=request_id, request_scope=request_scope, action="upload",
+                payload_digest=file_sha256, upload_id=upload_id)
             conn.commit()
             return upload_id, recalculation
 
@@ -734,6 +790,7 @@ class FulfillmentServicesBlock:
         from packages.application.warehouse_functional import ensure_warehouse_functional_schema
         ensure_warehouse_functional_schema(conn)
         recalc_intents.ensure_schema(conn)
+        operator_receipts.ensure_schema(conn)
         conn.commit()
 
     def _ensure_service_schema(self, conn: sqlite3.Connection) -> None:
