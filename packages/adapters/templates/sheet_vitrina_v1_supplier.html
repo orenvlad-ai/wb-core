@@ -4425,6 +4425,8 @@
         const context = {shipmentId:currentShipment.shipment_id, requestId:"", confirmSent:false, busy:false, posted:false, source:null};
         guidedContext = context;
         guidedAcceptanceModal.hidden = false;
+        guidedAcceptanceFields.hidden = false;
+        guidedAcceptanceConfirm.hidden = false;
         guidedAcceptanceDate.value = config.business_today || new Date().toISOString().slice(0, 10);
         guidedAcceptanceDate.max = config.business_today || "";
         guidedAcceptanceMode.value = "FBS";
@@ -4519,6 +4521,28 @@
 
       async function renderGuidedStatus(context, status) {
         if (guidedContext !== context) return;
+        const acceptance = status && status.acceptance;
+        const sameRequest = status && (status.request_id === context.requestId || status.client_request_id === context.requestId);
+        if (sameRequest && window.OperatorAcceptance.acceptedOperation(acceptance) && acceptance.operation_id === status.request_id && acceptance.domain === 'ff_pool_document') {
+          context.posted = true;
+          setGuidedBusy(context, false);
+          guidedAcceptanceFields.hidden = true;
+          guidedAcceptanceConfirm.hidden = true;
+          window.OperatorAcceptance.renderReceipt(guidedAcceptanceStatus, acceptance, {onClose:function(){guidedAcceptanceModal.hidden=true;guidedContext=null;}});
+          context.requestId=status.request_id;context.confirmSent=true;
+          if (acceptance.physical_applied) window.localStorage.removeItem(guidedStorageKey(context.shipmentId));
+          else saveGuidedPending(context);
+          window.localStorage.removeItem(guidedStorageKey(context.shipmentId) + ':draft');
+          if (acceptance.physical_applied && currentShipment && currentShipment.shipment_id === context.shipmentId) {
+            try { currentShipment=await fetchJson(shipmentsPath+'/'+encodeURIComponent(context.shipmentId));renderCard();await loadRegistry(); } catch (_) {}
+          }
+          return;
+        }
+        if ((!sameRequest && !(status.state === "not_found" && !context.confirmSent)) || acceptance) {
+          setGuidedBusy(context,false,'Не удалось подтвердить сохранение этой операции. Повторная отправка не выполняется.');
+          guidedAcceptanceConfirm.textContent='Проверить результат';
+          return;
+        }
         const posted = Boolean(status.document && status.document.document_id);
         context.posted = posted;
         setGuidedBusy(context, false);

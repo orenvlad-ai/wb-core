@@ -516,6 +516,8 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
 
     from packages.application.operator_ff_overhead import ensure_schema
     ensure_schema(conn)
+    from packages.application.operator_warehouse_documents import ensure_schema as ensure_operator_warehouse_schema
+    ensure_operator_warehouse_schema(conn)
     from packages.application.warehouse_domain_write_guard import EVENTS_TABLE, install_warehouse_domain_table_guards
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (EVENTS_TABLE,)).fetchone():
         install_warehouse_domain_table_guards(conn)
@@ -584,12 +586,6 @@ class FfPoolDocumentService:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             ensure_ff_pool_document_schema(conn)
-            now = self._now()
-            conn.execute(
-                f"UPDATE {REQUESTS_TABLE} SET state='accepted',started_at='',updated_at=? "
-                "WHERE state='processing'",
-                (now,),
-            )
             conn.commit()
         if resume:
             self.resume_incomplete()
@@ -1826,6 +1822,8 @@ class FfPoolDocumentService:
                 if str(current_request["state"]) in {"posted", "replay", "complete"}:
                     conn.rollback()
                     return None
+                from packages.application.operator_warehouse_documents import assert_accepted_epoch
+                assert_accepted_epoch(conn,current_request)
                 if _writer_epoch(conn) != epoch or _balance_digest(conn, plan["balance_keys"]) != before_digest:
                     conn.rollback()
                     raise FfPoolDocumentError(
@@ -1901,6 +1899,8 @@ class FfPoolDocumentService:
                         )
                 posted_at = self._now()
                 if guided_acceptance:
+                    from packages.application.operator_warehouse_documents import assert_supplier_inputs
+                    assert_supplier_inputs(conn,current_request)
                     _apply_guided_acceptance_legacy(
                         conn,
                         request=current_request,
@@ -1983,6 +1983,9 @@ class FfPoolDocumentService:
         return None
 
     def _finalize_posted(self, request_id: str) -> dict[str, Any]:
+        from packages.application.operator_warehouse_documents import may_finalize
+        if not may_finalize(self.db_path, self.runtime_dir, request_id):
+            return self.status(request_id=request_id)
         with _connect(self.db_path) as conn:
             request = conn.execute(
                 f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?",
@@ -2058,7 +2061,9 @@ class FfPoolDocumentService:
                 self._event(conn, request_id=request_id, stage="replay", status="running")
             conn.commit()
         if _is_guided_china_request(request):
-            self._replay_guided_acceptance(request)
+            from packages.application.operator_warehouse_documents import read_acceptance
+            if read_acceptance(self.db_path, request_id) is None:
+                self._replay_guided_acceptance(request)
         elif self._guided_recovery_target(request):
             self._replay_guided_recovery(request)
         readback = self._verify_posted_readback(request_id)
@@ -2186,6 +2191,11 @@ class FfPoolDocumentService:
                     "Guided acceptance replay evidence conflicts with immutable state",
                 )
             conn.commit()
+        from packages.application.operator_warehouse_documents import read_acceptance
+        if read_acceptance(self.db_path, str(request["request_id"])) is not None:
+            # The physical commit already bound the exact native demand.
+            # Do not coalesce it with another supplier-preparation revision.
+            return
         enqueue_warehouse_targeted_recalculation(
             runtime=runtime,
             stable_source_id=f"supplier_shipment:{shipment_id}",
@@ -2358,6 +2368,7 @@ def _build_posting_plan(
     request: Mapping[str, Any],
     manifest: Mapping[str, Any],
     epoch: int,
+    intrinsic_only: bool = False,
 ) -> dict[str, Any]:
     kind = str(request["document_kind"])
     builders = {
@@ -2383,7 +2394,8 @@ def _build_posting_plan(
             "Document kind cannot be posted directly",
             details={"document_kind": kind},
         )
-    plan = builder(conn, request=request, manifest=manifest, epoch=epoch)
+    kwargs = {"intrinsic_only": True} if intrinsic_only and kind == "china_acceptance" else {}
+    plan = builder(conn, request=request, manifest=manifest, epoch=epoch, **kwargs)
     plan["balance_keys"] = sorted(
         {
             (str(item["facility_id"]), str(item["pool"]), int(item["nm_id"]))
@@ -3386,6 +3398,7 @@ def _plan_china_acceptance(
     request: Mapping[str, Any],
     manifest: Mapping[str, Any],
     epoch: int,
+    intrinsic_only: bool = False,
 ) -> dict[str, Any]:
     facility_id = _facility(conn, str(manifest.get("facility_id") or ""), require_active=True)
     allocations = list(manifest.get("allocations") or [])
@@ -3566,7 +3579,7 @@ def _plan_china_acceptance(
             )
         )
     guided_before: dict[str, Any] = {}
-    if _is_guided_china_request(request):
+    if _is_guided_china_request(request) and not intrinsic_only:
         shipment = conn.execute(
             """SELECT shipment_id,actual_ff_acceptance_date,order_status,updated_at
                FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?""",
@@ -5679,6 +5692,10 @@ def _apply_plan(
     posted_at: str,
 ) -> None:
     _require_utc(posted_at)
+    from packages.application.operator_warehouse_documents import KINDS, assert_effect, assert_reservations
+    if str(request["document_kind"]) in KINDS:
+        assert_effect(conn, request, plan)
+        assert_reservations(conn, plan=plan, epoch=epoch)
     manifest_sha = _fingerprint(plan["posted_manifest"])
     for document in plan["documents"]:
         document_id = str(document["document_id"])
@@ -5858,6 +5875,8 @@ def _apply_plan(
             plan=plan,
             posted_at=posted_at,
         )
+    from packages.application.operator_warehouse_documents import enqueue_posted
+    enqueue_posted(conn, request=request, plan=plan, posted_at=posted_at)
 
 
 def _enqueue_pool_overhead_publication(

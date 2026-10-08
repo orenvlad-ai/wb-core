@@ -6841,8 +6841,8 @@ class RegistryUploadHttpEntrypoint:
             content_type=content_type,
         )
 
-    def handle_ff_pool_confirm_request(self, request_id: str) -> dict[str, Any]:
-        return self.ff_pool_surface.confirm_document(request_id)
+    def handle_ff_pool_confirm_request(self, request_id: str, *, actor: str | None = None) -> dict[str, Any]:
+        return self.ff_pool_surface.confirm_document(request_id, actor=actor)
 
     def handle_ff_pool_china_template_request(
         self, shipment_id: str, *, facility_id: str = ""
@@ -7324,6 +7324,8 @@ class RegistryUploadHttpEntrypoint:
             )
             from packages.application.operator_ff_overhead import drain as drain_overheads, reconcile as reconcile_overheads
             drain_overheads(self.runtime.db_path, self.runtime.runtime_dir)
+            from packages.application.operator_warehouse_documents import drain as drain_operator_documents, reconcile as reconcile_operator_documents
+            operator_documents = drain_operator_documents(self.runtime)
             plan = run_phase(
                 "official_complete_wb_stocks",
                 self.warehouse_functional_block.build_sync_plan,
@@ -7359,9 +7361,16 @@ class RegistryUploadHttpEntrypoint:
                         verified_backup=economics_backup,
                     )
                 )
-                finance_cost_recalculation = (
-                    self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
-                )
+                from packages.application.fbs_accounting_runtime import load as load_accounting_book, current_publication_receipt
+                economics_publication = {**economics_publication,
+                    "accounting_publication": current_publication_receipt(self.runtime)}
+                finance_accounting_before = load_accounting_book(self.runtime.runtime_dir)[1]
+                finance_cost_recalculation = self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
+                finance_accounting_after = load_accounting_book(self.runtime.runtime_dir)[1]
+                finance_cost_recalculation = {**finance_cost_recalculation,
+                    'accounting_version': finance_accounting_after,
+                    'accounting_version_before': finance_accounting_before,
+                    'accounting_version_unchanged': finance_accounting_before == finance_accounting_after}
                 transit_cost_replays = (
                     self.runtime.finalize_completed_wb_transit_cost_recalculations(
                         completed_at=self.activated_at_factory(),
@@ -7376,6 +7385,9 @@ class RegistryUploadHttpEntrypoint:
 
             dependent = run_phase("dependent_replay_economics", dependent_replay)
             reconcile_overheads(self.runtime)
+            reconcile_operator_documents(self.runtime,request_ids=operator_documents['request_ids'],
+                finance_receipt=dict(dependent.get('finance_cost_recalculation') or {}),
+                economics_receipt=dict(dependent.get('economics_publication') or {}))
             sync = dict(supply_payload.get("sync") or {})
             proxy_recalculation = dict(dependent.get("proxy_recalculation") or {})
             economics_publication = dict(dependent.get("economics_publication") or {})

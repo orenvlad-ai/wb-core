@@ -949,7 +949,14 @@ def _document_workflow(surface: FfPoolSurface, facilities: list[dict[str, object
     assert request["state"] == "ready" and request["confirm_allowed"]
     canonical = str(request["request_id"])
     confirmed = surface.confirm_document(canonical)
-    assert confirmed["state"] == "complete"
+    assert confirmed['acceptance']['durable_saved'] and confirmed['acceptance']['physical_applied']
+    from packages.application.operator_warehouse_documents import reconcile
+    from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
+    from types import SimpleNamespace
+    runtime=SimpleNamespace(db_path=surface.db_path,runtime_dir=surface.runtime_dir)
+    with warehouse_functional_job_lock(surface.runtime_dir):
+        reconcile(runtime,request_ids=[canonical],finance_receipt={})
+    assert surface.request_status(canonical)['acceptance']['state']=='completed'
     repeat = surface.accept_document_preview(
         {
             "request_id": "fixture:transfer:root",

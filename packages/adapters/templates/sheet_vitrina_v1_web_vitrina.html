@@ -5743,32 +5743,6 @@
     .ff-pool-list-item small { display: block; margin-top: 3px; color: var(--muted); }
     .ff-pool-metrics { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted-strong); font-size: 12px; }
     .ff-pool-details { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; }
-    /* Operator acceptance and journal are scoped to the FF document modal. */
-    .ff-operation-receipt { max-width: 660px; margin: 8px auto; padding: 24px; text-align: center; }
-    .ff-operation-check { width: 60px; height: 60px; display: grid; place-items: center; margin: 0 auto 14px; border-radius: 50%; background: var(--success-text); color: var(--panel-bg); font-size: 36px; line-height: 1; }
-    .ff-operation-receipt h3 { margin: 0; color: var(--success-text); font-size: 25px; font-weight: 600; }
-    .ff-operation-receipt > p { margin: 8px 0 0; }
-    .ff-operation-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 16px; margin: 22px 0; text-align: left; border-radius: 10px; background: var(--panel-subtle); }
-    .ff-operation-summary div { min-width: 0; }
-    .ff-operation-summary dt { color: var(--muted); font-size: 12px; }
-    .ff-operation-summary dd { margin: 4px 0 0; overflow-wrap: anywhere; }
-    .ff-operation-actions { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 14px; margin-top: 20px; }
-    .ff-operation-link { padding: 8px 2px; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
-    .ff-operation-status { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
-    .ff-operation-status[data-state="processed"] { color: var(--success-text); }
-    .ff-operation-status[data-state="delayed"], .ff-operation-status[data-state="needs_attention"] { color: var(--warning-text); }
-    .ff-operation-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; margin-top: 10px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; }
-    .ff-operation-row strong, .ff-operation-row p { overflow-wrap: anywhere; }
-    .ff-operation-row p { margin: 5px 0; }
-    .ff-operation-accepted { color: var(--success-text); font-size: 13px; }
-    .ff-operation-empty { padding: 24px 0; text-align: center; color: var(--muted); }
-    .ff-operation-detail { padding: 18px; margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; }
-    @media (max-width: 530px) {
-      .ff-operation-receipt { padding: 16px 4px; }
-      .ff-operation-row { grid-template-columns: minmax(0, 1fr); }
-      .ff-operation-row .button { justify-self: start; }
-      .ff-operation-summary { grid-template-columns: minmax(0, 1fr); }
-    }
     .ff-pool-steps { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
     .ff-pool-step { color: var(--muted); font-size: 12px; }
     .ff-pool-step[data-status="complete"] { color: var(--success-text); }
@@ -28905,7 +28879,7 @@
       state.busy = true; nodes.preview.disabled = true; nodes.previewDetail.hidden = false; setAlert(nodes.previewDetail, "Проверяем и сохраняем запрос…", "neutral");
       const kind = nodes.kind.value; const generation = ++state.workflowGeneration; const requestId = "ffui_" + Date.now() + "_" + Math.random().toString(16).slice(2,10);
       try {
-        const unresolved = kind === "pool_overhead" && savedOverheadConfirmation();
+        const unresolved = durableKind(kind) && savedOverheadConfirmation();
         if (unresolved) {
           nodes.requestId.value = unresolved;
           activateTab("workflow", false);
@@ -28955,8 +28929,16 @@
     function requestPayloadMatches(payload, id) {
       return Boolean(payload && payload.request_id && (payload.request_id === id || payload.client_request_id === id || state.requestAliases[id] === payload.request_id));
     }
+    function acceptanceDomainMatches(operation, kind) {
+      if (!operation || typeof operation !== 'object') return false;
+      const direct = operation.domain;
+      const source = operation.source_ref && operation.source_ref.domain;
+      if ((direct !== undefined && direct !== 'ff_pool_document') || (source !== undefined && source !== 'ff_pool_document')) return false;
+      return direct === 'ff_pool_document' || source === 'ff_pool_document' || kind === 'pool_overhead';
+    }
     function acceptedRequest(payload, id) {
-      return requestPayloadMatches(payload, id) && acceptedOperation(payload.acceptance) && payload.acceptance.operation_id === payload.request_id;
+      return requestPayloadMatches(payload, id) && acceptanceDomainMatches(payload.acceptance, payload.document_kind)
+        && window.OperatorAcceptance.acceptedOperation(payload.acceptance) && payload.acceptance.operation_id === payload.request_id;
     }
     async function loadWorkflow() {
       const requestId=nodes.requestId.value.trim(); if(!requestId){setAlert(nodes.workflow,"Введите номер запроса.","error");return;}
@@ -29063,7 +29045,7 @@
     }
     async function loadPreview(id){try{const payload=await api("/requests/"+encodeURIComponent(id)+"/preview?page=1&limit=200");const section=make("section","ff-pool-details");section.appendChild(make("h4","","Предпросмотр: "+(payload.collection||"сводка")));(payload.rows||[]).forEach(function(row){section.appendChild(make("p","ff-pool-note",JSON.stringify(row)));});nodes.workflow.appendChild(section);}catch(error){setAlert(nodes.workflow,error.message,"error");}}
     async function confirmRequest(id, button) {
-      const overhead = state.workflowPayload && state.workflowPayload.document_kind === "pool_overhead";
+      const overhead = state.workflowPayload && durableKind(state.workflowPayload.document_kind);
       if (overhead && state.confirmingOverhead) return;
       button.disabled = true;
       if (!overhead) {
@@ -29090,8 +29072,12 @@
         else await recoverOverheadConfirmation(id);
       } finally { state.confirmingOverhead = ""; }
     }
+    function durableKind(kind) {
+      return ["pool_overhead","china_acceptance","transfer_root","transfer_shipment","transfer_receipt","transfer_loss","transfer_discrepancy","transfer_cancellation","pool_reallocation"].includes(kind);
+    }
     function acceptedOperation(operation) {
-      return Boolean(operation && operation.durable_saved === true && operation.operation_id && operation.request_id === operation.operation_id && operation.accepted_at && operationStates[operation.state]);
+      return acceptanceDomainMatches(operation, operation && (operation.document_kind || operation.kind))
+        && window.OperatorAcceptance.acceptedOperation(operation);
     }
     function savedOverheadConfirmation() {
       try { return localStorage.getItem(overheadRecoveryKey) || ""; } catch (_) { return ""; }
@@ -29101,9 +29087,8 @@
       try { localStorage.setItem(overheadRecoveryKey, id); localStorage.setItem(requestStorageKey, id); } catch (_) {}
     }
     function operationStatus(operation) {
-      const status = make("span", "ff-operation-status", operationStates[operation.state] || "Статус обработки уточняется");
-      status.dataset.state = operation.state === "completed" ? "processed" : operation.state;
-      return status;
+      const box = make("div"); window.OperatorAcceptance.renderState(box, operation);
+      return box.firstElementChild;
     }
     function operationMoney(value) {
       if (value === null || value === undefined || value === "") return "—";
@@ -29119,6 +29104,10 @@
     }
     function operationSummary(operation) {
       const data = operation.summary || {}, summary = make("dl", "ff-operation-summary");
+      if (Array.isArray(operation.fields)) {
+        operation.fields.forEach(function(pair){ const row=make("div"); row.append(make("dt","",pair.label),make("dd","",pair.value)); summary.appendChild(row); });
+        return summary;
+      }
       const pairs = [["Склад", data.facility_name || "ФФ"], ["Сумма", operationMoney(data.amount_rub)],
         ["Сегмент", data.scope === "both" ? "FBS + FBO" : (data.scope || "—")], ["Дата документа", operationDate(operation.business_date)],
         ["Категория", data.category_label_ru || "Накладные расходы"], ["Основание", data.source_mode === "payment_order_pdf" ? "Платёжное поручение PDF" : "Ручной ввод"]];
@@ -29137,14 +29126,9 @@
       try { if (savedOverheadConfirmation() === operation.operation_id || state.requestAliases[savedOverheadConfirmation()] === operation.operation_id) localStorage.removeItem(overheadRecoveryKey); } catch (_) {}
       nodes.statusToolbar.hidden = true;
       clear(nodes.workflow); nodes.workflow.hidden = false;
-      const receipt = make("section", "ff-operation-receipt"); receipt.dataset.ffOperationReceipt = operation.operation_id;
-      receipt.setAttribute("role", "status"); receipt.setAttribute("tabindex", "-1");
-      const check = make("span", "ff-operation-check", "✓"); check.setAttribute("aria-hidden", "true");
-      receipt.append(check, make("h3", "", "Принято"), make("p", "", "Документ сохранён."), operationSummary(operation));
-      const actions = make("div", "ff-operation-actions"), close = make("button", "button primary", "Закрыть");
-      close.type = "button"; close.addEventListener("click", closeModal);
-      actions.append(close, operationJournalLink(operation)); receipt.appendChild(actions); nodes.workflow.appendChild(receipt);
-      if (!modal.hidden && state.activeTab === "workflow") receipt.focus();
+      const view = Object.assign({}, operation);
+      if (!Array.isArray(view.fields)) view.fields=Array.from(operationSummary(view).children).map(function(row){return {label:row.querySelector("dt").textContent,value:row.querySelector("dd").textContent};});
+      window.OperatorAcceptance.renderReceipt(nodes.workflow, view, {onClose:closeModal,onJournal:function(receipt){activateTab("journal");showOperationDetail(receipt.operation_id);}});
     }
     function renderOverheadUnknown(id) {
       nodes.statusToolbar.hidden = true; clear(nodes.workflow); nodes.workflow.hidden = false;
@@ -29168,7 +29152,7 @@
           && readback.workflow_contract === "ff_document_workflow_v1" && readback.status === "ready"
           && readback.request_id === id && typeof readback.confirm_allowed === "boolean"
           && ["ready","blocked","error","not_found"].includes(readback.state)
-          && (readback.document_kind === "pool_overhead" || readback.state === "not_found")
+          && (durableKind(readback.document_kind) || readback.state === "not_found")
           && !readback.acceptance;
         if (!validStatus) { renderOverheadUnknown(id); return; }
         payload = readback;
@@ -29209,7 +29193,7 @@
         operations.forEach(function (operation) {
           const row = make("article", "ff-operation-row"); row.dataset.ffOperationId = operation.operation_id;
           const copy = make("div"), data = operation.summary || {};
-          copy.append(make("strong", "", "Накладные расходы ФФ · " + operationMoney(data.amount_rub)),
+          copy.append(make("strong", "", (operation.title_ru || "Накладные расходы ФФ") + (data.amount_rub != null ? " · " + operationMoney(data.amount_rub) : "")),
             make("p", "ff-pool-note", (data.facility_name || "ФФ") + " · " + operationDate(operation.business_date)),
             make("span", "ff-operation-accepted", "✓ Принято"), operationStatus(operation));
           const detail = make("button", "button ghost", "Подробнее"); detail.type = "button";
@@ -29232,7 +29216,7 @@
         if (!acceptedOperation(operation) || operation.operation_id !== id) throw new Error("acceptance_not_confirmed");
         clear(nodes.journalDetail);
         const section = make("section", "ff-operation-detail"); section.setAttribute("tabindex", "-1"); section.dataset.operationId = id;
-        section.append(make("h3", "", "Накладные расходы ФФ"), make("p", "ff-operation-accepted", "✓ Принято · Документ сохранён."), operationSummary(operation), operationStatus(operation));
+        section.append(make("h3", "", operation.title_ru || "Накладные расходы ФФ"), make("p", "ff-operation-accepted", "✓ Принято · Документ сохранён."), operationSummary(operation), operationStatus(operation));
         const explanation = operation.state === "completed" ? "Связанные расчёты завершены." :
           operation.state === "delayed" || operation.state === "needs_attention" ? "Документ сохранён. Задержка обработки не требует повторной отправки." :
           "Связанные расчёты выполнятся в ближайшем плановом цикле. Обычно — в течение трёх часов; при задержке обработка может занять больше времени.";
@@ -29261,6 +29245,8 @@
       }
     }
     openButton.addEventListener("click", function () { openModal(""); });
+    const linkedOperation = new URLSearchParams(window.location.search).get("operation_id");
+    if (linkedOperation && /^[A-Za-z0-9:_-]{1,160}$/.test(linkedOperation)) openModal().then(function(){activateTab("journal");showOperationDetail(linkedOperation);});
     document.querySelectorAll("[data-ff-pool-open-overhead]").forEach(function(button){ button.addEventListener("click", function(){ openModal("pool_overhead"); }); });
     function closeModal(){state.workflowGeneration += 1;modal.hidden=true;document.body.style.overflow="";if(state.opener&&state.opener.focus)state.opener.focus();}
     document.querySelector("[data-ff-operations-open]").addEventListener("click", async function () { await openModal(""); activateTab("journal"); });

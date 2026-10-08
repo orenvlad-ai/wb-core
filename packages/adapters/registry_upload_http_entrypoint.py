@@ -527,9 +527,10 @@ def _inject_sheet_vitrina_ui_system(template: str) -> str:
     if "</head>" not in template:
         raise ValueError("sheet_vitrina_v1 HTML template must contain </head>")
     css = _sheet_vitrina_ui_system_css()
+    acceptance = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_operator_acceptance.js").read_text(encoding="utf-8")
     return template.replace(
         "</head>",
-        f'  <style {marker}>\n{css}\n  </style>\n</head>',
+        f'  <style {marker}>\n{css}\n  </style>\n<script data-operator-acceptance="v1">\n{acceptance}\n</script>\n</head>',
         1,
     )
 
@@ -5120,7 +5121,7 @@ def _build_handler(
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
-                    from packages.application.operator_ff_overhead import journal, read_acceptance
+                    from packages.application.operator_operations import journal, read_acceptance
                     prefix = "/v1/sheet-vitrina-v1/operations"
                     if parsed.path == prefix:
                         params = {key: values[-1] for key, values in urllib_parse.parse_qs(parsed.query).items()}
@@ -7147,7 +7148,7 @@ def _handle_ff_pool_post(
             raise FfPoolSurfaceError(
                 "explicit_confirmation_required", "Explicit confirm=true is required"
             )
-        return entrypoint.handle_ff_pool_confirm_request(parts[1])
+        return entrypoint.handle_ff_pool_confirm_request(parts[1], actor=actor)
     if (
         len(parts) == 4
         and parts[0] == "wb-warehouses"

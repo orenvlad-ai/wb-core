@@ -100,6 +100,9 @@ def _test_post_and_replay(mode):
         with sqlite3.connect(runtime.db_path) as conn:
             quantities_before=conn.execute(f'SELECT facility_id,pool,nm_id,quantity FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id').fetchall()
         prior_service=FfPoolDocumentService(db_path=runtime.db_path,runtime_dir=runtime.runtime_dir,timestamp_factory=lambda:NOW,resume=False,bootstrap=False)
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_ff_pool_document_requests SET state='accepted' WHERE request_id=?",(overhead['request_id'],))
+        prior_service.process_request(overhead['request_id'])
         prior_posted=prior_service.post(overhead['request_id'],defer_replay=True)
         assert prior_posted['state']=='posted' and prior_posted['document']['document_id'],prior_posted
         assert prior_service.post(overhead['request_id'],defer_replay=True)['document']==prior_posted['document']
@@ -150,19 +153,23 @@ def _test_post_and_replay(mode):
             assert conn.execute('SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_ff_cost_layers WHERE supplier_shipment_id=?',(SHIPMENT,)).fetchone()[0]==0
         # Recreate service as the scheduled warehouse runner does; no browser needed.
         service=FfPoolDocumentService(db_path=runtime.db_path,runtime_dir=runtime.runtime_dir,timestamp_factory=lambda:NOW,resume=False)
-        resumed=service.resume_incomplete()
+        from packages.application.operator_warehouse_documents import drain
+        from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
+        with warehouse_functional_job_lock(runtime.runtime_dir):
+            resumed=drain(runtime,timestamp_factory=lambda:NOW)
         status=surface.request_status(preview['request_id'])
-        assert status['state']=='complete',status
+        assert status['acceptance']['physical_applied'] and status['acceptance']['state']!='completed',status
         with sqlite3.connect(runtime.db_path) as conn:
             layer=conn.execute('SELECT layer_id,accepted_ff_date FROM sheet_vitrina_v1_supplier_ff_cost_layers WHERE supplier_shipment_id=?',(SHIPMENT,)).fetchone()
             assert layer and layer[1]==SOURCE_DAY
             replay=conn.execute('SELECT cost_layer_id FROM sheet_vitrina_v1_ff_guided_acceptance_replays WHERE request_id=?',(preview['request_id'],)).fetchone()
             assert replay[0]==layer[0]
-            queue=conn.execute('SELECT effective_date FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue WHERE stable_source_id=?',(f'supplier_shipment:{SHIPMENT}',)).fetchone()
+            queue=conn.execute('SELECT effective_date FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue WHERE stable_source_id=?',('ff_pool_document:'+posted['document']['document_id'],)).fetchone()
             assert queue[0]==SOURCE_DAY
             assert _history(conn,versions)==history_before
             assert conn.execute('SELECT COUNT(*) FROM sheet_vitrina_v1_ff_stock_operations WHERE source_object_id=?',(SHIPMENT,)).fetchone()[0]==1
-        service.resume_incomplete()
+        with warehouse_functional_job_lock(runtime.runtime_dir):
+            drain(runtime,timestamp_factory=lambda:NOW)
         with sqlite3.connect(runtime.db_path) as conn:
             assert conn.execute('SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_ff_cost_layers WHERE supplier_shipment_id=?',(SHIPMENT,)).fetchone()[0]==1
             assert conn.execute(f'SELECT COUNT(*) FROM {DOCUMENTS_TABLE} WHERE document_kind=\'pool_overhead\'').fetchone()[0]==1
@@ -187,12 +194,13 @@ def _test_stale_and_atomic():
                 assert preview['confirm_allowed'],preview
                 if failure=='stale_before_confirm':
                     with sqlite3.connect(runtime.db_path) as conn: conn.execute("UPDATE sheet_vitrina_v1_supplier_shipments SET cny_payment_currency_rub_cost='12000' WHERE shipment_id=?",(SHIPMENT,))
-                    status=surface.confirm_document(preview['request_id'])
-                    assert status['state']=='blocked' and status['error']['code']=='supplier_source_revision_changed',status
+                    try: surface.confirm_document(preview['request_id'])
+                    except FfPoolSurfaceError as exc: assert exc.code=='supplier_source_revision_changed'
+                    else: raise AssertionError('changed source accepted')
                 else:
                     with patch('packages.application.ff_pool_documents.publish_fbs_pool_aggregate_revision',side_effect=WarehouseFbsMaterialError('fixture_publication_failure','injected')):
                         status=surface.confirm_document(preview['request_id'])
-                    assert status['state']=='blocked',status
+                    assert status['acceptance']['durable_saved'] and not status['acceptance']['physical_applied'],status
             with sqlite3.connect(runtime.db_path) as conn:
                 assert conn.execute('SELECT actual_ff_acceptance_date FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?',(SHIPMENT,)).fetchone()[0] is None
                 assert conn.execute(f'SELECT document_id FROM {DOCUMENTS_TABLE} ORDER BY document_id').fetchall()==before_documents, failure

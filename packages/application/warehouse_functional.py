@@ -4687,6 +4687,8 @@ class WarehouseFunctionalBlock:
                         raise WarehouseFunctionalError(
                             "targeted recalculation request drifted before exact publication"
                         )
+                    from packages.application.operator_warehouse_documents import record_functional_publication
+                    record_functional_publication(conn, request=request, version_id=version_id, plan_fingerprint=fingerprint)
                 if business_date_from_timestamp(self.timestamp_factory()) != planned_effective_date:
                     raise WarehouseFunctionalError(
                         "functional plan crossed the canonical business-date boundary before commit"

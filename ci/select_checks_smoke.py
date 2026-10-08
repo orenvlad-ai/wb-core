@@ -344,6 +344,16 @@ def payment_pdf_dependency_checks():
     assert "playwright==1.58.0" in isolated["pip"], isolated
 
 
+def operator_warehouse_dependency_checks():
+    script='apps/operator_warehouse_documents_smoke.py'
+    exists=lambda revision,path: path==script or (select_checks.ROOT/path).is_file()
+    for path in (script,script.replace('_smoke.py','.py')):
+        plan=build_plan_from_paths(pull_request=137,base=BASE,head=HEAD,paths=[path],file_exists=lambda revision,candidate:candidate==path or exists(revision,candidate))
+        verify_plan(plan)
+        assert ['python3',script] in plan['commands'],plan
+        assert 'openpyxl==3.1.5' in plan['pip'],plan
+
+
 def command_dependency_checks():
     # Independent entrypoint expectations: browser dependencies follow commands,
     # not a filename heuristic or an unrelated changed-path group.
@@ -810,6 +820,7 @@ def main() -> None:
     assert workflow.index('>> "$GITHUB_PATH"') < workflow.index('python3 trusted-base/ci/run_checks.py')
     boundary_checks()
     rename_diff_check()
+    operator_warehouse_dependency_checks()
     command_dependency_checks()
     payment_pdf_dependency_checks()
     ads_dependency_checks()

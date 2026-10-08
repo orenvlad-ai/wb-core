@@ -330,7 +330,14 @@ def _run(
                 "business_date":body["business_date"], "preview":{"summary":{"facility_id":body["facility_id"]}},
             }
         else:
-            guided_status = {**guided_status,"state":"posted","confirm_allowed":False,"document":{"document_id":"doc-browser"}}
+            guided_status = {**guided_status,"state":"accepted","confirm_allowed":False,"acceptance":{
+                "operation_id":guided_status["request_id"],"domain":"ff_pool_document",
+                "document_kind":"china_receipt","title_ru":"Приёмка Китай → ФФ",
+                "accepted":True,"accepted_at":"2026-08-01T12:00:00Z","state":"delayed","durable_saved":True,"physical_applied":False,"status":"delayed",
+                "message":"Документ сохранён.","reason_code":"warehouse_busy",
+                "journal_path":"/sheet-vitrina-v1/vitrina?operation_id="+guided_status["request_id"],
+                "fields":[{"label":"Дата","value":guided_status["business_date"]}],
+            }}
             if guided_transport["hang_confirm"]:
                 guided_hanging_routes.append(route)
                 return
@@ -529,7 +536,7 @@ def _run(
     assert not ({"amount_rub", "category", "comment", "payment_evidence"} & set(transfer_manifest))
     assert "Готово к проведению" in page.locator("[data-ff-pool-workflow-detail]").inner_text()
     page.get_by_role("button", name="Подтвердить проведение").click()
-    page.wait_for_function("document.querySelector('[data-ff-pool-workflow-detail] h3')?.textContent.includes('Завершено')")
+    page.wait_for_function("document.querySelector('[data-ff-pool-workflow-detail] h3')?.textContent.includes('Принято')")
     saved_request = page.locator("[data-ff-pool-request-id]").input_value()
     assert saved_request.startswith("ffpdr_")
 
@@ -540,7 +547,7 @@ def _run(
     page.locator('[data-ff-pool-tab="workflow"]').click()
     page.locator("[data-ff-pool-workflow-detail] h3").wait_for(state="visible")
     assert page.locator("[data-ff-pool-request-id]").input_value() == saved_request
-    assert "Завершено" in page.locator("[data-ff-pool-workflow-detail]").inner_text()
+    assert "Документ сохранён." in page.locator("[data-ff-pool-workflow-detail]").inner_text()
 
     page.set_viewport_size({"width": 390, "height": 844})
     page.locator('[data-ff-pool-tab="facilities"]').click()
@@ -619,8 +626,14 @@ def _run(
             guided_transport["hang_confirm"] = True
             page.evaluate("window.__nativeTimer = window.setTimeout; window.setTimeout = (fn, ms, ...args) => window.__nativeTimer(fn, ms === 30000 ? 200 : ms, ...args)")
         page.locator("#guidedAcceptanceConfirm").evaluate("node => { node.click(); node.click(); }")
-        page.wait_for_function("document.querySelector('#guidedAcceptanceStatus').textContent.includes('Документ проведён')")
+        page.wait_for_function("document.querySelector('#guidedAcceptanceStatus').textContent.includes('Документ сохранён.')")
         assert len(guided_mutation_requests) == before_count + 2
+        assert "Принято" in status_node.inner_text()
+        assert "Завершено" not in status_node.inner_text()
+        assert "Документ проведён" not in status_node.inner_text()
+        assert page.locator("#guidedAcceptanceFields").is_hidden()
+        assert page.locator("#guidedAcceptanceConfirm").is_hidden()
+        assert status_node.get_by_role("link", name="Журнал операций").get_attribute("href").startswith("/sheet-vitrina-v1/vitrina?operation_id=")
         assert page.locator("#guidedAcceptanceClose").is_enabled()
         if mode == "FBO":
             guided_transport["hang_confirm"] = False
@@ -634,6 +647,15 @@ def _run(
         assert "остаток нормализации" not in status_node.inner_text()
         assert "выключено" not in status_node.inner_text()
         page.locator("#guidedAcceptanceClose").click()
+        # Reopening the same accepted source is readback only, including pending physical application.
+        page.locator("#guidedAcceptanceButton").click()
+        page.wait_for_function("document.querySelector('#guidedAcceptanceStatus').textContent.includes('Документ сохранён.')")
+        assert len(guided_mutation_requests) == before_count + 2
+        page.locator("#guidedAcceptanceClose").click()
+        # The following mode is an independent synthetic document fixture.
+        page.evaluate("localStorage.clear()")
+        guided_status={"state":"not_found"}
+        guided_transport["lose_confirm"]=False
 
     # Lost preview before server acceptance is resolved by GET, with explicit edit.
     guided_transport["lose_preview"] = True

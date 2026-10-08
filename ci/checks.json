@@ -72,6 +72,12 @@
       "commands": [["python3", "-m", "playwright", "install", "--with-deps", "chromium"]],
       "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     }
+,
+    "operator_warehouse_imports": {
+      "scripts": ["apps/operator_warehouse_documents_smoke.py"],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    }
   },
   "groups": {
     "business_heavy_supplies": {

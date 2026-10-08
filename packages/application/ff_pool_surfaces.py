@@ -998,6 +998,8 @@ class FfPoolSurface:
         state = str(row["state"])
         preview = _json_object(row["preview_manifest_json"])
         request_manifest = _json_object(row["request_payload_json"])
+        if not preview and str(row['document_kind']) == 'china_acceptance':
+            preview = request_manifest
         if str(row["document_kind"]) == "pool_overhead" and not preview:
             preview = request_manifest
         preview_summary = {}
@@ -1133,6 +1135,14 @@ class FfPoolSurface:
                 payload["confirmation_block_reason_ru"] = stale_payment_reason(str(row["business_date"]))
             payload["confirm_allowed"] = (not payload["acceptance"] and bool(feature["writer_effective"])
                 and overhead_date_current and source_confirmable(self.db_path, canonical))
+        from packages.application.operator_warehouse_documents import KINDS, read_acceptance as read_warehouse_acceptance
+        if str(row['document_kind']) in KINDS:
+            payload['acceptance'] = read_warehouse_acceptance(self.db_path,canonical)
+            technical = str(row['error_code']) in {'guided_acceptance_parity_not_current','guided_acceptance_parity_failed',
+                'fbs_material_business_date_drift','fbs_material_active_business_date_stale','preview_processing_failed'}
+            payload['confirm_allowed'] = (not payload['acceptance'] and bool(feature['writer_effective'])
+                and (state == 'ready' or technical)
+                and (row['document_kind'] != 'china_acceptance' or bool((payload.get('guided_acceptance_activation') or {}).get('effective'))))
         return _etagged(payload)
 
     def request_preview(
@@ -1890,7 +1900,7 @@ class FfPoolSurface:
             business_date=business_date,
         )
         try:
-            result = self._service().accept_preview(
+            result = self._service(resume=False, bootstrap=False).accept_preview(
                 identity=identity,
                 document_kind=kind,
                 manifest=dict(manifest),
@@ -2116,7 +2126,7 @@ class FfPoolSurface:
                 source_revision=_guided_request_source_revision(supplier_source_revision=revision, source_sha256=_sha256(source_bytes)),
                 idempotency_epoch=self._preview_epoch(), actor=_actor(actor), business_date=selected_date,
             )
-            result = self._service(resume=False).accept_preview(
+            result = self._service(resume=False, bootstrap=False).accept_preview(
                 identity=identity, document_kind="china_acceptance", manifest=manifest,
                 source_bytes=source_bytes, source_content_type="application/json",
             )
@@ -2156,7 +2166,7 @@ class FfPoolSurface:
             business_date=selected_date,
         )
         try:
-            result = self._service().preview_china_acceptance_workbook(
+            result = self._service(resume=False, bootstrap=False).preview_china_acceptance_workbook(
                 identity=identity,
                 source_bytes=bytes(workbook_bytes),
                 source_filename=str(filename),
@@ -2208,7 +2218,7 @@ class FfPoolSurface:
             raise _surface_from_document_error(exc) from exc
         return self.request_status(str(result.get("request_id") or selected_request))
 
-    def confirm_document(self, request_id: str) -> dict[str, Any]:
+    def confirm_document(self, request_id: str, *, actor: str | None = None) -> dict[str, Any]:
         selected = _identity_token(request_id, field="request_id")
         with self._read() as conn:
             canonical = self._resolve_request(conn, selected)
@@ -2221,6 +2231,29 @@ class FfPoolSurface:
                     runtime_dir=self.runtime_dir, timestamp_factory=self._now)
             except FfPoolDocumentError as exc:
                 raise _surface_from_document_error(exc) from exc
+            return self.request_status(selected)
+        from packages.application.operator_warehouse_documents import KINDS, confirm_source as confirm_warehouse_source, try_post, read_acceptance
+        if intrinsic is not None and intrinsic['document_kind'] in KINDS:
+            if read_acceptance(self.db_path,selected) is not None:
+                return self.request_status(selected)
+            if intrinsic['document_kind']=='china_acceptance':
+                activation=self._guided_acceptance_activation()
+                if not activation['effective']:
+                    raise FfPoolSurfaceError('guided_acceptance_not_activated',activation['reason_ru'],details=activation,http_status=409)
+            self._require_writer()
+            try:
+                confirm_warehouse_source(self, selected, actor=actor)
+            except FfPoolDocumentError as exc:
+                raise _surface_from_document_error(exc) from exc
+            # Only the exact saved source may be attempted. Every technical error
+            # after this boundary remains a saved, readable operation.
+            canonical = read_acceptance(self.db_path,selected)['request_id']
+            try:
+                try_post(self.db_path,self.runtime_dir,canonical,timestamp_factory=self._now)
+            except Exception:
+                # Source commit is the acceptance boundary. A lock-file/transport
+                # failure cannot convert it into a request to resubmit.
+                pass
             return self.request_status(selected)
         status = self.request_status(selected)
         if status.get("document_kind") == "china_acceptance":
@@ -2276,6 +2309,7 @@ class FfPoolSurface:
     def supplier_shipment_source(self, shipment_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
         selected = _identity_token(shipment_id, field="shipment_id")
         with self._read() as conn:
+            conn.execute("BEGIN")
             tables = self._tables(conn)
             required = {"sheet_vitrina_v1_supplier_shipments", "sheet_vitrina_v1_supplier_shipment_lines"}
             if not required.issubset(tables):
@@ -2316,45 +2350,44 @@ class FfPoolSurface:
                    WHERE is_active=1 AND is_hidden=0
                    ORDER BY nm_id,item_id"""
             ).fetchall()
-        lines = _resolve_supplier_lines_with_canonical_nomenclature(
-            source_rows,
-            nomenclature_rows,
-        )
-        try:
-            from packages.application.our_wb_costs import OurWbCostBlock
-            from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+            lines = _resolve_supplier_lines_with_canonical_nomenclature(
+                source_rows,
+                nomenclature_rows,
+            )
+            try:
+                from packages.application.our_wb_costs import OurWbCostBlock
 
-            preview = OurWbCostBlock(
-                runtime=RegistryUploadDbBackedRuntime(runtime_dir=self.runtime_dir),
-                timestamp_factory=self.timestamp_factory,
-            ).preview_supplier_ff_cost_layer(selected)
-        except (TypeError, ValueError) as exc:
-            raise FfPoolSurfaceError(
-                "supplier_capital_unavailable",
-                "China acceptance requires a complete exact supplier cost preview",
-                details={"reason": str(exc)[:240]},
-                http_status=409,
-            ) from exc
-        cost_rows: dict[int, Decimal] = {}
-        for item in preview.get("lines") or []:
-            nm_id = int(item.get("nm_id") or 0)
-            capital = _decimal(item.get("line_total_cost_rub") or 0)
-            if nm_id > 0:
-                cost_rows[nm_id] = cost_rows.get(nm_id, Decimal("0")) + capital
-        for item in lines:
-            nm_id = int(item["nm_id"])
-            total_capital = cost_rows.get(nm_id, Decimal("0"))
-            total_quantity = int(item["quantity"])
-            if total_capital <= 0 or total_quantity <= 0:
+                preview = OurWbCostBlock(
+                    runtime=_PinnedSupplierCostSources(conn),
+                    timestamp_factory=self.timestamp_factory,
+                ).preview_supplier_ff_cost_layer(selected)
+            except (TypeError, ValueError) as exc:
                 raise FfPoolSurfaceError(
                     "supplier_capital_unavailable",
-                    "China acceptance requires positive exact supplier capital for every SKU",
-                    details={"nm_id": nm_id},
+                    "China acceptance requires a complete exact supplier cost preview",
+                    details={"reason": str(exc)[:240]},
                     http_status=409,
-                )
-            item["capital_rub"] = canonical_decimal_text(total_capital * Decimal(int(item["quantity"])) / Decimal(total_quantity))
-        revision = _fingerprint({"shipment": dict(shipment), "lines": lines, "cost_inputs_hash": preview["inputs_hash"]})
-        return dict(shipment), lines, revision
+                ) from exc
+            cost_rows: dict[int, Decimal] = {}
+            for item in preview.get("lines") or []:
+                nm_id = int(item.get("nm_id") or 0)
+                capital = _decimal(item.get("line_total_cost_rub") or 0)
+                if nm_id > 0:
+                    cost_rows[nm_id] = cost_rows.get(nm_id, Decimal("0")) + capital
+            for item in lines:
+                nm_id = int(item["nm_id"])
+                total_capital = cost_rows.get(nm_id, Decimal("0"))
+                total_quantity = int(item["quantity"])
+                if total_capital <= 0 or total_quantity <= 0:
+                    raise FfPoolSurfaceError(
+                        "supplier_capital_unavailable",
+                        "China acceptance requires positive exact supplier capital for every SKU",
+                        details={"nm_id": nm_id},
+                        http_status=409,
+                    )
+                item["capital_rub"] = canonical_decimal_text(total_capital * Decimal(int(item["quantity"])) / Decimal(total_quantity))
+            revision = _fingerprint({"shipment": dict(shipment), "lines": lines, "cost_inputs_hash": preview["inputs_hash"]})
+            return dict(shipment), lines, revision
 
     def inventory_catalog(self) -> tuple[list[dict[str, Any]], str]:
         with self._read() as conn:
@@ -2608,6 +2641,27 @@ class FfPoolSurface:
         if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
             raise FfPoolSurfaceError("invalid_timestamp", "timestamp_factory must return UTC ISO")
         return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class _PinnedSupplierCostSources:
+    """Only read existing parsed supplier operands from one query-only snapshot."""
+    def __init__(self, connection):
+        self.connection=connection
+
+    def load_supplier_shipment(self, shipment_id):
+        from packages.application.registry_upload_db_backed_runtime import _supplier_shipment_header_to_dict, _supplier_shipment_line_to_dict
+        header=self.connection.execute('SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?',(shipment_id,)).fetchone()
+        if header is None: return None
+        lines=self.connection.execute('SELECT * FROM sheet_vitrina_v1_supplier_shipment_lines WHERE shipment_id=? ORDER BY sort_order,line_id',(shipment_id,)).fetchall()
+        return {'header':_supplier_shipment_header_to_dict(header),'lines':[_supplier_shipment_line_to_dict(row) for row in lines]}
+
+    def list_supplier_financial_documents(self, shipment_id):
+        from packages.application.registry_upload_db_backed_runtime import _supplier_financial_document_to_dict
+        return [_supplier_financial_document_to_dict(row) for row in self.connection.execute('SELECT * FROM sheet_vitrina_v1_supplier_financial_documents WHERE supplier_order_id=? ORDER BY document_date DESC,uploaded_at DESC,document_id',(shipment_id,))]
+
+    def list_supplier_financial_expense_lines(self, shipment_id):
+        from packages.application.registry_upload_db_backed_runtime import _supplier_financial_expense_line_to_dict
+        return [_supplier_financial_expense_line_to_dict(row) for row in self.connection.execute('SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines WHERE supplier_order_id=? ORDER BY financial_document_id,sort_order,line_id',(shipment_id,))]
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
