@@ -9,7 +9,7 @@ import time
 
 from packages.application.owned_history_worker_capability import (
     CONTRACT, HistoryDelegationError, child_bootstrap, file_digest, fingerprint,
-    lock_proof, process_generation, read_json, send_message,
+    lock_proof, process_generation, read_json, send_message, history_child_failure,
 )
 
 
@@ -205,9 +205,8 @@ def main():
         try:
             result = execute(cap)
         except Exception as exc:
-            # Exception text could contain business data. Types/codes only.
-            code = str(exc) if isinstance(exc, HistoryDelegationError) else type(exc).__name__
-            result = {"status": "failed", "reason": code[:128]}
+            from packages.application.web_vitrina_history_store import HistoryUnavailable
+            result = history_child_failure(exc, mode=cap["mode"], source_error=isinstance(exc, HistoryUnavailable))
         send_message(channel, {"contract": CONTRACT, "invocation": cap["invocation"], "result": result})
         return 0
     except Exception:

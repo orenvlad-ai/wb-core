@@ -146,6 +146,40 @@ class SharedCostReportTests(unittest.TestCase):
         self.assertEqual(partner["shared_cost"], finance["shared_cost"])
         self.assertEqual(partner["status"], "ready")
 
+    def test_closed_incomplete_same_day_is_per_sku_finance_missing(self):
+        other_nm = int(TARGET_NM) + 1
+        def image(day):
+            result = capture(day.isoformat(), quantity="10", extra=[dict(nm_id=other_nm, facility_id="ff-1", quantity="10")])
+            result["quantity_snapshot"]["rows"][0]["nm_id"] = TARGET_NM
+            result["quantity_snapshot"]["digest"] = fingerprint(result["quantity_snapshot"]["rows"])
+            result["baseline_costs"]["rows"][0]["nm_id"] = TARGET_NM
+            result["baseline_costs"]["rows"].append(dict(nm_id=other_nm, facility_id="ff-1", wac_rub="100",
+                                                        source=dict(version_id="published-1")))
+            result["source_digest"] = fingerprint(result)
+            return result
+        state = initialize_candidate(image(DAY - timedelta(days=1)))
+        state = evaluate_candidate(state, image(DAY))
+        state = close_candidate_period(state, DAY.isoformat(), today=(DAY + timedelta(days=1)).isoformat())
+        source = dict(contract="shared_sku_cost_wb_source_v1", business_date=DAY.isoformat(),
+                      complete=False, authority_complete=True, version_id="closed-partial",
+                      rows=[dict(nm_id=TARGET_NM, status="missing", reason="wb_cost_coverage_incomplete", quantity=1, capital_rub=None),
+                            dict(nm_id=other_nm, status="available", quantity=0, capital_rub="0")])
+        source["source_digest"] = fingerprint(source)
+        period = build_shared_cost_day(state, source, DAY.isoformat())
+        self.assertEqual((period["status"], period["quality"]), ("closed", "incomplete"))
+        snapshot = SharedSkuCostSnapshot([period], effective_date=(DAY-timedelta(days=1)).isoformat())
+        self.ingest([sale(1), _sale(2, DAY, other_nm, revenue="1000", for_pay="900", acquiring="0")])
+        finance = self.candidate(snapshot=snapshot).finance.preview_candidate_week(WEEK_ONE, END)
+        by_nm = {row["nm_id"]:json.loads(row["metrics_json"]) for row in finance["sku_projections"]}
+        self.assertIsNone(by_nm[str(TARGET_NM)]["cogs"])
+        self.assertEqual(by_nm[str(other_nm)]["cogs"], "100.0000")
+        # Aggregate COGS is explicitly the covered contribution; the separate
+        # coverage exposes the excluded SKU and its revenue.
+        self.assertEqual(finance["aggregate"]["cogs"], "100.0000")
+        self.assertEqual(finance["cost_coverage"]["unmatched_units"], 1)
+        self.assertEqual(finance["aggregate"]["profit_revenue_covered"], "1000.0000")
+        self.assertEqual(finance["aggregate"]["profit_revenue_uncovered"], "1000.0000")
+
     def test_missing_cost_and_partial_coverage_never_create_zero_profit(self):
         self.ingest([sale(1)])
         missing = self.candidate()

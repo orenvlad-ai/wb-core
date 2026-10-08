@@ -95,6 +95,81 @@ class PresentationTests(unittest.TestCase):
         self.assertIsNone(s.metrics(1)['own_total_product_capital_rub'])
         self.assertIsNone(s.metrics(1)[COST])
 
+    def test_missing_wb_valuation_preserves_quantity_and_other_sku(self):
+        state = fbs(fbo_quantity="0")
+        state["baseline"]["rows"]["ff-1:2"] = dict(nm_id=2, facility_id="ff-1", quantity="10",
+            wac_rub="900", capital_rub="9000", quality="accepted_initial_cost")
+        state["baseline"]["snapshot"]["rows"].append(dict(nm_id=2, facility_id="ff-1", quantity="10"))
+        source = wb()
+        source.update(complete=False, authority_complete=True)
+        source["rows"][0].update(status="missing", reason="wb_cost_coverage_incomplete", capital_rub=None,
+                                components=dict(physical=400, to_customer=100, from_customer=0))
+        source["rows"].append(dict(nm_id=2, status="available", quantity=0, capital_rub="0", components=dict(physical=0)))
+        stages = retained(source)
+        # Internal known-only zero must never leak as full capital.
+        stages["rows"]["1"]["stages"]["WB"]["capital_rub"] = "0"
+        stages["source_digest"] = fingerprint({k:v for k,v in stages.items() if k != "source_digest"})
+        snap = snapshot(state, source, stages)
+        self.assertEqual(snap.metrics(1)["own_capital_WB_qty"], "500")
+        self.assertIsNone(snap.metrics(1)["own_capital_WB_capital_rub"])
+        self.assertIsNone(snap.metrics(1)[COST])
+        self.assertEqual(snap.metrics(1)["stock_total"], "1400")
+        self.assertEqual(snap.metrics(2)[COST], "900")
+        self.assertIsNone(snap.metrics()["total_own_total_product_capital_rub"])
+        self.assertEqual(snap.metrics()["total_own_total_product_qty"], "1590")
+        rows = snap.apply_rows([row(COST), row(COST, nm=2), row("own_capital_WB_qty"), row("unrelated")], business_date=DAY)
+        self.assertEqual([r.values_by_date[DAY] for r in rows[:4]], ["", 900, 500, 999])
+        self.assertTrue(all(r.values_by_date['2026-09-06'] == 987 for r in rows[:4]))
+
+    def test_default_capital_lookup_keeps_sparse_known_stages_and_unknown_guard(self):
+        from apps.warehouse_targeted_replay_smoke import _seed_functional, NOW
+        from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+        with TemporaryDirectory() as tmp:
+            owner = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp))
+            _seed_functional(owner)
+            block = OwnProductCapitalBlock(runtime=owner, timestamp_factory=lambda: NOW)
+            implicit = block.load_daily_metric_lookup("2026-07-21")
+            explicit = block.load_daily_metric_lookup("2026-07-21", requested_nm_ids=[101])
+            self.assertEqual(implicit[101]["own_total_product_qty"], 12)
+            self.assertEqual(implicit[101]["own_total_product_capital_rub"], 120)
+            self.assertEqual(implicit[101]["own_avg_product_cost_rub"], 10)
+            self.assertEqual(explicit[101]["own_total_product_capital_rub"], 120)
+            # A present unpriced WB stage, unlike an absent empty stage, must
+            # invalidate money in both public forms while preserving quantity.
+            with sqlite3.connect(owner.db_path) as conn:
+                conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_balances("
+                    "version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,cost_covered_quantity,"
+                    "quality,certified,wb_quantity,wb_in_way_to_client,wb_in_way_from_client,provenance_json) "
+                    "VALUES('daily-2026-07-21','wb',101,'1',NULL,'0','0','wb_cost_unavailable',0,'0','1','0','{}')")
+            for scope in (None, [101]):
+                values = block.load_daily_metric_lookup("2026-07-21", requested_nm_ids=scope)[101]
+                self.assertEqual(values["own_total_product_qty"], 13)
+                self.assertIsNone(values["own_capital_WB_capital_rub"])
+                self.assertIsNone(values["own_total_product_capital_rub"])
+                self.assertIsNone(values["own_avg_product_cost_rub"])
+
+    def test_functional_publication_money_requires_full_cost_coverage(self):
+        from packages.application.warehouse_business_projection import _metric_rows
+        from packages.application.own_product_capital import _inventory_cost_stage_evidence
+        balances = [dict(nm_id=1, warehouse_key="wb", quantity="5", capital_rub="100",
+                         cost_covered_quantity="1", quality="wb_cost_unavailable", certified=False),
+                    dict(nm_id=2, warehouse_key="wb", quantity="2", capital_rub="200",
+                         cost_covered_quantity="2", quality="periodic_snapshot_wac", certified=False)]
+        projected = _metric_rows(balances, affected_nm_ids=[1,2])
+        self.assertEqual(projected[1]["metrics"]["own_capital_WB_qty"], 5)
+        self.assertIsNone(projected[1]["metrics"]["own_capital_WB_capital_rub"])
+        self.assertEqual(projected[2]["metrics"]["own_capital_WB_capital_rub"], 200)
+        self.assertEqual(projected[0]["metrics"]["total_own_capital_WB_qty"], 7)
+        self.assertIsNone(projected[0]["metrics"]["total_own_capital_WB_capital_rub"])
+        self.assertIsNone(projected[0]["metrics"]["total_own_total_product_capital_rub"])
+        evidence = _inventory_cost_stage_evidence(balances[0], public_stage="WB")
+        self.assertEqual(evidence["quantity"], "5")
+        self.assertEqual(evidence["known_capital_rub"], "100")
+        self.assertIsNone(evidence["capital_rub"])
+        self.assertIsNone(evidence["locations"][0]["capital_rub"])
+        self.assertIsNone(evidence["wac_rub"])
+
     def test_immutable_and_bad_binding(self):
         state=fbs();source=wb();stages=retained(source);s=snapshot(state,source,stages)
         state['baseline']['rows']['ff-1:1']['capital_rub']='1'

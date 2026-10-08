@@ -1197,19 +1197,21 @@ def _metric_rows(
         target = by_nm.setdefault(nm_id, {"metrics": {}, "presentation": {}})
         quantity = _decimal(row.get("quantity"))
         capital = _decimal(row.get("capital_rub"))
+        covered = _decimal(row.get("cost_covered_quantity"))
+        cost_complete = covered >= quantity and (quantity == ZERO or capital > ZERO)
         metric_values = {
             own_stage_metric_key(public_stage, "qty"): _number(quantity),
-            own_stage_metric_key(public_stage, "capital_rub"): _number(capital),
+            own_stage_metric_key(public_stage, "capital_rub"): _number(capital) if cost_complete else None,
             own_stage_metric_key(public_stage, "unit_cost_rub"): (
-                _number(capital / quantity) if quantity > ZERO else None
+                _number(capital / quantity) if quantity > ZERO and cost_complete else None
             ),
         }
         target["metrics"].update(metric_values)
-        if quantity > ZERO and not bool(row.get("certified")):
+        if quantity > ZERO and (not bool(row.get("certified")) or not cost_complete):
             reason = str(row.get("quality") or "неполное подтверждение источника")
             for metric_key in metric_values:
                 target["presentation"][metric_key] = {
-                    "state": "unconfirmed",
+                    "state": "unavailable" if metric_values[metric_key] is None else "unconfirmed",
                     "tone": "warning",
                     "reason": reason,
                     "source": "WebCore business-time projection",
@@ -1231,10 +1233,12 @@ def _metric_rows(
             ),
             ZERO,
         )
+        cost_complete = all(metrics.get(own_stage_metric_key(stage, "capital_rub")) is not None
+                            for stage in OWN_PRODUCT_CAPITAL_STAGES)
         metrics[OWN_TOTAL_QTY_METRIC_KEY] = _number(quantity)
-        metrics[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] = _number(capital)
+        metrics[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] = _number(capital) if cost_complete else None
         metrics[OWN_AVG_COST_RUB_METRIC_KEY] = (
-            _number(capital / quantity) if quantity > ZERO else None
+            _number(capital / quantity) if quantity > ZERO and cost_complete else None
         )
 
     total_metrics: dict[str, float | None] = {}
@@ -1256,12 +1260,14 @@ def _metric_rows(
             ),
             ZERO,
         )
+        cost_complete = all(item["metrics"].get(own_stage_metric_key(stage, "capital_rub")) is not None
+                            for item in by_nm.values())
         total_metrics[own_stage_total_metric_key(stage, "qty")] = _number(quantity)
         total_metrics[own_stage_total_metric_key(stage, "capital_rub")] = _number(
             capital
-        )
+        ) if cost_complete else None
         total_metrics[own_stage_total_metric_key(stage, "unit_cost_rub")] = (
-            _number(capital / quantity) if quantity > ZERO else None
+            _number(capital / quantity) if quantity > ZERO and cost_complete else None
         )
         stage_reasons = sorted(
             {
@@ -1291,10 +1297,12 @@ def _metric_rows(
         ),
         ZERO,
     )
+    cost_complete = all(item["metrics"].get(OWN_TOTAL_CAPITAL_RUB_METRIC_KEY) is not None
+                        for item in by_nm.values())
     total_metrics[OWN_TOTAL_QTY_TOTAL_METRIC_KEY] = _number(total_quantity)
-    total_metrics[OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY] = _number(total_capital)
+    total_metrics[OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY] = _number(total_capital) if cost_complete else None
     total_metrics[OWN_AVG_COST_RUB_TOTAL_METRIC_KEY] = (
-        _number(total_capital / total_quantity) if total_quantity > ZERO else None
+        _number(total_capital / total_quantity) if total_quantity > ZERO and cost_complete else None
     )
     result = {
         nm_id: by_nm[nm_id]

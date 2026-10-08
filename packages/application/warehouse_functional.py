@@ -144,6 +144,14 @@ WAREHOUSE_QUALITY_PRESENTATIONS: Mapping[str, tuple[str, str]] = {
         "Точный остаток facility × pool",
         "Количество и капитал FF равны точной сумме текущих остатков FBS/FBO по географическим складам.",
     ),
+    "snapshot_fbs_wb_initial_provisional": (
+        "Предварительная оценка по принятой стоимости FBS",
+        "Стоимость взята из принятого снимка учёта FBS. Количество сообщает WB; эта оценка не подтверждает физическое перемещение товара.",
+    ),
+    "wb_cost_unavailable": (
+        "Количество известно, себестоимость не определена",
+        "Количество сохранено из официального снимка WB. Достаточного основания для оценки стоимости нет; капитал и средняя цена не определены.",
+    ),
     "periodic_snapshot_wac": (
         "Средневзвешенная по историческому снимку",
         "Стоимость относится к точной бизнес-дате и учитывает подтверждённые приходы к этой дате.",
@@ -3955,6 +3963,14 @@ class WarehouseFunctionalBlock:
         )
         base_active_version_id = self._active_version_id()
         previous = self._active_lines()
+        if kind == "hourly_wb_sync":
+            from packages.application.wb_initial_fbs_cost_sources import capture as capture_initial_fbs_cost
+            capture["initial_fbs_cost_basis"] = capture_initial_fbs_cost(
+                self.runtime, day=str(capture["wb_snapshot"]["snapshot_date"])[:10],
+                fetched_at=str(capture["wb_snapshot"]["fetched_at"]),
+                previous_version=base_active_version_id,
+            )
+        capture["base_active_version_id"] = base_active_version_id
         cutover = self._cutover_row()
         lines, unmatched, events, opening_cost_map, movement_documents = self._calculate_lines(
             capture=capture,
@@ -4026,6 +4042,7 @@ class WarehouseFunctionalBlock:
             new_events=events,
             opening_cost_map=opening_cost_map,
             cutover_mode=kind == "functional_cutover",
+            allow_partial=kind == "hourly_wb_sync",
         )
         historical_wb_cost_projection = (
             pre_cutover_wb_cost_projection + post_cutover_wb_cost_projection
@@ -4043,17 +4060,22 @@ class WarehouseFunctionalBlock:
         positive = [line for line in lines if line.quantity > ZERO]
         gaps = [line for line in positive if line.wac is None or line.wac <= ZERO or line.capital <= ZERO]
         negatives = [line for line in lines if min(line.quantity, line.capital) < ZERO]
-        if gaps:
+        if gaps and (kind != "hourly_wb_sync" or any(
+            line.warehouse_key != STAGE_WB or line.quality != "wb_cost_unavailable" for line in gaps
+        )):
             raise WarehouseFunctionalError(
                 "positive warehouse balances have no positive cost coverage: "
                 + ",".join(f"{line.warehouse_key}:{line.nm_id}" for line in gaps)
             )
         if negatives:
             raise WarehouseFunctionalError("negative warehouse quantity or capital is forbidden")
+        wb_valuation = _wb_valuation_report(lines)
+        capture["watermarks"]["wb_valuation"] = wb_valuation
         plan = {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "status": "dry_run_ready",
+            "wb_valuation": wb_valuation,
             "kind": kind,
             "cutover_id": FUNCTIONAL_CUTOVER_ID,
             "captured_at": captured_at,
@@ -4157,6 +4179,24 @@ class WarehouseFunctionalBlock:
             raise WarehouseFunctionalError(
                 "active functional warehouse version drifted after bounded calculation"
             )
+        initial_anchors = [
+            anchor for item in normalized.get("lines") or []
+            if (anchor := _initial_valuation_anchor(item.get("provenance") or {}))
+            and anchor.get("snapshot_id") == (normalized.get("wb_snapshot") or {}).get("snapshot_id")
+        ]
+        if initial_anchors:
+            from packages.application.wb_initial_fbs_cost_sources import capture as capture_initial_fbs_cost
+            from packages.application.wb_initial_fbs_cost import resolve as resolve_initial_fbs_cost
+            snapshot = normalized["wb_snapshot"]
+            basis = capture_initial_fbs_cost(self.runtime, day=planned_effective_date,
+                fetched_at=str(snapshot["fetched_at"]), previous_version=str(normalized["base_active_version_id"]))
+            items = {int(item["nm_id"]): item for item in snapshot["items"]}
+            for anchor in initial_anchors:
+                checked = resolve_initial_fbs_cost(int(anchor["nm_id"]), items[int(anchor["nm_id"])], basis,
+                    business_date=planned_effective_date, snapshot_id=str(snapshot["snapshot_id"]),
+                    fetched_at=str(snapshot["fetched_at"]), previous_version=str(normalized["base_active_version_id"]))
+                if not checked.get("available") or checked["anchor"] != anchor:
+                    raise WarehouseFunctionalError("accepted FBS initial valuation proof drifted before publication")
         recovery_end_date = str(normalized.get("effective_date") or "")[:10]
         include_historical_correction = kind == "emergency_rebuild"
         current_digest = self._local_source_digest(
@@ -5013,7 +5053,7 @@ class WarehouseFunctionalBlock:
                 ]
                 public_rows = [
                     {
-                        **item,
+                        **_public_line_payload(item),
                         "line_id": f"{version_id}:{warehouse_key}:{int(item['nm_id'])}",
                         "average_unit_cost_rub": item.get("wac_rub"),
                         "physical_quantity": item.get("quantity"),
@@ -5577,6 +5617,8 @@ class WarehouseFunctionalBlock:
                 nm_id = int(line["nm_id"])
                 identity = names.get(nm_id, {})
                 line_quality = str((line.get("provenance") or {}).get("quality") or parent_quality)
+                if (line.get("provenance") or {}).get("valuation_complete") is False:
+                    line = {**line, "known_capital_rub": line.get("capital_rub"), "capital_rub": None, "wac_rub": None}
                 document_lines.append(
                     {
                         **line,
@@ -5611,7 +5653,7 @@ class WarehouseFunctionalBlock:
             }
             warehouse_from, warehouse_to = directions.get(document_type, ("source", warehouse_key))
             quantity = _decimal(item.get("quantity"))
-            capital = _decimal(item.get("capital_rub"))
+            capital = _optional_decimal(item.get("capital_rub"))
             public_documents.append(
                 {
                     **item,
@@ -5623,8 +5665,8 @@ class WarehouseFunctionalBlock:
                     "source_basis": str(item.get("source_id") or ""),
                     "sku_count": len(document_lines),
                     "total_quantity": _text(quantity),
-                    "total_cost_rub": _text(capital / quantity) if quantity != ZERO else None,
-                    "total_capital_rub": _text(capital),
+                    "total_cost_rub": _text(capital / quantity) if quantity != ZERO and capital is not None else None,
+                    "total_capital_rub": _text(capital) if capital is not None else None,
                     "status_label": "Аудит · не склад" if document_type in {"wb_unmatched_doprinato_audit", "wb_pre_cutover_unmatched_audit"} else "Проведено",
                     "human_evidence": _warehouse_human_evidence(
                         item.get("provenance"),
@@ -5783,6 +5825,17 @@ class WarehouseFunctionalBlock:
                     (FUNCTIONAL_CUTOVER_ID,),
                 ).fetchall()
             ]
+            quantity_snapshots = [dict(row) for row in conn.execute(
+                """WITH latest AS (
+                       SELECT version.version_id, snapshot.snapshot_date,
+                              ROW_NUMBER() OVER (PARTITION BY snapshot.snapshot_date
+                                ORDER BY version.effective_at DESC,version.created_at DESC,version.rowid DESC) rank
+                       FROM sheet_vitrina_v1_warehouse_functional_versions version
+                       JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot ON snapshot.version_id=version.version_id
+                       WHERE version.cutover_id=? AND version.status='good')
+                   SELECT latest.snapshot_date,snapshot.items_json FROM latest
+                   JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot ON snapshot.version_id=latest.version_id
+                   WHERE latest.rank=1 ORDER BY latest.snapshot_date""", (FUNCTIONAL_CUTOVER_ID,)).fetchall()]
             historical_quantity_rows = [
                 dict(row)
                 for row in conn.execute(
@@ -5869,6 +5922,12 @@ class WarehouseFunctionalBlock:
             day_values[f"SKU:{int(row.get('nm_id') or 0)}"] = _text(
                 _decimal(row.get("quantity"))
             )
+        for snapshot in quantity_snapshots:
+            day = str(snapshot["snapshot_date"])[:10]
+            contour_quantities_by_date[day] = {
+                f"SKU:{nm_id}": _text(quantity)
+                for nm_id, quantity in _wb_snapshot_quantities(_loads(snapshot["items_json"], [])).items()
+            }
         for day_values in contour_quantities_by_date.values():
             day_values["TOTAL"] = _text(
                 sum((_decimal(value) for value in day_values.values()), ZERO)
@@ -5897,6 +5956,7 @@ class WarehouseFunctionalBlock:
                 else {}
             ),
             "balances": public_balances,
+            "wb_valuation": _wb_valuation_report([_line_from_payload(item) for item in public_balances]),
             "documents": [_document_public(item) for item in documents],
             "unmatched_doprinato": [_unmatched_public(item) for item in unmatched],
             "historical_wb_cost_projection": historical_public,
@@ -6776,24 +6836,27 @@ class WarehouseFunctionalBlock:
                 provenance = dict(cost_map[nm_id].provenance)
             else:
                 previous_line = previous.get((STAGE_WB, nm_id))
-                previous_qty = previous_line.quantity if previous_line else ZERO
-                previous_capital = previous_line.capital if previous_line else ZERO
+                # An undercovered predecessor is quantity evidence, never a zero-cost layer.
+                valid_previous = previous_line is not None and previous_line.wac is not None
+                previous_qty = previous_line.quantity if valid_previous else ZERO
+                previous_capital = previous_line.capital if valid_previous else ZERO
                 inbound_qty, inbound_capital = inbound_by_nm[nm_id]
-                _, _, rolled = roll_periodic_wac(
-                    quantity=previous_qty,
-                    capital=previous_capital,
-                    quantity_delta=inbound_qty,
-                    capital_delta=inbound_capital,
-                )
-                if rolled is None:
-                    seed = cost_map.get(nm_id)
-                    if seed is None:
-                        raise WarehouseFunctionalError(
-                            f"official WB contour {nm_id} has neither prior nor inbound cost"
-                        )
-                    wac = seed.wb_unit_cost
+                unresolved_opening = previous_line is not None and previous_line.quantity > ZERO and not valid_previous
+                if unresolved_opening:
+                    if previous_line.quantity + inbound_qty < ZERO:
+                        raise WarehouseFunctionalError(f"WB correction exceeds unresolved quantity for nmId {nm_id}")
+                    rolled = None
                 else:
-                    wac = rolled
+                    _, _, rolled = roll_periodic_wac(
+                        quantity=previous_qty,
+                        capital=previous_capital,
+                        quantity_delta=inbound_qty,
+                        capital_delta=inbound_capital,
+                    )
+                wac = rolled if rolled is not None and rolled > ZERO and not unresolved_opening else None
+                seed = cost_map.get(nm_id)
+                if wac is None and seed is not None:
+                    wac = seed.wb_unit_cost
                 quality = "periodic_snapshot_wac"
                 provenance = {
                     "previous_quantity": _text(previous_qty),
@@ -6802,13 +6865,38 @@ class WarehouseFunctionalBlock:
                     "new_accepted_capital": _text(inbound_capital),
                     "last_valid_wac_fallback": rolled is None,
                 }
+                prior_anchor = _initial_valuation_anchor(previous_line.provenance) if valid_previous else None
+                if prior_anchor:
+                    provenance["initial_valuation_anchor"] = prior_anchor
+                if wac is None:
+                    from packages.application.wb_initial_fbs_cost import resolve as resolve_initial_fbs_cost
+                    fbo_source_present = any(
+                        int(good["nm_id"]) == nm_id
+                        for raw in capture["wb_supplies"]
+                        for good in _validated_wb_goods(_normalized_wb_record(raw))
+                    )
+                    basis = capture.get("initial_fbs_cost_basis") or {}
+                    if fbo_source_present:
+                        basis = {"available": False, "reason": "initial_wb_fbo_source_unresolved"}
+                    bridge = resolve_initial_fbs_cost(nm_id, item, basis,
+                        business_date=str(capture["wb_snapshot"]["snapshot_date"])[:10],
+                        snapshot_id=str(capture["wb_snapshot"]["snapshot_id"]),
+                        fetched_at=str(capture["wb_snapshot"]["fetched_at"]),
+                        previous_version=str(capture.get("base_active_version_id") or ""))
+                    if bridge.get("available"):
+                        wac = _decimal(bridge["wac_rub"])
+                        quality = "snapshot_fbs_wb_initial_provisional"
+                        provenance["initial_valuation_anchor"] = bridge["anchor"]
+                    else:
+                        quality = "wb_cost_unavailable"
+                        provenance["missing_cost_reason"] = str(bridge["reason"])
             _add_bucket(
                 buckets,
                 stage=STAGE_WB,
                 nm_id=nm_id,
                 quantity=contour,
-                capital=contour * wac,
-                covered=contour,
+                capital=contour * wac if wac is not None else ZERO,
+                covered=contour if wac is not None else ZERO,
                 quality=quality,
                 provenance={
                     "source": "official_wb_snapshot",
@@ -6980,6 +7068,7 @@ class WarehouseFunctionalBlock:
         new_events: Iterable[Mapping[str, Any]],
         opening_cost_map: Iterable[Mapping[str, Any]],
         cutover_mode: bool,
+        allow_partial: bool = False,
     ) -> list[dict[str, Any]]:
         """Replay versioned post-cutover WB WAC through the current snapshot day.
 
@@ -7066,7 +7155,7 @@ class WarehouseFunctionalBlock:
                    JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot
                      ON snapshot.version_id=version.version_id
                    WHERE version.cutover_id=? AND version.status='good'
-                   ORDER BY version.effective_at,version.created_at,version.version_id""",
+                   ORDER BY version.effective_at,version.created_at,version.rowid""",
                 (FUNCTIONAL_CUTOVER_ID,),
             ).fetchall()
             opening_rows = (
@@ -7078,6 +7167,25 @@ class WarehouseFunctionalBlock:
                 if cutover_version is not None
                 else []
             )
+            anchor_rows = conn.execute(
+                """WITH first_anchor AS (
+                       SELECT balance.version_id,balance.nm_id,
+                         ROW_NUMBER() OVER (PARTITION BY balance.nm_id
+                           ORDER BY version.effective_at,version.created_at,version.rowid) rank
+                       FROM sheet_vitrina_v1_warehouse_functional_versions version
+                       JOIN sheet_vitrina_v1_warehouse_functional_balances balance ON balance.version_id=version.version_id
+                       WHERE version.cutover_id=? AND version.status='good' AND balance.warehouse_key=?
+                         AND balance.provenance_json LIKE '%initial_valuation_anchor%')
+                   SELECT balance.nm_id,balance.quantity,balance.capital_rub,balance.cost_covered_quantity,
+                          balance.provenance_json,version.version_id,version.effective_at,snapshot.snapshot_id,snapshot.snapshot_date
+                   FROM first_anchor first
+                   JOIN sheet_vitrina_v1_warehouse_functional_versions version ON version.version_id=first.version_id
+                   JOIN sheet_vitrina_v1_warehouse_functional_balances balance ON balance.version_id=first.version_id
+                      AND balance.nm_id=first.nm_id AND balance.warehouse_key='wb'
+                   JOIN sheet_vitrina_v1_warehouse_wb_snapshots snapshot ON snapshot.version_id=first.version_id
+                   WHERE first.rank=1 ORDER BY balance.nm_id""",
+                (FUNCTIONAL_CUTOVER_ID, STAGE_WB),
+            ).fetchall()
             persisted_events = conn.execute(
                 """SELECT event_id,business_date,nm_id,quantity,capital_rub,source_id,
                           source_fingerprint,provenance_json
@@ -7090,6 +7198,38 @@ class WarehouseFunctionalBlock:
         cutover_date = business_date_from_timestamp(str(cutover["cutover_at"]))
         if current_date < cutover_date:
             raise WarehouseFunctionalError("functional daily WAC replay date precedes cutover")
+
+        from packages.application.wb_initial_fbs_cost import valid_anchor
+        anchors: dict[int, dict[str, Any]] = {}
+        for row in anchor_rows:
+            anchor = _initial_valuation_anchor(_loads(row["provenance_json"], {}))
+            if not anchor or int(anchor.get("nm_id") or 0) != int(row["nm_id"]) or not valid_anchor(anchor):
+                raise WarehouseFunctionalError("persisted initial WB valuation proof is invalid")
+            nm_id = int(row["nm_id"])
+            if nm_id in anchors:
+                if anchors[nm_id] != anchor:
+                    raise WarehouseFunctionalError("conflicting immutable initial WB valuation proofs")
+                continue
+            if (_stable_id("wbsnapv", {"source_snapshot_id": anchor["snapshot_id"], "version_id": row["version_id"]}) != row["snapshot_id"]
+                or anchor["business_date"] != str(row["snapshot_date"])[:10]
+                or _decimal(row["quantity"]) <= ZERO
+                or _decimal(row["cost_covered_quantity"]) < _decimal(row["quantity"])
+                or _decimal(row["capital_rub"]) != _decimal(row["quantity"]) * _decimal(anchor["wac_rub"])):
+                raise WarehouseFunctionalError("initial WB valuation proof differs from its immutable first balance")
+            anchors[nm_id] = anchor
+        for line in candidate_lines:
+            anchor = _initial_valuation_anchor(line.provenance)
+            if not anchor:
+                continue
+            if line.nm_id in anchors:
+                if anchor != anchors[line.nm_id]:
+                    raise WarehouseFunctionalError("candidate conflicts with immutable initial WB valuation proof")
+                continue
+            if (not valid_anchor(anchor) or int(anchor["nm_id"]) != line.nm_id
+                or anchor["business_date"] != current_date
+                or anchor["snapshot_id"] != candidate_snapshot["snapshot_id"]):
+                raise WarehouseFunctionalError("candidate initial WB valuation proof is invalid")
+            anchors[line.nm_id] = anchor
 
         opening_quantity = {int(row["nm_id"]): _decimal(row["quantity"]) for row in opening_rows}
         opening_wac = {
@@ -7185,7 +7325,12 @@ class WarehouseFunctionalBlock:
                 event_rows = event_groups.get(nm_id, [])
                 quantity_delta = sum((_decimal(item.get("quantity")) for item in event_rows), ZERO)
                 capital_delta = sum((_decimal(item.get("capital_rub")) for item in event_rows), ZERO)
-                if quantity_delta != ZERO or capital_delta != ZERO:
+                if prior_wac is None and prior_qty > ZERO and (quantity_delta != ZERO or capital_delta != ZERO):
+                    if prior_qty + quantity_delta < ZERO:
+                        raise WarehouseFunctionalError(f"daily WB correction exceeds unresolved quantity for {day}:{nm_id}")
+                    # A newly priced receipt cannot price unknown older stock.
+                    previous_quality[nm_id] = "wb_cost_unavailable"
+                elif quantity_delta != ZERO or capital_delta != ZERO:
                     if prior_wac is None:
                         if quantity_delta <= ZERO or capital_delta <= ZERO:
                             raise WarehouseFunctionalError(
@@ -7212,14 +7357,20 @@ class WarehouseFunctionalBlock:
                     if snapshot is not None
                     else prior_qty
                 )
+                anchor = anchors.get(nm_id)
+                if (prior_wac is None or prior_wac <= ZERO) and anchor and anchor["business_date"] == day:
+                    prior_wac = _decimal(anchor["wac_rub"])
+                    previous_quality[nm_id] = "snapshot_fbs_wb_initial_provisional"
                 if prior_wac is None or prior_wac <= ZERO:
-                    if quantity > ZERO:
-                        raise WarehouseFunctionalError(
-                            f"daily WB snapshot has no WAC for {day}:{nm_id}"
-                        )
+                    if quantity > ZERO and not allow_partial:
+                        raise WarehouseFunctionalError(f"daily WB snapshot has no WAC for {day}:{nm_id}")
+                    # Missing valuation does not erase the official quantity or create a zero WAC.
+                    previous_quantity[nm_id] = quantity
                     continue
                 quality = (
-                    BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY
+                    "snapshot_fbs_wb_initial_provisional"
+                    if previous_quality.get(nm_id) == "snapshot_fbs_wb_initial_provisional"
+                    else BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY
                     if previous_quality.get(nm_id)
                     == BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY
                     else "periodic_snapshot_wac_provisional"
@@ -7234,6 +7385,7 @@ class WarehouseFunctionalBlock:
                         wac=prior_wac,
                         quality=quality,
                         provenance={
+                            **({"initial_valuation_anchor": anchor} if anchor else {}),
                             "source": "versioned_functional_wb_daily_replay",
                             "snapshot_id": str((snapshot or {}).get("snapshot_id") or "carried_last_good"),
                             "snapshot_version_id": str((snapshot or {}).get("version_id") or "carried_last_good"),
@@ -7553,8 +7705,8 @@ class WarehouseFunctionalBlock:
                     FUNCTIONAL_CUTOVER_ID if document_type == "functional_cutover" else plan["wb_snapshot"]["snapshot_id"],
                     source_fingerprint,
                     summary["quantity"],
-                    summary["capital_rub"],
-                    _json({"source_watermarks": plan["source_watermarks"], "quality": summary["quality"]}),
+                    summary.get("known_capital_rub", summary["capital_rub"]),
+                    _json({"valuation_complete": summary.get("valuation_complete", True), "source_watermarks": plan["source_watermarks"], "quality": summary["quality"]}),
                     created_at,
                 ),
             )
@@ -7620,6 +7772,9 @@ class WarehouseFunctionalBlock:
         nm_id = int(item["nm_id"])
         line_id = _stable_id("whdocline", {"document_id": document_id, "nm_id": nm_id})
         provenance = dict(item.get("provenance") or {})
+        if "cost_covered_quantity" in item:
+            provenance["cost_covered_quantity"] = item["cost_covered_quantity"]
+            provenance["valuation_complete"] = _public_line_payload(item)["valuation_complete"]
         if str(item.get("quality") or "") and not str(provenance.get("quality") or ""):
             provenance["quality"] = str(item["quality"])
         conn.execute(
@@ -8704,6 +8859,51 @@ def _bucket_line(key: tuple[str, int], value: Mapping[str, Any]) -> WarehouseLin
     )
 
 
+def _initial_valuation_anchor(provenance: Mapping[str, Any]) -> dict[str, Any] | None:
+    direct = provenance.get("initial_valuation_anchor")
+    found = dict(direct) if isinstance(direct, Mapping) else None
+    for record in provenance.get("source_records") or []:
+        if isinstance(record, Mapping) and (anchor := _initial_valuation_anchor(record)):
+            if found is not None and anchor != found:
+                raise WarehouseFunctionalError("conflicting initial WB valuation proofs in one balance")
+            found = anchor
+    return found
+
+
+def _wb_valuation_report(lines: Iterable[WarehouseLine]) -> dict[str, Any]:
+    missing, provisional = [], []
+    for line in sorted(lines, key=lambda item: item.nm_id):
+        if line.warehouse_key != STAGE_WB or line.quantity <= ZERO:
+            continue
+        if line.wac is None:
+            records = line.provenance.get("source_records") or [line.provenance]
+            missing.append({"nm_id": line.nm_id, "reason": next(
+                (str(item["missing_cost_reason"]) for item in records if item.get("missing_cost_reason")),
+                "wb_cost_coverage_missing"), "quantity": _text(line.quantity),
+                "components": {"quantity": _text(line.wb_quantity),
+                    "in_way_to_client": _text(line.wb_in_way_to_client),
+                    "in_way_from_client": _text(line.wb_in_way_from_client)}})
+        elif anchor := _initial_valuation_anchor(line.provenance):
+            provisional.append({"nm_id": line.nm_id, "quantity": _text(line.quantity),
+                "quality": anchor["quality"], "proof_digest": anchor["proof_digest"],
+                "book_version": anchor["book_version"], "proves_physical_movement": False})
+    return {"status": "partial" if missing else "complete", "missing": missing, "provisional": provisional}
+
+
+def _public_line_payload(item: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(item)
+    complete = (_decimal(item.get("quantity")) <= ZERO or (
+        _decimal(item.get("cost_covered_quantity")) >= _decimal(item.get("quantity"))
+        and _optional_decimal(item.get("wac_rub")) is not None
+        and _decimal(item.get("capital_rub")) > ZERO))
+    result["known_capital_rub"] = item.get("known_capital_rub", item.get("capital_rub"))
+    result["valuation_complete"] = complete
+    if not complete:
+        result["capital_rub"] = None
+        result["wac_rub"] = None
+    return result
+
+
 def _line_payload(line: WarehouseLine) -> dict[str, Any]:
     return {
         "warehouse_key": line.warehouse_key,
@@ -8727,7 +8927,7 @@ def _line_from_payload(item: Mapping[str, Any]) -> WarehouseLine:
         warehouse_key=str(item["warehouse_key"]),
         nm_id=int(item["nm_id"]),
         quantity=_decimal(item["quantity"]),
-        capital=_decimal(item["capital_rub"]),
+        capital=_decimal(item.get("known_capital_rub", item["capital_rub"])),
         cost_covered_quantity=_decimal(item["cost_covered_quantity"]),
         quality=str(item["quality"]),
         certified=bool(item.get("certified")),
@@ -8748,10 +8948,13 @@ def _summaries(lines: Iterable[WarehouseLine]) -> dict[str, dict[str, Any]]:
         quantity = sum((item.quantity for item in rows), ZERO)
         capital = sum((item.capital for item in rows), ZERO)
         covered = sum((item.cost_covered_quantity for item in rows), ZERO)
+        complete = all(item.quantity <= ZERO or item.wac is not None for item in rows)
         result[stage] = {
             "quantity": _text(quantity),
-            "wac_rub": _text(capital / quantity) if quantity > ZERO else None,
-            "capital_rub": _text(capital),
+            "wac_rub": _text(capital / quantity) if quantity > ZERO and complete else None,
+            "capital_rub": _text(capital) if complete else None,
+            "known_capital_rub": _text(capital),
+            "valuation_complete": complete,
             "cost_covered_quantity": _text(covered),
             "coverage_share": _text(covered / quantity) if quantity > ZERO else None,
             "sku_count": len(rows),
@@ -8819,7 +9022,8 @@ def _materialize_compact_warehouse_read_models(
                     "reservation_supply_ids": sorted(reservation.get("supply_ids") or []),
                     "wac_rub": item.get("wac_rub"),
                     "average_unit_cost_rub": item.get("wac_rub"),
-                    "capital_rub": item.get("capital_rub"),
+                    "capital_rub": _public_line_payload(item).get("capital_rub"),
+                    "known_capital_rub": item.get("capital_rub"),
                     "cost_covered_quantity": item.get("cost_covered_quantity"),
                     "coverage_share": item.get("coverage_share"),
                     "quality": item.get("quality"),
@@ -9210,6 +9414,9 @@ def _replace_current_wb_costs(
             result.append(line)
             continue
         daily = current.get(line.nm_id)
+        if daily is None and line.quality == "wb_cost_unavailable":
+            result.append(line)
+            continue
         if daily is None:
             raise WarehouseFunctionalError(
                 f"current functional WB balance has no daily WAC replay for nmId {line.nm_id}"
@@ -9221,10 +9428,12 @@ def _replace_current_wb_costs(
                 nm_id=line.nm_id,
                 quantity=line.quantity,
                 capital=line.quantity * wac,
-                cost_covered_quantity=line.cost_covered_quantity,
+                cost_covered_quantity=line.quantity,
                 quality=str(daily["quality"]),
                 provenance={
                     **dict(line.provenance),
+                    **({"initial_valuation_anchor": daily["provenance"]["initial_valuation_anchor"]}
+                       if (daily.get("provenance") or {}).get("initial_valuation_anchor") else {}),
                     "daily_wac_replay": dict(daily.get("provenance") or {}),
                     "daily_wac_fingerprint": str(daily.get("fingerprint") or ""),
                 },
@@ -9239,11 +9448,14 @@ def _replace_current_wb_costs(
 
 def _total_summary(summaries: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     quantity = sum((_decimal(item["quantity"]) for item in summaries.values()), ZERO)
-    capital = sum((_decimal(item["capital_rub"]) for item in summaries.values()), ZERO)
+    capital = sum((_decimal(item.get("known_capital_rub", item["capital_rub"])) for item in summaries.values()), ZERO)
+    complete = all(item.get("valuation_complete", item.get("capital_rub") is not None) for item in summaries.values())
     return {
         "quantity": _text(quantity),
-        "capital_rub": _text(capital),
-        "wac_rub": _text(capital / quantity) if quantity > ZERO else None,
+        "capital_rub": _text(capital) if complete else None,
+        "known_capital_rub": _text(capital),
+        "valuation_complete": complete,
+        "wac_rub": _text(capital / quantity) if quantity > ZERO and complete else None,
     }
 
 
@@ -9269,9 +9481,13 @@ def _balance_diff(
                 "quantity_before": _text(before_qty),
                 "quantity_after": _text(after_qty),
                 "quantity_delta": _text(after_qty - before_qty),
-                "capital_before": _text(before_capital),
-                "capital_after": _text(after_capital),
-                "capital_delta": _text(after_capital - before_capital),
+                "capital_before": _text(before_capital) if before is None or before.quantity <= ZERO or before.wac is not None else None,
+                "capital_after": _text(after_capital) if after is None or after.quantity <= ZERO or after.wac is not None else None,
+                "capital_delta": (_text(after_capital - before_capital)
+                    if (before is None or before.quantity <= ZERO or before.wac is not None)
+                    and (after is None or after.quantity <= ZERO or after.wac is not None) else None),
+                "known_capital_before": _text(before_capital),
+                "known_capital_after": _text(after_capital),
             }
         )
     return {
@@ -9723,11 +9939,11 @@ def _warehouse_cost_source_label(record: Mapping[str, Any]) -> str:
 
 
 def _balance_public(item: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    return _public_line_payload({
         **dict(item),
         "certified": bool(item.get("certified")),
         "provenance": _loads(item.get("provenance_json"), {}),
-    }
+    })
 
 
 def _cutover_public(row: Mapping[str, Any] | sqlite3.Row) -> dict[str, Any]:
@@ -9756,7 +9972,11 @@ def _version_public(row: Mapping[str, Any] | sqlite3.Row) -> dict[str, Any]:
 
 def _document_public(item: Mapping[str, Any]) -> dict[str, Any]:
     value = dict(item)
-    return {**value, "provenance": _loads(value.get("provenance_json"), {})}
+    provenance = _loads(value.get("provenance_json"), {})
+    if provenance.get("valuation_complete") is False:
+        value["known_capital_rub"] = value.get("capital_rub")
+        value["capital_rub"] = None
+    return {**value, "provenance": provenance}
 
 
 def _unmatched_public(item: Mapping[str, Any]) -> dict[str, Any]:

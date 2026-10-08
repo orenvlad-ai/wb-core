@@ -414,11 +414,17 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         return receipt
     except BaseException as exc:
         # Small codes only: exception text can contain a provider response/secret.
-        code = str(exc) if isinstance(exc, CycleStageFailure) else type(exc).__name__
+        from packages.application.owned_history_worker_capability import HistoryDelegationError
+        history_failure = exc.diagnostic() if isinstance(exc, HistoryDelegationError) else None
+        code = history_failure["error_code"] if history_failure else str(exc) if isinstance(exc, CycleStageFailure) else type(exc).__name__
+        if history_failure:
+            receipt['history_failure'] = history_failure
         receipt.update(status='failed' if isinstance(exc, Exception) else 'interrupted',
             error_code=code[:256], finished_at=store.timestamp_factory())
         for item in receipt['stages']:
             if item['status'] == 'running':
                 item.update(status=receipt['status'], error_code=code[:256], finished_at=store.timestamp_factory())
+                if history_failure:
+                    item['history_failure'] = dict(history_failure)
         store.write(receipt)
         raise

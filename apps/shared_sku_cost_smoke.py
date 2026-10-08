@@ -124,6 +124,32 @@ class SharedCostTests(unittest.TestCase):
             with self.assertRaisesRegex(SharedSkuCostError,"immutable"):
                 store.save(changed,expected_version=closed["version_id"])
 
+    def test_closed_missing_wb_cost_is_frozen_and_sku_isolated(self):
+        state = fbs(fbo_quantity="0")
+        state["baseline"]["rows"]["ff-1:2"] = dict(nm_id=2, facility_id="ff-1", quantity="10",
+            wac_rub="900", capital_rub="9000", quality="accepted_initial_cost")
+        state["baseline"]["snapshot"]["rows"].append(dict(nm_id=2, facility_id="ff-1", quantity="10"))
+        state = evaluate_candidate(state, capture("2026-09-08", extra=[dict(nm_id=2, facility_id="ff-1", quantity="10")]))
+        state = close_candidate_period(state, "2026-09-08", today="2026-09-09")
+        source = wb("2026-09-08")
+        source.update(complete=False, authority_complete=True)
+        source["rows"][0].update(status="missing", reason="wb_cost_coverage_incomplete", capital_rub=None)
+        source["rows"].append(dict(nm_id=2, quantity=0, capital_rub="0", status="available"))
+        period = build_shared_cost_day(state, source, "2026-09-08")
+        self.assertEqual((period["status"], period["quality"]), ("closed", "incomplete"))
+        with TemporaryDirectory() as tmp:
+            store = SharedSkuCostStore(Path(tmp)/"candidate.sqlite3")
+            store.save(period, expected_version=None)
+            snap = store.snapshot(effective_date="2026-09-07")
+            missing = snap.resolve(nm_id="1", operation_date=date(2026,9,8))
+            self.assertEqual(missing["reason"], "wb_cost_coverage_incomplete")
+            self.assertNotIn("unit_cost_rub", missing)
+            self.assertEqual(snap.resolve(nm_id="2", operation_date=date(2026,9,8))["unit_cost_rub"], "900")
+            repaired = deepcopy(source)
+            repaired["rows"][0].update(status="available", reason="", capital_rub="100000")
+            with self.assertRaisesRegex(SharedSkuCostError, "immutable"):
+                store.save(build_shared_cost_day(state, repaired, "2026-09-08"), expected_version=period["version_id"])
+
     def test_foreign_db_readonly_rejection(self):
         with TemporaryDirectory() as tmp:
             path=Path(tmp)/"production.sqlite3"

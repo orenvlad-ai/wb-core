@@ -614,6 +614,7 @@ def _run_admitted(
             payload = {
                 "status": "success",
                 "mode": args.command,
+                "wb_valuation": dict(plan.get("wb_valuation") or {}),
                 "sqlite_busy_timeout_ms": sqlite_busy_timeout_ms,
                 "phase_timings_ms": phase_timings_ms,
                 "backup": completed_backup,

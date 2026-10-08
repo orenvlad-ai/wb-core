@@ -133,7 +133,9 @@ def check_invalid_sku_cost(directory):
         conn.commit()
         result = capture_wb_component(path, day=DAY, nm_ids=[1, 2])
         assert result["authority_complete"] and not result["complete"], (name, result)
-        assert result["rows"][0]["quantity"] is None, (name, result)
+        assert result["rows"][0]["quantity"] == 12, (name, result)
+        assert result["rows"][0]["capital_rub"] is None, (name, result)
+        assert result["rows"][0]["components"] == {"physical": 7, "to_customer": 3, "from_customer": 2}
         assert result["rows"][1]["status"] == "available", (name, result)
         conn.close()
 

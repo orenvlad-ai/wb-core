@@ -146,6 +146,28 @@ def semantic_checks(runtime):
     assert abs(pure.resolve_total('total_our_wb_unit_cost_rub',days[-1])-140/12)<1e-12
     assert pure.aggregation_evidence[(days[-1],'cost')]['missing_nm_ids']==[12]
     assert pure.resolve_total('total_proxy_profit_4_rub',days[-1])==500
+    # A single admitted quantity with unknown WB valuation leaves its cost and
+    # dependent profit blank, while the other group and known contributions refresh.
+    unknown_cost = [replace(r, values_by_date={d: None for d in days},
+        presentation_by_date={d: {'state':'unavailable','source_as_of_date':d,
+                                  'reason':'wb_cost_coverage_incomplete'} for d in days})
+        if r.nm_id == 12 and r.metric_key in {'our_wb_unit_cost_rub','proxy_profit_4_rub'} else r
+        for r in physical_sku]
+    missing_basis = deepcopy(physical_basis)
+    for day in days:
+        missing_basis[day][12].update(capital=None, quantity=None)
+    with patch.object(groups_module, 'load_buyout_percent_snapshot_metrics', return_value=mature):
+        partial = include_group_rows(totals+unknown_cost, groups=groups, config=config, metrics=metrics,
+            formulas={f.formula_id:f for f in state.formulas_v2}, dates=days, runtime=runtime,
+            today='2026-09-20', parameters3=lambda d: params, parameters4=lambda d: params,
+            cost_basis=missing_basis)
+    partial = {r.row_id:r for r in partial if r.scope_kind == 'GROUP'}
+    for metric in ('total_our_wb_unit_cost_rub','total_proxy_profit_4_rub'):
+        cell = partial[f'GROUP:a|{metric}'].presentation_by_date[days[-1]]
+        assert cell['quality_state'] == 'partial' and cell['missing_sku_count'] == 1, cell
+    assert partial['GROUP:a|total_proxy_profit_4_rub'].values_by_date[days[-1]] == 200
+    assert partial['GROUP:b|total_proxy_profit_4_rub'].values_by_date[days[-1]] == 40
+    assert partial['GROUP:a|total_inventory_wb_total_qty_v1'].values_by_date[days[-1]] == 24
     # Accepted advertising incompleteness is dated, not inferred from a blank
     # operand: native TOTAL aligns both ratio/formula member sets only then.
     ratio_key = 'group_ads_ratio_test'
