@@ -508,8 +508,10 @@ def command_dependency_checks():
         assert "playwright==1.58.0" not in non_browser["pip"], non_browser
     # These operator leaves arrive after this trusted prerequisite. Direct new
     # smoke selection must install its own imports, even without a broad group.
-    next_backend = ['apps/operator_nomenclature_smoke.py', 'apps/operator_nomenclature_journal_smoke.py', 'apps/operator_compat_uploads_smoke.py', 'apps/operator_supplier_shipments_smoke.py', 'apps/operator_supplier_shipments_http_smoke.py', 'apps/operator_supplier_factual_dates_smoke.py', 'apps/fbs_accounting_historical_revision_smoke.py', 'apps/fbs_accounting_historical_revision_writer_smoke.py', 'apps/fbs_accounting_historical_cohort_smoke.py', 'apps/fbs_accounting_historical_stages_smoke.py', 'apps/fbs_accounting_historical_publication_smoke.py', 'apps/fbs_accounting_historical_history_smoke.py', 'apps/business_data_formula_resume_smoke.py', 'apps/operator_supplier_processing_smoke.py', 'apps/operator_supplier_processing_cohort_smoke.py', 'apps/operator_supplier_journal_http_smoke.py', 'apps/operator_policy_smoke.py', 'apps/operator_policy_http_smoke.py', 'apps/operator_policy_history_smoke.py', 'apps/operator_external_operations_smoke.py']
-    next_browsers = ['apps/operator_nomenclature_browser_smoke.py', 'apps/operator_supplier_shipments_browser_smoke.py', 'apps/operator_supplier_factual_dates_browser_smoke.py', 'apps/operator_policy_browser_smoke.py', 'apps/operator_external_operations_browser_smoke.py', 'apps/operator_external_forms_browser_smoke.py']
+    next_backend = ['apps/operator_nomenclature_smoke.py', 'apps/operator_nomenclature_journal_smoke.py', 'apps/operator_compat_uploads_smoke.py', 'apps/operator_supplier_shipments_smoke.py', 'apps/operator_supplier_shipments_http_smoke.py', 'apps/operator_supplier_factual_dates_smoke.py', 'apps/fbs_accounting_historical_revision_smoke.py', 'apps/fbs_accounting_historical_revision_writer_smoke.py', 'apps/fbs_accounting_historical_cohort_smoke.py', 'apps/fbs_accounting_historical_stages_smoke.py', 'apps/fbs_accounting_historical_publication_smoke.py', 'apps/fbs_accounting_historical_history_smoke.py', 'apps/business_data_formula_resume_smoke.py', 'apps/operator_supplier_processing_smoke.py', 'apps/operator_supplier_processing_cohort_smoke.py', 'apps/operator_supplier_journal_http_smoke.py', 'apps/operator_policy_smoke.py', 'apps/operator_policy_http_smoke.py', 'apps/operator_policy_history_smoke.py', 'apps/operator_external_operations_smoke.py', 'apps/operator_policy_journal_smoke.py', 'apps/operator_supplier_financial_journal_smoke.py', 'apps/operator_supplier_financial_http_smoke.py', 'apps/operator_supplier_financial_native_smoke.py', 'apps/operator_supplier_financial_processing_smoke.py', 'apps/operator_cny_documents_smoke.py', 'apps/operator_cny_documents_processing_smoke.py', 'apps/operator_cny_documents_http_smoke.py', 'apps/operator_cny_journal_smoke.py']
+    next_browsers = ['apps/operator_nomenclature_browser_smoke.py', 'apps/operator_supplier_shipments_browser_smoke.py', 'apps/operator_supplier_factual_dates_browser_smoke.py', 'apps/operator_policy_browser_smoke.py', 'apps/operator_external_operations_browser_smoke.py', 'apps/operator_external_forms_browser_smoke.py', 'apps/operator_supplier_financial_browser_smoke.py', 'apps/operator_cny_documents_browser_smoke.py']
+    next_backend += ['apps/operator_trade_documents_smoke.py', 'apps/operator_trade_documents_http_smoke.py']
+    next_browsers += ['apps/operator_trade_documents_browser_smoke.py', 'apps/operator_feedback_forms_browser_smoke.py']
     for script in next_backend + next_browsers:
         narrow = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD,
             paths=[script], file_exists=lambda _, p: p == script)
@@ -522,6 +524,12 @@ def command_dependency_checks():
             assert install not in narrow['commands'], narrow
             assert 'playwright==1.58.0' not in narrow['pip'], narrow
     print('next operator leaves: narrow backend/browser prerequisite selection OK')
+
+    cash_script = 'apps/operator_cash_operations_smoke.py'
+    cash = build_plan_from_paths(pull_request=42, base=BASE, head=HEAD,
+        paths=[cash_script], file_exists=lambda _, p: p == cash_script)
+    check(cash, [cash_script])
+    assert 'apsw==3.53.4.0' in cash['pip'], cash
 
     print("command dependencies: direct/sibling/group/mixed browser routes and backend isolation OK")
 

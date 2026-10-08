@@ -1,15 +1,22 @@
 {
   "schema": "wb-core.check-map/v1",
   "command_dependencies": {
-    "operator_next_imports": {"scripts": ["apps/operator_nomenclature_smoke.py", "apps/operator_nomenclature_journal_smoke.py", "apps/operator_compat_uploads_smoke.py", "apps/operator_supplier_shipments_smoke.py", "apps/operator_supplier_shipments_http_smoke.py", "apps/operator_supplier_factual_dates_smoke.py", "apps/fbs_accounting_historical_revision_smoke.py", "apps/fbs_accounting_historical_revision_writer_smoke.py", "apps/fbs_accounting_historical_cohort_smoke.py", "apps/fbs_accounting_historical_stages_smoke.py", "apps/fbs_accounting_historical_publication_smoke.py", "apps/fbs_accounting_historical_history_smoke.py", "apps/business_data_formula_resume_smoke.py", "apps/operator_supplier_processing_smoke.py", "apps/operator_supplier_processing_cohort_smoke.py", "apps/operator_supplier_journal_http_smoke.py", "apps/operator_policy_smoke.py", "apps/operator_policy_http_smoke.py", "apps/operator_policy_history_smoke.py", "apps/operator_external_operations_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
+    "operator_fulfillment_imports": {"scripts": ["apps/operator_fulfillment_services_smoke.py", "apps/operator_fulfillment_services_native_smoke.py", "apps/operator_fulfillment_services_integration_smoke.py", "apps/operator_fulfillment_services_browser_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"]},
+    "operator_next_imports": {"scripts": ["apps/operator_nomenclature_smoke.py", "apps/operator_nomenclature_journal_smoke.py", "apps/operator_compat_uploads_smoke.py", "apps/operator_supplier_shipments_smoke.py", "apps/operator_supplier_shipments_http_smoke.py", "apps/operator_supplier_factual_dates_smoke.py", "apps/fbs_accounting_historical_revision_smoke.py", "apps/fbs_accounting_historical_revision_writer_smoke.py", "apps/fbs_accounting_historical_cohort_smoke.py", "apps/fbs_accounting_historical_stages_smoke.py", "apps/fbs_accounting_historical_publication_smoke.py", "apps/fbs_accounting_historical_history_smoke.py", "apps/business_data_formula_resume_smoke.py", "apps/operator_supplier_processing_smoke.py", "apps/operator_supplier_processing_cohort_smoke.py", "apps/operator_supplier_journal_http_smoke.py", "apps/operator_policy_smoke.py", "apps/operator_policy_http_smoke.py", "apps/operator_policy_history_smoke.py", "apps/operator_external_operations_smoke.py", "apps/operator_policy_journal_smoke.py", "apps/operator_supplier_financial_journal_smoke.py", "apps/operator_feedback_operations_smoke.py", "apps/operator_feedback_forms_browser_smoke.py", "apps/operator_supplier_financial_http_smoke.py", "apps/operator_supplier_financial_native_smoke.py", "apps/operator_supplier_financial_processing_smoke.py", "apps/operator_cny_documents_smoke.py", "apps/operator_cny_documents_processing_smoke.py", "apps/operator_cny_documents_http_smoke.py", "apps/operator_cny_journal_smoke.py", "apps/operator_trade_documents_smoke.py", "apps/operator_trade_documents_http_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "payment_pdf_fixtures": {
       "scripts": [
         "apps/russian_payment_orders_smoke.py",
         "apps/ff_pool_surfaces_smoke.py",
-        "apps/operator_ff_overhead_smoke.py"
+        "apps/operator_ff_overhead_smoke.py",
+        "apps/operator_supplier_financial_http_smoke.py",
+        "apps/operator_supplier_financial_browser_smoke.py"
       ],
       "commands": [],
-      "pip": ["openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"]
+      "pip": [
+        "openpyxl==3.1.5",
+        "pypdf==6.4.1",
+        "reportlab==4.4.5"
+      ]
     },
     "ads_partial_imports": {
       "scripts": [
@@ -42,10 +49,13 @@
         "apps/finance_liquidity_auth_smoke.py",
         "apps/finance_liquidity_browser_smoke.py",
         "apps/finance_liquidity_http_smoke.py",
-        "apps/finance_liquidity_integration_smoke.py"
+        "apps/finance_liquidity_integration_smoke.py",
+        "apps/operator_cash_operations_smoke.py"
       ],
       "commands": [],
-      "pip": ["apsw==3.53.4.0"]
+      "pip": [
+        "apsw==3.53.4.0"
+      ]
     },
     "playwright_chromium": {
       "scripts": [
@@ -74,16 +84,46 @@
         "apps/search_cluster_cleaner_browser_smoke.py",
         "apps/wb_buyer_support_pilot_browser_smoke.py",
         "apps/wb_buyer_support_smoke.py",
-        "apps/business_data_write_barrier_browser_smoke.py"
+        "apps/business_data_write_barrier_browser_smoke.py",
+        "apps/operator_report_sources_browser_smoke.py",
+        "apps/operator_fulfillment_services_browser_smoke.py",
+        "apps/operator_partner_report_browser_smoke.py",
+        "apps/operator_feedback_forms_browser_smoke.py",
+        "apps/operator_supplier_financial_browser_smoke.py",
+        "apps/operator_cny_documents_browser_smoke.py",
+        "apps/operator_cash_operations_smoke.py",
+        "apps/operator_trade_documents_browser_smoke.py"
       ],
-      "commands": [["python3", "-m", "playwright", "install", "--with-deps", "chromium"]],
-      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
+      "commands": [
+        [
+          "python3",
+          "-m",
+          "playwright",
+          "install",
+          "--with-deps",
+          "chromium"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "playwright==1.58.0"
+      ]
     }
 ,
     "operator_warehouse_imports": {
-      "scripts": ["apps/operator_warehouse_documents_smoke.py"],
+      "scripts": [
+        "apps/operator_warehouse_documents_smoke.py",
+        "apps/operator_inventory_documents_smoke.py",
+        "apps/operator_report_source_versions_smoke.py",
+        "apps/operator_partner_report_smoke.py",
+        "apps/operator_compat_uploads_smoke.py",
+        "apps/operator_nomenclature_smoke.py",
+        "apps/operator_nomenclature_journal_smoke.py"
+      ],
       "commands": [],
-      "pip": ["openpyxl==3.1.5"]
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
     }
   },
   "groups": {
