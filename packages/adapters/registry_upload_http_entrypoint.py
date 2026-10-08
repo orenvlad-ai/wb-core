@@ -3761,7 +3761,6 @@ def _build_handler(
                         operator_context=entrypoint.build_sheet_operator_ui_context(),
                         user_config_key=_current_web_user_config_key(self),
                         embedded_tab=embedded_tab,
-                        user_config_key=_current_web_user_config_key(self),
                     ),
                 )
                 return
@@ -10842,7 +10841,7 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
     """Source grants are applied before journal counts, rows and exact reads."""
     domains = set()
     if _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY):
-        domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services', 'supplier_factual_date', 'supplier_financial_document'))
+        domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services', 'supplier_factual_date', 'supplier_financial_document', 'cny_account_document'))
     if _user_can_access_path(user, DEFAULT_SUPPLIER_SHIPMENTS_PATH):
         domains.add('supplier_shipment')
     if _user_has_section_access(user, WEB_AUTH_SECTION_REPORTS):
@@ -11247,7 +11246,6 @@ def _render_sheet_vitrina_operator_ui(
     user_config_key: str = "local_operator",
     operator_context: Mapping[str, Any] | None = None,
     embedded_tab: str = "",
-    user_config_key: str = "local_operator",
 ) -> str:
     web_vitrina_url = DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     operator_ui_context = operator_context or {}
@@ -11255,7 +11253,6 @@ def _render_sheet_vitrina_operator_ui(
     config_payload = {
         "user_config_key": user_config_key,
         "page_title": "Операторский сайт" if normalized_embedded_tab else "sheet_vitrina_v1",
-        "user_config_key": user_config_key,
         "embedded": bool(normalized_embedded_tab),
         "initial_tab": normalized_embedded_tab,
         "daily_report_path": daily_report_path,

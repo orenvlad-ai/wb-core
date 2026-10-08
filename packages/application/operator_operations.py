@@ -106,11 +106,12 @@ def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections
             raise ValueError('invalid_operation_domain')
         allowed.intersection_update({domain})
     with closing(overhead.readonly(db_path)) as conn:
-        financial = supplier_journal.financial
-        if financial.DOMAIN in allowed and request_scope and not supplier_safe and runtime_dir is not None:
-            value = supplier_journal.financial_acceptance(conn, runtime_dir, db_path, identity, request_scope=request_scope)
-            if value:
-                return _common(value)
+        if request_scope and not supplier_safe and runtime_dir is not None:
+            for family in sorted(allowed.intersection(supplier_journal.FINANCIAL_DOMAINS)):
+                value = supplier_journal.financial_acceptance(conn, runtime_dir, db_path, identity,
+                    request_scope=request_scope, domain=family)
+                if value:
+                    return _common(value)
         for table, key, columns, where, values, reader in supplier_journal.sources(conn,
                 selected=allowed, request_scope=request_scope, supplier_safe=supplier_safe, db_path=db_path, runtime_dir=runtime_dir):
             row=conn.execute(f'SELECT {columns} FROM {table} WHERE {key}=? AND ({where})', (identity,*values)).fetchone()
