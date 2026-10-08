@@ -302,7 +302,7 @@ def public(conn,row):
         'summary':{'entity_ids':[s['entity_id'] for s in source['sources']]},
         'fields':[{'label':'Записей','value':str(len(source['sources']))}],
         'detail_path':REQUEST_PATH+row['operation_id'],
-        'journal_path':'/sheet-vitrina-v1/settings?operation_id='+row['operation_id']}
+        'journal_path':'/sheet-vitrina-v1/operations?operation_id='+row['operation_id']}
 
 
 def read(db_path, identity, *, actor):
@@ -529,7 +529,7 @@ def public_external(conn,row,source):
         'fields':[{'label':'Задание','value':'Чтение карточек WB'}],
         'processing_receipt':{'external':result,'children':children},
         'detail_path':REQUEST_PATH+row['operation_id'],
-        'journal_path':'/sheet-vitrina-v1/settings?operation_id='+row['operation_id']}
+        'journal_path':'/sheet-vitrina-v1/operations?operation_id='+row['operation_id']}
 
 
 def validate_catalog_write(conn,prepared,before):

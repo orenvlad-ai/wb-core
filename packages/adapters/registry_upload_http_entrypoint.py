@@ -5252,11 +5252,11 @@ def _build_handler(
                         params = {key: values[-1] for key, values in urllib_parse.parse_qs(parsed.query).items()}
                         payload = journal(entrypoint.runtime.db_path, page=int(params.get("page") or 1), limit=int(params.get("limit") or 25),
                             allowed_domains=allowed_domains, domain=params.get('domain') or 'all', search=params.get('search') or '',
-                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir)
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self))
                     else:
                         identity = urllib_parse.unquote(parsed.path[len(prefix) + 1:])
                         acceptance = read_acceptance(entrypoint.runtime.db_path, identity, allowed_domains=allowed_domains,
-                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir)
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self))
                         if acceptance is None:
                             _write_json_response(self, HTTPStatus.NOT_FOUND, {"code": "operation_not_found"})
                             return
@@ -10915,6 +10915,8 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
     domains = set()
     if _user_can_access_path(user, DEFAULT_TRADE_DOCUMENTS_PATH):
         domains.add('trade_document_library')
+    if _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS):
+        domains.add('nomenclature')
     if _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY):
         domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services', 'supplier_factual_date', 'supplier_financial_document', 'cny_account_document', 'facility_mapping'))
     if _user_can_access_path(user, DEFAULT_SUPPLIER_SHIPMENTS_PATH):

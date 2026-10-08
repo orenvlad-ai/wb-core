@@ -10,8 +10,9 @@ from packages.application import operator_trade_documents as trade
 from packages.application import operator_supplier_contracts as contracts
 from packages.application import operator_facility_mappings as facilities
 from packages.application import operator_compat_uploads as compat_uploads
+from packages.application import operator_nomenclature as nomenclature
 
-DOMAIN_LABELS = {'registry_bundle_upload': 'Справочники через API', 'cost_price_upload': 'Себестоимость через API', 'ff_pool_document': 'Складские документы', fulfillment.DOMAIN: 'Услуги фулфилмента',
+DOMAIN_LABELS = {nomenclature.DOMAIN: 'Справочник SKU', 'registry_bundle_upload': 'Справочники через API', 'cost_price_upload': 'Себестоимость через API', 'ff_pool_document': 'Складские документы', fulfillment.DOMAIN: 'Услуги фулфилмента',
     'plan_report_baseline': 'Исходные данные отчётов',
     'factory_order_dataset': 'Исходные данные планирования',
     partner_report.DOMAIN: 'Настройки партнёрского отчёта'}
@@ -20,7 +21,7 @@ DOMAIN_LABELS[trade.DOMAIN] = 'Библиотека инвойсов и дого
 DOMAIN_LABELS[contracts.DOMAIN]='Договоры поставщика'
 DOMAIN_LABELS[facilities.DOMAIN] = "Склады и связи FBS"
 DEFAULT_DOMAINS = frozenset({'ff_pool_document', fulfillment.DOMAIN})
-DOMAIN_SECTIONS = {'ff_pool_document': 'supply', fulfillment.DOMAIN: 'supply',
+DOMAIN_SECTIONS = {nomenclature.DOMAIN: 'settings', 'ff_pool_document': 'supply', fulfillment.DOMAIN: 'supply',
     'plan_report_baseline': 'reports', 'factory_order_dataset': 'supply', partner_report.DOMAIN: 'reports'}
 DOMAIN_SECTIONS.update({name: 'supply' for name in supplier_journal.LABELS})
 DOMAIN_SECTIONS[trade.DOMAIN] = 'settings'
@@ -70,7 +71,7 @@ def _contract_sources(conn, *, selected, request_scope, supplier_safe):
         lambda connection, row: contracts._public(connection, row)['acceptance'])]
 
 
-def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections=None, domain='all', search='', request_scope='', supplier_safe=False, runtime_dir=None):
+def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections=None, domain='all', search='', request_scope='', supplier_safe=False, runtime_dir=None, actor=''):
     if type(page) is not int or type(limit) is not int or not 1<=page<=100000 or not 1<=limit<=100:
         raise ValueError('invalid_operation_journal_page')
     allowed = _allowed(allowed_domains, allowed_sections)
@@ -85,6 +86,8 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
         sources=supplier_journal.sources(conn, selected=selected, request_scope=request_scope, supplier_safe=supplier_safe, db_path=db_path, runtime_dir=runtime_dir)
         sources.extend(_trade_sources(conn, selected=selected, request_scope=request_scope, supplier_safe=supplier_safe))
         sources.extend(_contract_sources(conn, selected=selected, request_scope=request_scope, supplier_safe=supplier_safe))
+        if actor and nomenclature.DOMAIN in selected and nomenclature.exists(conn):
+            sources.append((nomenclature.TABLE, 'operation_id', '*', 'actor=?', (actor,), nomenclature.public))
         if 'ff_pool_document' in selected:
             if overhead._exists(conn):
                 sources.append((overhead.TABLE, 'request_id', '*', '1', (), _overhead_public))
@@ -154,7 +157,7 @@ def json_search(item):
     return ' '.join(str(value or '') for value in values)
 
 
-def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections=None, domain='', request_scope='', supplier_safe=False, runtime_dir=None):
+def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections=None, domain='', request_scope='', supplier_safe=False, runtime_dir=None, actor=''):
     allowed = _allowed(allowed_domains, allowed_sections)
     if domain:
         if domain not in DOMAIN_LABELS:
@@ -177,6 +180,10 @@ def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections
             if row is not None:
                 value=reader(conn,row)
                 return _common(value) if value else None
+        if actor and nomenclature.DOMAIN in allowed and nomenclature.exists(conn):
+            row = conn.execute(f'SELECT * FROM {nomenclature.TABLE} WHERE operation_id=? AND actor=?', (identity, actor)).fetchone()
+            if row is not None:
+                return _common(nomenclature.public(conn, row))
         if fulfillment.DOMAIN in allowed and fulfillment._exists(conn, fulfillment.TABLE):
             row = conn.execute(f'SELECT * FROM {fulfillment.TABLE} WHERE operation_id=?', (identity,)).fetchone()
             if row:
