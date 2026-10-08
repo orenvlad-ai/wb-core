@@ -241,6 +241,7 @@
 </head>
 <body class="__SHEET_VITRINA_V1_SETTINGS_BODY_CLASS__">
   <main>
+    <div id="nomenclatureAcceptance" hidden></div>
     <div class="shell">
       <section class="topbar">
         <div>
@@ -692,6 +693,7 @@
   </main>
 
   <script id="sheet-vitrina-v1-settings-config" type="application/json">__SHEET_VITRINA_V1_SETTINGS_CONFIG_JSON__</script>
+  <!-- operator-nomenclature-driver -->
   <script>
     (() => {
       const config = JSON.parse(document.getElementById("sheet-vitrina-v1-settings-config").textContent);
@@ -871,6 +873,15 @@
       ];
       let items = [];
       let skuGroups = [];
+      const nomenclatureOperator = OperatorNomenclature.create(config, document.getElementById("nomenclatureAcceptance"), (url) => {
+        if (url === nomenclatureImportPath) return Object.fromEntries(items.map(item => [item.item_id,item.operator_source_revision]));
+        const group = url.startsWith(skuGroupsPath + "/");
+        const root = group ? skuGroupsPath : nomenclaturePath;
+        const id = decodeURIComponent(url.slice(root.length + 1).split("/")[0]);
+        const row = (group ? skuGroups : items).find(item => (group ? item.group_key : item.item_id) === id);
+        return row && row.operator_source_revision;
+      }, fetchJsonNative);
+      nomenclatureOperator.restore();
       let visibleColumnKeys = restoreVisibleColumns();
       let documents = [];
       let pendingDocumentType = "";
@@ -1062,7 +1073,10 @@
       }
 
       async function fetchJson(url, options) {
-        return fetchJsonNative(url, options);
+        if (nomenclatureOperator.handles(url,options)) return nomenclatureOperator.mutate(url,options);
+        const payload=await fetchJsonNative(url,options);
+        if ((url === skuGroupsPath || url.startsWith(nomenclaturePath + "?")) && String(options && options.method || "GET").toUpperCase()==="GET") nomenclatureOperator.sourceRefreshed();
+        return payload;
       }
 
       async function fetchJsonNative(url, options) {
@@ -1076,7 +1090,8 @@
         const payload = text ? JSON.parse(text) : {};
         if (!response.ok) {
           const rowErrors = Array.isArray(payload.errors) ? payload.errors.map((item) => item.message || String(item)).join("; ") : "";
-          throw new Error(payload.error || rowErrors || ("HTTP " + response.status));
+          const error=new Error(payload.error || rowErrors || ("HTTP " + response.status));
+          error.httpStatus=response.status; error.sourceNotSaved=payload.source_not_saved === true; error.operationId=payload.operation_id; throw error;
         }
         return payload;
       }
@@ -2083,7 +2098,7 @@
             headers: { Accept: "application/json" }
           });
           await loadItems();
-          setMessage("ШК обновлён.", "success");
+          setMessage("Задание сохранено. Результат обработки — в квитанции.", "success");
         } catch (error) {
           setMessage(error.message, "error");
         }
@@ -2102,7 +2117,7 @@
           });
           await loadItems();
           setMessage(
-            "WB sync: карточек " + (payload.cards_processed || 0) + ", создано " + (payload.created || 0) + ", обновлено " + (payload.updated || 0) + ", review " + (payload.created_needs_review || 0) + ".",
+            "Задание сохранено. Результат обработки — в квитанции.",
             payload.status === "ok" ? "success" : "warning"
           );
         } catch (error) {
@@ -2205,7 +2220,7 @@
           const payload = await fetchJson(nomenclatureImportPath, { method: "POST", body: formData, headers: { Accept: "application/json" } });
           await loadItems();
           setMessage(
-            "Импорт: создано " + payload.created_count + ", обновлено " + payload.updated_count + ", выключено " + payload.deactivated_count + ", пропущено " + payload.skipped_count + ".",
+            "Импорт сохранён. Результат обработки — в квитанции.",
             "success"
           );
         } catch (error) {
@@ -2289,9 +2304,7 @@
             headers: { "Content-Type": "application/json", Accept: "application/json" },
             body: JSON.stringify(payload)
           });
-          skuGroups = Array.isArray(result.groups) ? result.groups : skuGroups;
-          renderSkuGroups();
-          renderRows();
+          await loadSkuGroups();
           setSkuGroupsMessage("Группа сохранена.", "success");
         } catch (error) {
           setSkuGroupsMessage(error.message, "error");
@@ -2313,9 +2326,7 @@
             method: "DELETE",
             headers: { Accept: "application/json" }
           });
-          skuGroups = Array.isArray(result.groups) ? result.groups : skuGroups;
-          renderSkuGroups();
-          renderRows();
+          await loadSkuGroups();
           setSkuGroupsMessage("Группа отключена.", "success");
         } catch (error) {
           setSkuGroupsMessage(error.message, "error");

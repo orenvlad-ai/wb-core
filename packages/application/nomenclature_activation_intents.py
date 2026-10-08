@@ -154,6 +154,9 @@ def acknowledge_source(
         if changed != 1:
             raise DenseFbsError("sku_activation_source_ack_drift", "Activation acknowledgment lost its source revision")
 
+    from packages.application.operator_nomenclature import acknowledge_activation
+    acknowledge_activation(conn,staged_items=staged_items,intent_id=intent_id)
+
 
 def drain_nomenclature_activation_intents(
     runtime: Any, *, item_ids: Sequence[str] | None = None,
@@ -181,6 +184,9 @@ def _drain_nomenclature_activation_intents(
     from packages.application.registry_upload_db_backed_runtime import _connect
     from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
 
+    if item_ids is None:
+        from packages.application.operator_nomenclature import drain_external
+        drain_external(runtime)
     results: list[dict[str, Any]] = []
     first_error: Exception | None = None
     with warehouse_functional_write_lock(runtime.runtime_dir):

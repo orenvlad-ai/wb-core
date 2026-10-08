@@ -38,6 +38,7 @@
 - [Сравнение групп SKU](32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md)
 - [Остатки 1С](33_MODULE__ONEC_STOCKS_BLOCK.md)
 - [Поставки поставщиков](34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md)
+- [Приём изменений справочника SKU](operator_nomenclature.md)
 - [SPP proxy](35_MODULE__SPP_PROXY_BLOCK.md)
 - [Поставки WB](36_MODULE__WB_SUPPLIES_BLOCK.md)
 - [Оператор рекламы](37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md)

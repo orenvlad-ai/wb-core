@@ -625,18 +625,18 @@ def _http_route_smoke() -> None:
                     "purchase_price_yuan": "1",
                 },
             )
-            if auto_status != 200 or auto_payload.get("item", {}).get("barcode_status") != "token_missing":
-                raise AssertionError(f"HTTP auto-sync token warning must not block save: {auto_status} {auto_payload}")
+            if auto_status != 200 or auto_payload.get("barcode_sync", {}).get("status") != "pending" or not auto_payload.get("acceptance", {}).get("durable_saved"):
+                raise AssertionError(f"HTTP auto-sync read must be deferred after durable save: {auto_status} {auto_payload}")
             sync_status, sync_payload = _post_json(
                 f"{base_url}{DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH}",
                 {"limit": 10, "max_pages": 1},
             )
-            if sync_status != 200 or sync_payload.get("status") != "token_missing":
-                raise AssertionError(f"HTTP batch WB sync must expose token_missing status: {sync_status} {sync_payload}")
+            if sync_status != 200 or sync_payload.get("acceptance", {}).get("reason_code") != "native_wb_read_pending":
+                raise AssertionError(f"HTTP batch WB sync must expose durable pending read task: {sync_status} {sync_payload}")
             list_status, list_payload = _get_json(f"{base_url}{DEFAULT_NOMENCLATURE_PATH}")
             summary = list_payload.get("summary") or {}
-            if list_status != 200 or summary.get("active_rows_missing_barcode", 0) < 1:
-                raise AssertionError(f"HTTP list must expose barcode summary: {list_status} {list_payload}")
+            if list_status != 200 or not any(not item.get("barcode") and item.get("activation_status")=="pending" for item in list_payload.get("items", [])):
+                raise AssertionError(f"HTTP list must expose saved barcode diagnostics without claiming Dense activation: {list_status} {list_payload}")
             groups_status, groups_payload = _get_json(f"{base_url}{DEFAULT_SKU_GROUPS_PATH}")
             group_keys = {str(group.get("group_key") or "") for group in groups_payload.get("groups") or []}
             if groups_status != 200 or "no_frame_clean" not in group_keys:

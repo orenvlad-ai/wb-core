@@ -317,6 +317,7 @@ class HeavySourcesTests(unittest.TestCase):
         self.assertEqual(daily.build_daily_payload()['days'][-1]['metrics']['cogs'], '300.0000')
         supplier = SupplierShipmentsBlock.__new__(SupplierShipmentsBlock)
         supplier.runtime = runtime; supplier.timestamp_factory = lambda: '2026-09-29T09:01:00Z'
+        supplier.create_sku_group({'group_key':'clear','label':'Clean'})
         supplier._validate_nomenclature_group = lambda *_, **kw: None
         supplier._validate_nomenclature_unique = lambda *_, **kw: None
         supplier._sync_nomenclature_barcode_item = lambda item, **kw: (item, {})
@@ -325,7 +326,8 @@ class HeavySourcesTests(unittest.TestCase):
         with busy(self.root):
             saved = entry.handle_nomenclature_patch_request(item['item_id'], {'vendor_code': 'VC999'})
         self.assertEqual(saved['status'], 'ok')
-        self.assertEqual(saved['wb_finance_cost_recalculation']['status'], 'deferred')
+        self.assertEqual(saved['acceptance']['state'], 'processing')
+        self.assertEqual(saved['acceptance']['reason_code'], 'native_finance_pending')
         committed = runtime.load_nomenclature_item(item['item_id'])
         self.assertEqual(committed['vendor_code'], 'VC999')
         self.assertEqual(daily.build_daily_payload()['days'][-1]['status'], 'stale_projection')
@@ -337,6 +339,8 @@ class HeavySourcesTests(unittest.TestCase):
         with fixture_process(repair_after_restart, self.root) as child:
             child.wait('repaired'); child.release('repaired'); child.finish()
         self.assertEqual(runtime.load_nomenclature_item(item['item_id']), committed)
+        from packages.application.operator_nomenclature import read
+        self.assertEqual(read(runtime.db_path,saved['acceptance']['operation_id'],actor='local_operator')['state'],'completed')
         with sqlite3.connect(runtime.db_path) as conn:
             self.assertEqual(tuple(conn.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0]
                 for table in ('wb_finance_weekly_raw_rows', 'wb_finance_daily_raw_rows')), counts)

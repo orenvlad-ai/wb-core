@@ -490,6 +490,7 @@ DEFAULT_CNY_ACCOUNT_REPLAY_PATH = f"{DEFAULT_CNY_ACCOUNT_PATH}/replay"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
 DEFAULT_INSTRUCTIONS_UI_PATH = "/sheet-vitrina-v1/instructions"
 DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
+DEFAULT_NOMENCLATURE_OPERATIONS_PATH = DEFAULT_NOMENCLATURE_PATH + "/operations/"
 DEFAULT_NOMENCLATURE_EXPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
 DEFAULT_NOMENCLATURE_IMPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx"
 DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync"
@@ -2896,9 +2897,12 @@ def _build_handler(
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                         dry_run=_resolve_optional_query_bool(parsed.query, "dry_run"),
+                        actor=_current_web_user_actor(self),
+                        request_id=self.headers.get("X-Operator-Request-ID") or upload_payload["fields"].get("operator_request_id"),
+                        expected_revision=_nomenclature_expected_value(upload_payload["fields"].get("operator_expected_revision")) if upload_payload["fields"].get("operator_expected_revision") else _nomenclature_expected_header(self),
                     )
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -2907,6 +2911,9 @@ def _build_handler(
                         {"error": f"nomenclature import failed: {exc}"},
                     )
                     return
+                if result.get("status")!="ok":
+                    rejection=_nomenclature_rejection_payload(self,entrypoint,ValueError('import validation rejected'))
+                    result={**result,**{key:value for key,value in rejection.items() if key!='error'}}
                 response_status = HTTPStatus.OK if result.get("status") == "ok" else HTTPStatus.BAD_REQUEST
                 _write_json_response(self, response_status, result)
                 return
@@ -2916,9 +2923,9 @@ def _build_handler(
                     return
                 try:
                     payload = _load_optional_request_payload(self)
-                    result = entrypoint.handle_nomenclature_barcode_sync_request(payload)
+                    result = entrypoint.handle_nomenclature_barcode_sync_request(payload, actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -2935,9 +2942,9 @@ def _build_handler(
                     return
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_sku_groups_create_request(payload)
+                    result = entrypoint.handle_sku_groups_create_request(payload, actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -2954,9 +2961,9 @@ def _build_handler(
                     return
                 try:
                     item_id = _resolve_nomenclature_item_barcode_sync_id(parsed.path)
-                    result = entrypoint.handle_nomenclature_item_barcode_sync_request(item_id)
+                    result = entrypoint.handle_nomenclature_item_barcode_sync_request(item_id, actor=_current_web_user_actor(self), request_id=self.headers.get("X-Operator-Request-ID"), expected_revision=_nomenclature_expected_header(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -2973,9 +2980,9 @@ def _build_handler(
                     return
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_nomenclature_create_request(payload)
+                    result = entrypoint.handle_nomenclature_create_request(payload, actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -5559,6 +5566,17 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path.startswith(DEFAULT_NOMENCLATURE_OPERATIONS_PATH):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                identity=parsed.path[len(DEFAULT_NOMENCLATURE_OPERATIONS_PATH):]
+                if not re.fullmatch(r'opsku_[a-f0-9]{32}',identity):
+                    _write_json_response(self,HTTPStatus.NOT_FOUND,{'error':'operation not found'})
+                    return
+                payload=entrypoint.handle_nomenclature_operation_request(identity,actor=_current_web_user_actor(self))
+                _write_json_response(self,HTTPStatus.OK if payload['operation'] else HTTPStatus.NOT_FOUND,payload)
+                return
+
             if parsed.path == DEFAULT_NOMENCLATURE_EXPORT_PATH:
                 if not _ensure_operator_role(self, parsed.path):
                     return
@@ -6534,9 +6552,9 @@ def _build_handler(
                 try:
                     item_id = _resolve_nomenclature_item_id(parsed.path)
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_nomenclature_patch_request(item_id, payload)
+                    result = entrypoint.handle_nomenclature_patch_request(item_id, payload, actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -6554,9 +6572,9 @@ def _build_handler(
                 try:
                     group_key = _resolve_sku_group_key(parsed.path)
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_sku_groups_patch_request(group_key, payload)
+                    result = entrypoint.handle_sku_groups_patch_request(group_key, payload, actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -6741,9 +6759,9 @@ def _build_handler(
                     return
                 try:
                     item_id = _resolve_nomenclature_item_id(parsed.path)
-                    payload = entrypoint.handle_nomenclature_delete_request(item_id)
+                    payload = entrypoint.handle_nomenclature_delete_request(item_id, actor=_current_web_user_actor(self), request_id=self.headers.get("X-Operator-Request-ID"), expected_revision=_nomenclature_expected_header(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -6760,9 +6778,9 @@ def _build_handler(
                     return
                 try:
                     group_key = _resolve_sku_group_key(parsed.path)
-                    payload = entrypoint.handle_sku_groups_delete_request(group_key)
+                    payload = entrypoint.handle_sku_groups_delete_request(group_key, actor=_current_web_user_actor(self), request_id=self.headers.get("X-Operator-Request-ID"), expected_revision=_nomenclature_expected_header(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -11491,6 +11509,8 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,
         "nomenclature_export_path": DEFAULT_NOMENCLATURE_EXPORT_PATH,
         "nomenclature_import_path": DEFAULT_NOMENCLATURE_IMPORT_PATH,
+        "nomenclature_operations_path": DEFAULT_NOMENCLATURE_OPERATIONS_PATH,
+        "operator_actor_scope": operator_actor_scope,
         "nomenclature_barcode_sync_path": DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH,
         "sku_groups_path": DEFAULT_SKU_GROUPS_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
@@ -11535,6 +11555,8 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
     template=template.replace('<!-- FACILITY_ACCEPTANCE_ASSET -->','<script>'+UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_facility_acceptance.js').read_text(encoding='utf-8')+'</script>')
     asset = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_trade_acceptance.js").read_text(encoding="utf-8")
     template = template.replace("</head>", "<script>\n" + asset + "\n</script>\n</head>", 1)
+    driver=(SETTINGS_UI_TEMPLATE_PATH.parent / "sheet_vitrina_v1_operator_nomenclature.js").read_text(encoding="utf-8")
+    template=template.replace("<!-- operator-nomenclature-driver -->","<script>"+driver+"</script>")
     return (
         template.replace("__SHEET_VITRINA_V1_SETTINGS_BODY_CLASS__", "is-embedded" if embedded else "")
         .replace(
@@ -11963,3 +11985,31 @@ def _resolve_operator_embedded_tab_from_query(query: str) -> str:
     if tab in {"vitrina", "factory-order", "reports"}:
         return tab
     raise ValueError("unsupported embedded_tab: expected 'vitrina', 'factory-order', or 'reports'")
+
+
+def _nomenclature_expected_header(handler):
+    value=handler.headers.get('X-Operator-Expected-Revision')
+    if not value:
+        return None
+    return _nomenclature_expected_value(value)
+
+
+def _nomenclature_expected_value(value):
+    try:
+        return json.loads(value)
+    except (ValueError,TypeError) as exc:
+        raise ValueError('operator_nomenclature_expected_revision_invalid') from exc
+
+
+def _nomenclature_rejection_payload(handler,entrypoint,error):
+    """Only a completed rejection plus same-ID absent readback permits new input."""
+    result={'error':str(error)}
+    identity=handler.headers.get('X-Operator-Request-ID','')
+    if re.fullmatch(r'opsku_[a-f0-9]{32}',identity):
+        from packages.application.operator_nomenclature import read
+        try:
+            receipt=read(entrypoint.runtime.db_path,identity,actor=_current_web_user_actor(handler))
+            result.update(operation_id=identity,source_not_saved=receipt is None)
+        except Exception:
+            pass  # Unknown is not proof of an unsaved source.
+    return result

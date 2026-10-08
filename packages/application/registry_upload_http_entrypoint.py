@@ -8161,50 +8161,63 @@ class RegistryUploadHttpEntrypoint:
     def handle_nomenclature_export_request(self) -> tuple[bytes, str, str]:
         return self.supplier_shipments_block.export_nomenclature_xlsx()
 
+    def _nomenclature_operator_request(self, payload, *, action, actor, target=''):
+        from packages.application.operator_nomenclature import request
+        body=dict(payload)
+        identity=body.pop('_operator_request_id',None) or 'opsku_'+uuid4().hex
+        expected=body.pop('_operator_expected_revision',None)
+        return body,request(identity,actor=actor,action=action,
+            payload={'target':target,'body':body},expected=expected)
+
+    def handle_nomenclature_operation_request(self, identity, *, actor):
+        from packages.application.operator_nomenclature import read
+        return {'contract_name':'operator_operations_v1','status':'ready',
+                'operation':read(self.runtime.db_path,identity,actor=actor)}
+
     def handle_nomenclature_import_request(
-        self,
-        workbook_bytes: bytes,
-        *,
-        uploaded_filename: str | None = None,
-        uploaded_content_type: str | None = None,
-        dry_run: bool = False,
+        self, workbook_bytes: bytes, *, uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None, dry_run: bool = False,
+        actor: str = 'local_operator', request_id=None, expected_revision=None,
     ) -> dict[str, Any]:
-        result = self.supplier_shipments_block.import_nomenclature_xlsx(
-            workbook_bytes,
-            uploaded_filename=uploaded_filename,
-            uploaded_content_type=uploaded_content_type,
-            dry_run=dry_run,
-        )
-        return (
-            result
-            if dry_run
-            else self._attach_wb_finance_cost_recalculation(result)
-        )
+        if dry_run:
+            return self.supplier_shipments_block.import_nomenclature_xlsx(workbook_bytes,
+                uploaded_filename=uploaded_filename,uploaded_content_type=uploaded_content_type,dry_run=True)
+        from packages.application.operator_nomenclature import perform
+        _body,req=self._nomenclature_operator_request({
+            '_operator_request_id':request_id,'_operator_expected_revision':expected_revision,
+            'file_sha256':hashlib.sha256(workbook_bytes).hexdigest(),
+            'filename':uploaded_filename},action='import',actor=actor)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.import_nomenclature_xlsx(
+            workbook_bytes,uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,operator_request=req))
 
-    def handle_nomenclature_create_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self._attach_wb_finance_cost_recalculation(
-            self.supplier_shipments_block.create_nomenclature_item(payload)
-        )
+    def handle_nomenclature_create_request(self, payload: Mapping[str, Any], *, actor='local_operator') -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        body,req=self._nomenclature_operator_request(payload,action='create',actor=actor)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.create_nomenclature_item(body,operator_request=req))
 
-    def handle_nomenclature_patch_request(self, item_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self._attach_wb_finance_cost_recalculation(
-            self.supplier_shipments_block.update_nomenclature_item(item_id, payload)
-        )
+    def handle_nomenclature_patch_request(self, item_id: str, payload: Mapping[str, Any], *, actor='local_operator') -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        body,req=self._nomenclature_operator_request(payload,action='update',actor=actor,target=item_id)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.update_nomenclature_item(item_id,body,operator_request=req))
 
-    def handle_nomenclature_delete_request(self, item_id: str) -> dict[str, Any]:
-        return self._attach_wb_finance_cost_recalculation(
-            self.supplier_shipments_block.deactivate_nomenclature_item(item_id)
-        )
+    def handle_nomenclature_delete_request(self, item_id: str, *, actor='local_operator', request_id=None, expected_revision=None) -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        _body,req=self._nomenclature_operator_request({'_operator_request_id':request_id,
+            '_operator_expected_revision':expected_revision},action='delete',actor=actor,target=item_id)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.deactivate_nomenclature_item(item_id,operator_request=req))
 
-    def handle_nomenclature_barcode_sync_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self._attach_wb_finance_cost_recalculation(
-            self.supplier_shipments_block.sync_nomenclature_barcodes(payload)
-        )
+    def handle_nomenclature_barcode_sync_request(self, payload: Mapping[str, Any], *, actor='local_operator') -> dict[str, Any]:
+        from packages.application.operator_nomenclature import accept_external
+        body,req=self._nomenclature_operator_request(payload,action='wb_sync',actor=actor)
+        return accept_external(self.runtime,req,body,accepted_at=self.supplier_shipments_block.timestamp_factory())
 
-    def handle_nomenclature_item_barcode_sync_request(self, item_id: str) -> dict[str, Any]:
-        return self._attach_wb_finance_cost_recalculation(
-            self.supplier_shipments_block.sync_nomenclature_item_barcode(item_id)
-        )
+    def handle_nomenclature_item_barcode_sync_request(self, item_id: str, *, actor='local_operator', request_id=None, expected_revision=None) -> dict[str, Any]:
+        from packages.application.operator_nomenclature import accept_external
+        body,req=self._nomenclature_operator_request({'item_id':item_id,
+            '_operator_request_id':request_id,'_operator_expected_revision':expected_revision},
+            action='barcode',actor=actor,target=item_id)
+        return accept_external(self.runtime,req,body,accepted_at=self.supplier_shipments_block.timestamp_factory())
 
     def _attach_wb_finance_cost_recalculation(
         self, result: Mapping[str, Any]
@@ -8237,14 +8250,21 @@ class RegistryUploadHttpEntrypoint:
     def handle_sku_groups_list_request(self) -> dict[str, Any]:
         return self.supplier_shipments_block.list_sku_groups(include_inactive=True)
 
-    def handle_sku_groups_create_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.supplier_shipments_block.create_sku_group(payload)
+    def handle_sku_groups_create_request(self, payload: Mapping[str, Any], *, actor='local_operator') -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        body,req=self._nomenclature_operator_request(payload,action='group_create',actor=actor)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.create_sku_group(body,operator_request=req))
 
-    def handle_sku_groups_patch_request(self, group_key: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.supplier_shipments_block.update_sku_group(group_key, payload)
+    def handle_sku_groups_patch_request(self, group_key: str, payload: Mapping[str, Any], *, actor='local_operator') -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        body,req=self._nomenclature_operator_request(payload,action='group_update',actor=actor,target=group_key)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.update_sku_group(group_key,body,operator_request=req))
 
-    def handle_sku_groups_delete_request(self, group_key: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.deactivate_sku_group(group_key)
+    def handle_sku_groups_delete_request(self, group_key: str, *, actor='local_operator', request_id=None, expected_revision=None) -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        _body,req=self._nomenclature_operator_request({'_operator_request_id':request_id,
+            '_operator_expected_revision':expected_revision},action='group_delete',actor=actor,target=group_key)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.deactivate_sku_group(group_key,operator_request=req))
 
     @_heavy_http_method
     def _run_sheet_auto_update(

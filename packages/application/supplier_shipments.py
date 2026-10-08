@@ -1925,7 +1925,7 @@ class SupplierShipmentsBlock:
             worksheet.append(
                 [
                     str(item.get("item_id") or ""),
-                    "да" if bool(item.get("is_active")) else "нет",
+                    "да" if _nomenclature_requested_active(item) else "нет",
                     "да" if bool(item.get("is_hidden")) else "нет",
                     item.get("nm_id") if item.get("nm_id") is not None else "",
                     str(item.get("barcode") or ""),
@@ -1961,6 +1961,7 @@ class SupplierShipmentsBlock:
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
         dry_run: bool = False,
+        operator_request=None,
     ) -> dict[str, Any]:
         del uploaded_content_type
         filename = _safe_filename(uploaded_filename or NOMENCLATURE_XLSX_FILENAME)
@@ -2044,10 +2045,12 @@ class SupplierShipmentsBlock:
                 items=[],
             )
 
+        operator_request = _pin_operator_version(operator_request, {str(op["item"]["item_id"]):existing_by_id.get(str(op["item"]["item_id"])) for op in operations})
         saved_items = self.runtime.save_nomenclature_items_atomic(
             [operation["item"] for operation in operations],
             preserve_staged_item_ids=[str(operation["item"]["item_id"]) for operation in operations
                                      if operation.get("preserve_staged_activation")],
+            operator_request=operator_request,
         )
         return _nomenclature_import_result(
             status="ok",
@@ -2067,22 +2070,23 @@ class SupplierShipmentsBlock:
             "groups": groups,
         }
 
-    def create_sku_group(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def create_sku_group(self, payload: Mapping[str, Any], *, operator_request=None) -> dict[str, Any]:
         self._ensure_sku_groups_ready()
         now = self.timestamp_factory()
         group = _normalize_sku_group_payload(payload, created_at=now, updated_at=now)
         return {
             "contract_name": "sheet_vitrina_v1_sku_groups",
             "status": "ok",
-            "group": self.runtime.save_sku_group(group),
+            "group": self.runtime.save_sku_group(group, operator_request=operator_request),
             "groups": self.runtime.list_sku_groups(include_inactive=True),
         }
 
-    def update_sku_group(self, group_key: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def update_sku_group(self, group_key: str, payload: Mapping[str, Any], *, operator_request=None) -> dict[str, Any]:
         self._ensure_sku_groups_ready()
         existing = self.runtime.load_sku_group(group_key)
         if existing is None:
             raise ValueError(f"sku group not found: {group_key}")
+        operator_request = _pin_operator_version(operator_request, {group_key:existing})
         now = self.timestamp_factory()
         normalized = _normalize_sku_group_payload(
             {**existing, **dict(payload), "group_key": str(existing.get("group_key") or group_key)},
@@ -2096,14 +2100,14 @@ class SupplierShipmentsBlock:
         return {
             "contract_name": "sheet_vitrina_v1_sku_groups",
             "status": "ok",
-            "group": self.runtime.save_sku_group(normalized),
+            "group": self.runtime.save_sku_group(normalized, operator_request=operator_request),
             "groups": self.runtime.list_sku_groups(include_inactive=True),
         }
 
-    def deactivate_sku_group(self, group_key: str) -> dict[str, Any]:
-        return self.update_sku_group(group_key, {"is_active": False})
+    def deactivate_sku_group(self, group_key: str, *, operator_request=None) -> dict[str, Any]:
+        return self.update_sku_group(group_key, {"is_active": False}, operator_request=operator_request)
 
-    def create_nomenclature_item(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def create_nomenclature_item(self, payload: Mapping[str, Any], *, operator_request=None) -> dict[str, Any]:
         now = self.timestamp_factory()
         prepared_payload = _prepare_nomenclature_barcode_payload(
             existing=None,
@@ -2120,23 +2124,27 @@ class SupplierShipmentsBlock:
             updated_at=now,
         )
         self._validate_nomenclature_group(item)
-        item, barcode_sync = self._sync_nomenclature_barcode_item(
-            item,
-            reason="auto_save",
-            allow_existing_non_manual=False,
-        )
+        if operator_request is not None and item.get("nm_id") and not str(item.get("barcode") or "").strip():
+            # The immutable source is accepted before provider readiness. Existing
+            # owned SKU continuation performs the same native WB READ later.
+            barcode_sync = {"status":"pending","reason":"auto_save","save_item":False}
+        else:
+            item, barcode_sync = self._sync_nomenclature_barcode_item(
+                item,reason="auto_save",allow_existing_non_manual=False,
+            )
         self._validate_nomenclature_unique(item)
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature",
             "status": "ok",
-            "item": self.runtime.save_nomenclature_item(item),
+            "item": self.runtime.save_nomenclature_item(item, operator_request=operator_request),
             "barcode_sync": barcode_sync,
         }
 
-    def update_nomenclature_item(self, item_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def update_nomenclature_item(self, item_id: str, payload: Mapping[str, Any], *, operator_request=None) -> dict[str, Any]:
         existing = self.runtime.load_nomenclature_item(item_id)
         if existing is None:
             raise ValueError(f"nomenclature item not found: {item_id}")
+        operator_request = _pin_operator_version(operator_request, {item_id:existing})
         now = self.timestamp_factory()
         prepared_payload = _prepare_nomenclature_barcode_payload(
             existing=existing,
@@ -2158,37 +2166,42 @@ class SupplierShipmentsBlock:
             updated_at=now,
         )
         self._validate_nomenclature_group(item, existing=existing)
-        item, barcode_sync = self._sync_nomenclature_barcode_item(
-            item,
-            reason="auto_save",
-            allow_existing_non_manual=False,
-        )
+        if operator_request is not None and item.get("nm_id") and not str(item.get("barcode") or "").strip():
+            # The immutable source is accepted before provider readiness. Existing
+            # owned SKU continuation performs the same native WB READ later.
+            barcode_sync = {"status":"pending","reason":"auto_save","save_item":False}
+        else:
+            item, barcode_sync = self._sync_nomenclature_barcode_item(
+                item,reason="auto_save",allow_existing_non_manual=False,
+            )
         self._validate_nomenclature_unique(item)
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature",
             "status": "ok",
-            "item": self.runtime.save_nomenclature_item(item, preserve_staged_activation="is_active" not in payload),
+            "item": self.runtime.save_nomenclature_item(item, preserve_staged_activation="is_active" not in payload, operator_request=operator_request),
             "barcode_sync": barcode_sync,
         }
 
-    def deactivate_nomenclature_item(self, item_id: str) -> dict[str, Any]:
-        item = self.runtime.delete_nomenclature_item(item_id, updated_at=self.timestamp_factory())
+    def deactivate_nomenclature_item(self, item_id: str, *, operator_request=None) -> dict[str, Any]:
+        operator_request = _pin_operator_version(operator_request, {item_id:self.runtime.load_nomenclature_item(item_id)})
+        item = self.runtime.delete_nomenclature_item(item_id, updated_at=self.timestamp_factory(), operator_request=operator_request)
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature",
             "status": "ok",
             "item": item,
         }
 
-    def sync_nomenclature_item_barcode(self, item_id: str) -> dict[str, Any]:
+    def sync_nomenclature_item_barcode(self, item_id: str, *, operator_request=None) -> dict[str, Any]:
         existing = self.runtime.load_nomenclature_item(item_id)
         if existing is None:
             raise ValueError(f"nomenclature item not found: {item_id}")
+        operator_request = _pin_operator_version(operator_request, {item_id:existing})
         item, barcode_sync = self._sync_nomenclature_barcode_item(
             existing,
             reason="manual_row_sync",
             allow_existing_non_manual=True,
         )
-        saved = self.runtime.save_nomenclature_item(item, preserve_staged_activation=True) if barcode_sync.get("save_item", False) else existing
+        saved = self.runtime.save_nomenclature_item(item, preserve_staged_activation=True, operator_request=operator_request) if barcode_sync.get("save_item", False) else existing
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature_barcode_sync",
             "status": "ok",
@@ -2199,7 +2212,7 @@ class SupplierShipmentsBlock:
     def sync_nomenclature_barcodes(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self.sync_nomenclature_with_wb(payload)
 
-    def sync_nomenclature_with_wb(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def sync_nomenclature_with_wb(self, payload: Mapping[str, Any] | None = None, *, operator_parent=None) -> dict[str, Any]:
         payload = payload or {}
         self._ensure_nomenclature_ready()
         limit = _bounded_int(payload.get("limit"), default=100, minimum=1, maximum=100)
@@ -2240,7 +2253,38 @@ class SupplierShipmentsBlock:
             "skipped_invalid": 0,
         }
         results: list[dict[str, Any]] = []
-        for raw_card in cards:
+        for card_index, raw_card in enumerate(cards):
+            child_request = None
+            if operator_parent is not None:
+                from packages.application import operator_nomenclature as operator
+                child_request = operator.external_child_request(operator_parent, card_index, raw_card)
+                saved_result = operator.read_result(self.runtime.db_path, child_request)
+                if saved_result:
+                    saved = saved_result["items"][0]
+                    # Matcher starts from today's guarded native source. An old
+                    # child receipt is readback evidence, never a replacement for
+                    # an intervening explicit operator edit.
+                    results.append(saved)
+                    counts["cards_processed"] += 1
+                    # Recover native counts from the immutable before-image, not
+                    # today's mutable catalog matcher or a fresh random item ID.
+                    before=operator.child_before(self.runtime.db_path,child_request)
+                    if before is None:
+                        counts["created"] += 1
+                        if str(saved.get("wb_sync_status") or "")=="needs_review":
+                            counts["created_needs_review"] += 1
+                    else:
+                        counts["updated"] += 1
+                        _matched,match_type=_NomenclatureWbCardMatcher([before]).match(_normalize_wb_card_for_sync(raw_card))
+                        if match_type in {"nm_id","barcode","vendor_code"}:
+                            counts["matched_"+match_type] += 1
+                        if before.get("is_hidden"):
+                            counts["hidden_matched"] += 1
+                        replay=_apply_wb_card_to_existing_nomenclature(before,
+                            card=_normalize_wb_card_for_sync(raw_card),match_type=match_type,synced_at=now)
+                        if replay.get("_manual_barcode_preserved"):
+                            counts["manual_barcode_preserved"] += 1
+                    continue
             card = _normalize_wb_card_for_sync(raw_card)
             if not _wb_card_has_identity(card):
                 counts["skipped_invalid"] += 1
@@ -2265,7 +2309,7 @@ class SupplierShipmentsBlock:
                 if updated.get("_manual_barcode_preserved"):
                     counts["manual_barcode_preserved"] += 1
                 updated.pop("_manual_barcode_preserved", None)
-                saved = self.runtime.save_nomenclature_item(updated, preserve_staged_activation=True)
+                saved = self.runtime.save_nomenclature_item(updated, preserve_staged_activation=True, operator_request=_pin_operator_version(child_request,{str(matched["item_id"]):matched}))
                 matcher.replace(saved)
                 results.append(saved)
                 counts["updated"] += 1
@@ -2276,7 +2320,7 @@ class SupplierShipmentsBlock:
                 created_at=now,
                 updated_at=now,
             )
-            saved = self.runtime.save_nomenclature_item(created)
+            saved = self.runtime.save_nomenclature_item(created, operator_request=_pin_operator_version(child_request,{str(created["item_id"]):None}))
             matcher.replace(saved)
             results.append(saved)
             counts["created"] += 1
@@ -5016,7 +5060,7 @@ def _normalize_nomenclature_import_row(
         return None
     action = "created"
     if existing is not None:
-        action = "deactivated" if bool(existing.get("is_active")) and not bool(item.get("is_active")) else "updated"
+        action = "deactivated" if _nomenclature_requested_active(existing) and not bool(item.get("is_active")) else "updated"
     return {"row": row_number, "action": action, "item": item,
             "preserve_staged_activation": existing is not None and
                 ("is_active" not in row_values or not _cell_text(row_values.get("is_active")))}
@@ -5147,7 +5191,10 @@ def _nomenclature_item_changed(existing: Mapping[str, Any], item: Mapping[str, A
         "comment",
     ]
     for key in keys:
-        if key == "purchase_price_yuan":
+        if key == "is_active":
+            left = _nomenclature_requested_active(existing)
+            right = bool(item.get(key))
+        elif key == "purchase_price_yuan":
             left = _optional_number(existing.get(key))
             right = _optional_number(item.get(key))
         else:
@@ -6383,3 +6430,13 @@ def legacy_invoice_document_source(header, shipment_id, file_sha256, now):
         "created_at": now,
         "updated_at": now,
     }
+
+
+def _pin_operator_version(req, before):
+    """Guard the exact native read used to normalize a write, even for old clients."""
+    if req is None or (req.expected is not None and not isinstance(req.expected,dict)):
+        return req
+    from dataclasses import replace
+    expected={key:row.get("operator_source_revision") if row else None for key,row in before.items()}
+    expected.update(req.expected or {})
+    return replace(req,expected=expected)

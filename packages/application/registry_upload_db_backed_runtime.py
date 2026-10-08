@@ -8140,7 +8140,8 @@ class RegistryUploadDbBackedRuntime:
             ).fetchall()
             from packages.application.nomenclature_activation_intents import source_statuses
             statuses = source_statuses(conn)
-            return [{**_nomenclature_item_to_dict(row), **statuses.get(row["item_id"], {})} for row in rows]
+            from packages.application.operator_nomenclature import digest as operator_digest
+            return [{**_nomenclature_item_to_dict(row), **statuses.get(row["item_id"], {}), "operator_source_revision":operator_digest(dict(row))} for row in rows]
 
     def load_nomenclature_item(self, item_id: str) -> dict[str, Any] | None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -8155,7 +8156,8 @@ class RegistryUploadDbBackedRuntime:
                 (item_id,),
             ).fetchone()
             from packages.application.nomenclature_activation_intents import source_statuses
-            return ({**_nomenclature_item_to_dict(row), **source_statuses(conn, [item_id]).get(item_id, {})}
+            from packages.application.operator_nomenclature import digest as operator_digest
+            return ({**_nomenclature_item_to_dict(row), **source_statuses(conn, [item_id]).get(item_id, {}), "operator_source_revision":operator_digest(dict(row))}
                     if row is not None else None)
 
     def active_nomenclature_match_key_exists(self, *, match_key: str, exclude_item_id: str = "") -> bool:
@@ -8178,16 +8180,17 @@ class RegistryUploadDbBackedRuntime:
             ).fetchone()
             return row is not None
 
-    def save_nomenclature_item(self, item: Mapping[str, Any], *, preserve_staged_activation: bool = False) -> dict[str, Any]:
+    def save_nomenclature_item(self, item: Mapping[str, Any], *, preserve_staged_activation: bool = False, operator_request=None) -> dict[str, Any]:
         saved_items = self.save_nomenclature_items_atomic(
             [item], preserve_staged_item_ids=[str(item["item_id"])] if preserve_staged_activation else [],
+            operator_request=operator_request,
         )
         if not saved_items:
             raise ValueError("nomenclature item was not saved")
         return saved_items[0]
 
     def save_nomenclature_items_atomic(
-        self, items: list[Mapping[str, Any]], *, preserve_staged_item_ids: Sequence[str] = (),
+        self, items: list[Mapping[str, Any]], *, preserve_staged_item_ids: Sequence[str] = (), operator_request=None,
     ) -> list[dict[str, Any]]:
         prepared_items: list[dict[str, Any]] = []
         for item in items:
@@ -8305,6 +8308,12 @@ class RegistryUploadDbBackedRuntime:
                         [str(item["item_id"]) for item in prepared_items],
                     ).fetchall()
                 } if prepared_items else {}
+                if operator_request is not None:
+                    from packages.application import operator_nomenclature as operator
+                    before_rows={str(item['item_id']):conn.execute('SELECT * FROM sheet_vitrina_v1_nomenclature_items WHERE item_id=?',(item['item_id'],)).fetchone() for item in prepared_items}
+                    before_rows={key:dict(row) if row is not None else None for key,row in before_rows.items()}
+                    operator.before_write(conn,operator_request,before_rows)
+                    operator.validate_catalog_write(conn,prepared_items,before_rows)
                 activation_statuses = source_statuses(conn, preserve_staged_item_ids) if preserve_staged_item_ids else {}
                 staged_rows: list[dict[str, Any]] = []
                 for prepared in prepared_items:
@@ -8354,11 +8363,19 @@ class RegistryUploadDbBackedRuntime:
                 saved_activation_sources = source_statuses(
                     conn, [item["item_id"] for item in activation_items],
                 ) if activation_items else {}
+                if operator_request is not None:
+                    after_rows={str(item['item_id']):conn.execute('SELECT * FROM sheet_vitrina_v1_nomenclature_items WHERE item_id=?',(item['item_id'],)).fetchone() for item in prepared_items}
+                    receipt_items=[{**_nomenclature_item_to_dict(row),'operator_source_revision':operator.digest(dict(row))} for row in after_rows.values()]
+                    receipt_result={'item':receipt_items[0]} if operator_request.action in {'create','update'} and len(receipt_items)==1 else {'items':receipt_items}
+                    operator.record_saved(conn,operator_request,before=before_rows,
+                        after={key:dict(row) for key,row in after_rows.items()},
+                        accepted_at=str(prepared_items[0]['updated_at']) if prepared_items else datetime.now(timezone.utc).isoformat(),
+                        result=receipt_result)
                 conn.commit()
         # Source+intent committed together. Close the source writer before
         # heavy admission, then let the consumer revalidate its exact revision.
         continuation_error = None
-        if activation_items:
+        if activation_items and operator_request is None:
             try:
                 drain_nomenclature_activation_intents(
                     self, item_ids=[item["item_id"] for item in activation_items],
@@ -8384,7 +8401,7 @@ class RegistryUploadDbBackedRuntime:
             loaded_items.append(loaded)
         return loaded_items
 
-    def delete_nomenclature_item(self, item_id: str, *, updated_at: str) -> dict[str, Any]:
+    def delete_nomenclature_item(self, item_id: str, *, updated_at: str, operator_request=None) -> dict[str, Any]:
         _validate_timestamp(updated_at, field_name="updated_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         from packages.application.warehouse_functional_lock import (
@@ -8402,6 +8419,10 @@ class RegistryUploadDbBackedRuntime:
                 ).fetchone()
                 if row is None:
                     raise ValueError(f"nomenclature item not found: {item_id}")
+                if operator_request is not None:
+                    from packages.application import operator_nomenclature as operator
+                    before_row=conn.execute('SELECT * FROM sheet_vitrina_v1_nomenclature_items WHERE item_id=?',(item_id,)).fetchone()
+                    operator.before_write(conn,operator_request,{item_id:dict(before_row)})
                 if bool(row[0]) and not bool(row[1]) and int(row[2] or 0) > 0:
                     require_fbs_sku_retirable(conn, nm_id=int(row[2]))
                 from packages.application.nomenclature_activation_intents import cancel_source_activation
@@ -8415,6 +8436,11 @@ class RegistryUploadDbBackedRuntime:
                     (updated_at, item_id),
                 )
                 cancel_source_activation(conn, item_id)
+                if operator_request is not None:
+                    after_row=conn.execute('SELECT * FROM sheet_vitrina_v1_nomenclature_items WHERE item_id=?',(item_id,)).fetchone()
+                    operator.record_saved(conn,operator_request,before={item_id:dict(before_row)},
+                        after={item_id:dict(after_row)},accepted_at=updated_at,
+                        result={'item':_nomenclature_item_to_dict(after_row)})
                 conn.commit()
                 if cursor.rowcount != 1:
                     raise ValueError(f"nomenclature item not found: {item_id}")
@@ -8436,7 +8462,8 @@ class RegistryUploadDbBackedRuntime:
                 ORDER BY display_order ASC, group_key ASC
                 """
             ).fetchall()
-            return [_sku_group_to_dict(row) for row in rows]
+            from packages.application.operator_nomenclature import digest as operator_digest
+            return [{**_sku_group_to_dict(row),"operator_source_revision":operator_digest(dict(row))} for row in rows]
 
     def load_sku_group(self, group_key: str) -> dict[str, Any] | None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -8450,9 +8477,10 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (str(group_key or "").strip(),),
             ).fetchone()
-            return _sku_group_to_dict(row) if row is not None else None
+            from packages.application.operator_nomenclature import digest as operator_digest
+            return {**_sku_group_to_dict(row),"operator_source_revision":operator_digest(dict(row))} if row is not None else None
 
-    def save_sku_group(self, group: Mapping[str, Any]) -> dict[str, Any]:
+    def save_sku_group(self, group: Mapping[str, Any], *, operator_request=None) -> dict[str, Any]:
         group_key = str(group.get("group_key") or "").strip()
         if not group_key:
             raise ValueError("sku group_key is required")
@@ -8464,6 +8492,13 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            conn.execute('BEGIN IMMEDIATE')
+            if operator_request is not None:
+                from packages.application import operator_nomenclature as operator
+                before_row=conn.execute('SELECT * FROM sheet_vitrina_v1_sku_groups WHERE group_key=?',(group_key,)).fetchone()
+                operator.before_write(conn,operator_request,{group_key:dict(before_row) if before_row else None})
+                if not group.get('is_active',True):
+                    operator.require_group_unused(conn,group_key)
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_sku_groups(
@@ -8496,6 +8531,11 @@ class RegistryUploadDbBackedRuntime:
                     updated_at,
                 ),
             )
+            if operator_request is not None:
+                after_row=conn.execute('SELECT * FROM sheet_vitrina_v1_sku_groups WHERE group_key=?',(group_key,)).fetchone()
+                operator.record_saved(conn,operator_request,before={group_key:dict(before_row) if before_row else None},
+                    after={group_key:dict(after_row)},accepted_at=updated_at,
+                    result={'group':_sku_group_to_dict(after_row)})
             conn.commit()
         loaded = self.load_sku_group(group_key)
         if loaded is None:
