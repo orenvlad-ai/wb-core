@@ -62,6 +62,62 @@ def _route_unrelated_warehouse_options(route: object) -> None:
 
 
 class AutoanswersUiBrowserTest(unittest.TestCase):
+    def test_live_backlog_colors_require_fresh_confirmed_count(self) -> None:
+        cases = [
+            ({"verified": True, "fresh": True, "unresolved": 0}, "success", "без ответа 0"),
+            ({"verified": True, "fresh": True, "unresolved": 1}, "warning", "без ответа 1"),
+            ({"verified": True, "fresh": True, "unresolved": 10}, "warning", "без ответа 10"),
+            ({"verified": True, "fresh": True, "unresolved": 11}, "error", "без ответа 11"),
+            ({"verified": True, "fresh": False, "unresolved": 0}, "unknown", "данные сверки устарели"),
+            ({"verified": False, "fresh": True, "unresolved": 0}, "unknown", "ещё не подтверждено"),
+            ({"verified": True, "fresh": True, "unresolved": None}, "unknown", "ещё не подтверждено"),
+            ({"verified": True, "fresh": True}, "unknown", "ещё не подтверждено"),
+        ]
+        current = cases[0][0]
+        fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
+        with fixture as base_url:
+            base_payload = fixture.entrypoint.handle_sheet_feedbacks_autoanswers_settings_request()
+            def route_settings(route: object) -> None:
+                payload = deepcopy(base_payload)
+                payload["runtime"]["progress"]["live_backlog"] = current
+                route.fulfill(status=200, content_type="application/json; charset=utf-8", body=json.dumps(payload, ensure_ascii=False))
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                context = browser.new_context(viewport={"width": 1280, "height": 800})
+                context.route("**/v1/sheet-vitrina-v1/feedbacks/autoanswers/settings", route_settings)
+                context.route("**/v1/sheet-vitrina-v1/supply/wb-warehouses/exclusion-options", _route_unrelated_warehouse_options)
+                page = context.new_page()
+                try:
+                    for current, tone, text in cases:
+                        with self.subTest(live=current):
+                            page.goto(base_url + "/sheet-vitrina-v1/vitrina?tab=feedbacks", wait_until="domcontentloaded")
+                            node = page.locator("[data-autoanswers-live-backlog]")
+                            page.wait_for_function("""([tone, text]) => {
+                                const node = document.querySelector('[data-autoanswers-live-backlog]');
+                                return node && node.dataset.backlogTone === tone && node.textContent.includes(text);
+                            }""", arg=[tone, text])
+                            self.assertIn(text, node.inner_text())
+                            colors = node.evaluate("""node => {
+                                const css = getComputedStyle(node);
+                                const palette = getComputedStyle(document.documentElement);
+                                const tone = node.dataset.backlogTone;
+                                const token = tone === 'unknown' ? '--muted' : '--' + (tone === 'error' ? 'error' : tone) + '-text';
+                                return {actual: css.color, expected: palette.getPropertyValue(token).trim(), borderWidth: css.borderLeftWidth};
+                            }""")
+                            # Resolve the CSS variable through an element so its
+                            # normalized browser color can be compared directly.
+                            expected_color = page.evaluate("""color => {
+                                const node = document.createElement('span');
+                                node.style.color = color; document.body.appendChild(node);
+                                const result = getComputedStyle(node).color; node.remove(); return result;
+                            }""", colors["expected"])
+                            self.assertEqual(colors["actual"], expected_color)
+                            self.assertEqual(colors["borderWidth"], "4px")
+                            if tone == "unknown":
+                                self.assertNotIn("без ответа 0", node.inner_text())
+                finally:
+                    browser.close()
+
     def test_production_json_get_retries_only_transient_connection_reset(self) -> None:
         context = _FakeContext(
             [

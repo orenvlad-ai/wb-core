@@ -691,6 +691,10 @@
     .autoanswers-technical pre { max-width:100%; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
     .autoanswers-progress { margin-top:8px; color:var(--muted); font-size:12px; }
     .autoanswers-warning { margin: 8px 0 0; color: #92400e; font-size: 12px; }
+    .autoanswers-live-backlog { margin:8px 0 0; padding:10px 12px; border-left:4px solid var(--border); border-radius:8px; background:var(--control-bg); color:var(--muted); font-size:12px; }
+    .autoanswers-live-backlog[data-backlog-tone="success"] { border-color:var(--success-text); background:var(--success-bg); color:var(--success-text); }
+    .autoanswers-live-backlog[data-backlog-tone="warning"] { border-color:var(--warning-text); background:var(--warning-bg); color:var(--warning-text); }
+    .autoanswers-live-backlog[data-backlog-tone="error"] { border-color:var(--error-text); background:var(--error-bg); color:var(--error-text); }
     .autoanswers-queue-dashboard { margin-top:12px; padding:12px; border:1px solid var(--border); border-radius:12px; background:var(--panel-subtle); }
     .autoanswers-queue-grid { display:grid; grid-template-columns:repeat(6,minmax(110px,1fr)); gap:8px; }
     .autoanswers-queue-metric { min-width:0; padding:8px; border-radius:8px; background:var(--control-bg); }
@@ -6492,7 +6496,7 @@
 	              </div>
 	              <p class="feedbacks-source-helper"><span data-autoanswers-budget-updated>Расходы ещё не обновлялись</span> · Точный остаток доступен в кабинете OpenAI · <a href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">Баланс и пополнение OpenAI</a></p>
 	              <p class="autoanswers-progress" data-autoanswers-progress></p>
-	              <p class="autoanswers-warning" data-autoanswers-live-backlog>Текущая очередь Wildberries ещё не сверена.</p>
+	              <p class="autoanswers-live-backlog" data-autoanswers-live-backlog data-backlog-tone="unknown">Текущая очередь Wildberries ещё не сверена.</p>
 	              <section class="autoanswers-queue-dashboard" aria-label="Обработка отзывов"><strong>Обработка отзывов</strong><p class="feedbacks-source-helper" data-autoanswers-queue-context></p><div class="autoanswers-queue-grid" data-autoanswers-queue-metrics></div><section class="autoanswers-progress-card" data-autoanswers-progress-card="all"><h4>Все отзывы</h4><div data-autoanswers-progress-bars data-autoanswers-all-progress-bars></div></section><section class="autoanswers-progress-card is-content" data-autoanswers-progress-card="content-bearing"><h4>Отзывы с содержанием</h4><div data-autoanswers-content-progress-bars></div><p class="autoanswers-rating-barrier-note">Живая очередь соблюдает буквальный порядок: отзывы с содержанием 1★ → 2★ → 3★ → 4★ → 5★ → пустые. Новый более приоритетный отзыв будет выбран на следующем безопасном claim.</p></section><p class="autoanswers-stop-reason"><span data-autoanswers-stop-reason></span><button class="button secondary" type="button" data-autoanswers-increase-limit hidden>Увеличить лимит</button></p></section>
 	            </section>
 
@@ -19031,13 +19035,20 @@
       const liveBacklogNode = document.querySelector("[data-autoanswers-live-backlog]");
       if (liveBacklogNode) {
         const live = queue.live_backlog || {};
-        liveBacklogNode.textContent = live.verified
-          ? "Текущая очередь Wildberries: без ответа " + Number(live.unresolved || 0) +
+        const countKnown = typeof live.unresolved === "number" && Number.isInteger(live.unresolved) && live.unresolved >= 0;
+        const currentKnown = live.verified === true && live.fresh === true && countKnown;
+        liveBacklogNode.dataset.backlogTone = currentKnown
+          ? (live.unresolved === 0 ? "success" : live.unresolved <= 10 ? "warning" : "error")
+          : "unknown";
+        liveBacklogNode.textContent = currentKnown
+          ? "Текущая очередь Wildberries: без ответа " + live.unresolved +
             " · с содержанием " + Number(live.content_bearing || 0) + " · пустые " + Number(live.rating_only || 0) +
             " · технические ошибки " + Number(live.technical_error || 0) +
             " · требуется проверка " + (Number(live.needs_review || 0) + Number(live.policy_error || 0) + Number(live.indeterminate || 0)) +
-            " · сверка " + (live.completed_at || "—") + (live.fresh ? "" : " (нужна новая сверка)")
-          : "Текущая очередь Wildberries ещё не сверена. Исторический прогресс не подтверждает отсутствие новых отзывов.";
+            " · сверка " + (live.completed_at || "—")
+          : live.verified === true && live.fresh !== true
+            ? "Текущая очередь Wildberries: данные сверки устарели, нужна новая сверка. Последняя сверка " + (live.completed_at || "—") + "."
+            : "Текущее число отзывов без ответа в Wildberries ещё не подтверждено. Исторический прогресс не подтверждает отсутствие новых отзывов.";
         if ((queue.provider_pause || {}).active) liveBacklogNode.textContent += " · Вызовы AI приостановлены до " + queue.provider_pause.until;
       }
       const rolling = queue.rolling_admission || {};
