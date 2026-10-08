@@ -37,6 +37,7 @@ def entry_fixture(root):
     entry.warehouse_update_journal = WarehouseUpdateJournal(db_path=entry.runtime.db_path, runtime_dir=root)
     entry.operator_jobs = SheetVitrinaV1OperatorJobStore(lambda: datetime.now(timezone.utc).isoformat())
     entry.activated_at_factory = lambda: NOW
+    entry.now_factory = lambda: datetime.fromisoformat(NOW.replace("Z", "+00:00"))
     effects = []
     def effect(name, value):
         require_warehouse_job_owner(root)
@@ -62,7 +63,7 @@ def entry_fixture(root):
         record_failed_sync=lambda exc: effect("failed", None),
     )
     entry.inventory_planning = SimpleNamespace(current=lambda: {})
-    entry.wb_finance_weekly_block = SimpleNamespace(recalculate_stale_cost_weeks=lambda: effect("finance", {}))
+    entry.wb_finance_weekly_block = SimpleNamespace(seller_id="canonical", recalculate_stale_cost_weeks=lambda: effect("finance", {}))
     entry.runtime.finalize_completed_wb_transit_cost_recalculations = lambda **kw: {}
     return entry, effects, real_block
 
