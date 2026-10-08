@@ -60,6 +60,7 @@
     },
     "playwright_chromium": {
       "scripts": [
+        "apps/operator_business_settings_smoke.py",
         "apps/operator_acceptance_browser_smoke.py",
         "apps/operator_acceptance_component_smoke.py",
         "apps/operator_nomenclature_browser_smoke.py",
