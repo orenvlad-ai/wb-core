@@ -6092,7 +6092,8 @@ class WbFinanceWeeklyBlock:
         """Build and verify a query-only projection, then run one short CAS."""
 
         phase_started = datetime.now(timezone.utc)
-        with self._connect_stale_cost_plan() as plan_conn:
+        original_authority: list[GenerationManifest] = []
+        with self._connect_stale_cost_plan(storage_authority=original_authority) as plan_conn:
             self._assert_readonly_plan_connection(plan_conn)
             plan = self._plan_stale_cost_weeks_in_connection(
                 plan_conn, date_from=date_from, date_to=date_to
@@ -6208,8 +6209,10 @@ class WbFinanceWeeklyBlock:
                     # All book publishers own this same warehouse->book/main order.
                     # Hold it only for fresh compact shared refs and the final CAS.
                     with warehouse_functional_write_lock(self.runtime_dir, timeout_seconds=5):
-                        with self._connect() as writer_conn:
-                            if self._sqlite_persistent_identity(writer_conn) != observer_identity:
+                        writer_authority: list[GenerationManifest] = []
+                        with self._connect(storage_authority=writer_authority) as writer_conn:
+                            if (writer_authority != original_authority
+                                    or self._sqlite_persistent_identity(writer_conn) != observer_identity):
                                 raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
                                     phase='writer_handoff', classification='unclassified_commit', attempt=attempt,
                                     before=handoff_data_version, after=self._sqlite_data_version_token(plan_conn))
@@ -6990,7 +6993,7 @@ class WbFinanceWeeklyBlock:
             raise
         return conn
 
-    def _connect_stale_cost_plan(self) -> sqlite3.Connection:
+    def _connect_stale_cost_plan(self, *, storage_authority: list[GenerationManifest] | None = None) -> sqlite3.Connection:
         self._pin_active_cost()
         manifest = self.store_registry.load()
         conn = self.store_registry.connect(
@@ -7010,6 +7013,9 @@ class WbFinanceWeeklyBlock:
         except Exception:
             conn.close()
             raise
+        if storage_authority is not None:
+            # Bind the immutable manifest actually used for this open/attach.
+            storage_authority.append(manifest)
         return conn
 
     @staticmethod
@@ -7042,7 +7048,7 @@ class WbFinanceWeeklyBlock:
             raise ValueError("Finance SQLite main data version is unavailable")
         return versions
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, storage_authority: list[GenerationManifest] | None = None) -> sqlite3.Connection:
         self._pin_active_cost()
         if self.shared_cost_is_candidate:
             return self._connect_shared_cost_preview()
@@ -7058,6 +7064,9 @@ class WbFinanceWeeklyBlock:
             manifest=manifest,
             query_only_primary=False,
         )
+        if storage_authority is not None:
+            # Bind the immutable manifest actually used for this open/attach.
+            storage_authority.append(manifest)
         return conn
 
 

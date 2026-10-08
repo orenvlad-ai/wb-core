@@ -67,9 +67,9 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(plan['stale_week_count'], 1)
         original_connect, original_replace = self.block._connect, self.block._replace_finance_target_images
         calls = {'writer': 0, 'dml': 0}
-        def writer():
+        def writer(**kwargs):
             calls['writer'] += 1; inject(calls['writer'])
-            return original_connect()
+            return original_connect(**kwargs)
         def replace(*args, **kwargs):
             calls['dml'] += 1
             return original_replace(*args, **kwargs)
@@ -156,6 +156,34 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(self.calls, {'writer':1, 'dml':0})
         self.assertEqual(self.image(), before)
 
+    def test_same_path_actual_generation_or_manifest_drift_zero_dml(self):
+        from dataclasses import replace
+        from packages.application.storage_registry import manifest_payload, parse_manifest, _sha256
+        for store in ('operational', 'finance_raw', 'manifest_only'):
+            with self.subTest(store=store):
+                case = HandoffTests();case.setUp()
+                try:
+                    case.split();before=case.image()
+                    def change(_attempt):
+                        manifest=case.block.store_registry.load()
+                        if store=='manifest_only':
+                            changed=replace(manifest,rollback_generation_id='different-rollback')
+                        else:
+                            raw=store=='finance_raw'
+                            table='finance_raw_schema_meta' if raw else 'finance_operational_schema_meta'
+                            case.commit(f"UPDATE {table} SET generation_id='changed-generation'",raw=raw)
+                            field='raw' if raw else 'operational'
+                            changed=replace(manifest,**{field:replace(getattr(manifest,field),generation_id='changed-generation')})
+                        payload=manifest_payload(changed,include_digest=False)
+                        payload['manifest_sha256']=_sha256(payload)
+                        atomic_write_manifest(case.block.store_registry.manifest_path,parse_manifest(payload))
+                    with self.assertRaises(FinanceStaleCostHandoffError) as caught:case.run_apply(change)
+                    self.assertEqual(caught.exception.reason,'finance_handoff_identity_changed')
+                    self.assertEqual(case.calls,{'writer':1,'dml':0})
+                    self.assertEqual(case.image(),before)
+                    self.assertNotIn('changed-generation',json.dumps(caught.exception.diagnostic()))
+                finally:case.doCleanups()
+
     def test_validation_is_bracketed_and_projection_is_not_repeated(self):
         original, calls = self.block._finance_source_dependency_fingerprint, []
         def dependency(conn, **kwargs):
@@ -183,12 +211,12 @@ class HandoffTests(unittest.TestCase):
 
     def test_post_commit_failure_never_replays(self):
         original, calls = self.block._connect_stale_cost_plan, []
-        def readonly_plan():
+        def readonly_plan(**kwargs):
             calls.append(1)
             if len(calls)==3:  # run_apply plan, apply query plan, post-commit readback
                 raise FinanceStaleCostHandoffError('finance_handoff_changed', phase='writer_handoff',
                     classification='unclassified_commit', attempt=1)
-            return original()
+            return original(**kwargs)
         before = self.image()
         with patch.object(self.block, '_connect_stale_cost_plan', side_effect=readonly_plan):
             with self.assertRaises(FinanceStaleCostHandoffError): self.run_apply()
@@ -284,7 +312,7 @@ class SharedBookHandoffTests(unittest.TestCase):
 
     def apply_september(self, inject):
         plan = self.september_target(); original = self.block._connect
-        with patch.object(self.block, '_connect', side_effect=lambda: (inject(), original())[1]), \
+        with patch.object(self.block, '_connect', side_effect=lambda **kwargs: (inject(), original(**kwargs))[1]), \
              patch.object(self.block, '_replace_finance_target_images', wraps=self.block._replace_finance_target_images) as dml:
             with self.assertRaises(FinanceStaleCostHandoffError) as caught:
                 self.block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'], date_from=date(2026,9,7), date_to=date(2026,9,13))
