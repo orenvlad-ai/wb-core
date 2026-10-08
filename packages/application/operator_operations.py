@@ -6,16 +6,19 @@ from packages.application import operator_report_source_versions as report_sourc
 from packages.application import operator_fulfillment_services as fulfillment
 from packages.application import operator_partner_report as partner_report
 from packages.application import operator_supplier_journal as supplier_journal
+from packages.application import operator_trade_documents as trade
 
 DOMAIN_LABELS = {'ff_pool_document': 'Складские документы', fulfillment.DOMAIN: 'Услуги фулфилмента',
     'plan_report_baseline': 'Исходные данные отчётов',
     'factory_order_dataset': 'Исходные данные планирования',
     partner_report.DOMAIN: 'Настройки партнёрского отчёта'}
 DOMAIN_LABELS.update(supplier_journal.LABELS)
+DOMAIN_LABELS[trade.DOMAIN] = 'Библиотека инвойсов и договоров'
 DEFAULT_DOMAINS = frozenset({'ff_pool_document', fulfillment.DOMAIN})
 DOMAIN_SECTIONS = {'ff_pool_document': 'supply', fulfillment.DOMAIN: 'supply',
     'plan_report_baseline': 'reports', 'factory_order_dataset': 'supply', partner_report.DOMAIN: 'reports'}
 DOMAIN_SECTIONS.update({name: 'supply' for name in supplier_journal.LABELS})
+DOMAIN_SECTIONS[trade.DOMAIN] = 'settings'
 
 
 def _allowed(allowed_domains, allowed_sections):
@@ -39,6 +42,15 @@ def _overhead_public(conn,row):
     return value
 
 
+def _trade_sources(conn, *, selected, request_scope, supplier_safe):
+    if supplier_safe or not request_scope or trade.DOMAIN not in selected or not trade.exists(conn, trade.TABLE):
+        return []
+    actions = tuple(sorted(trade.ACTIONS))
+    return [(trade.TABLE, 'operation_id', '*',
+        'request_scope=? AND action IN (' + ','.join('?' for _ in actions) + ')',
+        (request_scope, *actions), lambda connection, row: trade._public(row)['acceptance'])]
+
+
 def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections=None, domain='all', search='', request_scope='', supplier_safe=False, runtime_dir=None):
     if type(page) is not int or type(limit) is not int or not 1<=page<=100000 or not 1<=limit<=100:
         raise ValueError('invalid_operation_journal_page')
@@ -51,6 +63,7 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
     selected = allowed if domain in ('', 'all') else allowed.intersection({domain})
     with closing(overhead.readonly(db_path)) as conn:
         sources=supplier_journal.sources(conn, selected=selected, request_scope=request_scope, supplier_safe=supplier_safe, db_path=db_path, runtime_dir=runtime_dir)
+        sources.extend(_trade_sources(conn, selected=selected, request_scope=request_scope, supplier_safe=supplier_safe))
         if 'ff_pool_document' in selected:
             if overhead._exists(conn):
                 sources.append((overhead.TABLE, 'request_id', '*', '1', (), _overhead_public))
@@ -68,6 +81,7 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
         if search:
             value = '%' + search.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
             search_columns = {report_sources.TABLE: 'after_json', partner_report.TABLE: "product_name || ' ' || nm_id"}
+            search_columns[trade.TABLE] = "coalesce(json_extract(source_json,'$.document.number'),'') || ' ' || coalesce(json_extract(source_json,'$.document.file_original_name'),'') || ' ' || action"
             financial = supplier_journal.financial
             search_columns[financial.REQUESTS] = ("shipment_id || ' ' || action || ' ' || coalesce((SELECT group_concat(child.subject_id,' ') FROM "
                 + financial.CHILDREN + ' child WHERE child.request_scope=' + financial.REQUESTS + '.request_scope AND child.request_id='
@@ -124,6 +138,10 @@ def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections
             row = conn.execute(f'SELECT * FROM {fulfillment.TABLE} WHERE operation_id=?', (identity,)).fetchone()
             if row:
                 return _common(fulfillment._public(conn, row))
+        for table, key, columns, where, values, reader in _trade_sources(conn, selected=allowed, request_scope=request_scope, supplier_safe=supplier_safe):
+            row = conn.execute(f'SELECT {columns} FROM {table} WHERE {key}=? AND ({where})', (identity, *values)).fetchone()
+            if row is not None:
+                return _common(reader(conn, row))
         if 'ff_pool_document' in allowed:
             canonical=overhead._resolve(conn,identity) if (overhead._exists(conn) or warehouse.exists(conn)) else identity
             for table,reader in ((overhead.TABLE,_overhead_public),(warehouse.TABLE,warehouse._public)):

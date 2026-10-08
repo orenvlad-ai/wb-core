@@ -35,10 +35,11 @@ def main():
                 # Native file chooser sets the document type; use the actual button first.
                 # set_input_files before choosing type above is harmless (no write).
                 with page.expect_file_chooser() as chooser:page.locator('#addInvoiceButton').click()
-                chooser.value.set_files({'name':'invoice.pdf','mimeType':'application/pdf','buffer':b'library-browser-invoice'})
+                with page.expect_event('requestfailed', predicate=lambda req: req.method=='POST' and req.url==base+http.DEFAULT_TRADE_DOCUMENTS_PATH):
+                    chooser.value.set_files({'name':'invoice.pdf','mimeType':'application/pdf','buffer':b'library-browser-invoice'})
                 expect(page.locator('#tradeSourceReceipt')).to_contain_text('Проверяем сохранение')
                 expect(page.locator('#addInvoiceButton')).to_be_disabled()
-                assert len(writes)==1 and not errors,errors
+                assert len(writes)==1 and not errors,(writes,errors)
                 stored=page.evaluate('Object.entries(localStorage).find(([k])=>k.startsWith("wbc_trade_source_pending_v1:"))[1]')
                 assert 'I-browser' not in stored and 'file_sha256' not in stored
                 before=rt.db_path.read_bytes();page.close();foreign=False;page=context.new_page();page.goto(url)
@@ -103,7 +104,8 @@ def main():
                     else:route.continue_()
                 context.route('**'+http.DEFAULT_TRADE_DOCUMENTS_PATH,lose_blocked)
                 with page.expect_file_chooser() as chooser:page.locator('#addInvoiceButton').click()
-                chooser.value.set_files({'name':'uncertain.pdf','mimeType':'application/pdf','buffer':b'library-uncertain'})
+                with page.expect_event('requestfailed', predicate=lambda req: req.method=='POST' and req.url==base+http.DEFAULT_TRADE_DOCUMENTS_PATH):
+                    chooser.value.set_files({'name':'uncertain.pdf','mimeType':'application/pdf','buffer':b'library-uncertain'})
                 expect(page.locator('#tradeSourceReceipt')).to_contain_text('Проверяем сохранение')
                 expect(page.locator('#addInvoiceButton')).to_be_disabled()
                 count=len(writes);page.close();page=context.new_page();page.goto(url)

@@ -10850,6 +10850,8 @@ def _required_section_for_path(path: str) -> str:
 def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
     """Source grants are applied before journal counts, rows and exact reads."""
     domains = set()
+    if _user_can_access_path(user, DEFAULT_TRADE_DOCUMENTS_PATH):
+        domains.add('trade_document_library')
     if _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY):
         domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services', 'supplier_factual_date', 'supplier_financial_document', 'cny_account_document'))
     if _user_can_access_path(user, DEFAULT_SUPPLIER_SHIPMENTS_PATH):

@@ -164,6 +164,7 @@ def _public(row):
                    {'label': 'Версия изменения', 'value': str(row['revision'])}],
         'processing': {'complete': True, 'cost_applicable': False, 'kind': 'library_source_only',
                        'reason_ru': 'Изменение библиотеки сохранено.'},
+        'journal_path': '/sheet-vitrina-v1/operations?operation_id=' + row['operation_id'],
         'detail_path': '/sheet-vitrina-v1/settings?embedded=1&operation_id=' + row['operation_id']}
     return {'domain': DOMAIN, 'status': 'accepted', 'settled': True, 'request_id': row['request_id'],
             'action': row['action'], 'wire_digest': row['wire_digest'], 'acceptance': receipt}
