@@ -11,7 +11,58 @@ from packages.adapters import registry_upload_http_entrypoint as http
 from packages.application import operator_trade_documents as receipts
 
 
+def check_selected_upload_intent():
+    with TemporaryDirectory(prefix='operator-library-selected-intent-') as raw:
+        rt,entry,_=seed(raw);server,thread,base=server_for(entry)
+        try:
+            with sync_playwright() as pw:
+                browser=pw.chromium.launch();page=browser.new_page();writes=[];errors=[]
+                page.on('pageerror',lambda error: errors.append(str(error)))
+                def capture(route):
+                    if route.request.method=='POST':
+                        reply=route.fetch();writes.append(reply.json());route.fulfill(response=reply)
+                    else:route.continue_()
+                page.route('**'+http.DEFAULT_TRADE_DOCUMENTS_PATH,capture)
+                page.goto(base+http.DEFAULT_SETTINGS_UI_PATH+'?embedded=1')
+                page.locator('[data-settings-tab-button="invoices"]').click()
+                page.locator('#invoiceNumberInput').fill('INVOICE-SELECTED')
+                page.locator('#invoiceDateInput').fill('2026-10-08')
+                page.locator('#invoiceSupplierInput').fill('Selected supplier')
+                page.evaluate("""()=>{const digest=crypto.subtle.digest.bind(crypto.subtle);let first=true;
+                  crypto.subtle.digest=(...args)=>{if(!first)return digest(...args);first=false;window.hashHeld=true;
+                    return new Promise(resolve=>{window.releaseHash=()=>digest(...args).then(resolve);});};}""")
+                with page.expect_file_chooser() as choice:page.locator('#addInvoiceButton').click()
+                choice.value.set_files({'name':'invoice-selected.pdf','mimeType':'application/pdf','buffer':b'selected invoice'})
+                page.wait_for_function('window.hashHeld===true');assert not writes
+                page.locator('[data-settings-tab-button="contracts"]').click()
+                expect(page.locator('#addContractButton')).to_be_disabled()
+                expect(page.locator('#documentFileInput')).to_be_disabled()
+                expect(page.locator('#invoiceNumberInput')).to_be_disabled()
+                # A concurrent DOM refresh must not alter the captured native source.
+                page.evaluate("""()=>{document.getElementById('addContractButton').click();
+                  document.getElementById('invoiceNumberInput').value='LATER-NUMBER';
+                  document.getElementById('invoiceDateInput').value='2026-10-09';
+                  document.getElementById('invoiceSupplierInput').value='Later supplier';window.releaseHash();}""")
+                expect(page.locator('#tradeSourceReceipt .ff-operation-check')).to_be_visible(timeout=10000)
+                expect(page.locator('#addInvoiceButton')).to_be_enabled()
+                documents=rt.list_trade_documents();assert len(writes)==len(documents)==1,(writes,documents)
+                doc=documents[0]
+                assert (doc['document_type'],doc['number'],doc['document_date'],doc['supplier_name'],doc['file_original_name'])==(
+                  'invoice','INVOICE-SELECTED','2026-10-08','Selected supplier','invoice-selected.pdf'),doc
+                assert writes[0]['acceptance']['source_ref']['document_type']=='invoice' and not errors
+                # File read failure occurs before persistence; controls must recover.
+                page.evaluate("()=>{File.prototype.arrayBuffer=()=>Promise.reject(new Error('synthetic file read failure'));}")
+                with page.expect_file_chooser() as choice:page.locator('#addInvoiceButton').click()
+                choice.value.set_files({'name':'unreadable.pdf','mimeType':'application/pdf','buffer':b'unreadable'})
+                expect(page.locator('#invoicesMessage')).to_contain_text('synthetic file read failure')
+                expect(page.locator('#addInvoiceButton')).to_be_enabled()
+                assert len(writes)==1 and not errors
+                browser.close()
+        finally:stop(server,thread)
+
+
 def main():
+    check_selected_upload_intent()
     with TemporaryDirectory(prefix='operator-library-browser-') as raw:
         rt,entry,_=seed(raw);server,thread,base=server_for(entry)
         try:

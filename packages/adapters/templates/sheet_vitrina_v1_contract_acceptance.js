@@ -62,7 +62,7 @@
         load(); if (pending) return recover();
         const wire = JSON.stringify(canonical(operands));
         const expected = {request_id: "contract_" + crypto.randomUUID().replaceAll("-", ""), action, shipment_id: shipmentId, digest: await hash(wire)};
-        
+
         persist(expected); unknown();
         let body = {...operands, request_id: expected.request_id, operator_wire_json: wire};
         const headers = {Accept: "application/json", "X-Request-ID": expected.request_id};

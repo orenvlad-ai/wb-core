@@ -2527,11 +2527,13 @@
       const tradeReceipt = document.createElement("div");
       tradeReceipt.id = "tradeSourceReceipt"; tradeReceipt.hidden = true;
       document.querySelector(".settings-panels").prepend(tradeReceipt);
-      let tradeLocked = false;
+      let tradeLocked = false, tradeUploadBusy = false;
       function lockTradeForms(locked) {
         tradeLocked = locked;
-        [addContractButton, addInvoiceButton, documentFileInput].forEach(el => {el.disabled = locked;});
-        document.querySelectorAll("[data-document-archive], [data-contract-save], [data-document-link], [data-document-unlink]").forEach(el => {el.disabled = locked;});
+        const blocked = locked || tradeUploadBusy;
+        [addContractButton, addInvoiceButton, documentFileInput, invoiceNumberInput, invoiceDateInput, invoiceSupplierInput,
+          contractNumberInput, contractDateInput, contractSupplierInput].forEach(el => {el.disabled = blocked;});
+        document.querySelectorAll("[data-document-archive], [data-contract-save], [data-document-link], [data-document-unlink]").forEach(el => {el.disabled = blocked;});
       }
       const tradeAcceptance = window.TradeSourceAcceptance.create({container: tradeReceipt, path: tradeDocumentsPath,
         scope: config.user_config_key || "local_operator", onLock: lockTradeForms,
@@ -2544,31 +2546,33 @@
       if (tradeOperationId) tradeAcceptance.showOperation(tradeOperationId).catch(error => setAllDocumentMessages(error.message, "error"));
 
       function startDocumentUpload(documentType) {
-        if (tradeLocked) return;
+        if (tradeLocked || tradeUploadBusy) return;
         pendingDocumentType = documentType;
         documentFileInput.value = "";
         documentFileInput.click();
       }
 
       async function uploadDocument(file) {
-        if (!file || !pendingDocumentType) {
-          return;
-        }
-        const controls = pendingDocumentType === "invoice" ? {number: invoiceNumberInput, date: invoiceDateInput, supplier: invoiceSupplierInput}
+        if (!file || !pendingDocumentType || tradeLocked || tradeUploadBusy) return;
+        const documentType = pendingDocumentType;
+        const controls = documentType === "invoice" ? {number: invoiceNumberInput, date: invoiceDateInput, supplier: invoiceSupplierInput}
           : {number: contractNumberInput, date: contractDateInput, supplier: contractSupplierInput};
-        const fileBytes = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-        const operands = {document_type: pendingDocumentType, number: controls.number.value.trim(),
-          document_date: controls.date.value.trim(), supplier_name: controls.supplier.value.trim(), filename: file.name,
-          file_sha256: Array.from(new Uint8Array(fileBytes), b => b.toString(16).padStart(2, "0")).join("")};
-        setDocumentMessage(pendingDocumentType, "Загружаем документ...", "");
+        // Capture the selected file's complete intent before the first async read.
+        const operands = {document_type: documentType, number: controls.number.value.trim(),
+          document_date: controls.date.value.trim(), supplier_name: controls.supplier.value.trim(), filename: file.name};
+        pendingDocumentType = "";
+        tradeUploadBusy = true; lockTradeForms(tradeLocked);
+        setDocumentMessage(documentType, "Загружаем документ...", "");
         try {
+          const fileBytes = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+          operands.file_sha256 = Array.from(new Uint8Array(fileBytes), b => b.toString(16).padStart(2, "0")).join("");
           await tradeAcceptance.mutate(tradeDocumentsPath, "upload", operands, "POST", file);
-          setDocumentMessage(pendingDocumentType, "", "");
+          setDocumentMessage(documentType, "", "");
         } catch (error) {
-          setDocumentMessage(pendingDocumentType, error.message, "error");
+          setDocumentMessage(documentType, error.message, "error");
         } finally {
-          pendingDocumentType = "";
           documentFileInput.value = "";
+          tradeUploadBusy = false; lockTradeForms(tradeLocked);
         }
       }
 
