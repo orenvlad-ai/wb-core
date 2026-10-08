@@ -4,17 +4,39 @@
   const ID = /^opsku_[a-f0-9]{32}$/;
   function create(config, container, expectedRevision, send) {
     const storageKey = "wbc.nomenclature.operations." + config.operator_actor_scope;
-    let ids,storageError=false;
-    try {
-      const saved=JSON.parse(localStorage.getItem(storageKey) || "[]");
-      if (!Array.isArray(saved) || saved.some(id=>!ID.test(id))) throw new Error("invalid identity store");
-      ids=saved;
-    } catch (_) { ids=[]; storageError=true; }
+    const lockKey = storageKey + ":mutation";
+    let ids=[];
+    function readIds() {
+      try {
+        const saved=JSON.parse(localStorage.getItem(storageKey) || "[]");
+        if (!Array.isArray(saved) || saved.some(id=>!ID.test(id))) throw new Error("invalid identity store");
+        return [...new Set(saved)];
+      } catch (_) {
+        throw new Error("Не удалось прочитать сохранённые номера операций. Новая отправка остановлена.");
+      }
+    }
+    try {ids=readIds();} catch (_) {}
     const unknown = new Set(ids);
     const known = new Map();
     const previous = new Map();
     let busy = false, generation=0;
+    // Only the actor/account-scoped lock holder changes the durable registry.
+    // Other tabs may remove only their own explicitly rejected request.
+    function refreshIds() {
+      ids=readIds();
+      // A journal URL is a readback request, not evidence of a new submission.
+      const queryId = new URL(location.href).searchParams.get("operation_id");
+      if (ID.test(queryId || "") && !ids.includes(queryId)) ids.push(queryId);
+      for (const id of unknown) if (!ids.includes(id)) unknown.delete(id);
+      for (const id of ids) if (!known.has(id)) unknown.add(id);
+    }
     function persist() { localStorage.setItem(storageKey, JSON.stringify(ids)); }
+    function locked(callback) {
+      if (!navigator.locks || !navigator.locks.request) {
+        throw new Error("Браузер не может безопасно согласовать отправку между вкладками. Новая отправка остановлена.");
+      }
+      return navigator.locks.request(lockKey, {mode:"exclusive"}, callback);
+    }
     function show(receipt) {
       container.hidden = false;
       OperatorAcceptance.renderReceipt(container, receipt, {onClose: () => {container.hidden = true;}});
@@ -51,23 +73,36 @@
           || url === config.sku_groups_path || url.startsWith(config.sku_groups_path + "/"));
     }
     async function mutate(url, options) {
-      if (storageError) throw new Error("Не удалось прочитать сохранённые номера операций. Новая отправка остановлена.");
       if (busy) throw new Error("Проверяем сохранение. Повторно отправлять не нужно.");
-      if (unknown.size) {showUnknown(unknown.values().next().value); throw new Error("Результат предыдущей операции пока неизвестен. Проверьте её сохранение.");}
       busy = true;
-      const capturedGeneration=++generation;
       try {
+        // Capture the caller's exact operands and before-image synchronously.
+        // Waiting for another tab or GET must not pair old input with a newer
+        // revision, or read a FormData/options object changed after the click.
+        const revision = expectedRevision(url);
+        const expected = revision == null ? revision : JSON.parse(JSON.stringify(revision));
         const opts = {...options, headers:{...(options.headers || {})}};
-        const expected = expectedRevision(url);
-        let content=options.body;
-        if (content instanceof FormData) {
-          content=await Promise.all([...content.values()].map(async value => {
-            if (!(value instanceof File)) return String(value);
+        const isForm = options.body instanceof FormData;
+        if (isForm) {
+          opts.body = new FormData();
+          for (const [name,value] of options.body.entries()) opts.body.append(name,value);
+        }
+        return await locked(async () => {
+        // A tab opened before another submit must read the fresh registry after
+        // acquiring the lock, then recover unknown identities by GET only.
+        refreshIds();
+        const capturedGeneration=++generation;
+        for (const id of [...unknown]) await readReceipt(id,capturedGeneration);
+        if (unknown.size) {showUnknown(unknown.values().next().value); throw new Error("Результат предыдущей операции пока неизвестен. Проверьте её сохранение.");}
+        let content=opts.body;
+        if (isForm) {
+          content=await Promise.all([...content.entries()].map(async ([name,value]) => {
+            if (!(value instanceof File)) return [name,String(value)];
             const hash=await crypto.subtle.digest("SHA-256",await value.arrayBuffer());
-            return [value.name,Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,"0")).join("")];
+            return [name,value.name,Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,"0")).join("")];
           }));
         }
-        const key = JSON.stringify([url,options.method,expected,content]);
+        const key = JSON.stringify([url,opts.method,expected,content]);
         if (previous.has(key)) {const result=previous.get(key); show(result.acceptance); return result;}
         if (!crypto.randomUUID) throw new Error("Браузер не может сохранить номер операции.");
         container.hidden=false; OperatorAcceptance.renderState(container,null);
@@ -76,13 +111,13 @@
         // Fail before POST if durable browser identity cannot be retained.
         persist();
         opts.headers["X-Operator-Request-ID"] = id;
-        if (options.body instanceof FormData) {
-          const form=new FormData(); for (const [name,value] of options.body.entries()) form.append(name,value);
+        if (isForm) {
+          const form=opts.body;
           if (expected !== undefined && expected !== null) form.append("operator_expected_revision",JSON.stringify(expected));
           opts.body=form;
         } else if (expected !== undefined && expected !== null) opts.headers["X-Operator-Expected-Revision"] = JSON.stringify(expected);
-        if (String(options.method).toUpperCase() !== "DELETE" && !(options.body instanceof FormData)) {
-          const body = options.body ? JSON.parse(options.body) : {};
+        if (String(opts.method).toUpperCase() !== "DELETE" && !isForm) {
+          const body = opts.body ? JSON.parse(opts.body) : {};
           body._operator_request_id=id;
           if (expected !== undefined && expected !== null) body._operator_expected_revision=expected;
           opts.headers["Content-Type"]="application/json"; opts.body=JSON.stringify(body);
@@ -107,18 +142,26 @@
         }
         unknown.delete(id); known.set(id,read.operation); show(read.operation);
         previous.set(key,payload); return payload;
-      } finally {busy=false;}
+      });} finally {busy=false;}
     }
     async function restore() {
-      const capturedGeneration=++generation;
-      const queryId = new URL(location.href).searchParams.get("operation_id");
-      if (ID.test(queryId || "") && !ids.includes(queryId)) ids.push(queryId);
-      for (const id of ids) {
-        await readReceipt(id,capturedGeneration);
-        if (capturedGeneration!==generation) return;
-      }
-      if (unknown.size) showUnknown(unknown.values().next().value);
+      try {
+        refreshIds();
+        const capturedGeneration=++generation;
+        for (const id of [...ids]) {
+          await readReceipt(id,capturedGeneration);
+          if (capturedGeneration!==generation) return;
+        }
+        if (unknown.size) showUnknown(unknown.values().next().value);
+      } catch (_) {showUnknown(null);}
     }
+    function restoreOnReturn() {
+      restore().catch(() => {container.hidden=false; OperatorAcceptance.renderState(container,null);});
+    }
+    window.addEventListener("storage", event => {if (event.key===storageKey || event.key===null) restoreOnReturn();});
+    window.addEventListener("pageshow", restoreOnReturn);
+    window.addEventListener("focus", restoreOnReturn);
+    document.addEventListener("visibilitychange", () => {if (document.visibilityState==="visible") restoreOnReturn();});
     return Object.freeze({handles,mutate,recover,restore,sourceRefreshed:()=>previous.clear()});
   }
   window.OperatorNomenclature=Object.freeze({create});
