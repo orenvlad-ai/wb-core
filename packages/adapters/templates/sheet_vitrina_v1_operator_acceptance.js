@@ -46,7 +46,7 @@
   function stateNode(receipt) {
     const accepted = acceptedOperation(receipt);
     const stage = sourceStage(receipt);
-    const label = accepted ? labels[receipt.state]
+    const label = accepted ? (receipt.primary_effect === "source_saved" && receipt.state === "completed" ? "Сохранено" : labels[receipt.state])
       : stage === "draft" ? "Черновик сохранён"
       : stage ? "Предпросмотр" : "Проверяем сохранение";
     const node = make("span", "ff-operation-status", label);
@@ -108,7 +108,7 @@
     section.setAttribute("tabindex", "-1");
     const check = make("span", "ff-operation-check", "✓");
     check.setAttribute("aria-hidden", "true");
-    section.append(check, make("h3", "", "Принято"), make("p", "", "Документ сохранён."));
+    section.append(check, make("h3", "", "Принято"), make("p", "", receipt.primary_effect === "source_saved" ? "Изменение сохранено." : "Документ сохранён."));
     if (text(receipt.title_ru)) section.appendChild(make("p", "ff-operation-title", receipt.title_ru));
     const fields = Array.isArray(receipt.fields) ? receipt.fields : [];
     if (fields.length) {

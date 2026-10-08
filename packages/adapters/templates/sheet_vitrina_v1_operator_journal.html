@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Журнал операций</title>
+  <style>
+    body { margin:0; background:#101318; color:#e7e8ec; font:16px/1.45 system-ui,sans-serif; }
+    main { max-width:1120px; margin:32px auto; padding:0 20px; }
+    header,.journal-tools,.journal-pagination { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+    header { justify-content:space-between; margin-bottom:24px; }
+    h1 { margin:0; font-size:28px; } a { color:#baadff; }
+    button,select { font:inherit; color:inherit; background:#20242d; border:1px solid #414654; border-radius:9px; padding:9px 14px; }
+    button { cursor:pointer; } button:disabled { opacity:.5; cursor:default; }
+    button:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid #ab96ff; outline-offset:3px; }
+    .journal-tools { margin-bottom:18px; } .journal-tools label { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .journal-list { display:grid; gap:10px; margin:16px 0; }
+    .journal-row { display:flex; justify-content:space-between; align-items:center; gap:20px; padding:18px; background:#191d25; border:1px solid #323744; border-radius:12px; }
+    .journal-row p { margin:4px 0; } .journal-meta { color:#a7adba; font-size:14px; }
+    #journal-detail { margin:24px 0; } .journal-pagination { justify-content:space-between; }
+    #journal-message { color:#a7adba; } .journal-error { color:#f0b47d !important; }
+    @media(max-width:560px) { main { margin:20px auto; padding:0 12px; } .journal-row { align-items:flex-start; flex-direction:column; gap:12px; } h1 { font-size:24px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header><h1>Журнал операций</h1><a href="/sheet-vitrina-v1/vitrina">К сервису</a></header>
+  <div class="journal-tools">
+    <label>Операции <select id="journal-domain"><option value="all">Все доступные</option></select></label>
+    <button id="journal-refresh" type="button">Обновить</button>
+  </div>
+  <p id="journal-message" role="status" aria-live="polite"></p>
+  <section id="journal-detail" aria-label="Выбранная операция" hidden></section>
+  <section id="journal-list" class="journal-list" aria-label="Операции"></section>
+  <nav class="journal-pagination" aria-label="Страницы журнала">
+    <button id="journal-prev" type="button" disabled>Назад</button>
+    <span id="journal-page"></span>
+    <button id="journal-next" type="button" disabled>Далее</button>
+  </nav>
+</main>
+<script>
+(function () {
+  "use strict";
+  const api = "/v1/sheet-vitrina-v1/operations";
+  const nodes = Object.fromEntries(["domain","refresh","message","detail","list","prev","page","next"].map(key => [key,document.getElementById("journal-"+key)]));
+  let page = 1, listGeneration = 0, detailGeneration = 0;
+  let selected = new URLSearchParams(location.search).get("operation_id") || "";
+  function element(tag, text, cls) { const node=document.createElement(tag); node.textContent=String(text || ""); if(cls)node.className=cls; return node; }
+  function message(text, error) { nodes.message.textContent=text; nodes.message.className=error?"journal-error":""; }
+  function time(value) { const date=new Date(value); return Number.isNaN(date.getTime())?String(value || ""):date.toLocaleString("ru-RU"); }
+  async function get(path) { const response=await fetch(path,{headers:{Accept:"application/json"},cache:"no-store"}); if(!response.ok)throw new Error(response.status===404?"Операция не найдена или недоступна.":"Не удалось получить журнал. Обновите страницу позже."); return response.json(); }
+  function closeDetail() { ++detailGeneration; selected=""; nodes.detail.hidden=true; nodes.detail.replaceChildren(); history.replaceState(null,"",location.pathname); }
+  async function detail(identity) {
+    const generation=++detailGeneration; selected=identity; nodes.detail.hidden=false;
+    nodes.detail.replaceChildren(element("p","Проверяем сохранённую операцию…"));
+    try {
+      const payload=await get(api+"/"+encodeURIComponent(identity));
+      if(generation!==detailGeneration)return;
+      const receipt=payload.operation;
+      if(!receipt || receipt.operation_id!==identity || !window.OperatorAcceptance.acceptedOperation(receipt))throw new Error("Подтверждение операции пока не получено.");
+      window.OperatorAcceptance.renderReceipt(nodes.detail,receipt,{onClose:closeDetail});
+      history.replaceState(null,"",location.pathname+"?operation_id="+encodeURIComponent(identity));
+    } catch(error) { if(generation===detailGeneration)nodes.detail.replaceChildren(element("p",error.message,"journal-error")); }
+  }
+  async function load() {
+    const generation=++listGeneration;
+    nodes.refresh.disabled=true; nodes.prev.disabled=true; nodes.next.disabled=true;
+    message("Загружаем операции…");
+    try {
+      const payload=await get(api+"?page="+page+"&limit=25&domain="+encodeURIComponent(nodes.domain.value));
+      if(generation!==listGeneration)return;
+      if(!payload || payload.contract_name!=="operator_operations_v1" || !Array.isArray(payload.items))throw new Error("Журнал пока недоступен.");
+      const selectedDomain=nodes.domain.value;
+      nodes.domain.replaceChildren(new Option("Все доступные","all"));
+      (payload.available_domains || []).forEach(item=>nodes.domain.add(new Option(item.label_ru,item.domain)));
+      if(Array.from(nodes.domain.options).some(option=>option.value===selectedDomain))nodes.domain.value=selectedDomain;
+      nodes.list.replaceChildren();
+      payload.items.forEach(receipt=>{
+        if(!window.OperatorAcceptance.acceptedOperation(receipt))return;
+        const row=element("article","","journal-row"), copy=element("div","");
+        copy.append(element("strong",receipt.title_ru || receipt.title || "Операция"),element("p",time(receipt.accepted_at),"journal-meta"));
+        const labels={accepted:"Принято",processing:"Обрабатывается",completed:"Обработано",delayed:"Обработка задерживается",needs_attention:"Требует внимания"};
+        copy.append(element("p",receipt.primary_effect==="source_saved"?"Сохранено":labels[receipt.state]));
+        const button=element("button","Подробнее"); button.type="button";
+        button.addEventListener("click",()=>detail(receipt.operation_id)); row.append(copy,button); nodes.list.append(row);
+      });
+      message(payload.total?"Всего операций: "+payload.total:"Пока нет операций.");
+      nodes.page.textContent="Страница "+page; nodes.prev.disabled=page<=1; nodes.next.disabled=!payload.has_more;
+    } catch(error) { if(generation===listGeneration)message(error.message,true); }
+    finally { if(generation===listGeneration)nodes.refresh.disabled=false; }
+  }
+  nodes.domain.addEventListener("change",()=>{page=1;load();});
+  nodes.refresh.addEventListener("click",()=>{load();if(selected)detail(selected);});
+  nodes.prev.addEventListener("click",()=>{if(page>1){--page;load();}});
+  nodes.next.addEventListener("click",()=>{++page;load();});
+  load(); if(selected)detail(selected);
+})();
+</script>
+</body>
+</html>

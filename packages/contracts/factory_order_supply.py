@@ -154,6 +154,7 @@ class FactoryOrderUploadResult:
     ignored_row_count: int
     message: str
     shipment_summary: tuple[FactoryOrderInboundShipmentSummary, ...] = ()
+    acceptance: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +162,7 @@ class FactoryOrderDatasetDeleteResult:
     status: str
     dataset: FactoryOrderDatasetState
     message: str
+    acceptance: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

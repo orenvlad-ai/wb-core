@@ -348,6 +348,8 @@ class FactoryOrderSupplyBlock:
         *,
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
+        operation_id: str | None = None,
+        actor: str = "system",
     ) -> FactoryOrderUploadResult:
         active_skus = dict(self._load_active_skus())
         workbook_rows = read_first_sheet_rows(workbook_bytes)
@@ -369,19 +371,21 @@ class FactoryOrderSupplyBlock:
             str(uploaded_content_type or "").strip()
             or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        self.runtime.save_factory_order_dataset_state(
+        acceptance = self.runtime.save_factory_order_dataset_state(
             dataset_type=dataset_type,
             uploaded_at=uploaded_at,
             rows=[asdict(item) for item in parsed_rows],
             uploaded_filename=normalized_filename,
             uploaded_content_type=normalized_content_type,
             workbook_bytes=workbook_bytes,
+            operation_id=operation_id,
+            actor=actor,
         )
         dataset_state = FactoryOrderDatasetState(
             dataset_type=dataset_type,
             label_ru=_DATASET_LABELS[dataset_type],
             status="uploaded",
-            uploaded_at=uploaded_at,
+            uploaded_at=acceptance["accepted_at"],
             row_count=len(parsed_rows),
             required=_DATASET_REQUIRED[dataset_type],
             uploaded_filename=normalized_filename,
@@ -395,21 +399,26 @@ class FactoryOrderSupplyBlock:
             ignored_row_count=ignored_row_count,
             message=f"Файл принят: {_DATASET_LABELS[dataset_type].lower()}",
             shipment_summary=shipment_summary,
+            acceptance=acceptance,
         )
 
-    def delete_dataset(self, dataset_type: str) -> FactoryOrderDatasetDeleteResult:
-        deleted = self.runtime.delete_factory_order_dataset_state(dataset_type)
+    def delete_dataset(self, dataset_type: str, *, operation_id: str | None = None,
+                       actor: str = "system") -> FactoryOrderDatasetDeleteResult:
+        deleted, acceptance = self.runtime.delete_factory_order_dataset_state(dataset_type,
+            operation_id=operation_id, actor=actor, deleted_at=self.timestamp_factory(), include_acceptance=True)
         dataset_state = self._load_dataset_state(dataset_type)
         if not deleted:
             return FactoryOrderDatasetDeleteResult(
                 status="missing",
                 dataset=dataset_state,
                 message=f"Файл уже отсутствует: {_DATASET_LABELS[dataset_type].lower()}",
+                acceptance=acceptance,
             )
         return FactoryOrderDatasetDeleteResult(
             status="deleted",
             dataset=dataset_state,
             message=f"Файл удалён: {_DATASET_LABELS[dataset_type].lower()}",
+            acceptance=acceptance,
         )
 
     def download_uploaded_dataset(self, dataset_type: str) -> tuple[bytes, str, str]:

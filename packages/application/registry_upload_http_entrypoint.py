@@ -1617,11 +1617,15 @@ class RegistryUploadHttpEntrypoint:
         *,
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
+        operation_id: str | None = None,
+        actor: str = "system",
     ) -> dict[str, Any]:
         return self.plan_report_block.upload_baseline(
             workbook_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
+            operation_id=operation_id,
+            actor=actor,
         )
 
     def handle_sheet_web_vitrina_request(
@@ -4501,6 +4505,8 @@ class RegistryUploadHttpEntrypoint:
         *,
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
+        operation_id: str | None = None,
+        actor: str = "system",
     ) -> dict[str, Any]:
         return asdict(
             self.factory_order_supply_block.upload_dataset(
@@ -4508,14 +4514,18 @@ class RegistryUploadHttpEntrypoint:
                 workbook_bytes,
                 uploaded_filename=uploaded_filename,
                 uploaded_content_type=uploaded_content_type,
+                operation_id=operation_id,
+                actor=actor,
             )
         )
 
     def handle_factory_order_uploaded_file_request(self, dataset_type: str) -> tuple[bytes, str, str]:
         return self.factory_order_supply_block.download_uploaded_dataset(dataset_type)
 
-    def handle_factory_order_delete_request(self, dataset_type: str) -> dict[str, Any]:
-        return asdict(self.factory_order_supply_block.delete_dataset(dataset_type))
+    def handle_factory_order_delete_request(self, dataset_type: str, *, operation_id: str | None = None,
+                                          actor: str = "system") -> dict[str, Any]:
+        return asdict(self.factory_order_supply_block.delete_dataset(dataset_type,
+            operation_id=operation_id, actor=actor))
 
     def handle_factory_order_calculate_request(
         self,
