@@ -1769,38 +1769,7 @@ class SupplierShipmentsBlock:
             now = self.timestamp_factory()
             if existing is None:
                 existing = self.runtime.save_trade_document(
-                    {
-                        "document_id": "tdoc_" + uuid4().hex,
-                        "document_type": TRADE_DOCUMENT_TYPE_INVOICE,
-                        "number": header.get("invoice_no") or "",
-                        "document_date": header.get("invoice_date") or "",
-                        "supplier_name": header.get("supplier_name") or DEFAULT_SUPPLIER_NAME,
-                        "currency": header.get("currency") or "",
-                        "amount_total": header.get("invoice_amount_total"),
-                        "source": TRADE_DOCUMENT_SOURCE_MIGRATION_EXISTING_SUPPLIER_INVOICE,
-                        "source_shipment_id": shipment_id,
-                        "source_upload_id": "",
-                        "file_original_name": header.get("source_filename") or "supplier-invoice.xlsx",
-                        "file_content_type": SUPPLIER_INVOICE_CONTENT_TYPE,
-                        "file_sha256": file_sha256,
-                        "file_path": source_file_path,
-                        "parser_version": header.get("parser_version") or "",
-                        "parsed_metadata": {
-                            "invoice_no": header.get("invoice_no") or "",
-                            "invoice_date": header.get("invoice_date") or "",
-                            "contract_no": header.get("contract_no") or "",
-                            "contract_date": header.get("contract_date") or "",
-                            "supplier_name": header.get("supplier_name") or DEFAULT_SUPPLIER_NAME,
-                            "currency": header.get("currency") or "",
-                            "invoice_amount_total": header.get("invoice_amount_total"),
-                            "declared_invoice_total": header.get("declared_invoice_total"),
-                        },
-                        "warnings": header.get("warnings") or [],
-                        "errors": header.get("errors") or [],
-                        "status": TRADE_DOCUMENT_STATUS_ACTIVE,
-                        "created_at": now,
-                        "updated_at": now,
-                    }
+                    legacy_invoice_document_source(header, shipment_id, file_sha256, now)
                 )
                 created_count += 1
             updated = self.runtime.set_supplier_shipment_invoice_document_id(
@@ -6377,3 +6346,40 @@ def _string_list(value: Any) -> list[str]:
 
 def _default_timestamp_factory() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def legacy_invoice_document_source(header, shipment_id, file_sha256, now):
+    """Canonical source-only payload shared with the native legacy migration."""
+    source_file_path = str(header.get("source_file_path") or "")
+    return {
+        "document_id": "tdoc_" + uuid4().hex,
+        "document_type": TRADE_DOCUMENT_TYPE_INVOICE,
+        "number": header.get("invoice_no") or "",
+        "document_date": header.get("invoice_date") or "",
+        "supplier_name": header.get("supplier_name") or DEFAULT_SUPPLIER_NAME,
+        "currency": header.get("currency") or "",
+        "amount_total": header.get("invoice_amount_total"),
+        "source": TRADE_DOCUMENT_SOURCE_MIGRATION_EXISTING_SUPPLIER_INVOICE,
+        "source_shipment_id": shipment_id,
+        "source_upload_id": "",
+        "file_original_name": header.get("source_filename") or "supplier-invoice.xlsx",
+        "file_content_type": SUPPLIER_INVOICE_CONTENT_TYPE,
+        "file_sha256": file_sha256,
+        "file_path": source_file_path,
+        "parser_version": header.get("parser_version") or "",
+        "parsed_metadata": {
+            "invoice_no": header.get("invoice_no") or "",
+            "invoice_date": header.get("invoice_date") or "",
+            "contract_no": header.get("contract_no") or "",
+            "contract_date": header.get("contract_date") or "",
+            "supplier_name": header.get("supplier_name") or DEFAULT_SUPPLIER_NAME,
+            "currency": header.get("currency") or "",
+            "invoice_amount_total": header.get("invoice_amount_total"),
+            "declared_invoice_total": header.get("declared_invoice_total"),
+        },
+        "warnings": header.get("warnings") or json.loads(header.get("warnings_json") or "[]"),
+        "errors": header.get("errors") or json.loads(header.get("errors_json") or "[]"),
+        "status": TRADE_DOCUMENT_STATUS_ACTIVE,
+        "created_at": now,
+        "updated_at": now,
+    }

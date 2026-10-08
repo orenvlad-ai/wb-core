@@ -4974,6 +4974,11 @@ class RegistryUploadHttpEntrypoint:
         return read(self.runtime.db_path, request_id, shipment_id=shipment_id, request_scope=request_scope)
 
     def handle_supplier_operator_operation_read(self, operation_id: str, *, request_scope: str, supplier_safe: bool = False) -> dict[str, Any]:
+        if operation_id.startswith('supplier_contract_'):
+            if supplier_safe:
+                return {'domain': 'supplier_contract', 'status': 'unknown', 'settled': False, 'acceptance': None}
+            from packages.application.operator_supplier_contracts import read_operation
+            return read_operation(self.runtime.db_path, operation_id, request_scope=request_scope) or {'status': 'unknown', 'acceptance': None}
         if operation_id.startswith('supplier_financial_'):
             from packages.application import operator_cny_documents as cny_operations
             from packages.application import operator_supplier_financial as financial_operations
@@ -6814,43 +6819,38 @@ class RegistryUploadHttpEntrypoint:
             document_id=document_id, target_shipment_id=target, request_scope=request_scope,
             native_write=lambda: native(document_id, target_shipment_id=target))
 
-    def handle_supplier_shipments_contract_patch_request(
-        self,
-        shipment_id: str,
-        payload: Mapping[str, Any],
-        *,
-        actor: str = "",
-    ) -> dict[str, Any]:
-        contract_document_id = str(payload.get("contract_document_id") or "").strip()
-        if contract_document_id:
-            return self.supplier_shipments_block.link_shipment_contract(
-                shipment_id,
-                contract_document_id=contract_document_id,
-                linked_by=actor,
-            )
+    def handle_supplier_contract_read(self, shipment_id, request_id, *, request_scope):
+        from packages.application.operator_supplier_contracts import read
+        return read(self.runtime.db_path, request_id, shipment_id=shipment_id, request_scope=request_scope)
+
+    def handle_supplier_shipments_contract_patch_request(self, shipment_id, payload, *, actor="", request_scope="local_operator"):
+        target = str(payload.get("contract_document_id") or "").strip()
+        if payload.get("request_id"):
+            from packages.application.operator_supplier_contracts import accept
+            return accept(self.supplier_shipments_block, shipment_id, payload, action="link" if target else "unlink",
+                actor=actor, request_scope=request_scope)
+        if target:
+            return self.supplier_shipments_block.link_shipment_contract(shipment_id, contract_document_id=target, linked_by=actor)
         return self.supplier_shipments_block.unlink_shipment_contract(shipment_id)
 
-    def handle_supplier_shipments_contract_upload_request(
-        self,
-        shipment_id: str,
-        file_bytes: bytes,
-        *,
-        uploaded_filename: str | None = None,
-        uploaded_content_type: str | None = None,
-        fields: Mapping[str, Any] | None = None,
-        actor: str = "",
-    ) -> dict[str, Any]:
-        del actor
-        fields = fields or {}
-        return self.supplier_shipments_block.upload_shipment_contract(
-            shipment_id,
-            file_bytes=file_bytes,
-            uploaded_filename=uploaded_filename,
-            uploaded_content_type=uploaded_content_type,
-            number=str(fields.get("number") or ""),
-            document_date=str(fields.get("document_date") or ""),
-            supplier_name=str(fields.get("supplier_name") or ""),
-        )
+    def handle_supplier_shipments_contract_upload_request(self, shipment_id, file_bytes, *,
+        uploaded_filename=None, uploaded_content_type=None, fields=None, actor="", request_scope="local_operator"):
+        fields = dict(fields or {})
+        if not fields.get("request_id"):
+            return self.supplier_shipments_block.upload_shipment_contract(shipment_id, file_bytes=file_bytes,
+                uploaded_filename=uploaded_filename, uploaded_content_type=uploaded_content_type,
+                number=str(fields.get("number") or ""), document_date=str(fields.get("document_date") or ""),
+                supplier_name=str(fields.get("supplier_name") or ""))
+        import hashlib
+        from packages.application.operator_supplier_contracts import accept
+        fields["filename"] = str(uploaded_filename or "")
+        fields["file_sha256"] = hashlib.sha256(file_bytes).hexdigest()
+        return accept(self.supplier_shipments_block, shipment_id, fields, action="upload_link", actor=actor,
+            request_scope=request_scope, native_upload=lambda header: self.supplier_shipments_block.create_trade_document_from_upload(
+                document_type="contract", file_bytes=file_bytes, uploaded_filename=uploaded_filename,
+                uploaded_content_type=uploaded_content_type, number=str(fields.get("number") or header.get("contract_no") or ""),
+                document_date=str(fields.get("document_date") or header.get("contract_date") or ""),
+                supplier_name=str(fields.get("supplier_name") or header.get("supplier_name") or "")))
 
     def handle_trade_documents_list_request(self) -> dict[str, Any]:
         from packages.application.operator_trade_documents import read_documents

@@ -2581,7 +2581,7 @@ def _build_handler(
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                         fields=upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {},
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -5808,6 +5808,12 @@ def _build_handler(
                     return
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_contract_path(parsed.path)
+                    request_id = _resolve_single_query_param(parsed.query, "request_id")
+                    if request_id:
+                        result = entrypoint.handle_supplier_contract_read(shipment_id, request_id,
+                            request_scope=_current_web_user_config_key(self))
+                        _write_json_response(self, HTTPStatus.OK, result)
+                        return
                     file_bytes, filename, content_type = entrypoint.handle_supplier_shipments_contract_request(shipment_id)
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
@@ -6338,7 +6344,7 @@ def _build_handler(
                     result = entrypoint.handle_supplier_shipments_contract_patch_request(
                         shipment_id,
                         payload,
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -11423,6 +11429,7 @@ def _render_sheet_vitrina_supplier_ui(
         SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     )
     source_acceptance = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_supplier_acceptance.js").read_text(encoding="utf-8")
+    source_acceptance += "\n" + UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_contract_acceptance.js").read_text(encoding="utf-8")
     template = template.replace("</head>", "<script>\n"+source_acceptance+"\n</script>\n</head>", 1)
     return (
         template.replace(

@@ -7778,85 +7778,15 @@ class RegistryUploadDbBackedRuntime:
         updated_at = str(document.get("updated_at") or "").strip()
         _validate_timestamp(created_at, field_name="created_at")
         _validate_timestamp(updated_at, field_name="updated_at")
-        parsed_metadata = document.get("parsed_metadata")
-        warnings = document.get("warnings")
-        errors = document.get("errors")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             from packages.application.operator_trade_documents import before_write, record_saved
             before_write(conn, document_id, kind="document")
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_trade_documents(
-                    document_id,
-                    document_type,
-                    number,
-                    document_date,
-                    supplier_name,
-                    currency,
-                    amount_total,
-                    source,
-                    source_shipment_id,
-                    source_upload_id,
-                    file_original_name,
-                    file_content_type,
-                    file_sha256,
-                    file_path,
-                    parser_version,
-                    parsed_metadata_json,
-                    warnings_json,
-                    errors_json,
-                    status,
-                    created_at,
-                    updated_at
-                )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(document_id) DO UPDATE SET
-                    document_type = excluded.document_type,
-                    number = excluded.number,
-                    document_date = excluded.document_date,
-                    supplier_name = excluded.supplier_name,
-                    currency = excluded.currency,
-                    amount_total = excluded.amount_total,
-                    source = excluded.source,
-                    source_shipment_id = excluded.source_shipment_id,
-                    source_upload_id = excluded.source_upload_id,
-                    file_original_name = excluded.file_original_name,
-                    file_content_type = excluded.file_content_type,
-                    file_sha256 = excluded.file_sha256,
-                    file_path = excluded.file_path,
-                    parser_version = excluded.parser_version,
-                    parsed_metadata_json = excluded.parsed_metadata_json,
-                    warnings_json = excluded.warnings_json,
-                    errors_json = excluded.errors_json,
-                    status = excluded.status,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    document_id,
-                    str(document.get("document_type") or ""),
-                    str(document.get("number") or ""),
-                    str(document.get("document_date") or ""),
-                    str(document.get("supplier_name") or ""),
-                    str(document.get("currency") or ""),
-                    document.get("amount_total"),
-                    str(document.get("source") or ""),
-                    str(document.get("source_shipment_id") or ""),
-                    str(document.get("source_upload_id") or ""),
-                    str(document.get("file_original_name") or ""),
-                    str(document.get("file_content_type") or ""),
-                    str(document.get("file_sha256") or ""),
-                    str(document.get("file_path") or ""),
-                    str(document.get("parser_version") or ""),
-                    json.dumps(dict(parsed_metadata) if isinstance(parsed_metadata, Mapping) else {}, ensure_ascii=False),
-                    json.dumps(list(warnings) if isinstance(warnings, list) else [], ensure_ascii=False),
-                    json.dumps(list(errors) if isinstance(errors, list) else [], ensure_ascii=False),
-                    str(document.get("status") or TRADE_DOCUMENT_STATUS_ACTIVE),
-                    created_at,
-                    updated_at,
-                ),
-            )
+            from packages.application.operator_supplier_contracts import before_document_write, record_document_saved
+            guard = before_document_write(conn, document_id)
+            _save_trade_document_in_connection(conn, document)
+            record_document_saved(conn, document_id, guard)
             record_saved(conn, document_id)
             conn.commit()
         loaded = self.load_trade_document(document_id)
@@ -8038,6 +7968,8 @@ class RegistryUploadDbBackedRuntime:
             from packages.application.operator_trade_documents import before_write, record_saved
             before_write(conn, invoice_document_id, kind="link")
             guard_invoice_link_write(conn, invoice_document_id, contract_document_id, preparation_request)
+            from packages.application.operator_supplier_contracts import before_link_write, record_link_applied
+            contract_guard = before_link_write(conn, invoice_document_id, contract_document_id, preparation_request, runtime_dir=self.runtime_dir)
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_invoice_contract_links(
@@ -8064,6 +7996,7 @@ class RegistryUploadDbBackedRuntime:
                     str(source or ""),
                 ),
             )
+            record_link_applied(conn, invoice_document_id, contract_document_id, contract_guard)
             record_saved(conn, invoice_document_id)
             conn.commit()
         link = self.load_invoice_contract_link(invoice_document_id)
@@ -8104,6 +8037,8 @@ class RegistryUploadDbBackedRuntime:
             from packages.application.operator_trade_documents import before_write, record_saved
             before_write(conn, invoice_document_id, kind="link")
             guard_invoice_link_write(conn, invoice_document_id, "", preparation_request)
+            from packages.application.operator_supplier_contracts import before_link_write, record_link_applied
+            contract_guard = before_link_write(conn, invoice_document_id, "", preparation_request, runtime_dir=self.runtime_dir)
             cursor = conn.execute(
                 """
                 DELETE FROM sheet_vitrina_v1_invoice_contract_links
@@ -8111,6 +8046,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (invoice_document_id,),
             )
+            record_link_applied(conn, invoice_document_id, "", contract_guard)
             record_saved(conn, invoice_document_id)
             conn.commit()
             return cursor.rowcount > 0
@@ -14301,3 +14237,88 @@ def _remove_incomplete_backup_destination(target: Path) -> None:
             "SQLite backup failed and incomplete destination cleanup failed: "
             + ", ".join(failures)
         )
+
+
+def _save_trade_document_in_connection(conn, document):
+    """The existing native document SQL, reusable by one-order materialization."""
+    document_id = str(document.get("document_id") or "").strip()
+    if not document_id:
+        raise ValueError("trade document_id is required")
+    created_at = str(document.get("created_at") or "").strip()
+    updated_at = str(document.get("updated_at") or "").strip()
+    _validate_timestamp(created_at, field_name="created_at")
+    _validate_timestamp(updated_at, field_name="updated_at")
+    parsed_metadata = document.get("parsed_metadata")
+    warnings = document.get("warnings")
+    errors = document.get("errors")
+    conn.execute(
+        """
+        INSERT INTO sheet_vitrina_v1_trade_documents(
+            document_id,
+            document_type,
+            number,
+            document_date,
+            supplier_name,
+            currency,
+            amount_total,
+            source,
+            source_shipment_id,
+            source_upload_id,
+            file_original_name,
+            file_content_type,
+            file_sha256,
+            file_path,
+            parser_version,
+            parsed_metadata_json,
+            warnings_json,
+            errors_json,
+            status,
+            created_at,
+            updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(document_id) DO UPDATE SET
+            document_type = excluded.document_type,
+            number = excluded.number,
+            document_date = excluded.document_date,
+            supplier_name = excluded.supplier_name,
+            currency = excluded.currency,
+            amount_total = excluded.amount_total,
+            source = excluded.source,
+            source_shipment_id = excluded.source_shipment_id,
+            source_upload_id = excluded.source_upload_id,
+            file_original_name = excluded.file_original_name,
+            file_content_type = excluded.file_content_type,
+            file_sha256 = excluded.file_sha256,
+            file_path = excluded.file_path,
+            parser_version = excluded.parser_version,
+            parsed_metadata_json = excluded.parsed_metadata_json,
+            warnings_json = excluded.warnings_json,
+            errors_json = excluded.errors_json,
+            status = excluded.status,
+            updated_at = excluded.updated_at
+        """,
+        (
+            document_id,
+            str(document.get("document_type") or ""),
+            str(document.get("number") or ""),
+            str(document.get("document_date") or ""),
+            str(document.get("supplier_name") or ""),
+            str(document.get("currency") or ""),
+            document.get("amount_total"),
+            str(document.get("source") or ""),
+            str(document.get("source_shipment_id") or ""),
+            str(document.get("source_upload_id") or ""),
+            str(document.get("file_original_name") or ""),
+            str(document.get("file_content_type") or ""),
+            str(document.get("file_sha256") or ""),
+            str(document.get("file_path") or ""),
+            str(document.get("parser_version") or ""),
+            json.dumps(dict(parsed_metadata) if isinstance(parsed_metadata, Mapping) else {}, ensure_ascii=False),
+            json.dumps(list(warnings) if isinstance(warnings, list) else [], ensure_ascii=False),
+            json.dumps(list(errors) if isinstance(errors, list) else [], ensure_ascii=False),
+            str(document.get("status") or TRADE_DOCUMENT_STATUS_ACTIVE),
+            created_at,
+            updated_at,
+        ),
+    )
