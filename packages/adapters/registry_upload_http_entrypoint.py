@@ -3263,6 +3263,10 @@ def _build_handler(
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                     )
                 except ValueError as exc:
+                    from packages.application.operator_manual_ff_stock import ModernFfWorkflowRequired
+                    if isinstance(exc, ModernFfWorkflowRequired):
+                        _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc), "code": exc.code, "source_not_saved": True, "modern_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH + "?tab=warehouses&warehouse=ff"})
+                        return
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
@@ -3285,6 +3289,10 @@ def _build_handler(
                         actor=_current_web_user_actor(self),
                     )
                 except ValueError as exc:
+                    from packages.application.operator_manual_ff_stock import ModernFfWorkflowRequired
+                    if isinstance(exc, ModernFfWorkflowRequired):
+                        _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc), "code": exc.code, "source_not_saved": True, "modern_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH + "?tab=warehouses&warehouse=ff"})
+                        return
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback

@@ -3668,6 +3668,9 @@ class RegistryUploadDbBackedRuntime:
             )
 
             ensure_warehouse_projection_source_outbox(conn)
+            if str(source_type or "").strip() == "manual_excel" and str(operation_type or "").strip() in {"manual_receipt", "manual_writeoff"}:
+                # Bootstrap may use executescript; acquire the source fence afterwards.
+                conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 """
                 SELECT *
@@ -3680,6 +3683,9 @@ class RegistryUploadDbBackedRuntime:
                 payload = _ff_stock_operation_to_dict(existing)
                 payload["idempotent"] = True
                 return payload
+            if str(source_type or "").strip() == "manual_excel" and str(operation_type or "").strip() in {"manual_receipt", "manual_writeoff"}:
+                from packages.application.operator_manual_ff_stock import require_legacy_manual_authority
+                require_legacy_manual_authority(conn)
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_ff_stock_operations(

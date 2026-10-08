@@ -28818,7 +28818,7 @@
     function applyNonOverheadDefaults() {
       const kind = nodes.kind.value;
       const action = actions[kind] || { fields: [] };
-      if (!kind || kind === "pool_overhead") return;
+      if (!kind || kind === "pool_overhead" || state.manualDraft) return;
       if (action.fields.indexOf("facility") >= 0 && !nodes.facility.value && nodes.facility.options.length > 1) nodes.facility.selectedIndex = 1;
       if (action.fields.indexOf("destination_facility") >= 0 && !nodes.destinationFacility.value && nodes.destinationFacility.options.length > 1) nodes.destinationFacility.selectedIndex = 1;
       if (action.fields.indexOf("scope") >= 0 && !nodes.scope.value) nodes.scope.value = "both";
@@ -28853,6 +28853,7 @@
       }
       nodes.overheadComment.required = kind === "pool_overhead" && nodes.overheadCategory.value === "other";
       nodes.help.textContent = action.help;
+      nodes.preview.disabled = !kind || !(state.capabilities && state.capabilities.feature && state.capabilities.feature.writer_effective);
       nodes.template.hidden = !action.workbook;
       nodes.preview.textContent = action.workbook ? "Загрузить и проверить" : "Проверить документ";
       state.currentAction = kind;
@@ -29250,6 +29251,8 @@
     }
 
     async function openModal(preferredAction) {
+      state.manualDraft = false;
+      const manualNote = nodes.form.querySelector("[data-ff-manual-draft]"); if (manualNote) manualNote.hidden = true;
       state.opener=document.activeElement;modal.hidden=false;document.body.style.overflow="hidden";dialog.focus();
       const alreadyLoaded = state.loaded;
       await initialize();
@@ -29262,6 +29265,48 @@
       } else if (savedOverheadConfirmation() === nodes.requestId.value && nodes.requestId.value) {
         activateTab("workflow", alreadyLoaded);
       }
+    }
+    const manualPurpose = new URLSearchParams(window.location.search).get("ff_manual_action");
+    const validManualPurpose = function(value) {return value === "manual_receipt" || value === "manual_writeoff";};
+    async function openManualDraft(payload) {
+      if (!validManualPurpose(payload.purpose)) return;
+      const recovering = Boolean(savedOverheadConfirmation());
+      await openModal("");
+      // An unresolved modern submission retains its exact recovery identity.
+      if (recovering || savedOverheadConfirmation()) {activateTab("workflow", false); return;}
+      activateUnifiedTab("warehouses", {persist: false});
+      state.manualDraft = true;
+      activateTab("create");
+      if (!Array.from(nodes.kind.options).some(function(option) {return option.value === "";})) {
+        const choice = make("option", "", "Выберите вид документа"); choice.value = ""; nodes.kind.insertBefore(choice, nodes.kind.firstChild);
+      }
+      [nodes.sourcePool, nodes.destinationPool].forEach(function(control) {
+        if (!Array.from(control.options).some(function(option) {return option.value === "";})) {
+          const choice = make("option", "", "Выберите сегмент"); choice.value = ""; control.insertBefore(choice, control.firstChild);
+        }
+        control.value = "";
+      });
+      nodes.kind.value = ""; nodes.facility.value = ""; nodes.destinationFacility.value = "";
+      nodes.scope.value = ""; nodes.sourcePool.value = ""; nodes.items.value = "";
+      updateActionFields();
+      let note = nodes.form.querySelector("[data-ff-manual-draft]");
+      if (!note) {note = make("p", "ff-pool-note"); note.dataset.ffManualDraft = "1"; nodes.form.prepend(note);}
+      const rows = Array.isArray(payload.rows) ? payload.rows.slice(0, 200).filter(function(row) {return row && Number.isSafeInteger(row.nm_id) && row.nm_id > 0 && Number.isSafeInteger(row.quantity_delta);}) : [];
+      note.hidden = false;
+      note.textContent = (payload.purpose === "manual_receipt" ? "Приход. " : "Списание. ") + "Выберите склад и вид документа. Без документа-основания используйте инвентаризацию фактического остатка.";
+      if (rows.length) note.appendChild(make("span", "", " Черновик изменений (не итоговый остаток): " + rows.map(function(row) {return row.nm_id + ": " + row.quantity_delta;}).join("; ")));
+      nodes.kind.focus();
+    }
+    window.addEventListener("message", function(event) {
+      if (event.origin !== window.location.origin || !event.data || event.data.type !== "wbc_manual_ff_stock_draft") return;
+      const embedded = operatorEmbedFrames.some(function(frame) {return frame.contentWindow === event.source;});
+      const opened = validManualPurpose(manualPurpose) && window.opener && event.source === window.opener;
+      if (embedded || opened) openManualDraft(event.data);
+    });
+    if (validManualPurpose(manualPurpose)) {
+      openManualDraft({purpose: manualPurpose, rows: []}).then(function() {
+        if (window.opener) window.opener.postMessage({type: "wbc_manual_ff_stock_draft_ready"}, window.location.origin);
+      });
     }
     openButton.addEventListener("click", function () { openModal(""); });
     const linkedOperation = new URLSearchParams(window.location.search).get("operation_id");

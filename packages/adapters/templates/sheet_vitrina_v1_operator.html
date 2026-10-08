@@ -5396,7 +5396,7 @@
                 </table>
               </div>
               <div class="dataset-actions">
-                <button id="ffStockConfirmButton" class="action-button primary-button" type="button">Применить документ</button>
+                <button id="ffStockConfirmButton" class="action-button primary-button" type="button">Открыть современные документы</button>
                 <button id="ffStockCancelPreviewButton" class="action-button secondary-button" type="button">Отменить</button>
               </div>
             </section>
@@ -7472,28 +7472,34 @@
           }
         });
       }
-      if (ffStockReceiptButton && ffStockFileInput) {
-        ffStockReceiptButton.addEventListener("click", () => {
-          ffStockPendingOperationType = "manual_receipt";
-          ffStockFileInput.click();
-        });
+      let ffStockModernWindow = null;
+      let ffStockModernDraft = null;
+      function openModernFfStockDraft(purpose) {
+        const preview = ffStockPreviewPayload && ffStockPreviewPayload.preview;
+        const rows = preview && preview.parsed_lines || [];
+        ffStockModernDraft = {type: "wbc_manual_ff_stock_draft", purpose: purpose, rows: rows.map(function(row) {
+          return {nm_id: Number(row.nm_id), quantity_delta: Number(row.quantity_delta)};
+        }).filter(function(row) { return Number.isSafeInteger(row.nm_id) && row.nm_id > 0 && Number.isSafeInteger(row.quantity_delta); }).slice(0, 200)};
+        if (isEmbeddedMode && window.parent !== window) {
+          window.parent.postMessage(ffStockModernDraft, window.location.origin);
+        } else {
+          const vitrinaLink = document.querySelector("a.eyebrow-link[href]");
+          const url = new URL(config.vitrina_path || (vitrinaLink && vitrinaLink.getAttribute("href")) || "/sheet-vitrina-v1/vitrina", window.location.origin);
+          if (url.origin !== window.location.origin) return;
+          url.searchParams.set("tab", "warehouses"); url.searchParams.set("warehouse", "ff");
+          url.searchParams.set("ff_manual_action", purpose);
+          ffStockModernWindow = window.open(url.href, "_blank");
+          if (!ffStockModernWindow) setFfStockMessage("Разрешите открытие вкладки с современными документами.", "warning");
+        }
       }
-      if (ffStockWriteoffButton && ffStockFileInput) {
-        ffStockWriteoffButton.addEventListener("click", () => {
-          ffStockPendingOperationType = "manual_writeoff";
-          ffStockFileInput.click();
-        });
-      }
-      if (ffStockFileInput) {
-        ffStockFileInput.addEventListener("change", () => {
-          if (ffStockFileInput.files && ffStockFileInput.files[0]) {
-            previewFfStockWorkbook();
-          }
-        });
-      }
-      if (ffStockConfirmButton) {
-        ffStockConfirmButton.addEventListener("click", confirmFfStockPreview);
-      }
+      window.addEventListener("message", function(event) {
+        if (event.origin === window.location.origin && event.source === ffStockModernWindow && event.data && event.data.type === "wbc_manual_ff_stock_draft_ready" && ffStockModernDraft) {
+          event.source.postMessage(ffStockModernDraft, event.origin);
+        }
+      });
+      if (ffStockReceiptButton) ffStockReceiptButton.addEventListener("click", function() {openModernFfStockDraft("manual_receipt");});
+      if (ffStockWriteoffButton) ffStockWriteoffButton.addEventListener("click", function() {openModernFfStockDraft("manual_writeoff");});
+      if (ffStockConfirmButton) ffStockConfirmButton.addEventListener("click", function() {openModernFfStockDraft(ffStockPendingOperationType || "manual_receipt");});
       if (ffStockCancelPreviewButton) {
         ffStockCancelPreviewButton.addEventListener("click", () => {
           ffStockPreviewPayload = null;
@@ -12349,7 +12355,7 @@
         if (ffStockConfirmButton) {
           const preview = ffStockPreviewPayload && ffStockPreviewPayload.preview ? ffStockPreviewPayload.preview : null;
           ffStockConfirmButton.disabled = busy || !preview || ffStockPreviewPayload.apply_allowed === false;
-          ffStockConfirmButton.textContent = ffStockConfirming ? "Применяем..." : "Применить документ";
+          ffStockConfirmButton.textContent = "Открыть современные документы";
         }
         if (ffStockOperationsPageSizeSelect) {
           ffStockOperationsPageSizeSelect.disabled = busy;

@@ -296,6 +296,8 @@ class FfStockLedgerBlock:
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
     ) -> dict[str, Any]:
+        from packages.application.operator_manual_ff_stock import check_legacy_manual_authority
+        check_legacy_manual_authority(self.runtime.db_path)
         normalized_operation_type = _normalize_manual_operation_type(operation_type)
         if not workbook_bytes:
             raise ValueError("XLSX file is empty")
@@ -333,6 +335,8 @@ class FfStockLedgerBlock:
         }
 
     def confirm_manual_operation(self, preview_id: str, *, created_by: str = "") -> dict[str, Any]:
+        from packages.application.operator_manual_ff_stock import check_legacy_manual_authority
+        check_legacy_manual_authority(self.runtime.db_path)
         preview = self.runtime.load_ff_stock_operation_preview(preview_id, include_file_blob=True)
         if preview is None:
             raise ValueError(f"Операция ФФ preview не найдена: {preview_id}")
