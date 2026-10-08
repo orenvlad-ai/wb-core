@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Настройки</title>
+  <!-- FACILITY_ACCEPTANCE_ASSET -->
   <style>
     :root {
       color-scheme: dark;
@@ -541,10 +542,12 @@
           <label class="field"><span>Название</span><input id="warehouseNameInput" placeholder="Например, FF Москва"></label>
           <label class="field"><span>Город</span><input id="warehouseCityInput" placeholder="Москва"></label>
           <label class="field"><span>Часовой пояс</span><input id="warehouseTimezoneInput" value="Asia/Yekaterinburg"></label>
-          <label class="field"><span>Статус</span><select id="warehouseActiveInput"><option value="true">Активен</option><option value="false">Неактивен</option></select></label>
-          <button id="createWarehouseButton" class="primary" type="button">Создать</button>
+          <p class="warehouse-meta">Новый склад создаётся неактивным. Активировать его можно после создания.</p>
+          <button id="createWarehouseButton" class="primary" type="button">Проверить создание</button>
+          <button id="editWarehouseDraftButton" type="button" hidden>Изменить черновик</button>
         </div>
         <p class="warehouse-meta">Identity и code назначает сервер и не меняет при переименовании. Адрес в MVP отсутствует. Удаление не поддерживается. Рекомендуемый будущий setup: FF Москва — active; FF Оренбург — inactive. Эта подсказка не создаёт строки.</p>
+        <div id="warehouseSourceReceipt" class="message" hidden></div>
         <div id="warehouseCards" class="warehouse-grid"><p>Склады загружаются...</p></div>
         <h2 style="margin-top:22px;">FBS read-only shadow</h2>
         <p class="warehouse-meta">Review range начинается с 2026-08-01; фактическая earliest official date вычисляется только из наблюдений. Сбор и backfill default-off.</p>
@@ -834,10 +837,11 @@
       const sourcesSessionsMessage = document.getElementById("sourcesSessionsMessage");
       const reloadWarehousesButton = document.getElementById("reloadWarehousesButton");
       const createWarehouseButton = document.getElementById("createWarehouseButton");
+      const editWarehouseDraftButton = document.getElementById("editWarehouseDraftButton");
       const warehouseNameInput = document.getElementById("warehouseNameInput");
       const warehouseCityInput = document.getElementById("warehouseCityInput");
       const warehouseTimezoneInput = document.getElementById("warehouseTimezoneInput");
-      const warehouseActiveInput = document.getElementById("warehouseActiveInput");
+      const warehouseSourceReceipt = document.getElementById("warehouseSourceReceipt");
       const warehouseCards = document.getElementById("warehouseCards");
       const warehousesActivationMessage = document.getElementById("warehousesActivationMessage");
       const fbsShadowCards = document.getElementById("fbsShadowCards");
@@ -1073,21 +1077,33 @@
         return payload;
       }
 
-      function warehouseRequestId(prefix) {
-        const suffix = window.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
-        return String(prefix) + ":" + suffix;
+      let warehouseCanWrite = false, warehouseBusy = false, warehousePreview = null;
+      let warehouseSources = new Map();
+      function lockWarehouseForms(locked) {
+        const blocked = locked || warehouseBusy || !warehouseCanWrite;
+        createWarehouseButton.disabled = blocked;
+        editWarehouseDraftButton.hidden = !warehousePreview; editWarehouseDraftButton.disabled = blocked;
+        warehouseCards.querySelectorAll('[data-warehouse-save], [data-warehouse-toggle]').forEach(button => {button.disabled = blocked;});
+        [warehouseNameInput, warehouseCityInput, warehouseTimezoneInput].forEach(input => {input.disabled = blocked || Boolean(warehousePreview);});
       }
-
-      function ffPoolJsonPost(url, payload) {
-        return fetchJson(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-WB-FF-Pool-CSRF": "1"
-          },
-          body: JSON.stringify(payload)
-        });
-      }
+      const warehouseOperator = FacilitySourceAcceptance.create({
+        scope: config.user_config_key || config.operator_actor_scope, path: ffPoolPath,
+        container: warehouseSourceReceipt, onLock: lockWarehouseForms,
+        onError: error => {if (!warehouseOperator.isPending()) {warehousesActivationMessage.textContent = error.message; warehousesActivationMessage.className = 'message error';}},
+        onRecovered: async result => {
+          if (result.action === 'create') {
+            warehousePreview = null; warehouseNameInput.value = ''; warehouseCityInput.value = '';
+            createWarehouseButton.textContent = 'Проверить создание';
+          }
+          if (document.getElementById('warehousesGroupPanel').hidden) activateSettingsGroup('warehouses');
+          else await loadWarehouses();
+        }
+      });
+      warehouseOperator.recover().catch(error => {
+        activateSettingsGroup('warehouses');
+        warehousesActivationMessage.textContent = error.message;
+        warehousesActivationMessage.className = 'message error';
+      });
 
       async function loadWarehouses() {
         warehousesActivationMessage.textContent = "Читаем склады и безопасные gates...";
@@ -1100,12 +1116,13 @@
           const management = capabilities.facility_management || {};
           const guided = capabilities.guided_acceptance || {};
           const canWrite = Boolean(management.available);
-          createWarehouseButton.disabled = !canWrite;
+          warehouseCanWrite = canWrite;
           warehousesActivationMessage.textContent = canWrite
             ? (guided.reason_ru || "Управление складами включено.")
             : "Создание и изменение выключены до exact production gate. Просмотр безопасен; production rows не создаются.";
           warehousesActivationMessage.className = "message " + (canWrite ? "success" : "warning");
           renderWarehouses(facilities.facilities || [], canWrite);
+          lockWarehouseForms(warehouseOperator.isPending());
           renderFbsShadow(fbs.shadow || {}, fbs.collector || {});
         } catch (error) {
           warehousesActivationMessage.textContent = error.message;
@@ -1114,6 +1131,7 @@
       }
 
       function renderWarehouses(rows, canWrite) {
+        warehouseSources = new Map(rows.map(row => [row.facility_id, row]));
         if (!rows.length) {
           warehouseCards.innerHTML = '<article class="warehouse-card"><h3>Склады ещё не созданы</h3><p class="warehouse-meta">FF Москва и FF Оренбург показаны только как reviewed setup contract; production rows отсутствуют.</p></article>';
           return;
@@ -1131,30 +1149,44 @@
       }
 
       async function createWarehouse() {
-        createWarehouseButton.disabled = true;
+        if (createWarehouseButton.disabled) return;
+        warehouseBusy = true; lockWarehouseForms(warehouseOperator.isPending());
         try {
-          await ffPoolJsonPost(ffPoolFacilitiesPath, {request_id:warehouseRequestId('facility-create'), name:warehouseNameInput.value.trim(), city:warehouseCityInput.value.trim(), display_timezone:warehouseTimezoneInput.value.trim(), active:warehouseActiveInput.value === 'true'});
-          warehouseNameInput.value = '';
-          warehouseCityInput.value = '';
-          await loadWarehouses();
+          if (!warehousePreview) {
+            warehousePreview = await fetchJsonNative(ffPoolFacilitiesPath + '/preview', {
+              method: 'POST', headers: {'Content-Type': 'application/json', 'X-WB-FF-Pool-CSRF': '1'},
+              body: JSON.stringify({request_id: 'facility_preview_' + crypto.randomUUID().replaceAll('-', ''), name: warehouseNameInput.value.trim(),
+                city: warehouseCityInput.value.trim(), display_timezone: warehouseTimezoneInput.value.trim(), active: false})
+            });
+            warehousesActivationMessage.textContent = 'Будет создан пустой неактивный склад. После создания его можно активировать.';
+            warehousesActivationMessage.className = 'message';
+            createWarehouseButton.textContent = 'Подтвердить создание';
+          } else {
+            await warehouseOperator.mutate(ffPoolFacilitiesPath + '/onboarding/' + encodeURIComponent(warehousePreview.request_id) + '/confirm', 'create',
+              {confirm: true, preview_request_id: warehousePreview.request_id, preview_fingerprint: warehousePreview.preview_fingerprint}, '');
+          }
         } catch (error) {
           warehousesActivationMessage.textContent = error.message;
           warehousesActivationMessage.className = 'message error';
-        } finally { createWarehouseButton.disabled = false; }
+        } finally {warehouseBusy = false; lockWarehouseForms(warehouseOperator.isPending());}
       }
 
       async function updateWarehouse(button, changes) {
+        if (button.disabled) return;
         const card = button.closest('[data-facility-id]');
-        button.disabled = true;
+        const shown = warehouseSources.get(card.dataset.facilityId);
+        warehouseBusy = true; lockWarehouseForms(warehouseOperator.isPending());
         try {
-          const detail = await fetchJson(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId));
-          await ffPoolJsonPost(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId), {...changes, request_id:warehouseRequestId('facility-update'), expected_updated_at:detail.facility.updated_at});
-          await loadWarehouses();
+          const detail = await fetchJsonNative(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId));
+          const source = detail.facility;
+          if (!shown || ['name', 'city', 'active', 'display_timezone', 'updated_at'].some(key => source[key] !== shown[key]))
+            throw new Error('Склад изменился. Обновите список перед сохранением.');
+          await warehouseOperator.mutate(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId), changes.active === true ? 'activate' : 'update',
+            {...changes, expected_updated_at: source.updated_at, expected_source_digest: source.operator_source_digest}, card.dataset.facilityId);
         } catch (error) {
           warehousesActivationMessage.textContent = error.message;
           warehousesActivationMessage.className = 'message error';
-          button.disabled = false;
-        }
+        } finally {warehouseBusy = false; lockWarehouseForms(warehouseOperator.isPending());}
       }
 
       async function loadWarehouseAudit(button) {
@@ -4167,6 +4199,12 @@
       reloadSourcesSessionsButton.addEventListener("click", () => loadSourcesSessions({refreshStale: false}));
       reloadWarehousesButton.addEventListener("click", loadWarehouses);
       createWarehouseButton.addEventListener("click", createWarehouse);
+      editWarehouseDraftButton.addEventListener("click", () => {
+        if (editWarehouseDraftButton.disabled) return;
+        warehousePreview = null; createWarehouseButton.textContent = "Проверить создание";
+        warehousesActivationMessage.textContent = "Черновик можно изменить. Склад ещё не создан.";
+        warehousesActivationMessage.className = "message"; lockWarehouseForms(warehouseOperator.isPending());
+      });
       Array.from(document.querySelectorAll("[data-source-check]")).forEach((button) => {
         button.addEventListener("click", () => checkSource(button.dataset.sourceCheck || ""));
       });

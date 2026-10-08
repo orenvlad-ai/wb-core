@@ -11532,6 +11532,7 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
     template = _inject_sheet_vitrina_ui_system(
         SETTINGS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     )
+    template=template.replace('<!-- FACILITY_ACCEPTANCE_ASSET -->','<script>'+UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_facility_acceptance.js').read_text(encoding='utf-8')+'</script>')
     asset = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_trade_acceptance.js").read_text(encoding="utf-8")
     template = template.replace("</head>", "<script>\n" + asset + "\n</script>\n</head>", 1)
     return (
