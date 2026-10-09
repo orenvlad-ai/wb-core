@@ -529,6 +529,7 @@ def _test_http_manual_snapshot_publication_order() -> None:
              patch("packages.application.operator_warehouse_documents.reconcile", return_value={"processed_count":0}) as operator_reconcile, \
              patch("packages.application.operator_fulfillment_services.reconcile", return_value={"processed_count":0}) as fulfillment_reconcile, \
              patch("packages.application.operator_supplier_processing.reconcile", return_value={"status":"ok", "operations":[]}), \
+             patch("packages.application.warehouse_recovery_sync_retention.run_bounded_recovery_retention", return_value={"status":"no_change"}) as retention, \
              patch("packages.application.fbs_accounting_runtime.current_publication_receipt", return_value={"status":"not_active"}):
             entry.runtime.runtime_dir = Path(temporary)
             entry.runtime.db_path = Path(temporary) / "registry.sqlite3"
@@ -541,12 +542,14 @@ def _test_http_manual_snapshot_publication_order() -> None:
                 except ValueError as exc:
                     _assert(str(exc) == "fbs publication failed", "manual failure propagated")
                 _assert(events == ["overhead_drain", "plan", "wb", "fbs"], "dependent publication after failed FBS")
+                retention.assert_called_once_with(entry.runtime)
                 overhead_reconcile.assert_not_called()
                 operator_reconcile.assert_not_called()
                 fulfillment_reconcile.assert_not_called()
                 _assert(entry.warehouse_update_journal.finish.call_args.kwargs["status"] == "failed", "failed journal")
             else:
                 result = entry.handle_warehouse_manual_sync_request()
+                _assert(retention.call_count == 2, "successful owned sync rotates before and after")
                 _assert(result["fbs_snapshot_accounting"] == {"status":status}, "manual accounting evidence")
                 expected = ["overhead_drain","plan","wb","fbs"]
                 _assert(events == expected + ["planning","proxy","economics","finance","overhead_reconcile"], "manual accounting order")

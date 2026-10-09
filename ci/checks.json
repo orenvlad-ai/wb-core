@@ -410,11 +410,17 @@
     },
     "warehouse_recovery_retention": {
       "patterns": [
+        "packages/application/warehouse_recovery_sync_retention.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/application/warehouse_update_journal.py",
+        "apps/warehouse_cycle_recovery_retention_smoke.py",
+        "apps/warehouse_functional_runner.py",
         "apps/warehouse_recovery_retention.py",
         "packages/application/warehouse_recovery_policy.py",
         "packages/application/storage_registry.py"
       ],
       "commands": [
+        ["python3", "apps/warehouse_cycle_recovery_retention_smoke.py"],
         [
           "python3",
           "apps/warehouse_recovery_retention_smoke.py"
