@@ -22,6 +22,8 @@ from apps.seller_portal_automation_guard import (
 )
 from packages.application.sheet_vitrina_v1_feedbacks import SheetVitrinaV1FeedbacksBlock
 from packages.application.sheet_vitrina_v1_feedbacks_ai import MAX_ROWS_PER_RUN, SheetVitrinaV1FeedbacksAiBlock
+from packages.application import operator_feedback_complaint_schedules as operator_schedules
+from packages.application import operator_complaint_runs as operator_runs
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import (
     SUBMIT_JOB_MAX_SELECTED_IDS,
     SUBMIT_JOB_MAX_SUBMIT_HARD_CAP,
@@ -74,20 +76,33 @@ class SheetVitrinaV1FeedbacksAutoComplaintsError(RuntimeError):
 class JsonFileFeedbacksAutoComplaintsStore:
     def __init__(self, runtime_dir: Path, *, now_factory: Callable[[], datetime] | None = None) -> None:
         self.runtime_dir = runtime_dir
-        self.path = runtime_dir / DEFAULT_STATE_FILENAME
-        self.report_root = runtime_dir / DEFAULT_REPORT_DIRNAME
+        self.path = runtime_dir.resolve() / DEFAULT_STATE_FILENAME
+        self.report_root = runtime_dir.resolve() / DEFAULT_REPORT_DIRNAME
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
-        self._lock = threading.RLock()
+        self._lock = operator_schedules.NativePromptLock(self.path)
         self._mark_interrupted_runs()
 
     def read(self) -> dict[str, Any]:
-        with self._lock:
+        # Writers replace atomically; a current GET needs no file lock creation.
+        with self._lock.thread:
             return self._read_unlocked()
 
-    def save_schedules(self, schedules: list[Mapping[str, Any]]) -> dict[str, Any]:
+    def save_schedules(self, schedules: list[Mapping[str, Any]], *, operator_command: Mapping[str, Any] | None = None) -> dict[str, Any]:
         now = _iso_now(self.now_factory)
         with self._lock:
             payload = self._read_unlocked()
+            previous = dict(payload)
+            if operator_command:
+                existing = operator_schedules.retained(previous, operator_command)
+                if existing:
+                    return {'replayed':True,'acceptance':operator_schedules.public(existing)}
+                if operator_schedules.revision(previous) != operator_command['request']['expected_source_revision']:
+                    raise operator_schedules.SourceRejected('complaint_schedules_revision_stale')
+                if 'disable_schedule_id' in operator_command['request']:
+                    target = operator_command['request']['disable_schedule_id']
+                    if not any(item['id']==target for item in payload['schedules']):
+                        raise operator_schedules.SourceRejected('complaint_schedules_target_missing')
+                    schedules = [dict(item,enabled=False) if item['id']==target else item for item in payload['schedules']]
             existing_by_id = {
                 str(item.get("id") or ""): item
                 for item in payload.get("schedules", [])
@@ -105,7 +120,10 @@ class JsonFileFeedbacksAutoComplaintsStore:
             if len(ids) != len(set(ids)):
                 raise ValueError("schedule ids must be unique")
             payload["schedules"] = normalized
+            payload = operator_schedules.prepare(previous,payload,operator_command,accepted_at=now)
             self._write_unlocked(payload)
+            if operator_command:
+                return {'replayed':False,'acceptance':operator_schedules.public(operator_schedules.retained(payload,operator_command))}
             return self._read_unlocked()
 
     def add_run(self, run: Mapping[str, Any]) -> dict[str, Any]:
@@ -124,17 +142,43 @@ class JsonFileFeedbacksAutoComplaintsStore:
             for index, run in enumerate(runs):
                 if str(run.get("run_id") or "") != normalized_run_id:
                     continue
+                if run.get(operator_runs.META):
+                    operator_runs.validate(run)
+                    if operator_runs.terminal_valid(run):return run
+                    if operator_runs.META in patch or 'operator_native_terminal' in patch:
+                        raise ValueError('complaint_run_immutable_proof')
+                    if patch.get('status')=='running' and run['status']!='queued':return run
                 patch_payload = dict(patch)
                 if "events" in patch_payload:
                     existing_events = run.get("events") if isinstance(run.get("events"), list) else []
                     patch_events = patch_payload.get("events") if isinstance(patch_payload.get("events"), list) else []
                     patch_payload["events"] = [*existing_events, *patch_events]
                 merged = _normalize_run({**dict(run), **patch_payload})
+                report_run=merged
                 runs[index] = merged
                 self._write_unlocked(payload)
-                self._write_run_report(merged)
+                self._write_run_report(report_run)
                 return merged
         raise SheetVitrinaV1FeedbacksAutoComplaintsError(f"auto complaint run not found: {normalized_run_id}", http_status=404)
+
+    def finalize_operator_run(self, result):
+        """Native worker owner seals only its exact persisted terminal afterimage.
+
+        The existing full report must already be retained. No current schedule,
+        foreign job or generic update_run terminal flag proves completion.
+        """
+        with self._lock:
+            payload=self._read_unlocked()
+            for index,current in enumerate(payload['runs']):
+                if current['run_id']!=result['run_id']:continue
+                operator_runs.validate(current)
+                if operator_runs.terminal_valid(current):return current
+                if operator_runs.digest(current)!=operator_runs.digest(result):return current
+                if current['status'] in ACTIVE_RUN_STATUSES or not current['finished_at']:return current
+                sealed=operator_runs.finish(current)
+                if not operator_runs.retained_terminal_valid(sealed,self.runtime_dir):return current
+                payload['runs'][index]=sealed;self._write_unlocked(payload);return sealed
+            raise ValueError('complaint_run_native_owner_afterimage_missing')
 
     def update_schedule_after_run(self, schedule_id: str, run: Mapping[str, Any]) -> None:
         normalized_schedule_id = str(schedule_id or "").strip()
@@ -213,14 +257,10 @@ class JsonFileFeedbacksAutoComplaintsStore:
             for index, run in enumerate(payload.get("runs", [])):
                 if not isinstance(run, Mapping) or str(run.get("status") or "") not in ACTIVE_RUN_STATUSES:
                     continue
-                payload["runs"][index] = _normalize_run(
-                    {
-                        **dict(run),
-                        "status": "error",
-                        "blocker_reason": "runtime service restarted before auto complaints run finished",
-                        "finished_at": now,
-                    }
-                )
+                interrupted=_normalize_run({**dict(run),"status":"error",
+                    "blocker_reason":"runtime service restarted before auto complaints run finished","finished_at":now})
+                # This is a terminal failure, never evidence of provider success.
+                payload["runs"][index]=operator_runs.finish(interrupted) if run.get(operator_runs.META) else interrupted
                 changed = True
             if changed:
                 self._write_unlocked(payload)
@@ -247,7 +287,9 @@ class JsonFileFeedbacksAutoComplaintsStore:
             "contract_version": CONTRACT_VERSION,
             "updated_at": _safe_text(payload.get("updated_at"), 80),
             "schedules": [_normalize_schedule(item, now=now, now_factory=self.now_factory) for item in schedules if isinstance(item, Mapping)],
-            "runs": [_normalize_run(item) for item in runs if isinstance(item, Mapping)][-200:],
+            "runs": operator_runs.retain([_normalize_run(item) for item in runs if isinstance(item, Mapping)]),
+            operator_schedules.LEDGER: payload.get(operator_schedules.LEDGER,[]),
+            operator_schedules.GENERATION: payload.get(operator_schedules.GENERATION,'legacy'),
         }
 
     def _write_unlocked(self, payload: Mapping[str, Any]) -> None:
@@ -258,17 +300,17 @@ class JsonFileFeedbacksAutoComplaintsStore:
             for item in payload.get("schedules", [])
             if isinstance(item, Mapping)
         ]
-        runs = [_normalize_run(item) for item in payload.get("runs", []) if isinstance(item, Mapping)][-200:]
+        runs = operator_runs.retain([_normalize_run(item) for item in payload.get("runs", []) if isinstance(item, Mapping)])
         normalized = {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "updated_at": now,
             "schedules": schedules,
             "runs": runs,
+            operator_schedules.LEDGER: payload.get(operator_schedules.LEDGER,[]),
+            operator_schedules.GENERATION: payload.get(operator_schedules.GENERATION,'legacy'),
         }
-        temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temp_path.replace(self.path)
+        operator_schedules.atomic_write(self.path,normalized)
 
     def _write_run_report(self, run: Mapping[str, Any]) -> None:
         run_id = str(run.get("run_id") or "").strip()
@@ -278,7 +320,8 @@ class JsonFileFeedbacksAutoComplaintsStore:
         run_dir.mkdir(parents=True, exist_ok=True)
         json_path = run_dir / "sheet_vitrina_v1_feedbacks_auto_complaints_run.json"
         md_path = run_dir / "sheet_vitrina_v1_feedbacks_auto_complaints_run.md"
-        json_path.write_text(json.dumps(_normalize_run(run), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if run.get(operator_runs.META):operator_schedules.atomic_write(json_path,_normalize_run(run))
+        else:json_path.write_text(json.dumps(_normalize_run(run), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         md_path.write_text(_render_run_markdown(run), encoding="utf-8")
 
 
@@ -313,6 +356,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
         return {
             "contract_name": SCHEDULES_CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
+            "source_revision": operator_schedules.revision(payload),
             "meta": {
                 "storage_path": str(self.store.path),
                 "timezone_default": DEFAULT_TIMEZONE,
@@ -322,17 +366,21 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
             },
             "schedules": schedules,
             "recent_runs": [
-                _public_run(_reconcile_run_with_journal(run, journal_by_id))
+                _public_run(_reconcile_run_with_journal(operator_runs.retained_terminal(run,self.runtime_dir) or run, journal_by_id))
                 for run in reversed(payload.get("runs", [])[-10:])
                 if isinstance(run, Mapping)
             ],
         }
 
-    def save_schedules(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def save_schedules(self, payload: Mapping[str, Any], *, operator_command: Mapping[str, Any] | None = None) -> dict[str, Any]:
         schedules = payload.get("schedules")
+        if operator_command and 'disable_schedule_id' in operator_command['request']:
+            schedules = []
         if not isinstance(schedules, list):
             raise ValueError("schedules must be a JSON array")
-        self.store.save_schedules([item for item in schedules if isinstance(item, Mapping)])
+        result = self.store.save_schedules([item for item in schedules if isinstance(item, Mapping)],operator_command=operator_command)
+        if operator_command:
+            return {'contract_name':SCHEDULES_CONTRACT_NAME,'contract_version':CONTRACT_VERSION,**result}
         return self.build_schedules()
 
     def list_runs(self) -> dict[str, Any]:
@@ -342,7 +390,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
             "contract_name": RUNS_CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "runs": [
-                _public_run(_reconcile_run_with_journal(run, journal_by_id))
+                _public_run(_reconcile_run_with_journal(operator_runs.retained_terminal(run,self.runtime_dir) or run, journal_by_id))
                 for run in reversed(payload.get("runs", [])[-50:])
                 if isinstance(run, Mapping)
             ],
@@ -350,14 +398,20 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         journal_by_id = self._journal_by_feedback_id()
+        run=self.store.get_run(run_id)
         return {
             "contract_name": RUN_CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
-            "run": _public_run(_reconcile_run_with_journal(self.store.get_run(run_id), journal_by_id), details=True),
+            "run": _public_run(_reconcile_run_with_journal(operator_runs.retained_terminal(run,self.runtime_dir) or run, journal_by_id), details=True),
         }
 
-    def run_now(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def run_now(self, payload: Mapping[str, Any] | None = None, *, operator_command=None) -> dict[str, Any]:
         payload = payload or {}
+        if operator_command:
+            bound_scope=operator_runs.RunScope(self.runtime_dir,operator_command.get('actor'),operator_command.get('account'),operator_command.get('account_scope'))
+            if operator_runs.command(dict(payload),bound_scope)!=operator_command:raise operator_runs.NotSaved('complaint_run_identity_conflict')
+            run=self._start_run({},trigger_source='manual',due_at=self.now_factory(),async_run=True,operator_command=operator_command)
+            return operator_runs.public(run,self.runtime_dir)
         schedule_id = str(payload.get("schedule_id") or "").strip()
         schedule = self._schedule_by_id(schedule_id) if schedule_id else _normalize_schedule(
             {
@@ -436,17 +490,28 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
         trigger_source: str,
         due_at: datetime,
         async_run: bool,
+        operator_command=None,
     ) -> dict[str, Any]:
-        active = self.store.active_run()
-        if active is not None:
-            return active
-        now = _iso_now(self.now_factory)
-        run_id = _new_run_id(self.now_factory)
-        window = _compute_window(schedule, due_at)
-        run = self.store.add_run(
-            {
+        with self.store._lock:
+            source=self.store._read_unlocked()
+            if operator_command:
+                prior=operator_runs.prior(source,operator_command)
+                if prior:return prior
+                if operator_schedules.revision(source)!=operator_command['request']['expected_source_revision']:
+                    raise operator_runs.NotSaved('complaint_run_source_revision_stale')
+                schedule=next((item for item in source['schedules'] if item['id']==operator_command['request']['schedule_id']),None)
+                if schedule is None:raise operator_runs.NotSaved('complaint_run_schedule_missing')
+            active=next((item for item in source['runs'] if item['status'] in ACTIVE_RUN_STATUSES),None)
+            if active is not None:
+                if operator_command:raise operator_runs.NotSaved('complaint_run_native_busy')
+                return active
+            if operator_command:operator_runs.reserve(source)
+            now = _iso_now(self.now_factory)
+            run_id = operator_runs.native_id(operator_command) if operator_command else _new_run_id(self.now_factory)
+            window = _compute_window(schedule, due_at)
+            run = {
                 "run_id": run_id,
-                "schedule_id": "" if trigger_source == "manual" and schedule.get("id") == "manual" else schedule.get("id"),
+                "schedule_id": "" if not operator_command and trigger_source == "manual" and schedule.get("id") == "manual" else schedule.get("id"),
                 "trigger_source": trigger_source,
                 "status": "queued",
                 "created_at": now,
@@ -460,23 +525,38 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
                 "attempts": [],
                 "events": [_event("run_queued", "Auto complaints run queued", status="queued", at=now)],
             }
-        )
-        self.store.update_schedule_after_run(str(schedule.get("id") or ""), run)
+            if operator_command:run=operator_runs.attach(_normalize_run(run),operator_command,dict(schedule))
+            try:run=self.store.add_run(run)
+            except Exception:
+                if not operator_command:raise
+                # A lost atomic-replace acknowledgment is not a second source
+                # write. Read this exact retained native intent under the same
+                # lock; only its original handler may launch the native owner.
+                committed=operator_runs.prior(self.store._read_unlocked(),operator_command)
+                if committed is None:raise
+                run=committed
+        if not operator_command:self.store.update_schedule_after_run(str(schedule.get("id") or ""), run)
         if async_run:
-            thread = admitted_thread(self.runtime_dir,
-                target=self._run_and_persist,
-                args=(run_id, schedule),
-                daemon=True,
-                name=f"feedbacks-auto-complaints-{run_id}",
-            )
-            thread.start()
+            try:
+                thread = admitted_thread(self.runtime_dir,
+                    target=self._run_and_persist,
+                    args=(run_id, schedule),
+                    daemon=True,
+                    name=f"feedbacks-auto-complaints-{run_id}",
+                )
+                thread.start()
+            except Exception as exc:
+                if not operator_command:raise
+                failed=self.store.update_run(run_id,{'status':'error','finished_at':_iso_now(self.now_factory),'blocker_reason':'native worker did not start: '+_safe_text(str(exc),160)})
+                self.store.finalize_operator_run(failed)
         else:
             self._run_and_persist(run_id, schedule)
         return run
 
     def _run_and_persist(self, run_id: str, schedule: Mapping[str, Any]) -> None:
+        claimed=[]
         try:
-            run = self._run(run_id, schedule)
+            run = self._run(run_id, schedule, on_claim=lambda:claimed.append(True))
         except Exception as exc:  # pragma: no cover - bounded fallback
             run = self.store.update_run(
                 run_id,
@@ -488,11 +568,19 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
                     "events": [_event("run_error", str(exc), status="error")],
                 },
             )
+        if claimed and run.get(operator_runs.META):run=self.store.finalize_operator_run(run)
         self.store.update_schedule_after_run(str(schedule.get("id") or ""), run)
 
-    def _run(self, run_id: str, schedule: Mapping[str, Any]) -> dict[str, Any]:
+    def _run(self, run_id: str, schedule: Mapping[str, Any], *, on_claim=None) -> dict[str, Any]:
         started_at = _iso_now(self.now_factory)
-        run = self.store.update_run(run_id, {"status": "running", "started_at": started_at, "events": [_event("run_started", "Auto complaints run started", status="running", at=started_at)]})
+        with self.store._lock:
+            current=self.store.get_run(run_id)
+            if current.get(operator_runs.META):
+                operator_runs.validate(current)
+                if current['status']!='queued':return current
+                schedule=current[operator_runs.META]['schedule']
+            run = self.store.update_run(run_id, {"status": "running", "started_at": started_at, "events": [_event("run_started", "Auto complaints run started", status="running", at=started_at)]})
+        if on_claim:on_claim()
         self.store.update_schedule_after_run(str(schedule.get("id") or ""), run)
         hard_cap = max(1, min(DEFAULT_HARD_CAP_PER_RUN, _safe_int(schedule.get("hard_cap_per_run")) or DEFAULT_HARD_CAP_PER_RUN))
         try:
@@ -888,7 +976,7 @@ def _normalize_run(run: Mapping[str, Any]) -> dict[str, Any]:
     attempts = run.get("attempts") if isinstance(run.get("attempts"), list) else []
     events = run.get("events") if isinstance(run.get("events"), list) else []
     status = str(run.get("status") or "queued").strip() or "queued"
-    return {
+    normalized = {
         "run_id": _safe_text(run.get("run_id"), 160),
         "schedule_id": _safe_text(run.get("schedule_id"), 100),
         "trigger_source": _safe_text(run.get("trigger_source") or "manual", 40),
@@ -928,6 +1016,8 @@ def _normalize_run(run: Mapping[str, Any]) -> dict[str, Any]:
         "attempts": [_normalize_attempt(item) for item in attempts if isinstance(item, Mapping)][-200:],
         "events": [_normalize_event(item) for item in events if isinstance(item, Mapping)][-200:],
     }
+
+    return operator_runs.normalize(run,normalized)
 
 
 def _normalize_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:

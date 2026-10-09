@@ -3,6 +3,7 @@ from contextlib import closing
 from datetime import date
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -13,6 +14,7 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from apps.operator_cny_journal_smoke import source_snapshot, get_only_connect
 from apps.operator_fulfillment_services_native_smoke import seed, publish_functional, publish_accounting, MOMENT, NOW
 from apps.sheet_vitrina_v1_fulfillment_services_smoke import _build_workbook, _valid_row, _reserve_free_port
 from packages.adapters import registry_upload_http_entrypoint as http
@@ -116,7 +118,15 @@ def main():
             op=value['acceptance']['operation_id'];upload=value['upload']['upload_id']
             assert op!='http-upload-identity'
             # Simulate loss of all POST response fields: browser only knows its request.
-            with patch.object(entry.fulfillment_services_block,'_ensure_service_schema',side_effect=AssertionError('GET bootstrap')):
+            # Normalize only the committed fixture before observing lost-reply GETs.
+            with closing(sqlite3.connect(rt.db_path)) as conn:
+                assert conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone() == (0, 0, 0)
+            logical_before = source_snapshot(rt.db_path)
+            wal = Path(str(rt.db_path) + '-wal')
+            wal_before = wal.read_bytes() if wal.exists() else b''
+            connect = sqlite3.connect
+            with patch.object(entry.fulfillment_services_block,'_ensure_service_schema',side_effect=AssertionError('GET bootstrap')), \
+                    patch.object(sqlite3, 'connect', side_effect=lambda *args, **kwargs: get_only_connect(connect, *args, **kwargs)):
                 before=rt.db_path.read_bytes()
                 status,recovered=request(base,UPLOADS+'?request_id=http-upload-identity')
                 assert status==200 and recovered['request_id']=='http-upload-identity' and recovered['acceptance']['operation_id']==op
@@ -124,6 +134,8 @@ def main():
                 assert request(base,UPLOADS)[0]==200
                 assert request(base,UPLOADS+'/'+upload)[0]==200
                 assert before==rt.db_path.read_bytes()
+                assert (wal.read_bytes() if wal.exists() else b'') == wal_before
+                assert source_snapshot(rt.db_path) == logical_before
             assert request(base,UPLOADS,method='POST',data=body,headers=headers)[1]['acceptance']['operation_id']==op
             with receipts.readonly(rt.db_path) as conn:
                 assert conn.execute('SELECT count(*) FROM '+receipts.TABLE).fetchone()[0]==1

@@ -38,6 +38,7 @@ from packages.application.change_registry_writer import (
 )
 from packages.adapters.wb_promotion import WbPromotionApiError
 from packages.business_time import current_business_date_iso
+from packages.application.wb_incident_policy import canonical_seller_id
 
 
 CALCULATION_CONTRACT = "sheet_vitrina_v1_sku_inventory_balance/v2"
@@ -519,9 +520,10 @@ class SkuInventoryBalanceBlock:
             "calculation": _sanitize_calculation_settings(config.get("calculation")),
             "table": _sanitize_table_preferences(config.get("table")),
             "canonical_store": "server_runtime_user_config",
+            "operator_scope": user_key,
         }
 
-    def save_settings(self, payload: Mapping[str, Any], *, user_key: str) -> dict[str, Any]:
+    def save_settings(self, payload: Mapping[str, Any], *, user_key: str, actor: str = '') -> dict[str, Any]:
         calculation = _sanitize_calculation_settings(payload.get("calculation"))
         table = _sanitize_table_preferences(payload.get("table"))
         saved = self.runtime.save_sheet_vitrina_user_config(
@@ -531,6 +533,8 @@ class SkuInventoryBalanceBlock:
             payload={"calculation": calculation, "table": table},
             updated_at=self.timestamp_factory(),
             expected_revision=_optional_int(payload.get("base_revision")),
+            **({'operator_command':dict(operation_id=payload['operation_id'],actor=actor,seller_id=canonical_seller_id())}
+                if 'operation_id' in payload else {}),
         )
         if saved.get("status") == "conflict":
             raise SkuInventoryBalanceError(
@@ -538,7 +542,11 @@ class SkuInventoryBalanceBlock:
                 http_status=409,
                 payload=saved,
             )
-        return self.get_settings(user_key=user_key)
+        result=dict(status='ok',revision=saved['revision'],updated_at=saved['updated_at'],
+            calculation=dict(saved['config']['calculation']),table=dict(saved['config']['table']),
+            canonical_store='server_runtime_user_config',operator_scope=user_key)
+        if saved.get('acceptance'):result['acceptance']=saved['acceptance']
+        return result
 
     def start_calculation_operation(
         self,

@@ -1,9 +1,12 @@
 """Same native financial tables retain distinct principal-scoped journal domains."""
 from pathlib import Path
+from contextlib import closing
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import hashlib
 import json
+import sqlite3
+from urllib.parse import parse_qs, urlparse
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +18,44 @@ from packages.application import operator_supplier_financial as financial
 from packages.application import operator_operations as journal
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.adapters import registry_upload_http_entrypoint as http
+
+
+def source_snapshot(db_path):
+    """Whole committed fixture schema and typed rows, independent of WAL layout."""
+    def typed(value):
+        if value is None: return ['null']
+        if isinstance(value, int): return ['integer', str(value)]
+        if isinstance(value, float): return ['real', value.hex()]
+        if isinstance(value, str): return ['text', value]
+        if isinstance(value, bytes): return ['blob', value.hex()]
+        raise AssertionError('unknown SQLite value type')
+    with closing(sqlite3.connect(db_path.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
+        conn.execute('PRAGMA query_only=ON')
+        conn.execute('BEGIN')
+        schema = list(conn.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name'))
+        tables = {}
+        for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
+            rows = [[typed(value) for value in row] for row in conn.execute('SELECT * FROM "' + name.replace('"', '""') + '"')]
+            tables[name] = sorted(rows, key=lambda row: json.dumps(row, ensure_ascii=False))
+        return schema, tables
+
+
+def get_only_connect(connect, *args, **kwargs):
+    """Reject a source writer open and deny every mutating SQLite action on GET."""
+    database = args[0] if args else kwargs['database']
+    assert kwargs.get('uri') is True and parse_qs(urlparse(str(database)).query).get('mode') == ['ro'], 'GET opens a source writer'
+    conn = connect(*args, **kwargs)
+    conn.execute('PRAGMA query_only=ON')
+    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    def authorize(action, one, two, database, trigger):
+        if action == sqlite3.SQLITE_PRAGMA:
+            if one == 'query_only': return sqlite3.SQLITE_OK if two is None or str(two).upper() in ('ON', '1') else sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK if one in {'table_info', 'table_xinfo', 'foreign_key_list', 'foreign_key_check', 'index_list', 'index_info', 'schema_version', 'data_version', 'integrity_check'} else sqlite3.SQLITE_DENY
+        if action == sqlite3.SQLITE_ATTACH:
+            return sqlite3.SQLITE_OK if parse_qs(urlparse(str(one)).query).get('mode') == ['ro'] else sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK if action in {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_RECURSIVE} else sqlite3.SQLITE_DENY
+    conn.set_authorizer(authorize)
+    return conn
 
 
 def main():
@@ -44,9 +85,18 @@ def main():
                 request_scope=scope, actor='alice', native_write=lambda: ledger.create_opening_balance({'operation_date': 'bad'}))
             assert rejected['acceptance'] is None
             server, thread, base = server_for(entry)
+            # setup() uses a WAL concurrency fixture; normalize its committed pages
+            # before the physical GET-only witness, not during the observed reads.
+            with closing(sqlite3.connect(runtime.db_path)) as conn:
+                assert conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone() == (0, 0, 0)
+            logical_before = source_snapshot(runtime.db_path)
             before = hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
+            wal = Path(str(runtime.db_path) + '-wal')
+            wal_before = wal.read_bytes() if wal.exists() else b''
+            connect = sqlite3.connect
             try:
-                with patch.object(financial, 'ensure_schema', side_effect=AssertionError('GET creates schema')):
+                with patch.object(financial, 'ensure_schema', side_effect=AssertionError('GET creates schema')), \
+                        patch.object(sqlite3, 'connect', side_effect=lambda *args, **kwargs: get_only_connect(connect, *args, **kwargs)):
                     args = dict(allowed_domains={cny.DOMAIN, financial.DOMAIN}, request_scope=scope,
                                 runtime_dir=runtime.runtime_dir)
                     pages = [journal.journal(runtime.db_path, page=n, limit=1, **args) for n in (1, 2, 3)]
@@ -80,6 +130,8 @@ def main():
             finally:
                 stop(server, thread)
             assert hashlib.sha256(runtime.db_path.read_bytes()).hexdigest() == before
+            assert (wal.read_bytes() if wal.exists() else b'') == wal_before
+            assert source_snapshot(runtime.db_path) == logical_before
     print('CNY common journal: exact native action and principal before count/search/page/detail; mixed families, child links, no account balance, GET-only: PASS')
 
 

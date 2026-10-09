@@ -84,7 +84,7 @@ from packages.application.wb_autoanswers_chat_public import (
 )
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11  # additive immutable typed settings audit guards
 AUTOANSWERS_STORE_SCHEMA_VERSION = 1
 AUTOANSWERS_DB_FILENAME = "wb_autoanswers_runtime.sqlite3"
 LEGACY_RUNTIME_DB_FILENAME = "registry_upload_runtime.sqlite3"
@@ -1457,7 +1457,17 @@ class AutoanswersRepository:
             # transaction. Start the migration inside the script so
             # all additive DDL plus marker/settings rows are atomic.
             conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
-            self._migrate_schema_v10(conn)
+            # A complete native v10 already owns its business migration results.
+            # The v11 audit guards must not replay legacy job/budget updates.
+            legacy_versions = {
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT version FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations "
+                    "WHERE version BETWEEN 1 AND 10"
+                )
+            }
+            if legacy_versions != set(range(1, 11)):
+                self._migrate_schema_v10(conn)
             applied_at = iso_utc(self._now())
             conn.executemany(
                 """
@@ -2339,12 +2349,21 @@ class AutoanswersRepository:
         expected_policy_epoch: int | None = None,
         expected_settings_revision: str | None = None,
         actor_id: str,
+        operator_command: Mapping[str, Any] | None = None,
+        operator_outcome: dict[str, Any] | None = None,
     ) -> AutoanswersSettings:
         actor = _clean_text(actor_id)
         if not actor:
             raise ValueError("actor_id is required")
+        from packages.application import operator_autoanswers_settings as operator
+        operands = {key: value for key, value in locals().items() if key in operator.FIELDS}
+        operator.verify_command(operator_command, actor=actor, operands=operands)
         now = self._now()
         with self.transaction() as conn:
+            saved = operator.retained(conn, operator_command)
+            if saved is not None:
+                if operator_outcome is not None:operator_outcome['replayed']=True
+                return _autoanswers_settings_from_row(saved['after'], env=self.env)
             current = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton = 1").fetchone()
             if current is None:
                 raise AutoanswersRuntimeError("autoanswers settings missing", code="settings_missing")
@@ -2541,7 +2560,11 @@ class AutoanswersRepository:
                 },
                 at=now,
             )
-        return self.settings()
+            after = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1").fetchone()
+            saved_settings = _autoanswers_settings_from_row(after, env=self.env)
+            operator.record(conn, operator_command, before=current, after=after,
+                settings=saved_settings, at=iso_utc(now))
+        return saved_settings
 
     def assert_effective_on(self, *, operation: str) -> AutoanswersSettings:
         settings = self.settings()
@@ -9644,22 +9667,30 @@ class AutoanswersRepository:
         *,
         actor_id: str,
         preview_id: str | None = None,
+        expected_policy_epoch: int | None = None,
+        operator_command: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         target = _clean_text(target_selector_state)
+        from packages.application import operator_autoanswers_settings as operator
+        operator.verify_command(operator_command, actor=_clean_text(actor_id),
+            operands={'expected_policy_epoch':expected_policy_epoch,'preview_id':preview_id}, target=target)
         if target == "off":
-            settings = self.update_settings(master_enabled=False, actor_id=actor_id)
+            settings = self.update_settings(master_enabled=False, actor_id=actor_id, expected_policy_epoch=expected_policy_epoch, operator_command=operator_command)
             return {"settings": settings, "sweep": None}
         target = validate_mode(target)
         if target == MODE_MANUAL:
-            settings = self.update_settings(master_enabled=True, mode=MODE_MANUAL, actor_id=actor_id)
+            settings = self.update_settings(master_enabled=True, mode=MODE_MANUAL, actor_id=actor_id, expected_policy_epoch=expected_policy_epoch, operator_command=operator_command)
             return {"settings": settings, "sweep": None}
-        if self.settings().force_off:
-            raise AutoanswersRuntimeError(
-                "WB autoanswers is forced OFF by environment",
-                code="emergency_force_off",
-            )
         now = self._now()
         with self.transaction() as conn:
+            saved = operator.retained(conn, operator_command)
+            if saved is not None:
+                sweep = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps WHERE sweep_id=?",
+                    (saved['native_binding']['sweep_id'],)).fetchone()
+                return {"settings":_autoanswers_settings_from_row(saved['after'],env=self.env),
+                    "sweep":self._reconciliation_row(sweep) if sweep else None,"replayed":True}
+            if self.settings().force_off:
+                raise AutoanswersRuntimeError("WB autoanswers is forced OFF by environment",code="emergency_force_off")
             preview = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_transition_previews WHERE preview_id=?",
                 (_clean_text(preview_id),),
@@ -9667,6 +9698,8 @@ class AutoanswersRepository:
             if preview is None:
                 raise AutoanswersRuntimeError("mode transition preview is required", code="transition_preview_required")
             if preview["consumed_at"]:
+                if operator_command is not None:
+                    raise AutoanswersRuntimeError("transition preview already consumed",code="preview_consumed")
                 existing = conn.execute(
                     "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps WHERE preview_id=?",
                     (preview["preview_id"],),
@@ -9688,6 +9721,8 @@ class AutoanswersRepository:
             ).fetchone()
             if current is None:
                 raise AutoanswersRuntimeError("autoanswers settings missing", code="settings_missing")
+            if expected_policy_epoch is not None and int(expected_policy_epoch)!=int(current['policy_epoch']):
+                raise AutoanswersRuntimeError("mode state changed; create a new preview",code="policy_epoch_stale")
             if int(preview["enable_epoch"]) != int(current["enable_epoch"]) or int(preview["policy_epoch"]) != int(
                 current["policy_epoch"]
             ):
@@ -9782,7 +9817,13 @@ class AutoanswersRepository:
                 },
                 at=now,
             )
-        return {"settings": self.settings(), "sweep": self.reconciliation_status(sweep_id)}
+            after = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1").fetchone()
+            saved_settings = _autoanswers_settings_from_row(after, env=self.env)
+            sweep = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps WHERE sweep_id=?",(sweep_id,)).fetchone()
+            operator.record(conn, operator_command, before=current, after=after, settings=saved_settings,
+                at=iso_utc(now), native_binding=dict(preview_id=preview['preview_id'],sweep_id=sweep_id,
+                    transition_run_id=transition_run_id,run_max_usd=preview['run_max_usd'],run_max_paid_reviews=preview['run_max_paid_reviews']))
+        return {"settings": saved_settings, "sweep": self._reconciliation_row(sweep)}
 
     @staticmethod
     def _reconciliation_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -11871,4 +11912,12 @@ CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_wb_autoanswers_audit_events(
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sv1_autoanswers_audit ON sheet_vitrina_v1_wb_autoanswers_audit_events(aggregate_id, created_at);
+CREATE TRIGGER IF NOT EXISTS operator_ai_settings_no_update
+BEFORE UPDATE ON sheet_vitrina_v1_wb_autoanswers_audit_events
+WHEN OLD.aggregate_type IN ('operator_settings','operator_settings_execution') OR NEW.aggregate_type IN ('operator_settings','operator_settings_execution')
+BEGIN SELECT RAISE(ABORT,'immutable_operator_ai_settings'); END;
+CREATE TRIGGER IF NOT EXISTS operator_ai_settings_no_delete
+BEFORE DELETE ON sheet_vitrina_v1_wb_autoanswers_audit_events
+WHEN OLD.aggregate_type IN ('operator_settings','operator_settings_execution')
+BEGIN SELECT RAISE(ABORT,'immutable_operator_ai_settings'); END;
 """

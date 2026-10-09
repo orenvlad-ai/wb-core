@@ -16,6 +16,7 @@ from packages.adapters.openai_feedbacks_ai import (
     OpenAiFeedbacksAnalysisProvider,
 )
 from packages.application.feedback_review_tags import normalize_review_tags, reason_contradicts_review_tags
+from packages.application import operator_feedback_analysis_settings as operator_prompt
 
 
 PROMPT_CONTRACT_NAME = "sheet_vitrina_v1_feedbacks_ai_prompt"
@@ -197,23 +198,25 @@ class FeedbacksAiModelCatalog:
 
 class JsonFileFeedbacksAiPromptStore:
     def __init__(self, runtime_dir: Path, *, filename: str = "sheet_vitrina_v1_feedbacks_ai_prompt.json") -> None:
-        self.path = runtime_dir / filename
-        self._lock = threading.Lock()
+        self.path = runtime_dir.resolve() / filename
+        self._lock = operator_prompt.NativePromptLock(self.path)
 
     def read(self) -> FeedbacksAiPromptState:
-        if not self.path.exists():
-            return FeedbacksAiPromptState(prompt="", model=_configured_default_feedbacks_ai_model(), updated_at=None)
+        return self.read_snapshot()[0]
+
+    def read_snapshot(self) -> tuple[FeedbacksAiPromptState, str]:
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            payload = operator_prompt.raw(self.path)
+        except (OSError, ValueError) as exc:
             raise SheetVitrinaV1FeedbacksAiError("saved AI prompt storage is not readable", http_status=500) from exc
-        if not isinstance(payload, Mapping):
-            raise SheetVitrinaV1FeedbacksAiError("saved AI prompt storage has invalid shape", http_status=500)
+        version = operator_prompt.revision(payload)
+        if not payload:
+            return FeedbacksAiPromptState(prompt="", model=_configured_default_feedbacks_ai_model(), updated_at=None), version
         return FeedbacksAiPromptState(
             prompt=str(payload.get("prompt") or ""),
             model=str(payload.get("model") or _configured_default_feedbacks_ai_model()).strip(),
             updated_at=str(payload.get("updated_at") or "") or None,
-        )
+        ), version
 
     def write(
         self,
@@ -222,6 +225,7 @@ class JsonFileFeedbacksAiPromptStore:
         model: str,
         updated_at: str,
         catalog: FeedbacksAiModelCatalog | None = None,
+        operator_command: Mapping[str, Any] | None = None,
     ) -> FeedbacksAiPromptState:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,9 +240,14 @@ class JsonFileFeedbacksAiPromptStore:
                 "model_discovery_status": catalog.discovery_status if catalog else "fallback",
                 "updated_at": updated_at,
             }
-            temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-            temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            temp_path.replace(self.path)
+            previous = operator_prompt.raw(self.path)
+            if operator_command:
+                if operator_command['request']['prompt'].strip() != prompt or operator_command['request']['model'].strip() != model:
+                    raise operator_prompt.SourceRejected('analysis_settings_native_operand_mismatch')
+                if operator_prompt.retained(previous, operator_command):
+                    raise operator_prompt.SourceRejected('analysis_settings_duplicate_requires_exact_read')
+            payload = operator_prompt.prepare(previous, payload, operator_command)
+            operator_prompt.atomic_write(self.path, payload)
         return FeedbacksAiPromptState(prompt=prompt, model=model, updated_at=updated_at)
 
 
@@ -262,18 +271,47 @@ class SheetVitrinaV1FeedbacksAiBlock:
         self._last_analyze_started_at = 0.0
 
     def get_prompt(self) -> dict[str, Any]:
-        state = self.prompt_store.read()
+        state, version = self.prompt_store.read_snapshot()
         catalog = _discover_model_catalog(self.provider)
         resolved_state, model_source = _resolve_prompt_state_model(state, catalog)
-        return _prompt_payload(resolved_state, catalog=catalog, model_source=model_source)
+        result = _prompt_payload(resolved_state, catalog=catalog, model_source=model_source)
+        result['source_revision'] = version
+        return result
 
-    def save_prompt(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def save_prompt(self, payload: Mapping[str, Any], *, operator_command: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        if operator_command:
+            # Retained-ID lookup, CAS, native catalog validation and commit share
+            # this source owner's lock. An exact retry never calls the provider.
+            with self.prompt_store._lock:
+                previous = operator_prompt.raw(self.prompt_store.path)
+                existing = operator_prompt.retained(previous, operator_command)
+                if existing:
+                    return {'contract_name': PROMPT_CONTRACT_NAME, 'contract_version': CONTRACT_VERSION,
+                            'status': 'ready', 'replayed': True, 'acceptance': operator_prompt.public(existing)}
+                if operator_prompt.revision(previous) != operator_command['request']['expected_source_revision']:
+                    raise operator_prompt.SourceRejected('analysis_settings_revision_stale')
+                result = self._save_prompt(payload, operator_command=operator_command)
+                retained = operator_prompt.retained(operator_prompt.raw(self.prompt_store.path), operator_command)
+                result['acceptance'] = operator_prompt.public(retained)
+                result['replayed'] = False
+                return result
+        return self._save_prompt(payload)
+
+    def _save_prompt(self, payload: Mapping[str, Any], *, operator_command: Mapping[str, Any] | None = None) -> dict[str, Any]:
         prompt = _normalize_prompt(payload.get("prompt"))
         catalog = _discover_model_catalog(self.provider)
-        model = _normalize_model(payload.get("model"), catalog)
+        try:
+            model = _normalize_model(payload.get("model"), catalog)
+        except ValueError as exc:
+            if operator_command:
+                raise operator_prompt.SourceRejected('analysis_settings_model_invalid') from exc
+            raise
         updated_at = self.now_factory().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-        state = self.prompt_store.write(prompt=prompt, model=model, updated_at=updated_at, catalog=catalog)
-        return _prompt_payload(state, catalog=catalog, model_source="saved")
+        with self.prompt_store._lock:
+            state = self.prompt_store.write(prompt=prompt, model=model, updated_at=updated_at, catalog=catalog, operator_command=operator_command)
+            result = _prompt_payload(state, catalog=catalog, model_source="saved")
+            result['source_revision'] = operator_prompt.revision(operator_prompt.raw(self.prompt_store.path))
+            return result
 
     def analyze(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         prompt_state = self.prompt_store.read()

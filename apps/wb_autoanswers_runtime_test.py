@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -314,6 +315,134 @@ class RuntimeTest(unittest.TestCase):
         finally:
             blocker.rollback()
             blocker.close()
+
+    @staticmethod
+    def _whole_schema_inventory(path: Path) -> dict:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            schema = {
+                (row[0], row[1]): row
+                for row in conn.execute(
+                    "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
+                )
+            }
+            rows = {}
+            for kind, name in schema:
+                if kind == "table":
+                    quoted = '"' + name.replace('"', '""') + '"'
+                    rows[name] = conn.execute(f"SELECT * FROM {quoted} ORDER BY rowid").fetchall()
+            assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+            assert not conn.execute("PRAGMA foreign_key_check").fetchall()
+            return {"schema": schema, "rows": rows}
+
+    def _seed_complete_v10_with_legacy_migration_operands(self) -> dict[str, str]:
+        self.enable("manual")
+        jobs = {}
+        for name in ("media", "protected", "terminal", "rating"):
+            self.repo.upsert_feedback(
+                self.classified_feedback(name, text="Existing content" if name != "rating" else ""),
+                source_stream="unanswered", run_kind="steady",
+            )
+            jobs[name] = self.repo.enqueue_manual_processing(
+                name, content_version=1, actor_id="reviewer",
+            )["processing_key"]
+        now = self.clock().isoformat()
+        with closing(sqlite3.connect(self.repo.db_path)) as conn, conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=11")
+            conn.execute("DROP TRIGGER operator_ai_settings_no_update")
+            conn.execute("DROP TRIGGER operator_ai_settings_no_delete")
+            conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswers_settings SET enable_epoch=42,policy_epoch=17,daily_cap_usd='7.37',policy_version='retained-v10-policy'")
+            conn.execute("UPDATE sheet_vitrina_v1_wb_feedbacks SET content_classification='rating_only' WHERE feedback_id<>'rating'")
+            conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET state='generated',media_uncertain=1,regeneration_required=0,final_route='rating_only_template' WHERE feedback_id IN ('media','protected')")
+            conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET state='terminal_error',actual_cost_usd='0' WHERE feedback_id='terminal'")
+            conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET processing_kind='frozen_ai' WHERE feedback_id='rating'")
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_publication_jobs(
+                    publication_key,processing_key,feedback_id,content_version,content_version_hash,
+                    exact_reply,normalized_reply_sha256,state,available_at,write_started_at,
+                    readback_answer,readback_hash,created_at,updated_at)
+                SELECT 'protected-publication',?,feedback_id,content_version,content_version_hash,
+                    'Existing reply','retained-reply','publish_pending_readback',?,?,'Existing answer',
+                    'retained-readback',?,? FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id='protected'""",
+                (jobs["protected"], now, now, now, now),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_publication_attempts(
+                    attempt_id,publication_key,attempt_number,request_reply_sha256,
+                    transport_outcome,write_started_at,details_json)
+                VALUES('protected-attempt','protected-publication',1,'retained-reply','timeout',?,'{}')""",
+                (now,),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_autoanswers_budget_reservations(
+                    processing_key,reserved_usd,actual_cost_usd,status,created_at,updated_at)
+                VALUES(?,'0.10','0.04','settled',?,?)""", (jobs["terminal"], now, now),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps(
+                    sweep_id,policy_epoch,target_mode,scope_from,state,cursor_json,totals_json,
+                    progress_json,created_by,created_at,updated_at,transition_run_id)
+                VALUES('v10-sweep',17,'manual','2026-01-01','queued','{}','{}','{}','reviewer',?,?,NULL)""",
+                (now, now),
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_autoanswers_reconciliation_scope(
+                    sweep_id,feedback_id,content_version_at_preview,content_version_hash_at_preview,
+                    ordinal,content_classification_at_preview)
+                SELECT 'v10-sweep',feedback_id,content_version,content_version_hash,1,'rating_only'
+                FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id='media'""",
+            )
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_wb_autoanswers_audit_events(
+                    event_id,aggregate_type,aggregate_id,event_type,actor_type,actor_id,
+                    bundle_version,evaluation_signature,details_json,created_at)
+                VALUES('v10-settings-proof','operator_settings','settings','retained','operator',
+                    'reviewer','retained-bundle','retained-signature','{}',?)""", (now,),
+            )
+        return jobs
+
+    def test_schema_v11_preserves_complete_v10_whole_database_and_fresh_backup(self) -> None:
+        self._seed_complete_v10_with_legacy_migration_operands()
+        before = self._whole_schema_inventory(self.repo.db_path)
+        backup_dir = Path(self.temp.name) / "backups" / "wb_autoanswers_schema_v11"
+        old_backups = set(backup_dir.glob("*.sqlite3"))
+        self.repo.ensure_schema()
+        after = self._whole_schema_inventory(self.repo.db_path)
+        new_backups = set(backup_dir.glob("*.sqlite3")) - old_backups
+        self.assertEqual(len(new_backups), 1)
+        self.assertEqual(self._whole_schema_inventory(next(iter(new_backups))), before)
+        added_objects = set(after["schema"]) - set(before["schema"])
+        self.assertEqual(added_objects, {
+            ("trigger", "operator_ai_settings_no_update"),
+            ("trigger", "operator_ai_settings_no_delete"),
+        })
+        self.assertEqual({key: after["schema"][key] for key in before["schema"]}, before["schema"])
+        markers = "sheet_vitrina_v1_wb_autoanswers_schema_migrations"
+        self.assertEqual([row[0] for row in after["rows"][markers]], list(range(1, 12)))
+        retained_rows = dict(after["rows"])
+        retained_rows[markers] = [row for row in retained_rows[markers] if row[0] != 11]
+        self.assertEqual(retained_rows, before["rows"])
+        self.repo.ensure_schema()
+        self.assertEqual(self._whole_schema_inventory(self.repo.db_path), after)
+        self.assertEqual(set(backup_dir.glob("*.sqlite3")), old_backups | new_backups)
+        with closing(sqlite3.connect(self.repo.db_path)) as conn:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("DELETE FROM sheet_vitrina_v1_wb_autoanswers_audit_events WHERE event_id='v10-settings-proof'")
+
+    def test_schema_v11_missing_old_marker_keeps_native_legacy_migration(self) -> None:
+        jobs = self._seed_complete_v10_with_legacy_migration_operands()
+        with closing(sqlite3.connect(self.repo.db_path)) as conn, conn:
+            # Marker10 alone is insufficient proof that all older migrations ran.
+            conn.execute("DELETE FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations WHERE version=4")
+        self.repo.ensure_schema()
+        with closing(sqlite3.connect(self.repo.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT state,regeneration_required FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?", (jobs["media"],)).fetchone(), ("needs_review", 1))
+            self.assertEqual(conn.execute("SELECT state,regeneration_required FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?", (jobs["protected"],)).fetchone(), ("generated", 0))
+            self.assertEqual(conn.execute("SELECT amount_usd FROM sheet_vitrina_v1_wb_autoanswers_budget_adjustments WHERE processing_key=?", (jobs["terminal"],)).fetchall(), [("-0.04000000",)])
+            self.assertEqual(conn.execute("SELECT transition_run_id FROM sheet_vitrina_v1_wb_autoanswers_reconciliation_sweeps WHERE sweep_id='v10-sweep'").fetchone(), ("v10-sweep",))
+            self.assertEqual(conn.execute("SELECT content_classification FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id='media'").fetchone(), ("content_bearing",))
+            self.assertEqual(conn.execute("SELECT version FROM sheet_vitrina_v1_wb_autoanswers_schema_migrations ORDER BY version").fetchall(), [(version,) for version in range(1, 12)])
 
     def test_schema_v8_adds_acknowledgements_without_rewriting_execution_evidence(
         self,

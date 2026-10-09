@@ -60,6 +60,20 @@ def checks(page) -> None:
         page.evaluate("processing => render('first', {...receipt,state:'completed',primary_effect:'source_saved',processing})", processing)
         assert first.locator(".ff-operation-status").inner_text() == label
 
+    for effect in ("external_command", "external_job"):
+        page.evaluate("""effect => render('first', {...receipt,primary_effect:effect,state:'processing',children:[
+          {nm_id:101,parameter_field:'price',external_confirmed:true,outcome:'ambiguous'},
+          {nm_id:102,parameter_field:'bid',external_confirmed:false,outcome:'submitted'},
+          {nm_id:103,parameter_field:'bid',external_confirmed:false,outcome:'ambiguous'},
+          {nm_id:104,parameter_field:'price',external_confirmed:false,outcome:'failed'},
+          {nm_id:'<img src=x>',parameter_field:'price',external_confirmed:false,outcome:'rejected'},null
+        ]})""", effect)
+        assert first.locator('.ff-operation-children li').all_inner_texts() == [
+            'SKU 101: price — Подтверждено WB', 'SKU 102: bid — Ожидает WB',
+            'SKU 103: bid — Результат неизвестен', 'SKU 104: price — Ошибка',
+            'SKU <img src=x>: price — Отклонено'], effect
+        assert first.locator('img,script').count() == 0
+
     for override in [{"state": "draft"}, {"status": "draft"}, {"primary_effect": "preview"},
                      {"source_state": "staged"}, {"durable_saved": False}, {"operation_id": ""},
                      {"operation_id": " native-1"}, {"accepted_at": ""}, {"state": "toString"}]:

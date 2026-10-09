@@ -1872,6 +1872,13 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_feedbacks_autoanswers_settings_update_request(
         self, payload: Mapping[str, Any], *, actor_id: str
     ) -> dict[str, Any]:
+        from packages.application import operator_autoanswers_settings as operator
+        operator_command=operator.command(payload,actor=actor_id,
+            account=str(getattr(self.change_registry_read_surface,'seller_id','') or ''),
+            account_scope=str(getattr(self.change_registry_read_surface,'account_scope','') or ''))
+        retained=operator.read(self,operator_command)
+        if retained is not None:
+            return {'acceptance':retained,'mutation_status':'source_saved','replayed':True}
         current = self.autoanswers_repository.settings()
         requested_limit_fields = AUTOANSWERS_OPERATOR_LIMIT_FIELDS.intersection(
             payload.keys()
@@ -1893,7 +1900,7 @@ class RegistryUploadHttpEntrypoint:
             raise ValueError(
                 "Ожидаемый policy epoch должен быть целым числом"
             ) from exc
-        if expected_policy_epoch != int(current.policy_epoch):
+        if operator_command is None and expected_policy_epoch != int(current.policy_epoch):
             raise AutoanswersRuntimeError(
                 "Настройки Autoanswers уже изменились. Обновите данные и повторите сохранение.",
                 code="policy_epoch_stale",
@@ -1911,18 +1918,22 @@ class RegistryUploadHttpEntrypoint:
                 raise ValueError(
                     "Не удалось подтвердить версию настроек. Обновите данные и повторите сохранение."
                 )
-            if expected_settings_revision != autoanswers_settings_revision(
+            if operator_command is None and expected_settings_revision != autoanswers_settings_revision(
                 current
             ):
                 raise AutoanswersRuntimeError(
                     "Лимиты Autoanswers уже изменились. Обновите данные и повторите сохранение.",
                     code="settings_revision_stale",
                 )
+        # OFF always saves with native epoch CAS even if ON/lifecycle readback
+        # is uncertain. Stop reconciliation remains a separate native result.
+        explicit_off=payload.get('selector_state')=='off' or payload.get('master_enabled') is False
         suspended_by_master, master_policy = self._autoanswers_master_suspension(
-            require_confirmed=True
+            require_confirmed=not explicit_off
         )
         selector_state = str(payload.get("selector_state") or "").strip()
         reconciliation: Mapping[str, Any] | None = None
+        operator_outcome={}
         if selector_state:
             if selector_state != "off" and selector_state not in AUTOANSWER_MODES:
                 raise ValueError("unsupported autoanswers selector state")
@@ -1935,7 +1946,10 @@ class RegistryUploadHttpEntrypoint:
                     selector_state,
                     actor_id=actor_id,
                     preview_id=str(payload.get("preview_id") or "") or None,
+                    expected_policy_epoch=expected_policy_epoch,
+                    operator_command=operator_command,
                 )
+                operator_outcome["replayed"]=transition.get("replayed",False)
                 settings = transition["settings"]
                 reconciliation = transition["sweep"]
                 if not reconciliation or not str(
@@ -1982,6 +1996,8 @@ class RegistryUploadHttpEntrypoint:
                         else None
                     ),
                     actor_id=actor_id,
+                    operator_command=operator_command,
+                    operator_outcome=operator_outcome,
                 )
         else:
             master_enabled = payload.get("master_enabled") if "master_enabled" in payload else None
@@ -2009,74 +2025,94 @@ class RegistryUploadHttpEntrypoint:
                     else None
                 ),
                 actor_id=actor_id,
+                operator_command=operator_command,
+                operator_outcome=operator_outcome,
             )
-        settings = self.autoanswers_repository.settings()
-        confirmed_limits = _autoanswers_confirmed_limits(
-            settings,
-            requested_limit_fields,
-        )
-        for field, confirmed in confirmed_limits.items():
-            requested = payload[field]
-            try:
-                matches = float(confirmed) == float(requested)
-            except (TypeError, ValueError, OverflowError):
-                matches = False
-            if not matches:
-                raise AutoanswersRuntimeError(
-                    "Сервер сохранил другое значение лимита. Обновите данные перед повторной попыткой.",
-                    code="settings_readback_unconfirmed",
-                )
-        if reconciliation is None:
-            reconciliation = self.autoanswers_repository.reconciliation_status()
-        if limit_only_update:
-            # Global limits are consumed from the server-owned settings row on
-            # every ordinary worker tick. Restarting the timer here would make
-            # a budget edit interrupt the active run and delay exact readback.
-            lifecycle = dict(self._autoanswers_lifecycle_readback())
-        else:
-            try:
-                lifecycle = dict(
-                    self._autoanswers_lifecycle_controller().reconcile(
-                        suspended_by_master=suspended_by_master,
-                        actor=actor_id,
-                        reason="feature-owned Autoanswers settings mutation",
-                        transition_run_id=(
-                            str(reconciliation.get("transition_run_id") or "")
-                            if reconciliation
-                            else None
-                        ),
+        acceptance=operator.read(self,operator_command)
+        if operator_command is not None and acceptance is None:
+            raise AutoanswersRuntimeError('Native settings command readback missing',code='settings_readback_unconfirmed')
+        if operator_outcome.get('replayed'):
+            return {'acceptance':acceptance,'mutation_status':'source_saved','replayed':True}
+        try:
+            # Exact writer return belongs to this commit; a later settings query
+            # could observe another actor's CAS and is not this command's proof.
+            confirmed_limits = _autoanswers_confirmed_limits(
+                settings,
+                requested_limit_fields,
+            )
+            for field, confirmed in confirmed_limits.items():
+                requested = payload[field]
+                try:
+                    matches = float(confirmed) == float(requested)
+                except (TypeError, ValueError, OverflowError):
+                    matches = False
+                if not matches:
+                    raise AutoanswersRuntimeError(
+                        "Сервер сохранил другое значение лимита. Обновите данные перед повторной попыткой.",
+                        code="settings_readback_unconfirmed",
                     )
-                )
-            except Exception as exc:
+            if reconciliation is None:
+                reconciliation = self.autoanswers_repository.reconciliation_status()
+            if limit_only_update:
+                # Global limits are consumed from the server-owned settings row on
+                # every ordinary worker tick. Restarting the timer here would make
+                # a budget edit interrupt the active run and delay exact readback.
+                lifecycle = dict(self._autoanswers_lifecycle_readback())
+            else:
+                try:
+                    lifecycle = dict(
+                        self._autoanswers_lifecycle_controller().reconcile(
+                            suspended_by_master=suspended_by_master,
+                            actor=actor_id,
+                            reason="feature-owned Autoanswers settings mutation",
+                            transition_run_id=(
+                                str(reconciliation.get("transition_run_id") or "")
+                                if reconciliation
+                                else None
+                            ),
+                        )
+                    )
+                except Exception as exc:
+                    raise AutoanswersRuntimeError(
+                        "Autoanswers settings were saved, but runtime lifecycle failed: "
+                        + str(exc),
+                        code="lifecycle_reconciliation_failed",
+                    ) from exc
+            lifecycle["master_policy"] = master_policy
+            if str(lifecycle.get("drift_status") or "") in {"drift", "unknown"}:
                 raise AutoanswersRuntimeError(
-                    "Autoanswers settings were saved, but runtime lifecycle failed: "
-                    + str(exc),
-                    code="lifecycle_reconciliation_failed",
-                ) from exc
-        lifecycle["master_policy"] = master_policy
-        if str(lifecycle.get("drift_status") or "") in {"drift", "unknown"}:
-            raise AutoanswersRuntimeError(
-                "Autoanswers lifecycle readback did not confirm timer state",
-                code="lifecycle_readback_unconfirmed",
+                    "Autoanswers lifecycle readback did not confirm timer state",
+                    code="lifecycle_readback_unconfirmed",
+                )
+            mutation_status = (
+                "confirmed"
+                if str(lifecycle.get("lifecycle_state") or "")
+                in {"running", "off", "suspended_by_master"}
+                else "pending"
             )
-        mutation_status = (
-            "confirmed"
-            if str(lifecycle.get("lifecycle_state") or "")
-            in {"running", "off", "suspended_by_master"}
-            else "pending"
-        )
-        return {
-            "settings": asdict(settings),
-            "settings_revision": autoanswers_settings_revision(settings),
-            "limits_contract": autoanswers_operator_limits_contract(),
-            "confirmed_limits": confirmed_limits,
-            "budget": self.autoanswers_repository.budget_status(),
-            "selector_state": settings.mode if settings.master_enabled else "off",
-            "runtime": self.autoanswers_repository.operational_status(),
-            "reconciliation": reconciliation,
-            "lifecycle": lifecycle,
-            "mutation_status": mutation_status,
-        }
+            if acceptance is not None:
+                operator.observe(self,operator_command,lifecycle=lifecycle)
+                acceptance=operator.read(self,operator_command)
+            return {
+                **({'acceptance':acceptance} if acceptance is not None else {}),
+                "settings": asdict(settings),
+                "settings_revision": autoanswers_settings_revision(settings),
+                "limits_contract": autoanswers_operator_limits_contract(),
+                "confirmed_limits": confirmed_limits,
+                "budget": self.autoanswers_repository.budget_status(),
+                "selector_state": settings.mode if settings.master_enabled else "off",
+                "runtime": self.autoanswers_repository.operational_status(),
+                "reconciliation": reconciliation,
+                "lifecycle": lifecycle,
+                "mutation_status": mutation_status,
+            }
+
+        except Exception as exc:
+            if operator_command is None:raise
+            code=exc.code if isinstance(exc,AutoanswersRuntimeError) else 'native_postcommit_readback_failed'
+            operator.observe(self,operator_command,error_code=code)
+            return {'acceptance':operator.read(self,operator_command),'mutation_status':'pending',
+                'execution_error_code':code}
 
     def handle_sheet_feedbacks_autoanswers_transition_preview_request(
         self, payload: Mapping[str, Any], *, actor_id: str
@@ -2112,12 +2148,13 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_feedbacks_autoanswers_approve_request(
         self, payload: Mapping[str, Any], *, actor_id: str
     ) -> dict[str, Any]:
-        return self.autoanswers_repository.approve_for_publication(
+        result = self.autoanswers_repository.approve_for_publication(
             str(payload.get("processing_key") or ""),
             actor_id=actor_id,
             confirmed=payload.get("confirmed") is True,
             expected_reply_sha256=str(payload.get("reply_sha256") or "") or None,
         )
+        return self._feedback_operator_result(result,'feedback_reply',str(payload.get('processing_key') or ''),actor_id)
 
     def handle_sheet_feedbacks_autoanswers_generate_request(
         self, payload: Mapping[str, Any], *, actor_id: str
@@ -2132,7 +2169,7 @@ class RegistryUploadHttpEntrypoint:
             content_version=content_version,
             actor_id=actor_id,
         )
-        return {"accepted": True, "job": job}
+        return self._feedback_operator_result({"accepted":True,"job":job},'feedback_reply',job['processing_key'],actor_id)
 
     def handle_sheet_feedbacks_autoanswers_regenerate_request(
         self, payload: Mapping[str, Any], *, actor_id: str
@@ -2141,7 +2178,7 @@ class RegistryUploadHttpEntrypoint:
             str(payload.get("processing_key") or ""),
             actor_id=actor_id,
         )
-        return {"accepted": True, "job": job}
+        return self._feedback_operator_result({"accepted":True,"job":job},'feedback_reply',job['processing_key'],actor_id)
 
     def handle_sheet_feedbacks_media_asset_request(
         self,
@@ -2189,7 +2226,7 @@ class RegistryUploadHttpEntrypoint:
             guard_errors=list(guard["errors"]),
             actor_id=actor_id,
         )
-        return {"accepted": True, "guard": guard, "job": job}
+        return self._feedback_operator_result({"accepted":True,"guard":guard,"job":job},'feedback_reply',job['processing_key'],actor_id)
 
     def handle_sheet_feedbacks_export_request(self, payload: Mapping[str, Any]) -> tuple[bytes, str]:
         return self.feedbacks_block.build_export(payload)
@@ -2197,8 +2234,13 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_feedbacks_ai_prompt_get_request(self) -> dict[str, Any]:
         return self.feedbacks_ai_block.get_prompt()
 
-    def handle_sheet_feedbacks_ai_prompt_save_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.feedbacks_ai_block.save_prompt(payload)
+    def handle_sheet_feedbacks_ai_prompt_save_request(self, payload: Mapping[str, Any], *, actor: str = '') -> dict[str, Any]:
+        from packages.application import operator_feedback_analysis_settings as source
+        command = None
+        if 'operation_id' in payload:
+            scope = source.PromptScope.from_entrypoint(self, actor=actor or 'local_operator')
+            command = source.command(payload, actor=scope.actor, account=scope.account, account_scope=scope.account_scope)
+        return self.feedbacks_ai_block.save_prompt(payload, operator_command=command)
 
     def handle_sheet_feedbacks_ai_analyze_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.feedbacks_ai_block.analyze(payload)
@@ -2212,20 +2254,39 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_feedbacks_complaints_sync_status_job_request(self, run_id: str) -> dict[str, Any]:
         return self.feedbacks_complaints_block.get_sync_status_job(run_id)
 
-    def handle_sheet_feedbacks_complaints_submit_selected_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.feedbacks_complaints_block.submit_selected(payload)
+    def handle_sheet_feedbacks_complaints_submit_selected_request(self, payload: Mapping[str, Any], *, actor: str = '') -> dict[str, Any]:
+        if actor:
+            payload={**dict(payload), 'requested_by':actor,
+                'account_id':str(getattr(self.change_registry_read_surface,'seller_id','') or '')}
+        result=self.feedbacks_complaints_block.submit_selected(payload)
+        if result.get('not_accepted') or (result.get('summary') or {}).get('seller_portal_automation_busy'):return result
+        return self._feedback_operator_result(result,'feedback_complaint',str(result.get('run_id') or ''),actor or 'operator_ui')
 
-    def handle_sheet_feedbacks_complaints_submit_job_request(self, run_id: str) -> dict[str, Any]:
-        return self.feedbacks_complaints_block.get_submit_job(run_id)
+    def handle_sheet_feedbacks_complaints_submit_job_request(self, run_id: str, *, actor: str = '') -> dict[str, Any]:
+        result=self.feedbacks_complaints_block.get_submit_job(run_id,actor=actor,
+            account_id=str(getattr(self.change_registry_read_surface,'seller_id','') or '') if actor else '')
+        return self._feedback_operator_result(result,'feedback_complaint',run_id,actor or 'operator_ui')
 
     def handle_sheet_feedbacks_auto_complaints_schedules_request(self) -> dict[str, Any]:
         return self.feedbacks_auto_complaints_block.build_schedules()
 
-    def handle_sheet_feedbacks_auto_complaints_schedules_save_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.feedbacks_auto_complaints_block.save_schedules(payload)
+    def handle_sheet_feedbacks_auto_complaints_schedules_save_request(self, payload: Mapping[str, Any], *, actor: str = '') -> dict[str, Any]:
+        from packages.application import operator_feedback_complaint_schedules as source
+        command=None
+        if 'operation_id' in payload:
+            scope=source.ScheduleScope.from_entrypoint(self,actor=actor or 'local_operator')
+            command=source.command(payload,actor=scope.actor,account=scope.account,account_scope=scope.account_scope)
+        return self.feedbacks_auto_complaints_block.save_schedules(payload,operator_command=command)
 
-    def handle_sheet_feedbacks_auto_complaints_run_now_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.feedbacks_auto_complaints_block.run_now(payload)
+    def handle_sheet_feedbacks_auto_complaints_run_now_request(self, payload: Mapping[str, Any], *, actor: str = '') -> dict[str, Any]:
+        from packages.application import operator_complaint_runs as source
+        scope=source.RunScope.from_entrypoint(self,actor=actor or 'local_operator')
+        command=source.command(payload,scope)
+        return self.feedbacks_auto_complaints_block.run_now(payload,operator_command=command)
+
+    def handle_operator_complaint_run_read(self, operation_id: str, *, actor: str = '') -> dict[str, Any]:
+        from packages.application import operator_complaint_runs as source
+        return source.read(operation_id,source.RunScope.from_entrypoint(self,actor=actor or 'local_operator'))
 
     def handle_sheet_feedbacks_auto_complaints_runs_request(self) -> dict[str, Any]:
         return self.feedbacks_auto_complaints_block.list_runs()
@@ -2249,8 +2310,20 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_ads_bid_preview_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.ads_block.preview_bid_change(payload)
 
+    def _external_operator_result(self,result,domain):
+        from packages.application.operator_external_operations import decorate
+        return decorate(result,db_path=self.runtime.db_path,scope=self.change_registry_read_surface,domain=domain)
+
+    def _feedback_operator_result(self,result,domain,native_id,actor):
+        from packages.application.operator_feedback_operations import FeedbackSurface,decorate
+        try:
+            return decorate(result,db_path=self.runtime.db_path,scope=FeedbackSurface.from_entrypoint(self,actor=actor),
+                domain=domain,native_id=native_id)
+        except (ValueError,TypeError,OSError,AttributeError):
+            return {**dict(result),'operator_projection':{'status':'not_tracked','reason_code':'native_receipt_unavailable'}}
+
     def handle_sheet_ads_bid_commit_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
-        return self.ads_block.commit_bid_change(payload, actor=actor)
+        return self._external_operator_result(self.ads_block.commit_bid_change(payload, actor=actor),'wb_ads')
 
     def handle_sheet_prices_goods_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self.prices_block.build_goods_table(params or {})
@@ -2259,10 +2332,10 @@ class RegistryUploadHttpEntrypoint:
         return self.prices_block.preview_changes(payload)
 
     def handle_sheet_prices_upload_task_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
-        return self.prices_block.upload_task(payload, actor=actor)
+        return self._external_operator_result(self.prices_block.upload_task(payload, actor=actor),'wb_prices')
 
     def handle_sheet_prices_upload_task_status_request(self, upload_id: int) -> dict[str, Any]:
-        return self.prices_block.get_upload_task(upload_id)
+        return self._external_operator_result(self.prices_block.get_upload_task(upload_id),'wb_prices')
 
     def handle_sheet_prices_upload_task_goods_request(
         self,
@@ -2403,20 +2476,20 @@ class RegistryUploadHttpEntrypoint:
     def handle_sku_management_settings_request(self, *, user_key: str) -> dict[str, Any]:
         return self.sku_management_block.get_settings(user_key=user_key)
 
-    def handle_sku_management_settings_save_request(self, payload: Mapping[str, Any], *, user_key: str) -> dict[str, Any]:
-        return self.sku_management_block.save_settings(user_key=user_key, payload=payload)
+    def handle_sku_management_settings_save_request(self, payload: Mapping[str, Any], *, user_key: str, actor: str = '') -> dict[str, Any]:
+        return self.sku_management_block.save_settings(user_key=user_key, payload=payload, actor=actor)
 
     def handle_sku_management_price_preview_request(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
         return self.sku_management_block.preview_price(payload, actor=actor)
 
     def handle_sku_management_price_commit_request(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
-        return self.sku_management_block.commit_price(payload, actor=actor)
+        return self._external_operator_result(self.sku_management_block.commit_price(payload, actor=actor),'sku_prices')
 
     def handle_sku_management_bid_preview_request(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
         return self.sku_management_block.preview_bid(payload, actor=actor)
 
     def handle_sku_management_bid_commit_request(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
-        return self.sku_management_block.commit_bid(payload, actor=actor)
+        return self._external_operator_result(self.sku_management_block.commit_bid(payload, actor=actor),'sku_ads')
 
     def handle_sku_management_history_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self.sku_management_block.history(params or {})
@@ -2489,8 +2562,9 @@ class RegistryUploadHttpEntrypoint:
         payload: Mapping[str, Any],
         *,
         user_key: str,
+        actor: str = '',
     ) -> dict[str, Any]:
-        return self.sku_inventory_balance_block.save_settings(payload, user_key=user_key)
+        return self.sku_inventory_balance_block.save_settings(payload, user_key=user_key, actor=actor)
 
     def handle_sku_inventory_balance_calculation_request(
         self,

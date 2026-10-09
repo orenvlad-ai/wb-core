@@ -12,6 +12,7 @@ from packages.application.business_data_procedure_admission import admitted_thre
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import hashlib
 from pathlib import Path
 import threading
 from typing import Any, Callable, Mapping
@@ -39,6 +40,12 @@ JOB_INTERRUPTION_STALE_SECONDS = 45 * 60
 SUBMIT_JOB_MAX_SELECTED_IDS = 20
 SUBMIT_JOB_MAX_SUBMIT_HARD_CAP = 5
 SUBMIT_JOB_EVENTS_LIMIT = 200
+# Includes every existing bounded native result field (including JSON escaping),
+# not just the small queued record. Only unfinished jobs consume unused reserve.
+SUBMIT_JOB_COMPLETION_CAPACITY_BYTES = 2 * 1024 * 1024
+SUBMIT_JOB_STORE_MAX_BYTES = 8 * 1024 * 1024
+SUBMIT_JOB_SOURCE_MAX_BYTES = 16 * 1024
+SUBMIT_JOB_COUNTER_FIELDS = ('selected_count', 'tested_count', 'submitted_count', 'skipped_count', 'error_count')
 
 COMPLAINT_STATUS_LABELS = {
     "waiting_response": "Ждёт ответа",
@@ -473,10 +480,16 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
     ) -> dict[str, Any]:
         request_payload = _validate_submit_selected_payload(payload or {})
         normalized_requested_by = str(requested_by or "operator_ui").strip() or "operator_ui"
+        if len(normalized_requested_by) > 80:
+            raise ValueError('complaint_actor_exceeds_bound')
         with self._lock:
             store_payload = self._read_payload_unlocked()
+            existing=self._request(store_payload,request_payload,normalized_requested_by)
+            if existing is not None:return _public_submit_job(existing,already_running=False)
             active = self._active_job(store_payload)
             if active is not None:
+                if request_payload.get('account_id'):
+                    return _scoped_submit_busy(normalized_requested_by,self.now_factory)
                 return _public_submit_job(active, already_running=True)
 
             run_id = _new_submit_run_id(self.now_factory)
@@ -492,6 +505,13 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
                     "finished_at": "",
                     "requested_by": normalized_requested_by,
                     "selected_count": len(selected_ids),
+                    "selected_feedback_ids": selected_ids,
+                    "request_key": request_payload.get('request_key',''),
+                    "request_digest": _submit_request_digest(request_payload,normalized_requested_by),
+                    "request_payload": _submit_request_operands(request_payload),
+                    "account_id": request_payload.get('account_id',''),
+                    "completion_capacity_bytes": SUBMIT_JOB_COMPLETION_CAPACITY_BYTES,
+                    "completion_capacity_released": False,
                     "tested_count": 0,
                     "submitted_count": 0,
                     "skipped_count": 0,
@@ -523,7 +543,7 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
         thread.start()
         return started_snapshot
 
-    def get(self, run_id: str) -> dict[str, Any]:
+    def get(self, run_id: str, *, actor: str = '', account_id: str = '') -> dict[str, Any]:
         normalized_run_id = str(run_id or "").strip()
         if not normalized_run_id:
             raise ValueError("run_id query parameter is required")
@@ -531,10 +551,28 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
             job = self._find_job_unlocked(normalized_run_id)
             if job is None:
                 raise SheetVitrinaV1FeedbacksComplaintsError(
-                    f"complaints submit job not found: {normalized_run_id}",
+                    'complaints submit job not found',
                     http_status=404,
                 )
+            if (actor and job.get('requested_by')!=actor) or ((actor or account_id) and job.get('account_id')!=account_id):
+                raise SheetVitrinaV1FeedbacksComplaintsError('complaints submit job not found',http_status=404)
             return _public_submit_job(job, already_running=False)
+
+    def _request(self,store_payload,payload,actor):
+        key=payload.get('request_key','')
+        if not key:return None
+        found=[job for job in store_payload.get('jobs',[]) if job.get('request_key')==key]
+        if not found:return None
+        if (len(found)!=1 or found[0].get('request_digest')!=_submit_request_digest(payload,actor)
+                or found[0].get('request_digest')!=_submit_request_digest(found[0].get('request_payload') or {},found[0].get('requested_by',''))):
+            raise ValueError('complaint_request_identity_conflict')
+        return found[0]
+
+    def get_request(self,payload,actor):
+        checked=_validate_submit_selected_payload(payload)
+        with self._lock:
+            found=self._request(self._read_payload_unlocked(),checked,actor)
+            return _public_submit_job(found,already_running=False) if found else None
 
     def patch(self, run_id: str, patch: Mapping[str, Any]) -> None:
         self._update_job(run_id, patch)
@@ -545,6 +583,18 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
         payload: Mapping[str, Any],
         runner: Callable[[Mapping[str, Any]], Mapping[str, Any]],
     ) -> None:
+        with self._lock:
+            job = self._find_job_unlocked(run_id)
+            if job is None:
+                return
+            if job.get('completion_capacity_bytes') != SUBMIT_JOB_COMPLETION_CAPACITY_BYTES:
+                # Pre-reservation jobs must not start/retry an external write.
+                self._update_job(run_id, _submit_job_error_patch(
+                    'complaint_completion_capacity_not_reserved; runner not invoked; prior outcome requires exact readback',
+                    finished_at=_iso_now(self.now_factory)))
+                return
+            if job.get('completion_capacity_released'):
+                return
         self._update_job(
             run_id,
             {
@@ -570,9 +620,25 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
                 if str(job.get("run_id") or "").strip() != run_id:
                     continue
                 normalized_patch = dict(patch)
+                if job.get('selected_feedback_ids'):
+                    for field in ('run_id','created_at','requested_by','selected_feedback_ids','request_key','request_digest','request_payload','account_id', 'completion_capacity_bytes', 'completion_capacity_released'):
+                        if field in normalized_patch and normalized_patch[field]!=job.get(field):
+                            raise ValueError('complaint_source_manifest_immutable')
+                    normalized_patch.pop('selected_count',None)
                 if str(normalized_patch.get("status") or "") in JOB_ACTIVE_STATUSES and "finished_at" not in normalized_patch:
                     normalized_patch["finished_at"] = ""
+                if job.get('completion_capacity_released'):
+                    if str(normalized_patch.get('status') or '') in JOB_ACTIVE_STATUSES:
+                        raise ValueError('complaint_completed_job_cannot_reopen')
+                    if any(value != job.get(field) for field, value in normalized_patch.items()):
+                        raise ValueError('complaint_completed_job_immutable')
+                    return
                 jobs[index] = _normalize_submit_job({**dict(job), **normalized_patch})
+                if job.get('completion_capacity_bytes'):
+                    jobs[index]['completion_capacity_released'] = bool(
+                        jobs[index]['finished_at'] or jobs[index]['status'] == 'success')
+                    if job.get('completion_capacity_released') and not jobs[index]['completion_capacity_released']:
+                        raise ValueError('complaint_completed_job_cannot_reopen')
                 self._write_payload_unlocked(store_payload)
                 return
 
@@ -580,7 +646,8 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
         active = [
             _normalize_submit_job(job)
             for job in payload.get("jobs", [])
-            if isinstance(job, Mapping) and str(job.get("status") or "") in JOB_ACTIVE_STATUSES
+            if isinstance(job, Mapping) and (str(job.get("status") or "") in JOB_ACTIVE_STATUSES
+                or (job.get('completion_capacity_bytes') and not job.get('completion_capacity_released')))
         ]
         if not active:
             return None
@@ -606,7 +673,8 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
             changed = False
             now = _iso_now(self.now_factory)
             for index, job in enumerate(payload.get("jobs", [])):
-                if not isinstance(job, Mapping) or str(job.get("status") or "") not in JOB_ACTIVE_STATUSES:
+                if not isinstance(job, Mapping) or not (str(job.get("status") or "") in JOB_ACTIVE_STATUSES
+                    or (job.get('completion_capacity_bytes') and not job.get('completion_capacity_released'))):
                     continue
                 has_finished_at = bool(str(job.get("finished_at") or "").strip())
                 if not has_finished_at and _job_active_age_seconds(job, self.now_factory) < JOB_INTERRUPTION_STALE_SECONDS:
@@ -631,6 +699,8 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
                 "contract_version": CONTRACT_VERSION,
                 "jobs": [],
             }
+        if self.path.is_symlink() or self.path.stat().st_size > SUBMIT_JOB_STORE_MAX_BYTES:
+            raise SheetVitrinaV1FeedbacksComplaintsError("complaints submit job store exceeds safe source bounds")
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -638,22 +708,41 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
         if not isinstance(payload, dict):
             raise SheetVitrinaV1FeedbacksComplaintsError("complaints submit job store has invalid shape")
         jobs = payload.get("jobs")
-        if not isinstance(jobs, list):
-            payload["jobs"] = []
-        payload["jobs"] = [_normalize_submit_job(item) for item in payload["jobs"] if isinstance(item, Mapping)]
+        if not isinstance(jobs, list) or len(jobs) > 5000 or any(not isinstance(item, Mapping) for item in jobs):
+            raise SheetVitrinaV1FeedbacksComplaintsError("complaints submit job store has invalid inventory")
+        payload["jobs"] = [_normalize_submit_job(item) for item in jobs]
         return payload
 
     def _write_payload_unlocked(self, payload: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         jobs = [_normalize_submit_job(item) for item in payload.get("jobs", []) if isinstance(item, Mapping)]
+        retained=[job for job in jobs if job.get('request_key')]
+        legacy=[job for job in jobs if not job.get('request_key')][-100:]
+        if len(retained)+len(legacy)>5000:raise ValueError('complaint_native_receipt_capacity_exceeded')
         normalized = {
             "contract_name": SUBMIT_JOB_STORE_CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "updated_at": _iso_now(self.now_factory),
-            "jobs": jobs[-100:],
+            "jobs": retained+legacy,
         }
+        encoded=json.dumps(normalized,ensure_ascii=False,indent=2)+'\n'
+        actual_bytes = len(encoded.encode('utf-8'))
+        unused_capacity = 0
+        for job in normalized['jobs']:
+            capacity = job.get('completion_capacity_bytes', 0)
+            if not capacity:
+                continue
+            if capacity != SUBMIT_JOB_COMPLETION_CAPACITY_BYTES:
+                raise ValueError('complaint_completion_capacity_invalid')
+            record_bytes = _submit_job_storage_bytes(job)
+            if record_bytes > capacity:
+                raise ValueError('complaint_native_result_exceeds_reserved_contract')
+            if not job.get('completion_capacity_released'):
+                unused_capacity += capacity - record_bytes
+        if actual_bytes + unused_capacity > SUBMIT_JOB_STORE_MAX_BYTES:
+            raise ValueError('complaint_native_receipt_capacity_exceeded')
         temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temp_path.write_text(encoded, encoding="utf-8")
         temp_path.replace(self.path)
 
 
@@ -722,8 +811,12 @@ class SheetVitrinaV1FeedbacksComplaintsBlock:
     def submit_selected(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
         requested_by = str(payload.get("requested_by") or "operator_ui").strip() or "operator_ui"
+        if payload.get('request_key'):
+            existing=self.submit_jobs.get_request(payload,requested_by)
+            if existing:return existing
         busy = current_lock_status(self.runtime_dir)
         if busy.get("busy"):
+            if payload.get('account_id'):return _scoped_submit_busy(requested_by,self.now_factory)
             return _public_submit_busy_job(busy, requested_by=requested_by, now_factory=self.now_factory)
         return self.submit_jobs.start(payload, runner=self._run_submit_selected, requested_by=requested_by)
 
@@ -731,8 +824,8 @@ class SheetVitrinaV1FeedbacksComplaintsBlock:
         """Run the same guarded selected-submit implementation inside an outer orchestration lock."""
         return self._run_submit_selected(payload or {})
 
-    def get_submit_job(self, run_id: str) -> dict[str, Any]:
-        return self.submit_jobs.get(run_id)
+    def get_submit_job(self, run_id: str, *, actor: str = '', account_id: str = '') -> dict[str, Any]:
+        return self.submit_jobs.get(run_id,actor=actor,account_id=account_id)
 
     def _run_status_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self.status_sync_runner is not None:
@@ -867,7 +960,7 @@ def _normalize_submit_job(job: Mapping[str, Any]) -> dict[str, Any]:
     attempts = job.get("attempts") if isinstance(job.get("attempts"), list) else []
     events = job.get("events") if isinstance(job.get("events"), list) else []
     submitted_ids = job.get("submitted_feedback_ids") if isinstance(job.get("submitted_feedback_ids"), list) else []
-    return {
+    normalized = {
         "run_id": _safe_text(job.get("run_id"), 160),
         "kind": _safe_text(job.get("kind") or SUBMIT_JOB_KIND, 120),
         "status": status,
@@ -876,6 +969,11 @@ def _normalize_submit_job(job: Mapping[str, Any]) -> dict[str, Any]:
         "finished_at": _safe_text(job.get("finished_at"), 80),
         "requested_by": _safe_text(job.get("requested_by") or "operator_ui", 80),
         "selected_count": _safe_int(job.get("selected_count")),
+        "selected_feedback_ids": list(job.get('selected_feedback_ids') or []),
+        "request_key": _safe_text(job.get('request_key'),160),
+        "request_digest": _safe_text(job.get('request_digest'),64),
+        "request_payload": dict(job.get('request_payload') or {}),
+        "account_id": _safe_text(job.get('account_id'),160),
         "tested_count": _safe_int(job.get("tested_count")),
         "submitted_count": _safe_int(job.get("submitted_count")),
         "skipped_count": _safe_int(job.get("skipped_count")),
@@ -893,6 +991,29 @@ def _normalize_submit_job(job: Mapping[str, Any]) -> dict[str, Any]:
         "status_sync_report_path": _safe_text(job.get("status_sync_report_path"), 600),
         "error": _safe_text(job.get("error"), 1000),
     }
+    if job.get('completion_capacity_bytes'):
+        normalized['completion_capacity_bytes'] = job['completion_capacity_bytes']
+        normalized['completion_capacity_released'] = bool(job.get('completion_capacity_released')
+            or normalized['finished_at'] or normalized['status'] == 'success')
+        # Native aggregate contains only these five counters. Full provider
+        # diagnostics stay in the existing report artifacts, not arbitrary JSON
+        # within the receipt. Every native attempt remains in the receipt.
+        normalized['summary'] = {field: _safe_int(summary.get(field)) for field in SUBMIT_JOB_COUNTER_FIELDS if field in summary}
+        if (len(normalized['submitted_feedback_ids']) > SUBMIT_JOB_MAX_SELECTED_IDS
+            or len(attempts) > SUBMIT_JOB_MAX_SELECTED_IDS or len(skipped) > SUBMIT_JOB_MAX_SELECTED_IDS):
+            raise ValueError('complaint_native_result_exceeds_selected_bound')
+        if any(abs(normalized[field]) > 2**63-1 for field in SUBMIT_JOB_COUNTER_FIELDS) or any(
+            abs(value) > 2**63-1 for value in normalized['summary'].values()):
+            raise ValueError('complaint_native_counter_exceeds_bound')
+        if len(json.dumps(normalized['request_payload'], ensure_ascii=False, indent=2).encode('utf-8')) > SUBMIT_JOB_SOURCE_MAX_BYTES:
+            raise ValueError('complaint_source_exceeds_bound')
+    return normalized
+
+
+def _submit_job_storage_bytes(job: Mapping[str, Any]) -> int:
+    """Exact record contribution at the jobs-array indentation, plus comma."""
+    text = json.dumps(job, ensure_ascii=False, indent=2)
+    return len(text.encode('utf-8')) + 4 * (text.count('\n') + 1) + 2
 
 
 def _public_submit_job(job: Mapping[str, Any], *, already_running: bool) -> dict[str, Any]:
@@ -909,6 +1030,10 @@ def _public_submit_job(job: Mapping[str, Any], *, already_running: bool) -> dict
         "finished_at": normalized["finished_at"],
         "requested_by": normalized["requested_by"],
         "selected_count": normalized["selected_count"],
+        "selected_feedback_ids": normalized['selected_feedback_ids'],
+        "request_key": normalized['request_key'],
+        "request_digest": normalized['request_digest'],
+        "account_id": normalized['account_id'],
         "tested_count": normalized["tested_count"],
         "submitted_count": normalized["submitted_count"],
         "skipped_count": normalized["skipped_count"],
@@ -975,13 +1100,39 @@ def _public_submit_busy_job(
     }
 
 
+SUBMIT_SOURCE_FIELDS=frozenset({'feedback_ids','max_submit','date_from','date_to','stars','is_answered','max_api_rows',
+    'retry_errors','timeout_ms','max_complaint_rows','status_sync_timeout_ms','account_id'})
+
+
+def _submit_request_operands(payload):
+    return {k:v for k,v in payload.items() if k in SUBMIT_SOURCE_FIELDS}
+
+
+def _submit_request_digest(payload,actor):
+    operands=_submit_request_operands(payload)
+    return hashlib.sha256(json.dumps(dict(actor=actor,operands=operands),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def _scoped_submit_busy(actor,now_factory):
+    result=_public_submit_busy_job({},requested_by=actor,now_factory=now_factory)
+    result.update(run_id='',automation_lock={'busy':True},not_accepted=True)
+    return result
+
+
 def _validate_submit_selected_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if payload.get('request_key') and set(payload)-SUBMIT_SOURCE_FIELDS-{'request_key','requested_by','run_id'}:
+        raise ValueError('unsupported_complaint_request_fields')
+    for field in ('request_key','account_id'):
+        value=payload.get(field,'')
+        if not isinstance(value,str) or value.strip()!=value or len(value)>160:
+            raise ValueError('invalid_complaint_'+field)
     raw_ids = payload.get("feedback_ids")
     if not isinstance(raw_ids, list):
         raise ValueError("feedback_ids must be a JSON array")
     feedback_ids: list[str] = []
     for raw_id in raw_ids:
         feedback_id = str(raw_id or "").strip()
+        if len(feedback_id)>160:raise ValueError('complaint_feedback_id_exceeds_bound')
         if feedback_id and feedback_id not in feedback_ids:
             feedback_ids.append(feedback_id)
     if not feedback_ids:
@@ -1000,7 +1151,21 @@ def _validate_submit_selected_payload(payload: Mapping[str, Any]) -> dict[str, A
         raise ValueError("date_from and date_to are required for guarded submit-selected execution")
     if not stars:
         raise ValueError("stars are required for guarded submit-selected execution")
-    return {
+    if isinstance(stars, list):
+        if len(stars) > 5 or any(isinstance(value, bool) or str(value) not in {'1','2','3','4','5'} for value in stars):
+            raise ValueError('invalid_complaint_stars')
+    elif isinstance(stars, str):
+        if len(stars) > 40 or any(part.strip() not in {'1','2','3','4','5'} for part in stars.split(',')):
+            raise ValueError('invalid_complaint_stars')
+    else:
+        raise ValueError('invalid_complaint_stars')
+    for field in SUBMIT_SOURCE_FIELDS - {'feedback_ids', 'stars'}:
+        value = payload.get(field)
+        if value is not None and (not isinstance(value, (str, bool, int))
+            or (isinstance(value, str) and len(value) > 160)
+            or (isinstance(value, int) and abs(value) > 2**63-1)):
+            raise ValueError('invalid_complaint_' + field)
+    normalized = {
         **dict(payload),
         "feedback_ids": feedback_ids,
         "max_submit": max_submit,
@@ -1009,6 +1174,9 @@ def _validate_submit_selected_payload(payload: Mapping[str, Any]) -> dict[str, A
         "is_answered": _safe_text(payload.get("is_answered") or "all", 20) or "all",
         "max_api_rows": max(1, _safe_int(payload.get("max_api_rows") or 100)),
     }
+    if len(json.dumps(_submit_request_operands(normalized), ensure_ascii=False, indent=2).encode('utf-8')) > SUBMIT_JOB_SOURCE_MAX_BYTES:
+        raise ValueError('complaint_source_exceeds_bound')
+    return normalized
 
 
 def _run_guarded_submit_selected_for_runtime(

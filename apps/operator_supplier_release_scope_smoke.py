@@ -1,9 +1,9 @@
-"""Fresh import/render closure for the bounded FF, supplier, CNY, library/contracts facilities and SKU release."""
+"""Fresh import/render closure for the bounded FF, supplier, CNY, library/contracts facilities SKU, external and feedback projections and JSON business settings and native AI settings and analysis prompt and complaint schedule/manual release."""
 from pathlib import Path
 import ast,importlib,importlib.abc,inspect,sys,unittest
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
-FUTURE=frozenset('operator_policy operator_policy_history operator_external_operations operator_feedback_operations operator_business_settings operator_autoanswers_settings operator_feedback_analysis_settings operator_feedback_complaint_schedules operator_cleaner_operations'.split())
-ASSETS=frozenset('sheet_vitrina_v1_operator_policy.js'.split())
+FUTURE=frozenset('operator_policy operator_policy_history operator_balance_jobs operator_spp_jobs operator_cleaner_operations'.split())
+ASSETS=frozenset('sheet_vitrina_v1_operator_policy.js sheet_vitrina_v1_operator_cleaner.js'.split())
 
 
 class DenyFuture(importlib.abc.MetaPathFinder):
@@ -15,7 +15,7 @@ class DenyFuture(importlib.abc.MetaPathFinder):
 class Tests(unittest.TestCase):
     def test_fresh_imports_and_all_exposed_pages(self):
         guard=DenyFuture();sys.meta_path.insert(0,guard);self.addCleanup(sys.meta_path.remove,guard)
-        modules=['packages.adapters.registry_upload_http_entrypoint','packages.application.registry_upload_http_entrypoint','packages.application.operator_operations','packages.application.operator_supplier_journal','packages.application.operator_cny_documents','packages.application.operator_nomenclature','packages.application.operator_compat_uploads','packages.application.operator_facility_mappings','packages.application.operator_manual_ff_stock','packages.application.operator_trade_documents','packages.application.operator_supplier_contracts','packages.application.operator_supplier_history','packages.application.operator_supplier_history_candidate','packages.application.owned_history_worker','apps.web_vitrina_history_candidate_build','apps.web_vitrina_owned_history_worker']
+        modules=['packages.adapters.registry_upload_http_entrypoint','packages.application.registry_upload_http_entrypoint','packages.application.operator_operations','packages.application.operator_supplier_journal','packages.application.operator_cny_documents','packages.application.operator_nomenclature','packages.application.operator_external_operations','packages.application.operator_business_settings','packages.application.operator_feedback_operations','packages.application.operator_autoanswers_settings','packages.application.operator_feedback_analysis_settings','packages.application.operator_feedback_complaint_schedules','packages.application.operator_complaint_runs','packages.application.operator_complaint_source_projection','packages.application.operator_compat_uploads','packages.application.operator_facility_mappings','packages.application.operator_manual_ff_stock','packages.application.operator_trade_documents','packages.application.operator_supplier_contracts','packages.application.operator_supplier_history','packages.application.operator_supplier_history_candidate','packages.application.owned_history_worker','apps.web_vitrina_history_candidate_build','apps.web_vitrina_owned_history_worker']
         for name in modules:importlib.import_module(name)
         from packages.adapters import registry_upload_http_entrypoint as adapter
         page_names=['_render_sheet_vitrina_supplier_ui','_render_sheet_vitrina_supplier_safe_ui','_render_sheet_vitrina_web_vitrina_ui','_render_sheet_vitrina_settings_ui','_render_sheet_vitrina_operator_ui']
@@ -29,6 +29,7 @@ class Tests(unittest.TestCase):
 
     def test_static_installed_source_imports_and_assets(self):
         paths=['packages/adapters/registry_upload_http_entrypoint.py','packages/application/registry_upload_http_entrypoint.py','packages/application/operator_operations.py','apps/web_vitrina_owned_history_worker.py','packages/application/owned_history_worker.py']
+        paths += ['packages/application/operator_business_settings.py','packages/application/operator_external_operations.py']
         paths += [str(p.relative_to(ROOT)) for p in (ROOT/'packages/application').glob('operator_supplier*.py')]
         for relative in paths:
             text=(ROOT/relative).read_text();tree=ast.parse(text)

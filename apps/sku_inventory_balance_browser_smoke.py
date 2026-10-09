@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.operator_business_settings_fixture import BusinessSettingsFixture
+
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     _render_sheet_vitrina_web_vitrina_ui,
 )
@@ -53,6 +55,7 @@ def main() -> None:
             "preset": "all",
         },
     }
+    settings["operator_scope"]="fixture-config-user"
     calculation = _calculation()
     new_calculation = deepcopy(calculation)
     new_calculation["calculation_id"] = "ibc_browser_new"
@@ -69,7 +72,7 @@ def main() -> None:
     operation_status_reads = [0]
     apply_status_reads = [0]
 
-    with sync_playwright() as playwright:
+    with BusinessSettingsFixture() as settings_source,sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1366, "height": 900})
         page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
@@ -77,7 +80,7 @@ def main() -> None:
 
         def route_handler(route):
             request = route.request
-            path = request.url.split("balance.test", 1)[-1]
+            path = request.url.split("127.0.0.1:18791", 1)[-1]
             body = json.loads(request.post_data or "{}") if request.post_data else {}
             requests.append((request.method, path, body))
             if path.split("?", 1)[0] == "/page":
@@ -150,10 +153,13 @@ def main() -> None:
                     body=json.dumps(latest_operation[0]),
                 )
                 return
+            if path.startswith("/v1/sheet-vitrina-v1/operations/business-settings"):
+                from urllib.parse import unquote
+                receipt=settings_source.read(unquote(path.rsplit('/',1)[-1]))
+                route.fulfill(status=200 if receipt else 404,content_type="application/json",body=json.dumps({"operation":receipt}))
+                return
             if path == base + "/settings":
-                settings["revision"] += 1
-                settings["calculation"] = body.get("calculation") or settings["calculation"]
-                settings["table"] = body.get("table") or settings["table"]
+                settings.update(settings_source.save("sku_inventory_balance",body,settings))
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(settings))
                 return
             if path.endswith("/override"):
@@ -208,7 +214,9 @@ def main() -> None:
             route.fulfill(status=404, content_type="application/json", body='{"error":"not found"}')
 
         page.route("**/*", route_handler)
-        page.goto("http://balance.test/page")
+        # Native settings fences require secure-context Web Locks. All requests
+        # remain intercepted fixtures; loopback provides browser lock support.
+        page.goto("http://127.0.0.1:18791/page")
         page.locator('[data-sku-management-subtab="inventory-balance"]').click(force=True)
         page.locator("[data-inventory-balance-body]").wait_for()
         page.wait_for_timeout(500)
@@ -638,6 +646,8 @@ def main() -> None:
         page.locator("[data-inventory-balance-preset]").select_option("actionable")
         saved_columns = page.evaluate("JSON.stringify({visible:state.inventoryBalance.table.visible_columns,order:state.inventoryBalance.table.column_order,widths:state.inventoryBalance.table.column_widths})")
         page.locator("[data-inventory-balance-settings-save]").click()
+        page.wait_for_selector("#operator-business-settings-receipt[open]")
+        page.locator("#operator-business-settings-receipt").get_by_role("button",name="Закрыть").click()
         page.wait_for_timeout(50)
         assert page.evaluate("JSON.stringify({visible:state.inventoryBalance.table.visible_columns,order:state.inventoryBalance.table.column_order,widths:state.inventoryBalance.table.column_widths})") == saved_columns
 

@@ -582,9 +582,10 @@ class SkuManagementBlock:
             "forecast": asdict(forecast),
             "table": table,
             "canonical_store": "server_runtime_user_config",
+            "operator_scope": user_key,
         }
 
-    def save_settings(self, *, user_key: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def save_settings(self, *, user_key: str, payload: Mapping[str, Any], actor: str = '') -> dict[str, Any]:
         forecast = validate_forecast_settings(payload.get("forecast") if isinstance(payload.get("forecast"), Mapping) else {})
         table = _sanitize_table_preferences(payload.get("table") if isinstance(payload.get("table"), Mapping) else {})
         saved = self.runtime.save_sheet_vitrina_user_config(
@@ -594,10 +595,16 @@ class SkuManagementBlock:
             payload={"forecast": asdict(forecast), "table": table},
             updated_at=self.timestamp_factory(),
             expected_revision=_optional_int(payload.get("base_revision")),
+            **({'operator_command':dict(operation_id=payload['operation_id'],actor=actor,seller_id=canonical_seller_id())}
+                if 'operation_id' in payload else {}),
         )
         if saved.get("status") == "conflict":
             raise SkuManagementError("sku management settings revision conflict", http_status=409, payload=saved)
-        return self.get_settings(user_key=user_key)
+        result=dict(status='ok',revision=saved['revision'],updated_at=saved['updated_at'],
+            forecast=dict(saved['config']['forecast']),table=dict(saved['config']['table']),
+            canonical_store='server_runtime_user_config',operator_scope=user_key)
+        if saved.get('acceptance'):result['acceptance']=saved['acceptance']
+        return result
 
     def get_warehouse_exclusion_settings(self, *, user_key: str) -> dict[str, Any]:
         del user_key  # policy ownership is seller/account-level, never per browser user
