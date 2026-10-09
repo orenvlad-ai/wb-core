@@ -63,8 +63,14 @@
         "apsw==3.53.4.0"
       ]
     },
+    "stock_monitor_imports": {
+      "scripts": ["apps/stock_monitor_smoke.py", "apps/stock_monitor_jobs_smoke.py", "apps/stock_monitor_market_smoke.py", "apps/stock_monitor_http_smoke.py"],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "playwright_chromium": {
       "scripts": [
+        "apps/stock_monitor_browser_smoke.py",
         "apps/operator_complaint_runs_browser_smoke.py",
         "apps/operator_settings_facilities_browser_smoke.py",
         "apps/operator_feedback_schedules_smoke.py","apps/operator_balance_job_recovery_smoke.py","apps/operator_spp_job_recovery_smoke.py","apps/operator_manual_ff_stock_browser_smoke.py",
