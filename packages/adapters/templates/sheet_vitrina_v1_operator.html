@@ -6223,6 +6223,7 @@
       let fbsFulfillmentUiRevision = 0;
       let fbsFulfillmentStatusRequest = 0;
       let fbsFulfillmentCalculating = false;
+      let fbsInitialReadinessMessage = true;
       let fbsReadinessScope = null;
       let fbsStatusController = null;
       let fbsStatusDebounce = 0;
@@ -14274,6 +14275,7 @@
       }
 
       function setFbsFulfillmentMessage(text, stateClass) {
+        fbsInitialReadinessMessage = false;
         fbsFulfillmentMessage.textContent = text || "";
         fbsFulfillmentMessage.className = "section-message" + (stateClass ? " is-" + stateClass : "");
       }
@@ -14581,6 +14583,16 @@
         }
         fbsReadinessScope = options ? options.scope : null;
         renderFbsFacilityReadiness();
+        // Preserving a preview must not preserve the initial loading label.
+        // Any later user or calculation message has already cleared this flag.
+        if (fbsInitialReadinessMessage) {
+          const ready = !fbsFulfillmentCalculateButton.disabled;
+          setFbsFulfillmentMessage(
+            ready ? "Готовность выбранных SKU проверена. Можно рассчитать заказ."
+              : "Готовность выбранных SKU проверена. Причина блокировки показана ниже.",
+            ready ? "success" : "warning"
+          );
+        }
         if (options && options.preserveUi) return;
         const lastResult = payload ? payload.last_result : null;
         const currentResult = fbsFulfillmentCurrentResult && fbsResultFingerprint(fbsFulfillmentCurrentResult) === fbsFormFingerprint()
