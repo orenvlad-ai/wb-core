@@ -15,6 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from select_checks import verify_plan  # noqa: E402
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+# This suite contains six independently bounded native-history completions.
+# Keep its normal unittest discovery intact and grant only this exact argv a
+# larger aggregate budget. Candidate plan fields cannot change these limits.
+COMMAND_TIMEOUT_SECONDS = {
+    ("python3", "apps/operator_supplier_history_smoke.py"): 1800,
+}
 
 
 def local_markdown_links(root: Path, changed: list[str]) -> list[str]:
@@ -74,7 +80,8 @@ def main() -> int:
         if not isinstance(command, list) or not command or command[0] not in {"python3", "node"}:
             raise SystemExit(f"unsupported command: {command!r}")
         print("check:", " ".join(command), flush=True)
-        subprocess.run(command, cwd=root, check=True, timeout=900)
+        timeout = COMMAND_TIMEOUT_SECONDS.get(tuple(command), 900)
+        subprocess.run(command, cwd=root, check=True, timeout=timeout)
     return 0
 
 
