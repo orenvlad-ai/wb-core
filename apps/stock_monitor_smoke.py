@@ -173,7 +173,7 @@ class CacheTests(unittest.TestCase):
         root = Path(self.temp.name)
         self.now = NOW
         self.service = StockMonitorService(runtime=SimpleNamespace(runtime_dir=root, db_path=root/'never-open.sqlite'),
-            now_factory=lambda: self.now)
+            now_factory=lambda: self.now, ads_loader=lambda: {'index': {}})
         source = {'captured_at': NOW.isoformat(), 'date': '2026-09-05'}
         child = {'facility_id':'A','name':'FBS Москва','current_stock':100,'avg_daily_sales':10,
             'warnings':[],'stock_source':source}
@@ -187,6 +187,8 @@ class CacheTests(unittest.TestCase):
         with patch.object(self.service, '_build_base', return_value=self.base):
             self.service.refresh_snapshot()
         with (patch.object(self.service, '_build_base', side_effect=AssertionError('must not rebuild')),
+              patch.object(self.service, '_load_market_ads', side_effect=AssertionError('GET must not read bids')),
+              patch('packages.application.stock_monitor_market.build_market', side_effect=AssertionError('GET must not read references')),
               patch('packages.application.stock_monitor._read', side_effect=AssertionError('must not open sources'))):
             result = self.service.get_snapshot()
             self.assertEqual(result['rows'][0]['cells'][0]['quantity'], 100)
@@ -196,6 +198,37 @@ class CacheTests(unittest.TestCase):
             self.assertIsNone(result['rows'][0]['current_stock'])
             self.assertIsNone(result['rows'][0]['cells'][0]['quantity'])
         self.assertFalse(self.service.get_snapshot(period_days=30)['cache']['hit'])
+
+    def test_legacy_saved_snapshot_without_market_remains_readable(self):
+        path = self.service._path(14)
+        path.parent.mkdir()
+        path.write_text(json.dumps(self.base))
+        with patch('packages.application.stock_monitor_market.build_market', side_effect=AssertionError('GET reference enrichment')):
+            result = self.service.get_snapshot()
+        self.assertEqual(result['rows'][0]['current_stock'],100)
+        self.assertNotIn('market',result['rows'][0])
+
+    def test_reference_failure_does_not_prevent_new_stock_publication(self):
+        from unittest.mock import Mock
+        self.service._ads_loader = Mock(return_value={'index':{1:[{'status':9,'payment_type':'cpm',
+            'advert_id':1,'placement':'search','current_bid_rub':250,'campaign_fetched_at':NOW.isoformat()}]}})
+        with (patch.object(self.service,'_build_base',return_value=self.base),
+              patch('packages.application.stock_monitor_market._temporal',return_value=({1:{'price_seller_discounted':500,'promo_participation':0}},NOW.isoformat(),False))):
+            self.service.refresh_snapshot()
+        self.base['rows'][0]['warehouses'][0]['current_stock'] = 20
+        self.base['rows'][0]['current_stock'] = 20
+        self.service._ads_loader.side_effect = RuntimeError('unavailable')
+        self.service._market_ads_read_at = None
+        with (patch.object(self.service,'_build_base',return_value=self.base),
+              patch('packages.application.stock_monitor_market._temporal',side_effect=OSError('unavailable'))):
+            self.service.refresh_snapshot()
+        result = self.service.get_snapshot()['rows'][0]
+        self.assertEqual(result['current_stock'],20)
+        self.assertEqual(result['market']['seller_price']['value'],500)
+        self.assertEqual(result['market']['seller_price']['captured_at'],NOW.isoformat())
+        self.assertEqual(result['market']['seller_price']['status'],'stale')
+        self.assertEqual(result['market']['cpm_bid']['value'],250)
+        self.assertEqual(result['market']['cpm_bid']['status'],'stale')
 
     def test_large_horizon_transports_at_most_ninety_cells_and_validates_period(self):
         with patch.object(self.service, '_build_base', return_value=self.base):
@@ -256,7 +289,8 @@ class IntegrationTests(unittest.TestCase):
             before = path.read_bytes()
             history = FbsDemandHistory({'A':{1:{'2026-09-03':100,'2026-09-04':100},2:{}},'B':{1:{},2:{}}},
                 ('2026-09-03','2026-09-04'),(),{'status':'available','fingerprint':'history'})
-            service = StockMonitorService(runtime=SimpleNamespace(runtime_dir=root,db_path=path),now_factory=lambda:NOW)
+            service = StockMonitorService(runtime=SimpleNamespace(runtime_dir=root,db_path=path),now_factory=lambda:NOW,
+                ads_loader=lambda: {'index': {}})
             with patch('packages.application.stock_monitor.load_daily_fbs_demand',return_value=history):
                 refreshed = service.refresh_snapshot(period_days=2)
             self.assertEqual(refreshed['sku_count'],2)

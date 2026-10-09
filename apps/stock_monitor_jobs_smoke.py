@@ -85,6 +85,48 @@ class Scheduling(unittest.TestCase):
         self.assertEqual(self.published, [30, 45])
         self.assertEqual(result['period_days'], 45)
 
+    def test_cycle_market_batch_reused_after_ttl_and_fresh_next_operation(self):
+        from packages.application.stock_monitor import StockMonitorService
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                ads = Mock(side_effect=RuntimeError('unavailable')) if failed else Mock(return_value={'index':{}})
+                service = StockMonitorService(runtime=self.service.runtime,ads_loader=ads)
+                controller = StockMonitorJobs(service=service,operator_jobs=self.jobs)
+                controller.request_refresh(30)
+                with patch('packages.application.stock_monitor.time.monotonic',return_value=0) as clock:
+                    def refresh(*, period_days):
+                        try: service._load_market_ads()
+                        except RuntimeError: pass
+                        clock.return_value += 121
+                        return self.refresh(period_days=period_days)
+                    service.refresh_snapshot = refresh
+                    controller.refresh_cycle()
+                    self.assertEqual(ads.call_count,1)
+                    controller.refresh_cycle()
+                    self.assertEqual(ads.call_count,2)
+
+    def test_manual_followup_market_batch_reused_after_ttl(self):
+        from contextlib import nullcontext
+        from packages.application.stock_monitor import StockMonitorService
+        ads = Mock(return_value={'index':{}})
+        service = StockMonitorService(runtime=self.service.runtime,ads_loader=ads)
+        controller = StockMonitorJobs(service=service,operator_jobs=self.jobs)
+        controller.request_refresh(30)
+        with patch('packages.application.stock_monitor.time.monotonic',return_value=0) as clock, \
+             patch('packages.application.stock_monitor_jobs.heavy_admitted',return_value=nullcontext()):
+            def refresh(*, period_days):
+                service._load_market_ads()
+                clock.return_value += 121
+                if period_days == 30:
+                    (controller.root/'settings.json').write_text(json.dumps({'period_days':45}))
+                return self.refresh(period_days=period_days)
+            service.refresh_snapshot = refresh
+            self.jobs.runner(lambda _:None)
+            self.assertEqual(self.published,[30,45])
+            ads.assert_called_once_with()
+            self.jobs.runner(lambda _:None)
+            self.assertEqual(ads.call_count,2)
+
     def test_history_has_no_monitor_publication(self):
         from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint as Entry, SHEET_OPERATOR_JOB_ID
         from packages.application.business_data_heavy_admission import heavy_admitted
@@ -103,7 +145,7 @@ class Scheduling(unittest.TestCase):
                     side_effect=lambda **kwargs: events.append('history_published') or {'edition':'history-proof'}), \
                  patch('packages.application.registry_upload_http_entrypoint.StockMonitorService', return_value=self.service):
                 proof = Entry._cycle_history(owner, None, receipt, {'ready':'v1'})
-            self.assertEqual(events, ['history_published', 'ready_verified'])
+            self.assertEqual(events, ['ready_verified', 'history_published', 'ready_verified'])
             self.assertEqual(proof.versions, {'history_edition':'history-proof'})
             self.assertEqual(self.published, [])
         finally:

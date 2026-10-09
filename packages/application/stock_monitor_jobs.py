@@ -5,6 +5,7 @@ Reading the screen never loads source history or starts a producer.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import threading
@@ -33,6 +34,11 @@ class StockMonitorJobs:
         self.root = Path(service.runtime.runtime_dir) / 'stock_monitor'
         self._lock = threading.RLock()
 
+    def _market_scope(self):
+        # Lightweight legacy/fake services need no market enrichment context.
+        scope = getattr(self.service, 'market_refresh_scope', None)
+        return scope() if scope is not None else nullcontext()
+
     def preferred_period(self) -> int:
         try:
             value = json.loads((self.root / 'settings.json').read_text(encoding='utf-8'))
@@ -53,7 +59,7 @@ class StockMonitorJobs:
 
             def worker(log):
                 try:
-                    with heavy_admitted(self.service.runtime.runtime_dir, operation='stock_monitor_refresh'):
+                    with heavy_admitted(self.service.runtime.runtime_dir, operation='stock_monitor_refresh'), self._market_scope():
                         target = self.preferred_period()
                         result = self.service.refresh_snapshot(period_days=target)
                         # A preference changed while building gets one bounded follow-up.
@@ -73,15 +79,16 @@ class StockMonitorJobs:
         # Called once at the terminal attempt tail, under the still-live cycle
         # worker heavy/maintenance ownership, including failed core stages.
         outcomes = []
-        for days in sorted({14, self.preferred_period()}):
-            try:
-                snapshot = self.service.refresh_snapshot(period_days=days)
-                outcomes.append({'period_days': days, 'status': 'published',
-                                 'snapshot_id': snapshot.get('source_fingerprint', ''),
-                                 'generated_at': snapshot.get('generated_at', '')})
-            except Exception as exc:
-                # Last-good files remain intact. Source and warehouse cycle results
-                # must not be discarded because this derived view could not refresh.
-                outcomes.append({'period_days': days, 'status': 'retained',
-                                 'error_code': type(exc).__name__})
+        with self._market_scope():
+            for days in sorted({14, self.preferred_period()}):
+                try:
+                    snapshot = self.service.refresh_snapshot(period_days=days)
+                    outcomes.append({'period_days': days, 'status': 'published',
+                                     'snapshot_id': snapshot.get('source_fingerprint', ''),
+                                     'generated_at': snapshot.get('generated_at', '')})
+                except Exception as exc:
+                    # Last-good files remain intact. Source and warehouse cycle results
+                    # must not be discarded because this derived view could not refresh.
+                    outcomes.append({'period_days': days, 'status': 'retained',
+                                     'error_code': type(exc).__name__})
         return {'snapshots': outcomes}

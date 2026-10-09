@@ -38,6 +38,23 @@ def fixture(period=14, horizon=60, date_offset=0):
                               "demand_quality": {"qualified_days": 5, "requested_days": period,
                                                  "first_date": "2026-09-01", "last_date": "2026-10-07"}}]
         rows.append(row)
+    for row in rows:
+        nm = row["nm_id"]
+        if nm == 95:  # A cached snapshot made before the additive market fields.
+            continue
+        def metric(value, source, status="ready", warning="", captured="2026-10-08T10:30:00+05:00"):
+            return {"value": value, "source": source, "status": status, "warning": warning, "captured_at": captured}
+        row["market"] = {
+            "seller_price": metric(None if nm == 1 else 100.5 if nm == 2 else 200 if nm == 3 else nm*10, "prices_snapshot", "missing" if nm == 1 else "stale" if nm == 3 else "ready", "Новые цены не получены" if nm == 3 else "", "2026-10-05T10:30:00+05:00" if nm == 3 else "2026-10-08T10:30:00+05:00"),
+            "buyer_wallet_price": metric(None if nm == 1 else 80.75 if nm == 2 else nm*9, "wb_buyer_authenticated", "missing" if nm == 1 else "ready"),
+            "promo_participation": metric(None if nm == 1 else nm % 2, "promo_by_price", "missing" if nm == 1 else "ready"),
+            "cpm_bid": metric(None if nm in (1, 4) else 250.125 if nm == 2 else nm*3, "ads_placement_index", "ambiguous" if nm == 4 else "missing" if nm == 1 else "ready", "Разные ставки площадок; единого значения нет" if nm == 4 else ""),
+            "cpc_bid": metric(None if nm in (1, 5) else 1.2345 if nm == 2 else nm/10, "ads_placement_index", "missing" if nm in (1, 5) else "ready", "Нет активной CPC-кампании" if nm == 5 else ""),
+        }
+        if nm == 4:
+            row["market"]["cpm_bid"]["details"] = [{"advert_id": 501, "placement": "search", "bid": 100}, {"advert_id": 501, "placement": "recommendations", "bid": 200}]
+        for warehouse in row["warehouses"]:
+            warehouse["market"] = row["market"]  # Child must never duplicate it.
     return {"contract_name": "stock_monitor", "generated_at": "2026-10-08T11:00:00+05:00",
             "report_date": today.isoformat(), "period_days": period, "horizon_days": horizon, "date_offset": date_offset,
             "dates": dates, "rows": rows, "warnings": [], "cache": {"hit": True}, "freshness": {"fbs_captured_at": "2026-10-06T10:00:00+05:00"}}
@@ -174,7 +191,7 @@ def main():
     finally:
         server.shutdown()
         server.server_close()
-    print(json.dumps({"status": "ok", "checked": ["unknown_not_zero", "warehouse_forecast", "stale_warning", "quality_details", "sort", "hidden_columns", "search", "display_modes", "deficit_jump", "independent_period", "bounded_horizontal_dom", "no_cache_not_published", "old_target_cache_not_published", "refresh_failure_visible", "composed_shell_nav", "compact_row_geometry"], "api_requests": len(requests)}))
+    print(json.dumps({"status": "ok", "checked": ["unknown_not_zero", "warehouse_forecast", "stale_warning", "quality_details", "sort", "hidden_columns", "search", "display_modes", "deficit_jump", "independent_period", "bounded_horizontal_dom", "no_cache_not_published", "old_target_cache_not_published", "refresh_failure_visible", "composed_shell_nav", "compact_row_geometry", "optional_market_defaults", "market_sources_timestamps", "market_ambiguity_missing", "market_numeric_null_last", "market_resize_persistence_sticky"], "api_requests": len(requests)}))
 
 
 def shell_checks():
@@ -207,8 +224,88 @@ def shell_checks():
             assert first_cell.locator('.sm-number').evaluate("el=>el.getBoundingClientRect().height") <= 15
             assert first_cell.evaluate("el=>Math.abs(el.closest('td').getBoundingClientRect().width-38)<1")
             page.locator('[data-sm-expand="3"]').click()
+            market_keys = ["seller_price", "buyer_wallet_price", "promo_participation", "cpm_bid", "cpc_bid"]
+            assert all(page.locator(f'[data-sm-sort="{key}"]').count() == 0 for key in market_keys)
+            # Legacy column and width preferences must not opt into new data.
+            page.evaluate("localStorage.setItem('wbc.stock-monitor.columns.v1',JSON.stringify(['category']));localStorage.setItem('wbc.stock-monitor.widths.v1',JSON.stringify({name:156,day:38}))")
+            page.reload(wait_until="domcontentloaded")
+            page.locator('[data-unified-tab-button="warehouses"]').click()
+            page.locator('[data-open-stock-monitor]').click()
+            page.wait_for_selector('[data-sm-expand="3"]')
+            assert all(page.locator(f'[data-sm-sort="{key}"]').count() == 0 for key in market_keys)
+            assert page.locator('[data-sm-sort="category"]').count() == 0
+            assert page.locator('[data-sm-resize="name"]').get_attribute("aria-valuenow") == "156"
+            page.locator('.sm-columns summary').click()
+            for key in market_keys:
+                page.locator(f'[data-sm-column="{key}"]').check()
+            page.locator('.sm-columns summary').click()
+            seller = page.locator('[data-sm-market="seller_price"][data-sm-market-row="2"]')
+            assert seller.inner_text() == "100,5"
+            assert "после скидки продавца" in seller.get_attribute("title")
+            assert "08.10.2026" in seller.get_attribute("title")
+            buyer = page.locator('[data-sm-market="buyer_wallet_price"][data-sm-market-row="2"]')
+            assert buyer.inner_text() == "80,75"
+            assert "Зафиксирована в покупательском аккаунте" in buyer.get_attribute("title")
+            assert "Цена покупателя с кошельком" in page.locator('[data-sm-sort="buyer_wallet_price"]').get_attribute("title")
+            assert page.locator('[data-sm-market="promo_participation"][data-sm-market-row="2"]').inner_text() == "0"
+            assert "Справочный признак по цене" in page.locator('[data-sm-market="promo_participation"][data-sm-market-row="2"]').get_attribute("title")
+            assert page.locator('[data-sm-market="cpm_bid"][data-sm-market-row="2"]').inner_text() == "250,125"
+            assert page.locator('[data-sm-market="cpc_bid"][data-sm-market-row="2"]').inner_text() == "1,2345"
+            missing = page.locator('[data-sm-market="cpc_bid"][data-sm-market-row="5"]')
+            assert missing.inner_text() == "—" and "Нет активной CPC-кампании" in missing.get_attribute("title")
+            ambiguous = page.locator('[data-sm-market="cpm_bid"][data-sm-market-row="4"]')
+            assert ambiguous.inner_text() == "—" and "единого значения нет" in ambiguous.get_attribute("title")
+            assert "Кампания 501" in ambiguous.get_attribute("title")
+            stale = page.locator('[data-sm-market="seller_price"][data-sm-market-row="3"]')
+            assert stale.inner_text() == "200" and "05.10.2026" in stale.get_attribute("title") and "новые данные не получены" in stale.get_attribute("title")
+            assert page.locator('[data-sm-market="seller_price"][data-sm-market-row="95"]').inner_text() == "—"
+            page.locator('[data-sm-expand="3"]').click()
+            for key in market_keys:
+                child = page.locator(f'[data-sm-market="{key}"][data-sm-market-row="3:0"]')
+                assert child.inner_text() == "—"
+                assert "основную строку" in child.get_attribute("title")
+            for key in market_keys:
+                page.locator(f'[data-sm-sort="{key}"]').click()
+                values = page.locator(f'tbody tr:not(.sm-child) [data-sm-market="{key}"]').all_text_contents()
+                numeric = [float(text.replace('\xa0','').replace('\u202f','').replace(',','.')) for text in values if text != "—"]
+                assert numeric == sorted(numeric)
+                assert values[-1] == "—"
+                page.locator(f'[data-sm-sort="{key}"]').click()
+                values = page.locator(f'tbody tr:not(.sm-child) [data-sm-market="{key}"]').all_text_contents()
+                numeric = [float(text.replace('\xa0','').replace('\u202f','').replace(',','.')) for text in values if text != "—"]
+                assert numeric == sorted(numeric, reverse=True) and values[-1] == "—"
+            handle = page.locator('[data-sm-resize="seller_price"]')
+            handle.press("ArrowRight")
+            assert handle.get_attribute("aria-valuenow") == "87"
+            page.locator('[data-sm-scroll]').evaluate("el => el.scrollLeft=600")
+            seller.hover()
+            fixed = seller.locator('xpath=..')
+            assert fixed.evaluate("el => {const tr=el.parentElement, cells=[...tr.querySelectorAll('td.sm-fixed')];return cells.every(cell=>{const color=getComputedStyle(cell).backgroundColor;return color!=='transparent'&&!color.endsWith(', 0)')})}")
+            geometry = fixed.evaluate("el => ({delta:el.getBoundingClientRect().left-el.closest('.sm-scroll').getBoundingClientRect().left,left:parseFloat(getComputedStyle(el).left),scroll:el.closest('.sm-scroll').scrollLeft})")
+            assert abs(geometry["delta"] - geometry["left"]) < 3, geometry
+            assert seller.evaluate("el=>el.scrollWidth>=el.clientWidth")
+            page.reload(wait_until="domcontentloaded")
+            page.locator('[data-unified-tab-button="warehouses"]').click()
+            page.locator('[data-open-stock-monitor]').click()
+            page.wait_for_selector('[data-sm-sort="seller_price"]')
+            assert all(page.locator(f'[data-sm-sort="{key}"]').count() == 1 for key in market_keys)
+            assert page.locator('[data-sm-sort="category"]').count() == 0
+            assert page.locator('[data-sm-resize="seller_price"]').get_attribute("aria-valuenow") == "87"
+            assert page.locator('[data-sm-resize="name"]').get_attribute("aria-valuenow") == "156"
+            # Hiding a fixed column updates every subsequent sticky offset.
+            page.locator('.sm-columns summary').click()
+            page.locator('[data-sm-column="seller_price"]').uncheck()
+            page.locator('.sm-columns summary').click()
+            assert page.locator('[data-sm-sort="seller_price"]').count() == 0
+            assert page.locator('[data-sm-market="buyer_wallet_price"][data-sm-market-row="2"]').locator('xpath=..').evaluate("el => parseFloat(getComputedStyle(el).left)") == 310
             evidence = os.environ.get("WBC_STOCK_MONITOR_EVIDENCE_DIR")
             if evidence:
+                page.locator('.sm-columns summary').click()
+                page.locator('[data-sm-column="seller_price"]').check()
+                page.locator('.sm-columns summary').click()
+                page.locator('[name="search"]').fill("Модель 00")
+                page.locator('[data-sm-sort="name"]').click()
+                page.locator('[data-sm-expand="3"]').click()
                 target = Path(evidence)
                 target.mkdir(parents=True, exist_ok=True)
                 for theme in ("dark", "light"):
