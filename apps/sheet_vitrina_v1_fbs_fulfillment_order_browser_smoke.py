@@ -401,6 +401,7 @@ def main() -> int:
                 release_status_request()
                 expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
                 expect(page.locator("#fbsReadinessAvailable")).not_to_have_text("987654321")
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Параметры изменены")
                 assert first_sku.evaluate("node => node === window.oldSkuCheckbox && node === document.activeElement")
                 expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_disabled()
                 # Removed catalog IDs may remain in local preferences, but must
@@ -412,6 +413,8 @@ def main() -> int:
                 # readiness GET. Finish that bootstrap before arming a held
                 # metadata response, so it belongs to the explicit activation.
                 expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
+                expect(page.locator("#fbsFulfillmentMessage")).not_to_contain_text("Читаем готовность источников")
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Готовность")
                 page.locator("#fbsSkuSelectionSummary").click()
                 first_sku = page.locator(f'[data-fbs-sku="{first_id}"]')
                 expect(first_sku).not_to_be_checked()
