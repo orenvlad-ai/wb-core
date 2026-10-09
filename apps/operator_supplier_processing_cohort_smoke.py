@@ -258,7 +258,98 @@ def large_proof_cases():
             print('large synthetic proof descriptor/DELETE cache8pages, '+('single oversized fallback' if fallback else 'bounded cohort')+': no main observer read after DML; '+str(round(elapsed,2))+'ms: OK')
 
 
+def failed_preparation_cases():
+    import gc, sqlite3, time
+    from contextlib import ExitStack
+    from packages.application import operator_supplier_cost_proof as cost, fbs_accounting_runtime as accounting
+    # Real native projection failures occur after the per-source RO BEGIN.
+    # DELETE journal must still retain attempts and complete valid siblings.
+    for failure in ('dated_all', 'source_sql', 'target_sql'):
+        with TemporaryDirectory(prefix='supplier-failed-reader-'+failure+'-') as raw:
+            rt, identities, _, _ = finance_fixture(raw)
+            gc.collect()
+            with closing(sqlite3.connect(rt.db_path)) as conn:
+                assert conn.execute('PRAGMA journal_mode=DELETE').fetchone()[0] == 'delete'
+                if failure == 'dated_all':
+                    assert conn.execute("UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost SET wac_rub='999'").rowcount > 0
+                    failed = set(identities); reason = 'supplier_dated_cost_publication_changed'
+                else:
+                    failed = {identities[0 if failure == 'source_sql' else 1]}; reason = 'no such table'
+                conn.commit()
+            native = cost.read_native_proof
+            def read(*args, **kwargs):
+                if failure != 'dated_all' and args[1] in failed:
+                    # Inject an actual SQLite read error after the real
+                    # per-source BEGIN/SHARED lock. No authority is changed
+                    # and the valid sibling uses its entire native proof.
+                    observer = kwargs['connection']; assert observer.in_transaction
+                    observer.execute('SELECT count(*) FROM sqlite_master').fetchone()
+                    observer.execute('SELECT * FROM missing_supplier_fixture_operand')
+                return native(*args, **kwargs)
+            started = time.perf_counter()
+            with patch.object(cost, 'read_native_proof', read):result = _reconcile(rt)
+            elapsed = (time.perf_counter()-started)*1000
+            states = {item['operation_id']: item for item in result['operations']}
+            assert set(states) == set(identities) and result['status'] == 'pending', result
+            with closing(source.readonly(rt.db_path)) as conn:
+                attempts = {row['operation_id']: row['reason'] for row in conn.execute(f'SELECT * FROM {processing.ATTEMPTS}')}
+                completed = {row[0] for row in conn.execute(f'SELECT operation_id FROM {processing.COMPLETIONS}')}
+            assert attempts == {identity: reason for identity in failed} and completed == set(identities)-failed, (attempts, completed)
+            assert all(not states[identity]['complete'] for identity in failed)
+            assert all(states[identity]['complete'] for identity in completed)
+            assert elapsed < 2000, elapsed
+            print('native DELETE '+failure+': failed reader released, exact attempts '+str(len(attempts))+', valid siblings '+str(len(completed))+', '+str(round(elapsed,2))+'ms: OK')
+    # A per-scope Finance refusal must not roll back the successful coherent
+    # snapshot or discard its actual native projection/capitalization cache.
+    with TemporaryDirectory(prefix='supplier-finance-scope-refusal-') as raw:
+        rt, _, scopes, _ = finance_fixture(raw)
+        book, _ = accounting.load(rt.runtime_dir)
+        shared = accounting.ActiveSharedCostSnapshot(list(book['shared_days'].values()), effective_date=book['effective_date']).metadata()['version_id']
+        with ExitStack() as stack:
+            cohort = cost.FinanceProofCohort(rt, seller_id='canonical', stack=stack)
+            first = cohort.read(queue_ref=scopes[0], shared_version=shared, handoff=[])
+            observer = cohort.conn; projections = dict(cohort.projections)
+            try:cohort.read(queue_ref=scopes[1], shared_version='sha256:'+'f'*64, handoff=[])
+            except ValueError as exc:assert str(exc) == 'supplier_finance_accounting_version_mismatch', str(exc)
+            else:raise AssertionError('expected native scope refusal')
+            assert cohort.conn is observer and observer.in_transaction and cohort.projections == projections
+            second = cohort.read(queue_ref={**scopes[1], 'affected_nm_ids':[1,999]}, shared_version=shared, handoff=[])
+            assert first == second and cohort.projections == projections
+            cohort.seal()
+        print('native Finance scope refusal preserves successful shared snapshot/cache and valid sibling: OK')
+    # Actual open-authority drift refuses both sources and closes the failed
+    # native connection before the attempt writer. A new cohort can recover.
+    with TemporaryDirectory(prefix='supplier-finance-opening-refusal-') as raw:
+        from dataclasses import replace
+        from packages.application.storage_registry import StoreRegistry, atomic_write_manifest, manifest_payload, parse_manifest, _sha256
+        from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
+        rt, identities, _, _ = finance_fixture(raw, split=True)
+        gc.collect()
+        with closing(sqlite3.connect(rt.db_path)) as conn:
+            assert conn.execute('PRAGMA journal_mode=DELETE').fetchone()[0] == 'delete'
+        opened = []; original = WbFinanceWeeklyBlock._connect_stale_cost_plan
+        def changed_open(block, *args, **kwargs):
+            conn = original(block, *args, **kwargs); opened.append(conn)
+            registry = StoreRegistry(rt.runtime_dir)
+            payload = manifest_payload(replace(registry.load(), rollback_generation_id='changed-opening-parent'), include_digest=False)
+            payload['manifest_sha256'] = _sha256(payload)
+            atomic_write_manifest(registry.manifest_path, parse_manifest(payload))
+            return conn
+        with patch.object(WbFinanceWeeklyBlock, '_connect_stale_cost_plan', changed_open):
+            result = _reconcile(rt)
+        assert len(opened) == 1 and not any(item['complete'] for item in result['operations']), result
+        try:opened[0].execute('SELECT 1')
+        except sqlite3.ProgrammingError:pass
+        else:raise AssertionError('failed Finance opening observer retained')
+        with closing(source.readonly(rt.db_path)) as conn:
+            assert {row['operation_id']: row['reason'] for row in conn.execute(f'SELECT * FROM {processing.ATTEMPTS}')} == {identity:'supplier_finance_cohort_authority_changed' for identity in identities}
+            assert conn.execute(f'SELECT count(*) FROM {processing.COMPLETIONS}').fetchone()[0] == 0
+        assert all(item['complete'] for item in _reconcile(rt)['operations'])
+        print('actual native opening manifest drift releases failed observer; exact attempts then fresh cohort completes: OK')
+
+
 if __name__ == '__main__':
     main()
     finance_cohort_cases()
     large_proof_cases()
+    failed_preparation_cases()

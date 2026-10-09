@@ -3,11 +3,12 @@
 The caller retains live RO observers through its short completion CAS. This
 module neither bootstraps schemas nor submits, enqueues, or publishes anything.
 """
-from contextlib import closing, nullcontext
+from contextlib import closing, nullcontext, ExitStack
 from datetime import date
 from decimal import Decimal
 import json
 import re
+import sqlite3
 from copy import deepcopy
 from packages.application import operator_supplier_shipments as source
 from packages.application import operator_supplier_processing as processing
@@ -285,19 +286,24 @@ class FinanceProofCohort:
         self.paths = sorted({self.block.store_registry.resolve(role, manifest=manifest) for role in ('operational', 'finance_raw')})
         identity = self._path_identity()
         authority = []
-        self.conn = self.stack.enter_context(closing(self.block._connect_stale_cost_plan(storage_authority=authority)))
-        self.block._assert_readonly_plan_connection(self.conn)
-        if authority != [manifest] or self._authority() != (manifest, identity):
-            raise ValueError('supplier_finance_cohort_authority_changed')
-        self.expected = self._observe(self.conn)
-        self.conn.execute('BEGIN')
+        # Opening failures have no shared successful snapshot to retain. Do
+        # not leave a partially opened reader in the enclosing writer cohort.
+        with ExitStack() as opening:
+            conn = opening.enter_context(closing(self.block._connect_stale_cost_plan(storage_authority=authority)))
+            self.block._assert_readonly_plan_connection(conn)
+            if authority != [manifest] or self._authority() != (manifest, identity):
+                raise ValueError('supplier_finance_cohort_authority_changed')
+            expected = self._observe(conn)
+            conn.execute('BEGIN')
+            self.conn, self.expected = conn, expected
+            self.stack.enter_context(opening.pop_all())
 
     def read(self, *, queue_ref, shared_version, handoff):
         if self.sealed:raise ValueError('supplier_finance_cohort_already_sealed')
         if self.open_error is not None:raise self.open_error
         if self.conn is None:
             try:self._open()
-            except ValueError as exc:
+            except (ValueError, sqlite3.OperationalError) as exc:
                 self.open_error = exc
                 raise
         # The full native connection, including its capitalization cache, is

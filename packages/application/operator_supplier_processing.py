@@ -262,18 +262,24 @@ COMPLETION_COHORT_MAX_BYTES = 8 * 1024**2
 
 def _prepare_completion(runtime, operation_id, *, seller_id, now, stack, finance_cohort=None):
     from packages.application.operator_supplier_cost_proof import read_native_proof
-    observer = stack.enter_context(closing(source.readonly(runtime.db_path)))
-    op = operation(observer, operation_id)
-    if not current(observer, op):
-        raise ValueError("supplier_completion_source_changed")
-    saved = public_completion(observer, operation_id)
-    if saved and saved["complete"]:
-        return {"saved": saved}
-    observer.commit();observer.execute("BEGIN")
-    handoff = []
-    proof = read_native_proof(runtime, operation_id, seller_id=seller_id, now=now, connection=observer, handoff=handoff, stack=stack, finance_cohort=finance_cohort)
-    _after_native_proof()
-    return {'proof': proof, 'handoff': handoff, 'bytes': len(source._json(proof).encode())}
+    # A failed proof must release its own read transaction before the attempt
+    # writer. Only successful observers survive for the completion CAS; the
+    # shared Finance snapshot belongs to the enclosing cohort independently.
+    with ExitStack() as preparation:
+        observer = preparation.enter_context(closing(source.readonly(runtime.db_path)))
+        op = operation(observer, operation_id)
+        if not current(observer, op):
+            raise ValueError("supplier_completion_source_changed")
+        saved = public_completion(observer, operation_id)
+        if saved and saved["complete"]:
+            return {"saved": saved}
+        observer.commit();observer.execute("BEGIN")
+        handoff = []
+        proof = read_native_proof(runtime, operation_id, seller_id=seller_id, now=now, connection=observer, handoff=handoff, stack=preparation, finance_cohort=finance_cohort)
+        _after_native_proof()
+        size = len(source._json(proof).encode())
+        stack.enter_context(preparation.pop_all())
+        return {'proof': proof, 'handoff': handoff, 'bytes': size}
 
 
 def _validate_completion(conn, operation_id, proof, handoff):
