@@ -6459,7 +6459,7 @@
 	                <div class="research-field"><span class="filter-label">Активный резерв</span><strong data-autoanswers-budget-reserved>—</strong></div>
 	                <div class="research-field"><span class="filter-label">Доступно до лимитов</span><strong data-autoanswers-budget-available>—</strong></div>
 	                <div class="research-field"><span class="filter-label">Без usage / holds</span><strong data-autoanswers-budget-unverified>—</strong></div>
-	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-save-mode>Применить режим</button><button class="button secondary" type="button" data-autoanswers-open-limits>Настроить лимиты</button><button class="button ghost" type="button" data-autoanswers-backlog hidden disabled>Legacy backlog отключён</button></div>
+	                <div class="autoanswers-control-actions"><button class="button secondary" type="button" data-autoanswers-save-mode>Применить режим</button><button class="button ghost" type="button" data-autoanswers-off>Выключить AI</button><button class="button secondary" type="button" data-autoanswers-open-limits>Настроить лимиты</button><button class="button ghost" type="button" data-autoanswers-backlog hidden disabled>Legacy backlog отключён</button></div>
 	              </div>
 	              <section class="autoanswers-queue-dashboard autoanswers-lifecycle-summary" aria-label="Фактическое состояние Autoanswers">
 	                <strong>Фактическое состояние runtime</strong>
@@ -7641,6 +7641,8 @@
     const autoanswersLimitsBoundsNode = document.querySelector("[data-autoanswers-limits-bounds]");
     const autoanswersLimitsResultNode = document.querySelector("[data-autoanswers-limits-result]");
     const autoanswersSaveModeButton = document.querySelector("[data-autoanswers-save-mode]");
+    const autoanswersOffButton = document.querySelector("[data-autoanswers-off]");
+    if(autoanswersOffButton)autoanswersOffButton.addEventListener("click",()=>updateAutoanswersSettings({selector_state:"off"}));
     const autoanswersSettingsNoteNode = document.querySelector("[data-autoanswers-settings-note]");
     const autoanswersApplyButton = document.querySelector("[data-autoanswers-apply]");
     const autoanswersSyncButton = document.querySelector("[data-autoanswers-sync]");
@@ -18415,10 +18417,15 @@
       if (externalRefreshEpoch !== null) {
         refreshAutoanswersLifecycleAfterExternalChange(externalRefreshEpoch);
       }
+      if(WEB_VITRINA_CONFIG.feedbacks_can_admin){for(const lane of ["selector","limits","off"]){if(await recoverAiSettings(lane))break;}}
     }
 
     async function postAutoanswers(path, body) {
-      const response = await fetch(path, {
+      // Capture clicked operands and principal/settings before hashing or locks.
+      body=JSON.parse(JSON.stringify(body || {}));
+      const actorScope=WEB_VITRINA_CONFIG.user_config_key;
+      const settingsRevision=state.feedbacks.server.settingsRevision;
+      const submit=async function(){const response = await fetch(path, {
         method: "POST",
         headers: {"Accept": "application/json", "Content-Type": "application/json; charset=utf-8", "X-WB-Autoanswers-CSRF": "1"},
         body: JSON.stringify(body || {})
@@ -18429,7 +18436,21 @@
         error.code = String(payload.code || "");
         throw error;
       }
-      return payload;
+      return payload;};
+      if(!/\/autoanswers\/(?:manual\/(?:generate|regenerate|edit)|review\/approve)$/.test(path))return submit();
+      const nativeId=body.processing_key || ('feedback-version:'+Number(body.content_version)+':'+String(body.feedback_id||''));
+      const jobs=(state.feedbacks.server.detail || {}).jobs || [];
+      const prior=jobs.find(job=>job.processing_key===body.processing_key) || {};
+      const expected={};
+      const hash=async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)))).map(n=>n.toString(16).padStart(2,'0')).join('');
+      if(path.endsWith('/edit'))expected.manual_reply_sha256=await hash(String(body.reply||'').trim().replace(/\s+/gu,' '));
+      if(path.endsWith('/regenerate'))expected.min_media_processing_version=Number(prior.media_processing_version || 1)+1;
+      if(path.endsWith('/approve')){expected.publication_required=true;if(body.reply_sha256)expected.publication_reply_sha256=body.reply_sha256;}
+      const commandKey=await hash(JSON.stringify({path,body,expected,user:actorScope,settings_revision:settingsRevision}));
+      const result=await OperatorAcceptance.onceFeedback('feedback_reply',nativeId,commandKey,submit,expected);
+      OperatorAcceptance.showFeedbackReceipt(result);
+      if(result.status==='unknown' || result.not_accepted)throw new Error('Подтверждение пока не получено. Проверяется та же команда; повторной отправки не будет.');
+      return result;
     }
 
     function friendlyAutoanswersMutationError(error) {
@@ -18443,34 +18464,135 @@
       return String(error && error.message ? error.message : error);
     }
 
+    function aiSettingsFenceKey(lane) {
+      return "operator-ai-settings:"+String(WEB_VITRINA_CONFIG.user_config_key||"")+":"+WEB_VITRINA_CONFIG.feedbacks_autoanswers_settings_path+":"+lane;
+    }
+
+    function aiSettingsReceiptMatches(receipt,record) {
+      return OperatorAcceptance.acceptedOperation(receipt) && receipt.domain==="autoanswers_settings"
+        && receipt.operation_id===record.identity && Object.keys(record.body).length===Object.keys(receipt.request||{}).length
+        && Object.keys(record.body).every(key=>JSON.stringify(record.body[key])===JSON.stringify(receipt.request[key]));
+    }
+
+    function showAiSettingsReceipt(receipt) {
+      let dialog=document.getElementById("operator-ai-settings-receipt");
+      if(!dialog){dialog=document.createElement("dialog");dialog.id="operator-ai-settings-receipt";document.body.appendChild(dialog);}
+      OperatorAcceptance.renderReceipt(dialog,receipt,{onClose:()=>dialog.close()});
+      if(!OperatorAcceptance.acceptedOperation(receipt)){const close=document.createElement("button");close.textContent="Закрыть";close.onclick=()=>dialog.close();dialog.appendChild(close);}
+      if(!dialog.open)dialog.showModal();
+    }
+
+    async function readAiSettingsReceipt(record) {
+      const response=await fetch("/v1/sheet-vitrina-v1/operations/"+encodeURIComponent(record.identity),{headers:{Accept:"application/json"},cache:"no-store"});
+      const payload=await readJsonResponse(response,"Не получена квитанция AI-настроек.");
+      return response.ok && aiSettingsReceiptMatches(payload.operation,record)?payload.operation:null;
+    }
+
+    async function recoverAiSettings(lane) {
+      const key=aiSettingsFenceKey(lane);
+      if(!navigator.locks || typeof navigator.locks.request!=="function")return false;
+      return navigator.locks.request(key,async()=>{
+        const record=JSON.parse(localStorage.getItem(key)||"null");if(!record)return false;
+        let receipt=null;try{receipt=await readAiSettingsReceipt(record);}catch(_){}
+        if(receipt){const own=JSON.parse(localStorage.getItem(key)||"null");if(own && own.identity===record.identity)localStorage.removeItem(key);}
+        showAiSettingsReceipt(receipt);return true;
+      });
+    }
+
+    function aiSettingsPrecommitRejected(error) {
+      // These native codes are emitted only before the settings transaction
+      // commits. A generic 4xx or projection/readback error is NOT proof of
+      // rollback; retaining its exact ID is mandatory even when GET fails.
+      const status=Number(error && error.httpStatus),code=String(error && error.code || "");
+      if(status===423 && code==="business_data_maintenance")return true;
+      if(status===401 && code==="authentication_required")return true;
+      if(status===403 && ["csrf_failed","forbidden"].includes(code))return true;
+      return status===409 && ["policy_epoch_stale","settings_revision_stale","master_policy_unconfirmed",
+        "emergency_force_off","transition_preview_required","preview_consumed","preview_actor_mismatch",
+        "preview_target_mismatch","preview_expired","preview_epoch_stale","preview_snapshot_stale"].includes(code);
+    }
+
+    async function onceAiSettings(change,current) {
+      // Freeze the confirmed operands and their GUI revision before queued admission.
+      change=JSON.parse(JSON.stringify(change));current=JSON.parse(JSON.stringify(current));
+      const clickedSettingsRevision=state.feedbacks.server.settingsRevision;
+      const lane=change.selector_state==="off" || change.master_enabled===false?"off":change.selector_state || Object.hasOwn(change,"master_enabled") || change.mode?"selector":"limits";
+      const key=aiSettingsFenceKey(lane);
+      if(!navigator.locks || typeof navigator.locks.request!=="function")throw new Error("Не удалось защитить запрос между вкладками. Запись не отправлена.");
+      return navigator.locks.request(key,async()=>{
+        let record,send=false;
+        function clearOwnFence(){const own=JSON.parse(localStorage.getItem(key)||"null");if(own && own.identity===record.identity)localStorage.removeItem(key);}
+        record=JSON.parse(localStorage.getItem(key)||"null");
+        if(!record){
+          // OFF never waits for an uncertain ON/limits fence. A fresh native
+          // epoch is required and still checked inside the settings TX.
+          if(lane==="off"){
+            const response=await fetch(WEB_VITRINA_CONFIG.feedbacks_autoanswers_settings_path,{headers:{Accept:"application/json"},cache:"no-store"});
+            const readback=await readJsonResponse(response,"Не получена текущая версия AI.");
+            if(!response.ok || !readback.settings)throw new Error("Текущая версия AI не подтверждена. OFF не отправлен.");
+            current=readback.settings;
+          }
+          const epoch=Number(current.policy_epoch);
+          if(!Number.isInteger(epoch) || epoch<0)throw new Error("Текущая версия AI не подтверждена. Запись не отправлена.");
+          const body=Object.assign({},change,{expected_policy_epoch:epoch});
+          if(lane==="limits")body.expected_settings_revision=clickedSettingsRevision;
+          record={identity:"ai-settings:"+crypto.randomUUID(),body:body};
+          localStorage.setItem(key,JSON.stringify(record));send=true;
+        }
+        let result=null,definite=null;
+        if(send){
+          try{
+            const response=await fetch(WEB_VITRINA_CONFIG.feedbacks_autoanswers_settings_path,{method:"POST",headers:{Accept:"application/json","Content-Type":"application/json","X-WB-Autoanswers-CSRF":"1"},body:JSON.stringify(Object.assign({},record.body,{operation_id:record.identity}))});
+            const payload=await readJsonResponse(response,"Не получен ответ сохранения AI.");
+            if(response.ok && aiSettingsReceiptMatches(payload.acceptance,record))result=payload;
+            else if(response.status>=400 && response.status<500)definite=Object.assign(new Error(payload.error||"Настройки не сохранились."),{code:payload.code || payload.error,httpStatus:response.status});
+          }catch(_){}
+        }
+        if(!result){
+          // Even a post-commit lifecycle 4xx can have saved the settings. Read
+          // the exact native command before treating an error as a rejection.
+          let receipt=null;try{receipt=await readAiSettingsReceipt(record);}catch(_){}
+          if(receipt)result={acceptance:receipt,mutation_status:"source_saved"};
+          else if(definite && aiSettingsPrecommitRejected(definite)){clearOwnFence();throw definite;}
+          else{showAiSettingsReceipt(null);throw new Error("Сохранение пока не подтверждено. Читаем тот же запрос; повторной отправки не будет.");}
+        }
+        clearOwnFence();showAiSettingsReceipt(result.acceptance);
+        const originalChange=Object.fromEntries(Object.entries(record.body).filter(([k])=>!k.startsWith("expected_")));
+        if(!send && (Object.keys(originalChange).length!==Object.keys(change).length || Object.keys(change).some(k=>JSON.stringify(change[k])!==JSON.stringify(originalChange[k]))))throw new Error("Прежняя команда подтверждена. Новые значения ещё не отправлены; проверьте их перед отдельным сохранением.");
+        const saved=result.acceptance.saved_settings;
+        result.confirmed_limits=Object.fromEntries(Object.keys(record.body).filter(k=>Object.hasOwn(saved,k)).map(k=>[k,saved[k]]));
+        return result;
+      });
+    }
+
     async function updateAutoanswersSettings(change) {
       if (!WEB_VITRINA_CONFIG.feedbacks_can_admin) return;
       const server = state.feedbacks.server;
       const current = server.settings || {};
       const expectedPolicyEpoch = Number(current.policy_epoch);
-      if (!Number.isInteger(expectedPolicyEpoch) || expectedPolicyEpoch < 0) {
+      const explicitOff=change && (change.selector_state==="off" || change.master_enabled===false);
+      if (!explicitOff && (!Number.isInteger(expectedPolicyEpoch) || expectedPolicyEpoch < 0)) {
         server.error = "Сначала обновите server-owned настройки Autoanswers.";
         renderAutoanswersServer();
         return;
-      }
-      const requestBody = Object.assign({}, change || {}, {
-        expected_policy_epoch: expectedPolicyEpoch
-      });
-      if (server.settingsRevision) {
-        requestBody.expected_settings_revision = server.settingsRevision;
       }
       server.error = "";
       server.settingsLoading = true;
       renderAutoanswersServer();
       try {
-        const payload = await postAutoanswers(WEB_VITRINA_CONFIG.feedbacks_autoanswers_settings_path, requestBody);
-        server.settings = payload.settings || null;
-        server.settingsRevision = String(payload.settings_revision || "");
-        server.limitsContract = payload.limits_contract || server.limitsContract;
-        server.budget = payload.budget || null;
-        server.runtime = payload.runtime || null;
-        server.reconciliation = payload.reconciliation || null;
-        server.lifecycle = payload.lifecycle || null;
+        const payload = await onceAiSettings(change || {},current);
+        // Receipt values identify the dated command. The ordinary GET shows
+        // current settings after another tab or an explicit OFF won its CAS.
+        const response=await fetch(WEB_VITRINA_CONFIG.feedbacks_autoanswers_settings_path,{headers:{Accept:"application/json"},cache:"no-store"});
+        const latest=await readJsonResponse(response,"Не получены текущие настройки AI.");
+        if(!response.ok || !latest.settings)throw new Error("Изменение сохранено. Текущее состояние исполнителя пока не подтверждено.");
+        server.settings = latest.settings || null;
+        server.settingsRevision = String(latest.settings_revision || "");
+        server.limitsContract = latest.limits_contract || server.limitsContract;
+        server.budget = latest.budget || null;
+        server.runtime = latest.runtime || null;
+        server.reconciliation = latest.reconciliation || null;
+        server.lifecycle = latest.lifecycle || null;
         server.mutationStatus = String(payload.mutation_status || "");
         if (server.mutationStatus === "pending") {
           pollAutoanswersLifecycle(Number((server.settings || {}).policy_epoch || 0));
@@ -18569,6 +18691,7 @@
     async function saveAutoanswersMode() {
       const selectorState = String(autoanswersModeNode ? autoanswersModeNode.value : "off");
       const settings = state.feedbacks.server.settings || {};
+      if(selectorState!=="off" && await recoverAiSettings("selector"))return;
       if (selectorState === "auto_all") {
         const confirmation = window.prompt("Для режима «Полный» введите ПОЛНЫЙ. Все safety-проверки останутся включены.");
         if (confirmation !== "ПОЛНЫЙ") return;
@@ -18906,7 +19029,7 @@
           processing_key: processingKey,
           reply: reply
         });
-        state.feedbacks.server.error = payload.guard && payload.guard.passed
+        state.feedbacks.server.error = payload.guard && payload.guard.passed || payload.acceptance && payload.acceptance.source_ref.manual_guard_passed===true
           ? "Ответ сохранён и прошёл финальные проверки."
           : "Ответ сохранён, но не прошёл финальные проверки.";
         await openAutoanswersDetail(feedbackId);
@@ -18960,6 +19083,7 @@
       }
       if (autoanswersModeNode) autoanswersModeNode.value = selectorState;
       if (autoanswersModeNode) autoanswersModeNode.disabled = !WEB_VITRINA_CONFIG.feedbacks_can_admin || !!settings.force_off;
+      if(autoanswersOffButton){autoanswersOffButton.hidden=!WEB_VITRINA_CONFIG.feedbacks_can_admin;autoanswersOffButton.disabled=!WEB_VITRINA_CONFIG.feedbacks_can_admin;}
       if (autoanswersSaveModeButton) {
         autoanswersSaveModeButton.hidden = !WEB_VITRINA_CONFIG.feedbacks_can_admin;
         autoanswersSaveModeButton.disabled = server.settingsLoading || !!settings.force_off;
@@ -19779,6 +19903,8 @@
         if (autoanswersDetailDialog) autoanswersDetailDialog.close();
         return;
       }
+      const autoOff = event.target.closest("[data-feedbacks-auto-off]");
+      if(autoOff){event.preventDefault();disableFeedbacksAutomationSchedule(String(autoOff.getAttribute("data-feedbacks-auto-off")||""));return;}
       const autoDelete = event.target.closest("[data-feedbacks-auto-delete]");
       if (autoDelete) {
         event.preventDefault();
@@ -20210,10 +20336,82 @@
       });
     }
 
+    function analysisSettingsFenceKey() {
+      return "operator-analysis-settings:"+String(WEB_VITRINA_CONFIG.user_config_key||"")+":"+WEB_VITRINA_CONFIG.feedbacks_ai_prompt_path;
+    }
+
+    function analysisSettingsMatches(receipt,record) {
+      return OperatorAcceptance.acceptedOperation(receipt) && receipt.domain==="feedback_analysis_settings"
+        && receipt.operation_id===record.identity && Object.keys(receipt.request||{}).length===Object.keys(record.body).length
+        && Object.keys(record.body).every(key=>JSON.stringify(record.body[key])===JSON.stringify(receipt.request[key]));
+    }
+
+    function showAnalysisSettingsReceipt(receipt) {
+      let dialog=document.getElementById("operator-analysis-settings-receipt");
+      if(!dialog){dialog=document.createElement("dialog");dialog.id="operator-analysis-settings-receipt";document.body.appendChild(dialog);}
+      OperatorAcceptance.renderReceipt(dialog,receipt,{onClose:()=>dialog.close()});
+      if(!OperatorAcceptance.acceptedOperation(receipt)){const close=document.createElement("button");close.textContent="Закрыть";close.onclick=()=>dialog.close();dialog.appendChild(close);}
+      if(!dialog.open)dialog.showModal();
+    }
+
+    async function readAnalysisSettingsReceipt(record) {
+      const response=await fetch("/v1/sheet-vitrina-v1/operations/"+encodeURIComponent(record.identity),{headers:{Accept:"application/json"},cache:"no-store"});
+      const payload=await readJsonResponse(response,"Не получена квитанция инструкции.");
+      return response.ok && analysisSettingsMatches(payload.operation,record)?payload.operation:null;
+    }
+
+    function analysisSettingsPrecommitRejected(error) {
+      const status=Number(error && error.httpStatus),code=String(error && error.code || "");
+      if(status===401 && code==="authentication_required")return true;
+      if(status===403 && code==="forbidden")return true;
+      if(status===423 && code==="business_data_maintenance")return true;
+      return status===409 && ["analysis_settings_command_invalid","analysis_settings_identity_invalid",
+        "analysis_settings_revision_required","analysis_settings_native_scope_required","analysis_settings_command_size_exceeded",
+        "analysis_settings_identity_conflict","analysis_settings_revision_stale","analysis_settings_model_invalid",
+        "analysis_settings_native_operand_mismatch","analysis_settings_capacity_exceeded"].includes(code);
+    }
+
+    async function onceAnalysisSettings(change,recoveryOnly) {
+      // Bind clicked operands to their displayed source before queued admission.
+      change=change===null?null:JSON.parse(JSON.stringify(change));
+      const clickedSourceRevision=String(state.feedbacks.promptSourceRevision||"");
+      const key=analysisSettingsFenceKey();
+      if(!navigator.locks || typeof navigator.locks.request!=="function"){
+        if(recoveryOnly)return false;
+        throw new Error("Не удалось защитить запрос между вкладками. Запись не отправлена.");
+      }
+      return navigator.locks.request(key,async()=>{
+        let record=JSON.parse(localStorage.getItem(key)||"null"),send=false;
+        const clearOwn=()=>{const own=JSON.parse(localStorage.getItem(key)||"null");if(own && own.identity===record.identity)localStorage.removeItem(key);};
+        if(!record){
+          if(recoveryOnly)return false;
+          const version=clickedSourceRevision;
+          if(!/^[a-f0-9]{64}$/.test(version))throw new Error("Текущая версия инструкции не подтверждена. Запись не отправлена.");
+          record={identity:"analysis-settings:"+crypto.randomUUID(),body:Object.assign({},change,{expected_source_revision:version})};
+          localStorage.setItem(key,JSON.stringify(record));send=true;
+        }
+        let receipt=null,definite=null;
+        if(send){
+          try{
+            const response=await fetch(WEB_VITRINA_CONFIG.feedbacks_ai_prompt_path,{method:"POST",headers:{Accept:"application/json","Content-Type":"application/json"},body:JSON.stringify(Object.assign({},record.body,{operation_id:record.identity}))});
+            const payload=await readJsonResponse(response,"Не получен ответ сохранения инструкции.");
+            if(response.ok && analysisSettingsMatches(payload.acceptance,record))receipt=payload.acceptance;
+            else definite=Object.assign(new Error(payload.error||"Сохранение не подтверждено."),{code:payload.code,httpStatus:response.status});
+          }catch(_){}
+        }
+        if(!receipt){try{receipt=await readAnalysisSettingsReceipt(record);}catch(_){} }
+        if(receipt)clearOwn();
+        else if(definite && analysisSettingsPrecommitRejected(definite)){clearOwn();throw definite;}
+        showAnalysisSettingsReceipt(receipt);
+        return receipt;
+      });
+    }
+
     async function loadFeedbacksPrompt() {
       state.feedbacks.promptLoading = true;
       renderFeedbacksPromptPanel();
       try {
+        await onceAnalysisSettings(null,true);
         const response = await fetch(WEB_VITRINA_CONFIG.feedbacks_ai_prompt_path, {
           method: "GET",
           headers: {"Accept": "application/json"}
@@ -20229,6 +20427,7 @@
         state.feedbacks.savedPrompt = String(payload.prompt || "");
         state.feedbacks.starterPrompt = String(payload.starter_prompt || "");
         state.feedbacks.promptUpdatedAt = String(payload.updated_at || "");
+        state.feedbacks.promptSourceRevision = String(payload.source_revision || "");
         state.feedbacks.model = String(payload.model || "gpt-5-mini");
         state.feedbacks.availableModels = Array.isArray(payload.available_models) && payload.available_models.length
           ? payload.available_models.map(function(item) { return String(item); })
@@ -20262,35 +20461,11 @@
       state.feedbacks.error = "";
       renderFeedbacksPromptPanel();
       try {
-        const response = await fetch(WEB_VITRINA_CONFIG.feedbacks_ai_prompt_path, {
-          method: "POST",
-          headers: {
-            "Accept": "application/json",
-            "Content-Type": "application/json; charset=utf-8"
-          },
-          body: JSON.stringify({prompt: prompt, model: state.feedbacks.model || "gpt-5-mini"})
-        });
-        const payload = await readJsonResponse(response, "non-json response from feedbacks AI prompt save route");
-        if (!response.ok) {
-          throw new Error((payload && payload.error) ? payload.error : "feedbacks AI prompt save returned " + response.status);
-        }
-        state.feedbacks.promptStatus = String(payload.status || "ready");
-        state.feedbacks.savedPrompt = String(payload.prompt || prompt);
-        state.feedbacks.promptDraft = state.feedbacks.savedPrompt;
-        state.feedbacks.promptUpdatedAt = String(payload.updated_at || "");
-        state.feedbacks.model = String(payload.model || state.feedbacks.model || "gpt-5-mini");
-        state.feedbacks.availableModels = Array.isArray(payload.available_models) && payload.available_models.length
-          ? payload.available_models.map(function(item) { return String(item); })
-          : state.feedbacks.availableModels;
-        state.feedbacks.preferredModels = Array.isArray(payload.preferred_models)
-          ? payload.preferred_models.map(function(item) { return String(item); })
-          : state.feedbacks.preferredModels;
-        state.feedbacks.unavailableModels = Array.isArray(payload.unavailable_models)
-          ? payload.unavailable_models
-          : state.feedbacks.unavailableModels;
-        state.feedbacks.modelDiscoveryStatus = String(payload.model_discovery_status || state.feedbacks.modelDiscoveryStatus || "fallback");
-        state.feedbacks.modelDiscoveryError = String(payload.model_discovery_error || "");
-        state.feedbacks.promptLoaded = true;
+        const receipt=await onceAnalysisSettings({prompt:prompt,model:state.feedbacks.model||"gpt-5-mini"},false);
+        if(!receipt)return;
+        // The receipt is dated. Current values may legitimately have advanced
+        // since it was saved, so reload the native current source separately.
+        await loadFeedbacksPrompt();
       } catch (error) {
         state.feedbacks.error = String(error && error.message ? error.message : error);
       } finally {
@@ -20642,25 +20817,35 @@
 	      state.feedbacks.error = "";
 	      renderFeedbacksPanel();
 	      try {
-	        const response = await fetch(WEB_VITRINA_CONFIG.feedbacks_complaints_submit_selected_path, {
-	          method: "POST",
-	          headers: {
-	            "Accept": "application/json",
-	            "Content-Type": "application/json; charset=utf-8"
-	          },
-	          body: JSON.stringify({
-	            feedback_ids: selectedIds,
+	        const requestBody = {feedback_ids: selectedIds,
 	            max_submit: Math.min(5, selectedIds.length),
 	            date_from: state.feedbacks.dateFrom,
 	            date_to: state.feedbacks.dateTo,
 	            stars: stars,
 	            is_answered: state.feedbacks.isAnswered || "all",
-	            max_api_rows: Math.max(50, (state.feedbacks.rows || []).length)
-	          })
+	            max_api_rows: Math.max(50, (state.feedbacks.rows || []).length)};
+	        const actorScope=WEB_VITRINA_CONFIG.user_config_key;
+	        const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify({user:actorScope,body:requestBody}))))).map(n=>n.toString(16).padStart(2,'0')).join('');
+	        let payload=await OperatorAcceptance.withFeedbackLock('selected:'+String(actorScope || 'local_operator')+':'+digest,async function(){
+	          const key='operator-complaint-request:'+digest;
+	          let requestKey;
+	          try{requestKey=localStorage.getItem(key);if(!requestKey){requestKey=crypto.randomUUID();localStorage.setItem(key,requestKey);}}
+	          catch(_){throw new Error('Не удалось сохранить номер операции в браузере. Новая отправка остановлена.');}
+	          requestBody.request_key=requestKey;
+	          return OperatorAcceptance.onceFeedback('feedback_complaint',requestKey,digest,async function(){
+	            const response=await fetch(WEB_VITRINA_CONFIG.feedbacks_complaints_submit_selected_path,{method:'POST',headers:{Accept:'application/json','Content-Type':'application/json; charset=utf-8'},body:JSON.stringify(requestBody)});
+	            const result=await readJsonResponse(response,'non-json response from submit-selected route');
+	            if(!response.ok)throw new Error(result.error || 'submit-selected returned '+response.status);
+	            return result;
+	          });
 	        });
-	        const payload = await readJsonResponse(response, "non-json response from submit-selected route");
-	        if (!response.ok) {
-	          throw new Error((payload && payload.error) ? payload.error : "submit-selected returned " + response.status);
+	        OperatorAcceptance.showFeedbackReceipt(payload);
+	        if(payload.not_accepted)throw new Error(payload.error || 'Другое задание ещё выполняется. Новое задание не принято.');
+	        if(payload.status==='unknown')throw new Error('Ответ сервера не получен. Проверяется та же команда; повторной отправки не будет.');
+	        if(payload.status==='native_readback'){
+	          const response=await fetch(WEB_VITRINA_CONFIG.feedbacks_complaints_submit_job_path+'?run_id='+encodeURIComponent(payload.acceptance.source_ref.entity_id),{headers:{Accept:'application/json'},cache:'no-store'});
+	          payload=await readJsonResponse(response,'native complaint job read failed');
+	          if(!response.ok)throw new Error('Сохранённое задание пока недоступно. Повторной отправки не будет.');
 	        }
 	        if (!payload || payload.contract_name !== "sheet_vitrina_v1_feedbacks_complaints_submit_job") {
 	          throw new Error("unexpected submit-selected job payload");
@@ -20672,6 +20857,7 @@
 	          : payload;
 	        if (finalPayload && pollSequence === Number(state.feedbacks.submitJob.pollSequence || 0)) {
 	          applyFeedbacksSubmitJobPayload(finalPayload);
+	          if(finalPayload.acceptance)OperatorAcceptance.refreshFeedbackReceipt(finalPayload);
 	        }
 	        state.feedbacks.submitJob.running = false;
 	        state.feedbacks.selectedFeedbackIds = new Set();
@@ -20876,6 +21062,8 @@
       if (!payload || typeof payload !== "object") {
         return;
       }
+      if(payload.source_revision)automation.sourceRevision=String(payload.source_revision);
+      if(payload.meta && payload.meta.hard_cap_default)automation.hardCapDefault=Number(payload.meta.hard_cap_default);
       if (Array.isArray(payload.schedules)) {
         automation.schedules = payload.schedules;
         automation.loaded = true;
@@ -20883,6 +21071,7 @@
       }
       if (Array.isArray(payload.recent_runs)) {
         automation.recentRuns = payload.recent_runs;
+        automation.nativeRunActive=payload.recent_runs.some(run=>["queued","running"].includes(String(run.status||"")));
       }
       if (payload.run) {
         upsertFeedbacksAutomationRun(payload.run);
@@ -20979,6 +21168,13 @@
       automation.error = "";
       renderFeedbacksAutomationPanel();
       try {
+        await onceComplaintRun(true);
+        await onceComplaintSchedule(null,"save",true);
+        const baseKey=complaintScheduleFenceKey("off:");
+        for(let index=0;index<localStorage.length;index++){
+          const key=localStorage.key(index);
+          if(key && key.startsWith(baseKey))await onceComplaintSchedule(null,"off:"+key.slice(baseKey.length),true);
+        }
         const response = await fetch(path, {method: "GET", credentials: "same-origin"});
         const payload = await readJsonResponse(response, "non-json response from feedbacks automation schedules route");
         if (!response.ok) {
@@ -21012,6 +21208,89 @@
       renderFeedbacksAutomationPanel();
     }
 
+    function complaintScheduleFenceKey(lane) {
+      return "operator-complaint-schedules:"+String(WEB_VITRINA_CONFIG.user_config_key||"")+":"+WEB_VITRINA_CONFIG.feedbacks_auto_complaints_schedules_path+":"+lane;
+    }
+
+    function complaintScheduleCanonical(value) {
+      if(Array.isArray(value))return value.map(complaintScheduleCanonical);
+      if(value && typeof value==="object")return Object.fromEntries(Object.keys(value).sort().map(key=>[key,complaintScheduleCanonical(value[key])]));
+      return value;
+    }
+
+    function complaintScheduleMatches(receipt,record) {
+      return OperatorAcceptance.acceptedOperation(receipt) && receipt.domain==="feedback_complaint_schedules"
+        && receipt.actor===String(WEB_VITRINA_CONFIG.complaint_run_actor||"")
+        && receipt.operation_id===record.identity && JSON.stringify(complaintScheduleCanonical(receipt.request))===JSON.stringify(complaintScheduleCanonical(record.body));
+    }
+
+    function showComplaintScheduleReceipt(receipt) {
+      let dialog=document.getElementById("operator-complaint-schedule-receipt");
+      if(!dialog){dialog=document.createElement("dialog");dialog.id="operator-complaint-schedule-receipt";document.body.appendChild(dialog);}
+      OperatorAcceptance.renderReceipt(dialog,receipt,{onClose:()=>dialog.close()});
+      if(!OperatorAcceptance.acceptedOperation(receipt)){const close=document.createElement("button");close.textContent="Закрыть";close.onclick=()=>dialog.close();dialog.appendChild(close);}
+      if(!dialog.open)dialog.showModal();
+    }
+
+    async function readComplaintScheduleReceipt(record) {
+      const response=await fetch("/v1/sheet-vitrina-v1/operations/"+encodeURIComponent(record.identity),{headers:{Accept:"application/json"},cache:"no-store"});
+      const payload=await readJsonResponse(response,"Не получена квитанция расписания.");
+      return response.ok && complaintScheduleMatches(payload.operation,record)?payload.operation:null;
+    }
+
+    function complaintSchedulePrecommitRejected(error) {
+      const status=Number(error && error.httpStatus),code=String(error && error.code || "");
+      if(status===401 && code==="authentication_required" || status===403 && code==="forbidden" || status===423 && code==="business_data_maintenance")return true;
+      return status===409 && ["complaint_schedules_command_invalid","complaint_schedules_identity_invalid","complaint_schedules_revision_required",
+        "complaint_schedules_native_scope_required","complaint_schedules_command_size_exceeded","complaint_schedules_identity_conflict",
+        "complaint_schedules_revision_stale","complaint_schedules_target_missing","complaint_schedules_capacity_exceeded"].includes(code);
+    }
+
+    async function onceComplaintSchedule(change,lane,recoveryOnly) {
+      const key=complaintScheduleFenceKey(lane);
+      const capturedChange=change===null ? null : JSON.parse(JSON.stringify(change));
+      const capturedRevision=String(state.feedbacks.automation.sourceRevision||"");
+      if(!navigator.locks || typeof navigator.locks.request!=="function"){
+        if(recoveryOnly)return false;
+        throw new Error("Не удалось защитить запрос между вкладками. Запись не отправлена.");
+      }
+      return navigator.locks.request(key,async()=>{
+        let record=JSON.parse(localStorage.getItem(key)||"null"),send=false;
+        const clearOwn=()=>{const own=JSON.parse(localStorage.getItem(key)||"null");if(own && own.identity===record.identity)localStorage.removeItem(key);};
+        if(!record){
+          if(recoveryOnly)return false;
+          let version=capturedRevision;
+          if(lane.startsWith("off:")){
+            const response=await fetch(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_schedules_path,{headers:{Accept:"application/json"},cache:"no-store"});
+            const current=await readJsonResponse(response,"Текущая версия расписания не подтверждена.");
+            if(!response.ok)throw new Error("Текущая версия расписания не подтверждена. OFF не отправлен.");
+            version=String(current.source_revision||"");
+          }
+          if(!/^[a-f0-9]{64}$/.test(version))throw new Error("Текущая версия расписания не подтверждена. Запись не отправлена.");
+          record={identity:"complaint-schedules:"+crypto.randomUUID(),body:Object.assign({},capturedChange,{expected_source_revision:version})};
+          localStorage.setItem(key,JSON.stringify(record));send=true;
+        }
+        let receipt=null,definite=null;
+        if(send){try{
+          const response=await fetch(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_schedules_path,{method:"POST",headers:{Accept:"application/json","Content-Type":"application/json"},body:JSON.stringify(Object.assign({},record.body,{operation_id:record.identity}))});
+          const payload=await readJsonResponse(response,"Не получен ответ сохранения расписания.");
+          if(response.ok && complaintScheduleMatches(payload.acceptance,record))receipt=payload.acceptance;
+          else definite=Object.assign(new Error(payload.error||"Сохранение не подтверждено."),{code:payload.code,httpStatus:response.status});
+        }catch(_){} }
+        if(!receipt){try{receipt=await readComplaintScheduleReceipt(record);}catch(_){} }
+        if(receipt)clearOwn();
+        else if(definite && complaintSchedulePrecommitRejected(definite)){clearOwn();throw definite;}
+        showComplaintScheduleReceipt(receipt);return receipt;
+      });
+    }
+
+    async function disableFeedbacksAutomationSchedule(identity) {
+      try{
+        const receipt=await onceComplaintSchedule({disable_schedule_id:identity},"off:"+identity,false);
+        if(receipt){await refreshFeedbacksAutomationState();renderFeedbacksAutomationPanel();}
+      }catch(error){state.feedbacks.automation.error=String(error.message||error);renderFeedbacksAutomationPanel();}
+    }
+
     async function saveFeedbacksAutomationSchedules() {
       const automation = state.feedbacks.automation;
       const path = String(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_schedules_path || "");
@@ -21022,17 +21301,12 @@
       automation.error = "";
       renderFeedbacksAutomationPanel();
       try {
-        const response = await fetch(path, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({schedules: automation.schedules || []})
-        });
-        const payload = await readJsonResponse(response, "non-json response from feedbacks automation schedules save route");
-        if (!response.ok) {
-          throw new Error((payload && payload.error) ? payload.error : "feedbacks automation save returned " + response.status);
-        }
-        applyFeedbacksAutomationRuntimePayload(payload);
+        const schedules=(automation.schedules||[]).map(item=>({id:String(item.id||""),enabled:!!item.enabled,
+          local_time_hhmm:String(item.local_time_hhmm||"12:00"),timezone:String(item.timezone||"Asia/Yekaterinburg"),
+          first_lookback_hours:Number(item.first_lookback_hours||24),overlap_hours:Number(item.overlap_hours===undefined?24:item.overlap_hours),hard_cap_per_run:Number(item.hard_cap_per_run||automation.hardCapDefault||5)}));
+        const receipt=await onceComplaintSchedule({schedules:schedules},"save",false);
+        if(!receipt)return;
+        await refreshFeedbacksAutomationState();
         automation.loaded = true;
         automation.dirty = false;
         loadProcessMonitoring({silent: true});
@@ -21044,54 +21318,85 @@
       }
     }
 
-    async function runFeedbacksAutomationNow() {
-      const automation = state.feedbacks.automation;
-      const path = String(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_run_now_path || "");
-      if (!path || automation.running) {
-        return;
-      }
-      if (automation.dirty) {
-        automation.error = "Сначала сохраните расписание";
-        renderFeedbacksAutomationPanel();
-        return;
-      }
-      const firstSchedule = (automation.schedules || [])[0] || {};
-      if (!firstSchedule.id) {
-        automation.error = "Сначала сохраните расписание";
-        renderFeedbacksAutomationPanel();
-        return;
-      }
-      automation.running = true;
-      automation.error = "";
-      automation.logMessage = "Создаём запуск авто-жалоб…";
-      renderFeedbacksAutomationPanel();
-      try {
-        const response = await fetch(path, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({schedule_id: firstSchedule.id || ""})
-        });
-        const payload = await readJsonResponse(response, "non-json response from feedbacks automation run-now route");
-        if (!response.ok) {
-          throw new Error((payload && payload.error) ? payload.error : "feedbacks automation run-now returned " + response.status);
-        }
-        applyFeedbacksAutomationRuntimePayload(payload);
-        if (payload.run && payload.run.run_id) {
-          automation.logMessage = "Запуск создан: " + String(payload.run.status || "queued");
-          renderFeedbacksAutomationPanel();
-          await pollFeedbacksAutomationRun(String(payload.run.run_id || ""));
-        } else {
-          automation.logMessage = "Backend не вернул run_id для запуска.";
-        }
-      } catch (error) {
-        automation.error = String(error && error.message ? error.message : error);
-        automation.logMessage = automation.error;
-      } finally {
-        automation.running = false;
-        renderFeedbacksAutomationPanel();
-      }
+    function complaintRunFenceKey() {
+      return "operator-complaint-run:"+String(WEB_VITRINA_CONFIG.user_config_key||"")+":"+WEB_VITRINA_CONFIG.feedbacks_auto_complaints_run_now_path;
     }
+    function complaintRunPending() {return !!localStorage.getItem(complaintRunFenceKey());}
+    function complaintRunMatches(receipt,record) {
+      return OperatorAcceptance.acceptedOperation(receipt) && receipt.domain==="feedback_complaint_run"
+        && receipt.actor===String(WEB_VITRINA_CONFIG.complaint_run_actor||"")
+        && receipt.operation_id===record.identity && receipt.request_digest===record.digest
+        && (!record.job || receipt.source_ref.entity_id===record.job);
+    }
+    function showComplaintRunReceipt(receipt) {
+      let dialog=document.getElementById("operator-complaint-run-receipt");
+      if(!dialog){dialog=document.createElement("dialog");dialog.id="operator-complaint-run-receipt";document.body.appendChild(dialog);}
+      dialog.replaceChildren();
+      if(receipt)OperatorAcceptance.renderReceipt(dialog,receipt,{onClose:()=>dialog.close()});
+      else{const text=document.createElement("p");text.textContent="Результат запуска пока не подтверждён. Проверяется тот же запрос; повторная отправка не выполняется.";dialog.appendChild(text);
+        const close=document.createElement("button");close.textContent="Закрыть";close.onclick=()=>dialog.close();dialog.appendChild(close);}
+      if(!dialog.open)dialog.showModal();
+    }
+    async function readComplaintRunReceipt(record) {
+      const response=await fetch(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_run_path+"?operation_id="+encodeURIComponent(record.identity),{headers:{Accept:"application/json"},cache:"no-store"});
+      const payload=await readJsonResponse(response,"Квитанция запуска не получена.");
+      return response.ok && complaintRunMatches(payload.acceptance,record)?payload.acceptance:null;
+    }
+    async function onceComplaintRun(recoveryOnly) {
+      const key=complaintRunFenceKey();
+      const automation=state.feedbacks.automation;
+      const captured={scheduleId:String((automation.schedules||[])[0]?.id||""),revision:String(automation.sourceRevision||""),dirty:!!automation.dirty,nativeRunActive:!!automation.nativeRunActive};
+      if(!navigator.locks || !navigator.locks.request){if(recoveryOnly)return null;throw new Error("Запуск не отправлен: защита запроса между вкладками недоступна.");}
+      return navigator.locks.request(key,async()=>{
+        let record=JSON.parse(localStorage.getItem(key)||"null"),body=null,receipt=null,definite=null;
+        if(!record){
+          if(recoveryOnly)return null;
+          if(captured.nativeRunActive)throw new Error("Другой запуск ещё выполняется. Обновите состояние.");
+          if(captured.dirty || !captured.scheduleId)throw new Error("Сначала сохраните расписание");
+          const revision=captured.revision;
+          if(!/^[a-f0-9]{64}$/.test(revision))throw new Error("Текущая версия расписания не подтверждена. Запуск не отправлен.");
+          const bytes=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify([captured.scheduleId,revision])));
+          record={identity:"complaint-run:"+crypto.randomUUID().replace(/-/g,""),digest:Array.from(new Uint8Array(bytes)).map(n=>n.toString(16).padStart(2,"0")).join("")};
+          // Only an opaque identity/digest is persistent. No schedule payload,
+          // feedbacks or provider credentials are stored by this form.
+          localStorage.setItem(key,JSON.stringify(record));
+          body={operation_id:record.identity,schedule_id:captured.scheduleId,expected_source_revision:revision};
+        }
+        if(body){try{
+          const response=await fetch(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_run_now_path,{method:"POST",headers:{"Content-Type":"application/json",Accept:"application/json"},body:JSON.stringify(body)});
+          const payload=await readJsonResponse(response,"Ответ запуска не получен.");
+          if(response.ok && complaintRunMatches(payload.acceptance,record))receipt=payload.acceptance;
+          else if(response.status===409 && payload.status==="not_saved" && payload.operation_id===record.identity && ["complaint_run_command_invalid","complaint_run_identity_invalid","complaint_run_schedule_required","complaint_run_source_revision_required","complaint_run_scope_required","complaint_run_source_revision_stale","complaint_run_schedule_missing","complaint_run_native_busy","complaint_run_capacity_exceeded","complaint_run_identity_conflict"].includes(String(payload.code||""))
+            || response.status===423 && payload.code==="business_data_maintenance"
+            || response.status===401 && payload.code==="authentication_required" || response.status===403 && payload.code==="forbidden")definite=new Error(payload.error||payload.message||"Запуск не сохранён.");
+        }catch(_){} }
+        if(!receipt){try{receipt=await readComplaintRunReceipt(record);}catch(_){} }
+        const clearOwn=()=>{const current=JSON.parse(localStorage.getItem(key)||"null");if(current && current.identity===record.identity)localStorage.removeItem(key);};
+        if(receipt){clearOwn();state.feedbacks.automation.acceptedRunId=receipt.source_ref.entity_id;state.feedbacks.automation.nativeRunActive=receipt.state==="processing";}
+        else if(definite){clearOwn();throw definite;}
+        showComplaintRunReceipt(receipt);renderFeedbacksAutomationPanel();return receipt;
+      });
+    }
+    async function runFeedbacksAutomationNow() {
+      const automation=state.feedbacks.automation;
+      if(automation.running)return;
+      automation.running=true;automation.error="";renderFeedbacksAutomationPanel();
+      try{
+        const receipt=await onceComplaintRun(false);
+        if(receipt){automation.logMessage="Задание сохранено. Принятие жалоб WB проверяется отдельно.";await refreshFeedbacksAutomationState();}
+      }catch(error){automation.error=String(error.message||error);}
+      finally{automation.running=false;renderFeedbacksAutomationPanel();}
+    }
+    window.addEventListener("storage",function(event){
+      if(event.key!==complaintRunFenceKey())return;
+      renderFeedbacksAutomationPanel();
+      if(event.oldValue && !event.newValue){try{
+        const record=JSON.parse(event.oldValue);
+        readComplaintRunReceipt(record).then(receipt=>{if(receipt){state.feedbacks.automation.nativeRunActive=receipt.state==="processing";renderFeedbacksAutomationPanel();}}).catch(()=>{});
+      }catch(_){} }
+    });
+    // A closed tab is recovered by GET alone even when this subpanel is hidden.
+    queueMicrotask(()=>onceComplaintRun(true).catch(error=>{state.feedbacks.automation.error=String(error.message||error);renderFeedbacksAutomationPanel();}));
 
     async function loadFeedbacksAutomationRun(runId, options) {
       const path = String(WEB_VITRINA_CONFIG.feedbacks_auto_complaints_run_path || "");
@@ -21178,8 +21483,8 @@
       }
       if (feedbacksAutoRunNowButton) {
         const canRunNow = !!automation.loaded && !automation.dirty && !!(automation.schedules || []).length;
-        feedbacksAutoRunNowButton.disabled = !!automation.loading || !!automation.saving || !!automation.running || !canRunNow;
-        feedbacksAutoRunNowButton.textContent = automation.running ? "Запуск…" : automation.dirty ? "Сначала сохраните расписание" : "Запустить сейчас";
+        feedbacksAutoRunNowButton.disabled = !!automation.loading || !!automation.saving || !!automation.running || !!automation.nativeRunActive || complaintRunPending() || !canRunNow;
+        feedbacksAutoRunNowButton.textContent = complaintRunPending() ? "Проверяется прежний запрос" : automation.nativeRunActive ? "Запуск выполняется" : automation.running ? "Запуск…" : automation.dirty ? "Сначала сохраните расписание" : "Запустить сейчас";
       }
       if (feedbacksAutoReloadButton) {
         feedbacksAutoReloadButton.disabled = !!automation.loading || !!automation.saving || !!automation.running;
@@ -21213,7 +21518,7 @@
           "<td>" + escapeHtml(formatTimestampDisplay(schedule.next_run_at || "")) + "</td>",
           "<td>" + escapeHtml(schedule.last_status || "—") + "</td>",
           '<td><span>' + escapeHtml("AI " + (stats.ai_candidates_count || 0) + " · к отправке " + (stats.eligible_for_submit_count || 0) + " · подтверждено " + (stats.submit_confirmed_count || stats.submitted_count || 0) + " · уже было " + (stats.already_confirmed_count || 0)) + '</span><br><span class="research-result-note" data-feedbacks-auto-window-hint="' + escapeHtml(id) + '">' + escapeHtml(windowHint) + "</span></td>",
-          '<td><div class="feedbacks-action-group"><button class="button secondary" type="button" data-feedbacks-auto-log-schedule="' + escapeHtml(id) + '">Посмотреть лог</button><button class="button ghost" type="button" data-feedbacks-auto-delete="' + escapeHtml(id) + '">Удалить</button></div></td>',
+          '<td><div class="feedbacks-action-group"><button class="button secondary" type="button" data-feedbacks-auto-log-schedule="' + escapeHtml(id) + '">Посмотреть лог</button><button class="button ghost" type="button" data-feedbacks-auto-off="' + escapeHtml(id) + '">Выключить расписание</button><button class="button ghost" type="button" data-feedbacks-auto-delete="' + escapeHtml(id) + '">Удалить</button></div></td>',
           "</tr>"
         ].join("");
       }).join("");
@@ -26711,8 +27016,10 @@
         '<div class="ads-fact"><span class="ads-fact-label">Риски</span><span class="ads-fact-value">' + escapeHtml(summary.warnings || 0) + '</span></div>',
         '</div>',
         '<div class="table-scroll"><table class="prices-preview-table"><thead><tr><th>nmID</th><th>Товар</th><th>Цена была</th><th>Цена будет</th><th>Скидка была</th><th>Скидка будет</th><th>Со скидкой было</th><th>Со скидкой будет</th><th>Статус</th></tr></thead><tbody>' + rowsHtml + '</tbody></table></div>',
+        state.prices.error ? '<p class="research-error">'+escapeHtml(state.prices.error)+'</p>' : '',
         result ? '<p class="research-result-note">uploadID: ' + escapeHtml(result.uploadID || "—") + ' · ' + escapeHtml(result.status || "") + '</p>' : ''
       ].join("");
+      renderExternalOperation(pricesModalBodyNode,result,closePricesModal);
       if (pricesCommitButton) {
         const canCommit = !!(preview.preview_id && state.prices.writeEnabled && Number(summary.valid || 0) > 0 && !result);
         pricesCommitButton.disabled = !canCommit || !!state.prices.commitLoading;
@@ -26727,6 +27034,14 @@
       return labels[String(value || "")] || String(value || "");
     }
 
+    function renderExternalOperation(container,result,onClose) {
+      if (!result || !window.OperatorAcceptance) return;
+      const node=document.createElement("div");container.appendChild(node);
+      if (result.acceptance) OperatorAcceptance.renderReceipt(node,result.acceptance,{onClose:onClose});
+      else OperatorAcceptance.renderState(node,result);
+      if(result.native_rejection_reason){const reason=document.createElement("p");reason.className="ff-pool-note";reason.textContent=String(result.native_rejection_reason);node.appendChild(reason);}
+    }
+
     async function commitPriceChanges() {
       const preview = state.prices.preview || {};
       if (!preview.preview_id || state.prices.commitLoading || !state.prices.writeEnabled) {
@@ -26735,6 +27050,7 @@
       state.prices.commitLoading = true;
       renderPricesModal();
       try {
+        const payload = await OperatorAcceptance.onceExternal("wb_prices", String(preview.operation_id || ""), async function () {
         const response = await fetch(WEB_VITRINA_CONFIG.prices_upload_task_path, {
           method: "POST",
           credentials: "same-origin",
@@ -26745,19 +27061,24 @@
             confirm: true
           })
         });
-        const payload = await readJsonResponse(response, "non-json response from prices upload task route");
+        const responsePayload = await readJsonResponse(response, "non-json response from prices upload task route");
         if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "prices upload task route returned " + response.status);
+          throw OperatorAcceptance.externalHttpError(response,responsePayload,"prices upload task route returned " + response.status);
         }
+        return responsePayload;
+        });
         state.prices.commitResult = payload;
-        state.prices.dirty = {};
-        markPriceUploadRows(preview.rows || [], payload.uploadID, "processing", "");
+        if (payload.uploadID) {
+          state.prices.dirty = {};
+          markPriceUploadRows(preview.rows || [], payload.uploadID, "processing", "");
+        }
         renderPricesTable();
         if (payload.uploadID) {
           pollPriceUploadStatus(payload.uploadID, preview.rows || []);
         }
       } catch (error) {
         state.prices.error = String(error && error.message ? error.message : error);
+        if(error && error.definitiveNativeRejection)state.prices.commitResult={status:"rejected",error:state.prices.error};
       } finally {
         state.prices.commitLoading = false;
         renderPricesModal();
@@ -27251,6 +27572,7 @@
         state.ads.commitError ? '<p class="research-error">' + escapeHtml(state.ads.commitError) + '</p>' : '',
         result ? '<p class="research-result-note">Commit: ' + escapeHtml(result.status || "") + ' · operation_id ' + escapeHtml(result.operation_id || "") + '</p>' : ''
       ].join("");
+      renderExternalOperation(adsModalBodyNode,result,closeAdsModal);
       if (adsCommitButton) {
         adsCommitButton.disabled = !preview.preview_id || !!state.ads.commitLoading || !!result;
         adsCommitButton.textContent = state.ads.commitLoading ? "Commit…" : "Изменить live ставку";
@@ -27266,16 +27588,19 @@
       state.ads.commitError = "";
       renderAdsModal();
       try {
+        const payload = await OperatorAcceptance.onceExternal("wb_ads", String(preview.operation_id || ""), async function () {
         const response = await fetch(WEB_VITRINA_CONFIG.ads_bid_commit_path, {
           method: "POST",
           credentials: "same-origin",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({preview_id: preview.preview_id})
         });
-        const payload = await readJsonResponse(response, "non-json response from ads bid commit route");
+        const responsePayload = await readJsonResponse(response, "non-json response from ads bid commit route");
         if (!response.ok) {
-          throw new Error(payload && payload.error ? payload.error : "ads bid commit route returned " + response.status);
+          throw OperatorAcceptance.externalHttpError(response,responsePayload,"ads bid commit route returned " + response.status);
         }
+        return responsePayload;
+        });
         state.ads.commitResult = payload;
         window.setTimeout(function() {
           if (state.ads.selectedNmId) {
@@ -27285,6 +27610,7 @@
         }, Number(payload.delayed_refresh_after_seconds || 30) * 1000);
       } catch (error) {
         state.ads.commitError = String(error && error.message ? error.message : error);
+        if(error && error.definitiveNativeRejection)state.ads.commitResult={status:"rejected",error:state.ads.commitError};
       } finally {
         state.ads.commitLoading = false;
         renderAdsModal();
@@ -27428,7 +27754,7 @@
         const payload=await readJsonResponse(response,"non-json inventory balance response");
         if(!response.ok)throw new Error((payload&&payload.error)||("inventory balance route returned "+response.status));
         if(requestToken!==state.inventoryBalance.loadRequestToken)return;
-        const incomingCalculation=payload.calculation||null;const acceptIncoming=inventoryBalanceCalculationMayReplace(incomingCalculation);if(acceptIncoming){const settings=payload.settings||{};state.inventoryBalance.settings=settings.calculation||{};state.inventoryBalance.revision=Number(settings.revision||0);state.inventoryBalance.table=normalizeInventoryBalanceTable(settings.table||{});installInventoryBalanceCalculation(incomingCalculation);state.inventoryBalance.applyJob=payload.apply_job||null;state.inventoryBalance.calculationOperation=payload.calculation_operation||null;}state.inventoryBalance.loaded=true;
+        const incomingCalculation=payload.calculation||null;const acceptIncoming=inventoryBalanceCalculationMayReplace(incomingCalculation);if(acceptIncoming){const settings=payload.settings||{};state.inventoryBalance.settings=settings.calculation||{};state.inventoryBalance.revision=Number(settings.revision||0);state.inventoryBalance.operatorScope=settings.operator_scope||"";state.inventoryBalance.table=normalizeInventoryBalanceTable(settings.table||{});installInventoryBalanceCalculation(incomingCalculation);state.inventoryBalance.applyJob=payload.apply_job||null;state.inventoryBalance.calculationOperation=payload.calculation_operation||null;}state.inventoryBalance.loaded=true;
         if(state.inventoryBalance.calculationOperation&&state.inventoryBalance.calculationOperation.state==="succeeded"&&state.inventoryBalance.calculationOperation.result)installInventoryBalanceCalculation(state.inventoryBalance.calculationOperation.result);
         const available=new Set((state.inventoryBalance.calculation&&state.inventoryBalance.calculation.rows||[]).filter(function(row){return row.select_available;}).map(function(row){return Number(row.nm_id);}));
         state.inventoryBalance.selectedNmIds=new Set(Array.from(state.inventoryBalance.selectedNmIds).filter(function(id){return available.has(Number(id));}));
@@ -27450,9 +27776,53 @@
 
     function inventoryBalanceSettingsFromInputs(){const result={};document.querySelectorAll("[data-inventory-balance-setting]").forEach(function(node){result[node.getAttribute("data-inventory-balance-setting")]=Number(node.value);});return result;}
 
+    function businessSettingsFenceKey(configKey,scope){return "operator-business-settings:"+configKey+":"+scope;}
+
+    function businessSettingsReceiptMatches(receipt,record,configKey){
+      if(!OperatorAcceptance.acceptedOperation(receipt)||receipt.domain!=="business_settings"||receipt.operation_id!==record.identity||receipt.source_ref.config_key!==configKey||Number(receipt.source_ref.revision)!==Number(record.body.base_revision)+1)return false;
+      const field=configKey==="sku_management"?"forecast":"calculation",after=receipt.source_ref.after||{},expected=record.body[field]||{};
+      return Object.keys(expected).every(function(key){return JSON.stringify(after[key])===JSON.stringify(expected[key]);});
+    }
+
+    async function saveNativeBusinessSettings(configKey,path,body,scope){
+      if(!scope)throw new Error("Не получена точная ссылка настроек. Обновите раздел.");
+      const capturedBody=JSON.parse(JSON.stringify(body));
+      const key=businessSettingsFenceKey(configKey,scope);
+      if(!navigator.locks||typeof navigator.locks.request!=="function")throw new Error("Не удалось защитить запрос между вкладками. Запись не отправлена.");
+      return navigator.locks.request(key,async function(){
+      let record,send=false;
+      function clearOwnFence(){const retained=JSON.parse(localStorage.getItem(key)||"null");if(retained&&retained.identity===record.identity)localStorage.removeItem(key);}
+      try{
+        record=JSON.parse(localStorage.getItem(key)||"null");
+        if(!record){record={identity:"business-settings:"+(crypto.randomUUID?crypto.randomUUID():Date.now()+"_"+Math.random().toString(16).slice(2)),body:capturedBody};localStorage.setItem(key,JSON.stringify(record));send=true;}
+      }catch(_){throw new Error("Не удалось сохранить ссылку запроса. Запись не отправлена.");}
+      let result=null;
+      if(send){
+        try{
+          const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify(Object.assign({},record.body,{operation_id:record.identity}))});
+          const payload=await readJsonResponse(response,"non-json business settings response");
+          if(!response.ok){if(response.status>=400&&response.status<500&&payload.source_not_saved===true&&payload.operation_id===record.identity){clearOwnFence();throw Object.assign(new Error(payload.error||"Настройки не сохранились."),{definite:true,payload:payload});}}
+          else if(businessSettingsReceiptMatches(payload.acceptance,record,configKey))result=payload;
+        }catch(error){if(error.definite)throw error;}
+      }
+      if(!result){
+        const response=await fetch("/v1/sheet-vitrina-v1/operations/"+encodeURIComponent(record.identity),{headers:{"Accept":"application/json"}});
+        const payload=await readJsonResponse(response,"non-json settings receipt response");
+        if(!response.ok||!businessSettingsReceiptMatches(payload.operation,record,configKey))throw new Error("Сохранение пока не подтверждено. Повторная запись не выполняется; читаем тот же запрос.");
+        result={status:"ok",revision:payload.operation.source_ref.revision,updated_at:payload.operation.accepted_at,acceptance:payload.operation};
+        result[configKey==="sku_management"?"forecast":"calculation"]=payload.operation.source_ref.after;
+      }
+      clearOwnFence();
+      let dialog=document.getElementById("operator-business-settings-receipt");
+      if(!dialog){dialog=document.createElement("dialog");dialog.id="operator-business-settings-receipt";document.body.appendChild(dialog);}
+      OperatorAcceptance.renderReceipt(dialog,result.acceptance,{onClose:function(){dialog.close();}});
+      if(!dialog.open)dialog.showModal();return result;
+      });
+    }
+
     async function saveInventoryBalanceSettings(){
       if(state.inventoryBalance.saving)return;state.inventoryBalance.saving=true;state.inventoryBalance.error="";renderInventoryBalance();
-      try{const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_settings_path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({base_revision:state.inventoryBalance.revision,calculation:inventoryBalanceSettingsFromInputs(),table:state.inventoryBalance.table})});const payload=await readJsonResponse(response,"non-json inventory balance settings response");if(!response.ok)throw new Error((payload&&payload.error)||("settings route returned "+response.status));state.inventoryBalance.settings=payload.calculation||state.inventoryBalance.settings;state.inventoryBalance.table=normalizeInventoryBalanceTable(payload.table||state.inventoryBalance.table);state.inventoryBalance.revision=Number(payload.revision||state.inventoryBalance.revision);syncInventoryBalanceInputs();}catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.saving=false;renderInventoryBalance();}
+      try{const payload=await saveNativeBusinessSettings("sku_inventory_balance",WEB_VITRINA_CONFIG.sku_inventory_balance_settings_path,{base_revision:state.inventoryBalance.revision,calculation:inventoryBalanceSettingsFromInputs(),table:state.inventoryBalance.table},state.inventoryBalance.operatorScope);state.inventoryBalance.settings=payload.calculation||state.inventoryBalance.settings;state.inventoryBalance.table=normalizeInventoryBalanceTable(payload.table||state.inventoryBalance.table);state.inventoryBalance.revision=Number(payload.revision||state.inventoryBalance.revision);syncInventoryBalanceInputs();}catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.saving=false;renderInventoryBalance();}
     }
 
     async function calculateInventoryBalance(){
@@ -27819,6 +28189,7 @@
         state.skuManagement.rows = Array.isArray(payload.rows) ? payload.rows : [];
         state.skuManagement.settings = (payload.settings || {}).forecast || {};
         state.skuManagement.revision = Number((payload.settings || {}).revision || 0);
+        state.skuManagement.operatorScope=(payload.settings || {}).operator_scope || "";
         state.skuManagement.table = normalizeSkuManagementTablePreferences((payload.settings || {}).table || {});
         state.skuManagement.meta = payload.meta || {};
         state.skuManagement.loaded = true;
@@ -27869,25 +28240,24 @@
       state.skuManagement.saving = true;
       if (skuManagementStatusNode) skuManagementStatusNode.textContent = "Сохраняем server-owned настройки…";
       try {
-        const response = await fetch(WEB_VITRINA_CONFIG.sku_management_settings_path, {method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({base_revision:state.skuManagement.revision,forecast:skuForecastSettingsFromInputs(),table:state.skuManagement.table})});
-        const payload = await readJsonResponse(response,"non-json response from SKU settings route");
-        if (!response.ok) {
-          if(response.status===409&&payload&&payload.current){
-            const current=payload.current||{};const config=current.config||{};
-            state.skuManagement.revision=Number(current.revision||state.skuManagement.revision);
-            state.skuManagement.settings=config.forecast||state.skuManagement.settings;
-            state.skuManagement.table=normalizeSkuManagementTablePreferences(config.table||{});
-            syncSkuManagementSettingsInputs();
-            throw new Error("Настройки изменились в другой сессии. Загружена актуальная server-owned версия; повторите действие.");
-          }
-          throw new Error((payload&&payload.error)||("SKU settings route returned "+response.status));
+        let payload;
+        if(options && options.noReload){
+          if(localStorage.getItem(businessSettingsFenceKey("sku_management",state.skuManagement.operatorScope)))return;
+          const response=await fetch(WEB_VITRINA_CONFIG.sku_management_settings_path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({base_revision:state.skuManagement.revision,forecast:state.skuManagement.settings,table:state.skuManagement.table})});
+          payload=await readJsonResponse(response,"non-json preferences response");
+          if(!response.ok)throw new Error(payload.error||"Личные настройки не сохранились.");
+        }else{
+          payload=await saveNativeBusinessSettings("sku_management",WEB_VITRINA_CONFIG.sku_management_settings_path,{base_revision:state.skuManagement.revision,forecast:skuForecastSettingsFromInputs(),table:state.skuManagement.table},state.skuManagement.operatorScope);
         }
         state.skuManagement.settings = payload.forecast || state.skuManagement.settings;
         state.skuManagement.table = normalizeSkuManagementTablePreferences(payload.table || state.skuManagement.table);
         state.skuManagement.revision = Number(payload.revision || state.skuManagement.revision);
         state.skuManagement.error = "";
         if (!(options && options.noReload)) await loadSkuManagement({force:true});
-      } catch(error) { state.skuManagement.error=String(error&&error.message?error.message:error); }
+      } catch(error) {
+        if(error.payload && error.payload.current){const current=error.payload.current,config=current.config||{};state.skuManagement.revision=Number(current.revision||state.skuManagement.revision);state.skuManagement.settings=config.forecast||state.skuManagement.settings;state.skuManagement.table=normalizeSkuManagementTablePreferences(config.table||state.skuManagement.table);syncSkuManagementSettingsInputs();}
+        state.skuManagement.error=String(error&&error.message?error.message:error);
+      }
       finally { const repeat=state.skuManagement.savePending;state.skuManagement.savePending=false;state.skuManagement.saving=false;renderSkuManagement();if(repeat)saveSkuManagementSettings({noReload:true}); }
     }
 
@@ -28218,7 +28588,7 @@
       skuManagementModalNode.setAttribute("data-sku-modal-state",modalState);skuManagementModalNode.hidden=modalState==="idle";
       skuManagementModalNode.querySelectorAll("[data-sku-modal-cancel]").forEach(function(node){node.disabled=["commit_running","readback_pending"].includes(modalState);});
       if(skuManagementModalConfirmButton)skuManagementModalConfirmButton.hidden=["quick_loading","quick_ready"].includes(modalState);
-      if(skuManagementModalSecondaryButton)skuManagementModalSecondaryButton.hidden=["commit_running","readback_pending","success","controlled_error"].includes(modalState);
+      if(skuManagementModalSecondaryButton)skuManagementModalSecondaryButton.hidden=["commit_running","readback_pending","success","controlled_error","native_receipt"].includes(modalState);
       if(modalState==="quick_loading"){
         const identity=state.skuManagement.quickSku||{};skuManagementModalTitleNode.textContent="Управление SKU";skuManagementModalBodyNode.innerHTML='<div class="sku-modal-state"><strong>'+escapeHtml(identity.name||"SKU")+'</strong><p>nmID '+escapeHtml(identity.nm_id||"—")+'</p><p>Догружаем текущую цену и точные campaign/placement данные…</p></div>';skuManagementModalSecondaryButton.textContent="Отмена";return;
       }
@@ -28239,14 +28609,22 @@
         skuManagementModalBodyNode.innerHTML=skuManagementPreviewFactsHtml(p)+'<p class="sku-modal-state" data-sku-commit-state="'+escapeHtml(modalState)+'">'+(modalState==="commit_running"?"Изменение отправляется через guarded backend…":"Ожидаем canonical WB readback. Success появится только после совпадения значения.")+'</p>';
         skuManagementModalConfirmButton.textContent="Изменение выполняется…";skuManagementModalConfirmButton.className="button danger";skuManagementModalConfirmButton.disabled=true;return;
       }
+      if(modalState==="native_receipt"){
+        skuManagementModalTitleNode.textContent="Результат команды";
+        skuManagementModalBodyNode.replaceChildren();
+        renderExternalOperation(skuManagementModalBodyNode,state.skuManagement.operatorReceipt,closeSkuManagementModal);
+        skuManagementModalConfirmButton.textContent="Закрыть";skuManagementModalConfirmButton.className="button primary";skuManagementModalConfirmButton.disabled=false;return;
+      }
       if(modalState==="success"&&state.skuManagement.pendingConfirmedUpdate){
         const update=state.skuManagement.pendingConfirmedUpdate;const payload=update.payload||{};const preview=update.preview||{};const oldValue=update.kind==="price"?(preview.current||{}).discountedPrice:preview.old_value;const requestedValue=update.kind==="price"?preview.target_seller_price:preview.requested_value;const label=update.kind==="price"?"Цена изменена":"Ставка изменена";const productName=payload.product_name||preview.product_name||((state.skuManagement.quickSku||{}).name)||"SKU";const nmId=payload.nm_id||preview.nm_id||((state.skuManagement.quickSku||{}).nm_id);
         const bidIdentity=update.kind==="bid"?'<p><strong>advert_id:</strong> '+escapeHtml(payload.advert_id||preview.advert_id)+' · <strong>campaign:</strong> '+escapeHtml(payload.campaign_name||preview.campaign_name||"—")+' · <strong>placement:</strong> '+escapeHtml(payload.placement||preview.placement||"—")+'</p>':"";
         skuManagementModalTitleNode.textContent=label;skuManagementModalBodyNode.innerHTML='<div class="sku-modal-state success"><strong>'+escapeHtml(label)+'</strong><p><strong>Товар:</strong> '+escapeHtml(productName)+'</p><p><strong>nmID:</strong> '+escapeHtml(nmId)+'</p>'+bidIdentity+'<p>'+escapeHtml(oldValue)+' → '+escapeHtml(payload.confirmed_value)+' ₽</p><p><strong>Было:</strong> '+escapeHtml(oldValue)+' ₽ · <strong>Запрошено:</strong> '+escapeHtml(requestedValue)+' ₽ · <strong>Подтверждено:</strong> '+escapeHtml(payload.confirmed_value)+' ₽</p><p>Изменение проверено через WB readback: значение совпадает.</p></div>';
+        renderExternalOperation(skuManagementModalBodyNode,payload,closeSkuManagementModal);
         skuManagementModalConfirmButton.textContent="Закрыть";skuManagementModalConfirmButton.className="button primary";skuManagementModalConfirmButton.disabled=false;return;
       }
       if(modalState==="controlled_error"){
         skuManagementModalTitleNode.textContent="Изменение не подтверждено";skuManagementModalBodyNode.innerHTML='<div class="sku-modal-state error"><strong>Controlled error</strong><p>'+escapeHtml(state.skuManagement.modalError||"WB readback не подтвердил изменение.")+'</p><p>Зелёный success не показан, локальное значение не изменено.</p></div>';
+        if(state.skuManagement.operatorReceipt)renderExternalOperation(skuManagementModalBodyNode,state.skuManagement.operatorReceipt,closeSkuManagementModal);
         skuManagementModalConfirmButton.textContent=state.skuManagement.quickOrigin?"Вернуться к SKU":"Закрыть";skuManagementModalConfirmButton.className="button primary";skuManagementModalConfirmButton.disabled=false;
       }
     }
@@ -28267,8 +28645,10 @@
       if(state.skuManagement.modalState==="controlled_error"&&state.skuManagement.preview){
         const nmId=Number(state.skuManagement.preview.nm_id);if(state.skuManagement.previewKind==="price"){state.skuManagement.editingPriceNmId=null;patchSkuManagementRowCells(nmId,["seller_price"]);}else{state.skuManagement.editingBidNmId=null;patchSkuManagementRowCells(nmId,["current_bid"]);}
       }
+      const refreshNative=state.skuManagement.modalState==="native_receipt";
       const opener=state.skuManagement.modalOpener;
       state.skuManagement.preview=null;state.skuManagement.modalError="";state.skuManagement.pendingConfirmedUpdate=null;state.skuManagement.modalState="idle";state.skuManagement.quickSku=null;state.skuManagement.quickHistoryRows=[];state.skuManagement.quickOrigin=false;state.skuManagement.modalOpener=null;skuManagementModalNode.hidden=true;renderSkuManagementFeedback();
+      if(refreshNative){state.skuManagement.editingPriceNmId=null;state.skuManagement.editingBidNmId=null;loadSkuManagement({force:true});}
       if(opener&&typeof opener.focus==="function")opener.focus();
     }
 
@@ -28280,17 +28660,23 @@
 
     function handleSkuManagementModalPrimaryAction(){
       if(state.skuManagement.modalState==="controlled_error"&&state.skuManagement.quickOrigin){state.skuManagement.modalError="";state.skuManagement.modalState="quick_ready";renderSkuManagementModal();return;}
-      if(state.skuManagement.modalState==="success"||state.skuManagement.modalState==="controlled_error"){closeSkuManagementModal();return;}
+      if(["success","controlled_error","native_receipt"].includes(state.skuManagement.modalState)){closeSkuManagementModal();return;}
       if(state.skuManagement.modalState==="preview_ready")commitSkuManagementPreview();
     }
 
     async function commitSkuManagementPreview(){
-      const preview=state.skuManagement.preview;if(!preview||state.skuManagement.commitRunning)return;const kind=state.skuManagement.previewKind;state.skuManagement.commitRunning=true;state.skuManagement.modalState="commit_running";state.skuManagement.error="";renderSkuManagementModal();renderSkuManagementFeedback();
+      const preview=state.skuManagement.preview;if(!preview||state.skuManagement.commitRunning)return;const kind=state.skuManagement.previewKind;state.skuManagement.operatorReceipt=null;state.skuManagement.commitRunning=true;state.skuManagement.modalState="commit_running";state.skuManagement.error="";renderSkuManagementModal();renderSkuManagementFeedback();
       const readbackTimer=window.setTimeout(function(){if(state.skuManagement.commitRunning&&state.skuManagement.modalState==="commit_running"){state.skuManagement.modalState="readback_pending";renderSkuManagementModal();renderSkuManagementFeedback();}},100);
       try{
         const path=kind==="price"?WEB_VITRINA_CONFIG.sku_management_price_commit_path:WEB_VITRINA_CONFIG.sku_management_bid_commit_path;const hasStabilization=Array.isArray(preview.stabilization_warnings)&&preview.stabilization_warnings.length>0;const hasOverrideWarnings=Array.isArray(preview.override_required_warnings)&&preview.override_required_warnings.length>0;
-        const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({preview_id:preview.preview_id,confirm:true,override_stabilization:hasStabilization,override_warnings:hasOverrideWarnings})});const payload=await readJsonResponse(response,"non-json SKU commit response");
-        if(!response.ok)throw new Error((payload&&payload.error)||("commit route returned "+response.status));
+        const payload=await OperatorAcceptance.onceExternal(kind==="price"?"sku_prices":"sku_ads",String(preview.operation_id||""),async function(){
+          const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({preview_id:preview.preview_id,confirm:true,override_stabilization:hasStabilization,override_warnings:hasOverrideWarnings})});const result=await readJsonResponse(response,"non-json SKU commit response");
+          if(!response.ok)throw OperatorAcceptance.externalHttpError(response,result,"commit route returned "+response.status);return result;
+        });state.skuManagement.operatorReceipt=payload;
+        if(payload && (["native_readback","unknown"].includes(payload.status)||OperatorAcceptance.acceptedOperation(payload.acceptance))){
+          state.skuManagement.pendingConfirmedUpdate=null;state.skuManagement.modalState="native_receipt";state.skuManagement.modalError="";state.skuManagement.error="";
+          if(skuManagementHistoryNode&&skuManagementHistoryNode.open)loadSkuManagementHistory({force:true});return;
+        }
         if(!payload||payload.status!=="success"||payload.readback_status!=="matching"||payload.confirmed_value===null||payload.confirmed_value===undefined)throw new Error("WB readback mismatch: matching confirmation was not returned");
         state.skuManagement.pendingConfirmedUpdate={kind:kind,preview:preview,payload:payload};state.skuManagement.modalState="success";state.skuManagement.error="";
         if(skuManagementHistoryNode&&skuManagementHistoryNode.open)loadSkuManagementHistory({force:true});

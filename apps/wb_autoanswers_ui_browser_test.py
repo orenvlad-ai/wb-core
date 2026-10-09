@@ -332,6 +332,12 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
         fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
         with fixture as base_url:
             repository = fixture.entrypoint.autoanswers_repository
+            # Synthetic native source account for this layout fixture. The
+            # limits write below retains its actual command in the native TX;
+            # convenient fake lifecycle flags never prove execution.
+            from packages.application.change_registry_observer import ChangeRegistryReadSurface
+            from packages.application import operator_autoanswers_settings as operator
+            fixture.entrypoint.change_registry_read_surface=ChangeRegistryReadSurface(repository.runtime_dir,seller_id='autoanswers-ui-fixture')
             preview = repository.preview_mode_transition(
                 "draft_only",
                 actor_id="local_operator",
@@ -386,7 +392,11 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                 if route.request.method == "POST":
                     body = route.request.post_data_json
                     posted.append(dict(body))
+                    command=operator.command(body,actor='local_operator',account='autoanswers-ui-fixture')
                     repository.update_settings(
+                        operator_command=command,
+                        expected_policy_epoch=body['expected_policy_epoch'],
+                        expected_settings_revision=body['expected_settings_revision'],
                         hourly_cap_usd=body["hourly_cap_usd"],
                         daily_cap_usd=body["daily_cap_usd"],
                         monthly_cap_usd=body["monthly_cap_usd"],
@@ -415,6 +425,7 @@ class AutoanswersUiBrowserTest(unittest.TestCase):
                             "max_materialized_processing_jobs",
                         )
                     }
+                    payload['acceptance']=operator.read(fixture.entrypoint,command)
                     payload["mutation_status"] = "confirmed"
                 else:
                     payload = settings_payload()

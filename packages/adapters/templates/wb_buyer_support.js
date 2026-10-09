@@ -191,6 +191,7 @@
     try {
       const response = await global.fetch(endpoint + '/pilot/' + action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-WB-Buyer-Support-CSRF':'1'},body:JSON.stringify(body)});
       const payload = await response.json();
+      if(['send','claim','reconcile'].includes(action) && payload.acceptance && global.OperatorAcceptance)global.OperatorAcceptance.showFeedbackReceipt(payload);
       if (!response.ok) {
         if (response.status >= 500 && !(payload.not_accepted === true && payload.write_attempted === false && payload.request_id === body.request_id)) throw new Error('unclear');
         note = payload.code === 'source_refresh_required' ? 'Сначала обновите историю из WB, затем проверьте обращение.' : response.status === 409 ? 'Данные изменились или действие недоступно. Проверьте обновлённое обращение.' : 'Действие не принято. Проверьте обновлённое обращение.';
@@ -214,6 +215,7 @@
     let note = 'Результат пока недоступен. Повторная отправка остаётся заблокированной.';
     try {
       const payload = await get('/pilot/operation',{request_id:receipt.request_id});
+      if(payload.acceptance && global.OperatorAcceptance)global.OperatorAcceptance.showFeedbackReceipt(payload);
       if (payload && payload.state === 'failed' && payload.write_attempted === false && payload.request_id === receipt.request_id) {
         savePending(null); note = 'Команда не выполнена: отправки покупателю или решения по заявке не было. Проверьте обращение перед новым действием.';
       } else if (payload && receipt.action === 'refresh' && payload.kind === 'refresh' && payload.write_attempted === false && payload.state === 'request_result_unknown') {

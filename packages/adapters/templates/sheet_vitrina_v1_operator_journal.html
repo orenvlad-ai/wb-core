@@ -57,7 +57,7 @@
       const payload=await get(api+"/"+encodeURIComponent(identity));
       if(generation!==detailGeneration)return;
       const receipt=payload.operation;
-      if(!receipt || receipt.operation_id!==identity || !window.OperatorAcceptance.acceptedOperation(receipt))throw new Error("Подтверждение операции пока не получено.");
+      if(!receipt || receipt.operation_id!==identity || (!window.OperatorAcceptance.acceptedOperation(receipt) && receipt.source_confirmation_missing!==true))throw new Error("Подтверждение операции пока не получено.");
       window.OperatorAcceptance.renderReceipt(nodes.detail,receipt,{onClose:closeDetail});
       history.replaceState(null,"",location.pathname+"?operation_id="+encodeURIComponent(identity));
     } catch(error) { if(generation===detailGeneration)nodes.detail.replaceChildren(element("p",error.message,"journal-error")); }
@@ -76,11 +76,10 @@
       if(Array.from(nodes.domain.options).some(option=>option.value===selectedDomain))nodes.domain.value=selectedDomain;
       nodes.list.replaceChildren();
       payload.items.forEach(receipt=>{
-        if(!window.OperatorAcceptance.acceptedOperation(receipt))return;
+        if(!window.OperatorAcceptance.acceptedOperation(receipt) && receipt.source_confirmation_missing!==true)return;
         const row=element("article","","journal-row"), copy=element("div","");
         copy.append(element("strong",receipt.title_ru || receipt.title || "Операция"),element("p",time(receipt.accepted_at),"journal-meta"));
-        const labels={accepted:"Принято",processing:"Обрабатывается",completed:"Обработано",delayed:"Обработка задерживается",needs_attention:"Требует внимания"};
-        copy.append(element("p",receipt.primary_effect==="source_saved"?"Сохранено":labels[receipt.state]));
+        copy.append(window.OperatorAcceptance.stateNode(receipt));
         const button=element("button","Подробнее"); button.type="button";
         button.addEventListener("click",()=>detail(receipt.operation_id)); row.append(copy,button); nodes.list.append(row);
       });

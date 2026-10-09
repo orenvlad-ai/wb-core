@@ -17,6 +17,7 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "operator_business_settings_smoke": ("packages/application/operator_business_settings.py", "packages/application/operator_operations.py", "packages/application/registry_upload_db_backed_runtime.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html", "packages/application/sku_inventory_balance.py", "packages/application/sku_management.py"),
     'operator_supplier_journal_http_smoke': ('packages/application/operator_operations.py', 'packages/application/operator_supplier_journal.py', 'packages/adapters/registry_upload_http_entrypoint.py'),
     'operator_supplier_financial_journal_smoke': ('packages/application/operator_supplier_financial.py', 'packages/application/operator_supplier_journal.py', 'packages/application/operator_operations.py'),
     'operator_supplier_history_cycle_smoke': ('packages/application/registry_upload_http_entrypoint.py', 'packages/application/operator_supplier_history.py', 'packages/application/owned_history_worker.py'),
@@ -284,7 +285,12 @@ def boundary_checks():
             paths=paths, file_exists=lambda *_: True)
         commands = {tuple(c) for c in plan["commands"]}
         assert not commands.intersection(set().union(*expected.values())), plan
-        assert len(plan["groups"]) <= 1, plan
+        if "packages/application/wb_autoanswers_runtime.py" in paths:
+            assert plan["groups"] == ["autoanswers", "operator_autoanswers_settings"], plan
+            assert ("python3", "apps/operator_autoanswers_settings_smoke.py") in commands, plan
+            assert plan["pip"] == ["apsw==3.53.4.0", "openpyxl==3.1.5", "playwright==1.58.0"], plan
+        else:
+            assert len(plan["groups"]) <= 1, plan
 
     helper = build_plan_from_paths(pull_request=23, base=BASE, head=HEAD,
         paths=["ci/fixture_process.py"], file_exists=lambda _, p: (root / p).is_file())
@@ -624,7 +630,7 @@ def command_dependency_checks():
     assert "apsw==3.53.4.0" not in unrelated_browser["pip"], unrelated_browser
 
     for paths, file_exists in (
-        (["packages/application/sku_inventory_balance.py"], lambda *_: True),
+        (["apps/sku_inventory_balance_smoke.py"], lambda *_: True),
         (["apps/sheet_vitrina_v1_reports_ready_snapshot_browser_smoke.py"], lambda *_: True),
         (["ci/checks.json", "ci/select_checks.py", "ci/select_checks_smoke.py"], lambda *_: True),
         ([scripts[1]], lambda *_: False),
@@ -1117,7 +1123,10 @@ def main() -> None:
     assert "inventory_balance" in backend["groups"]
     assert "change_registry_writer" in backend["groups"]
     assert "openpyxl==3.1.5" in backend["pip"]
-    assert install not in backend["commands"]
+    assert "operator_business_settings" in backend["groups"]
+    settings_command=["python3", "apps/operator_business_settings_smoke.py"]
+    assert settings_command in backend["commands"]
+    assert backend["commands"].index(install) < backend["commands"].index(settings_command)
     assert "playwright==1.58.0" not in finance["pip"]
     assert install not in docs["commands"]
 

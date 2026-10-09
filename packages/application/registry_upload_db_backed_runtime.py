@@ -1882,6 +1882,7 @@ class RegistryUploadDbBackedRuntime:
         payload: Mapping[str, Any],
         updated_at: str,
         expected_revision: int | None = None,
+        operator_command: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_user_key = _normalize_required_storage_key(user_key, field_name="user_key")
         normalized_config_key = _normalize_required_storage_key(config_key, field_name="config_key")
@@ -1889,9 +1890,25 @@ class RegistryUploadDbBackedRuntime:
         if normalized_schema_version < 1:
             raise ValueError("schema_version must be a positive integer")
         _validate_timestamp(updated_at, field_name="updated_at")
+        command = None
+        if operator_command is not None:
+            from packages.application import operator_business_settings as business_settings
+            command = business_settings.command(normalized_user_key,normalized_config_key,dict(payload),expected_revision,
+                operator_command.get('operation_id'),operator_command.get('actor'),operator_command.get('seller_id'),normalized_schema_version)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            # Serialize native read-CAS-write; append the business source proof
+            # in this same transaction, never via a journal executor.
+            if not conn.in_transaction:
+                conn.execute('BEGIN IMMEDIATE')
+            if command is not None:
+                business_settings.ensure(conn)
+                previous = business_settings.previous(conn,command)
+                if previous is not None:
+                    return dict(status='ok',user_key=normalized_user_key,config_key=normalized_config_key,
+                        schema_version=normalized_schema_version,revision=previous['revision'],
+                        updated_at=previous['accepted_at'],config=dict(payload),acceptance=business_settings.public(previous))
             current = conn.execute(
                 """
                 SELECT user_key, config_key, schema_version, payload_json, updated_at, revision
@@ -1946,11 +1963,18 @@ class RegistryUploadDbBackedRuntime:
                     next_revision,
                 ),
             )
+            acceptance = None
+            if command is not None:
+                before = json.loads(current['payload_json']) if current is not None else {}
+                acceptance = business_settings.save(conn,command,revision=next_revision,before=before,
+                    after=dict(payload),accepted_at=updated_at,schema_version=normalized_schema_version)
+            saved = conn.execute('SELECT user_key,config_key,schema_version,payload_json,updated_at,revision '
+                'FROM sheet_vitrina_v1_user_configs WHERE user_key=? AND config_key=?',
+                (normalized_user_key,normalized_config_key)).fetchone()
+            result = _sheet_vitrina_user_config_row_to_dict(saved)
+            if acceptance is not None:result['acceptance']=acceptance
             conn.commit()
-        return self.load_sheet_vitrina_user_config(
-            user_key=normalized_user_key,
-            config_key=normalized_config_key,
-        )
+        return result
 
     def list_sheet_vitrina_user_configs(self, *, config_key: str) -> list[dict[str, Any]]:
         """Read every legacy per-user value for one config key without mutating it."""

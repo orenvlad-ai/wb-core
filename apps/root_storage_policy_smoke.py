@@ -70,6 +70,60 @@ def _backup_reserve_boundary(loaded: dict) -> None:
             raise AssertionError("invalid backup reserve was accepted")
 
 
+def _autoanswers_v11_backup_admission(loaded: dict) -> None:
+    from packages.application.wb_autoanswers_runtime import SCHEMA_VERSION
+
+    owner = "autoanswers_first_schema"
+    relative = f"wb_autoanswers_schema_v{SCHEMA_VERSION}"
+    contract = loaded["storage_registry"]["filesystems"]["backup"]
+    assert policy.storage_destination_root(owner, relative_root=relative, policy=loaded) == (
+        Path(contract["path"]) / relative
+    ).resolve()
+    # Offline filesystem/Finance facts; the native owner, destination, quota and
+    # full reserve admission remain real, without an admission override.
+    with TemporaryDirectory() as directory:
+        backup = Path(directory) / "backups"
+        backup.mkdir()
+        offline = deepcopy(loaded)
+        offline["storage_registry"]["filesystems"]["backup"]["path"] = str(backup)
+        destination = policy.storage_destination_root(owner, relative_root=relative, policy=offline) / "fresh.sqlite3"
+        next_copy = 28 * policy.GIB + 8 * policy.GIB
+        floor = next_copy + int(contract["emergency_reserve_bytes"])
+        peak = 4 * policy.MIB
+        observed = {**contract, "mount_options": ",".join(contract["required_mount_options"])}
+        health = {"status": "healthy", "next_replacement_capacity": True,
+                  "next_replacement_required_bytes": next_copy, "blockers": []}
+        with patch.object(policy, "_hosted_runtime_marker_present", return_value=True), patch.object(
+            policy, "_filesystem_status", return_value=observed,
+        ), patch("packages.application.finance_storage_backup_rotation.backup_rotation_health", return_value=health):
+            for difference, allowed in ((0, True), (-1, False)):
+                available = floor + peak + difference
+                with patch.object(policy.os, "statvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)):
+                    try:
+                        receipt = policy.admit_root_write(
+                            owner=owner, destination=destination, predicted_output_bytes=policy.MIB,
+                            predicted_temporary_bytes=policy.MIB, predicted_readback_bytes=policy.MIB,
+                            control_reserve_bytes=policy.MIB, policy=offline,
+                        )
+                    except policy.RootStoragePolicyError as exc:
+                        assert not allowed and "backup_predicted_free_after_below_reserve" in str(exc)
+                    else:
+                        assert allowed and receipt["allowed"]
+                        assert receipt["predicted_peak_bytes"] == peak
+                        assert receipt["required_reserve_bytes"] == floor
+                        assert receipt["predicted_free_after_bytes"] == floor
+                        assert receipt["destination_role"] == "backup"
+            try:
+                policy.admit_root_write(
+                    owner=owner, destination=Path(directory) / "foreign.sqlite3",
+                    predicted_output_bytes=1, policy=offline,
+                )
+            except policy.RootStoragePolicyError as exc:
+                assert "bypasses canonical storage registry" in str(exc)
+            else:
+                raise AssertionError("autoanswers backup accepted a foreign destination")
+
+
 def _warehouse_placement_transition(loaded: dict) -> None:
     with TemporaryDirectory() as directory:
         base = Path(directory)
@@ -189,6 +243,7 @@ def main() -> int:
     assert policy.storage_level(11 * policy.GIB) == "hard"
     assert policy.storage_level(30 * policy.GIB) == "normal"
     _backup_reserve_boundary(loaded)
+    _autoanswers_v11_backup_admission(loaded)
     _warehouse_placement_transition(loaded)
     _warehouse_native_writer_mount_guard(loaded)
     print("root_storage_policy_smoke: ok")

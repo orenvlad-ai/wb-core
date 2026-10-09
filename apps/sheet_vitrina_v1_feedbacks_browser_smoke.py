@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 
 from playwright.sync_api import sync_playwright
 
@@ -55,6 +56,13 @@ def main() -> None:
 
 
 def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str, object]:
+    # Native source+receipt for the prompt form. Other layout feeds remain
+    # synthetic; no provider analysis or external writes are performed.
+    from apps.sheet_vitrina_v1_feedbacks_ai_smoke import FakeAiProvider, NOW
+    from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1FeedbacksAiBlock
+    from packages.application import operator_feedback_analysis_settings as prompt_source
+    prompt_temp = TemporaryDirectory(prefix='feedback-prompt-browser-')
+    prompt_owner = SheetVitrinaV1FeedbacksAiBlock(runtime_dir=Path(prompt_temp.name).resolve(), provider=FakeAiProvider(), now_factory=lambda: NOW)
     captured_urls: list[str] = []
     ai_request_batches: list[list[str]] = []
     export_requests: list[dict[str, object]] = []
@@ -170,16 +178,18 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 route.fulfill(
                     status=200,
                     headers={"Content-Type": "application/json; charset=utf-8"},
-                    body=json.dumps(_prompt_payload(status="ready" if prompt_saved else "missing", model=selected_model), ensure_ascii=False),
+                    body=json.dumps(prompt_owner.get_prompt(), ensure_ascii=False),
                 )
                 return
             payload = json.loads(route.request.post_data or "{}")
             selected_model = str(payload.get("model") or "gpt-5-mini")
             prompt_saved = True
+            command = prompt_source.command(payload, actor='browser_fixture', account='fixture', account_scope='seller-portal-primary')
+            saved = prompt_owner.save_prompt(payload, operator_command=command)
             route.fulfill(
                 status=200,
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                body=json.dumps(_prompt_payload(status="ready", model=selected_model), ensure_ascii=False),
+                body=json.dumps(saved, ensure_ascii=False),
             )
 
         def fulfill_export(route: object) -> None:
@@ -857,6 +867,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             page.wait_for_function(
                 "() => document.querySelector('[data-feedbacks-prompt-status]')?.textContent.includes('Сохранён')"
             )
+            page.locator('#operator-analysis-settings-receipt button').filter(has_text='Закрыть').click()
             page.locator("[data-feedbacks-back-to-reviews]").click()
             if "WB API / feedbacks" not in page.locator("[data-feedbacks-meta]").inner_text():
                 raise AssertionError("feedbacks tab must expose read-only WB API source context")
@@ -1026,6 +1037,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError(f"selected skipped row must show attempt status instead of dash, got {selected_row_text!r}")
         finally:
             browser.close()
+            prompt_temp.cleanup()
 
     return {
         "base_url": base_url,

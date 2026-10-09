@@ -165,6 +165,11 @@
     }
   },
   "groups": {
+    "operator_business_settings": {"patterns": ["packages/application/operator_business_settings.py", "packages/application/operator_operations.py", "packages/application/registry_upload_db_backed_runtime.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html", "packages/application/sku_inventory_balance.py", "packages/application/sku_management.py", "apps/operator_business_settings_fixture.py"], "commands": [["python3", "apps/operator_business_settings_smoke.py"]], "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]},
+    "operator_feedback_schedules": {"patterns": ["packages/application/operator_feedback_complaint_schedules.py", "packages/application/sheet_vitrina_v1_feedbacks_auto_complaints.py", "packages/application/operator_operations.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"], "commands": [["python3", "apps/operator_feedback_schedules_smoke.py"]], "pip": ["apsw==3.53.4.0", "openpyxl==3.1.5", "playwright==1.58.0"]},
+    "operator_complaint_runs": {"patterns": ["packages/application/operator_complaint_runs.py", "packages/application/operator_complaint_source_projection.py", "packages/application/operator_feedback_complaint_schedules.py", "packages/application/sheet_vitrina_v1_feedbacks_auto_complaints.py", "packages/application/operator_operations.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"], "commands": [["python3", "apps/operator_complaint_runs_smoke.py"], ["python3", "apps/operator_complaint_runs_http_smoke.py"], ["python3", "apps/operator_complaint_runs_browser_smoke.py"]], "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]},
+    "operator_feedback_analysis_settings": {"patterns": ["packages/application/operator_feedback_analysis_settings.py", "packages/application/sheet_vitrina_v1_feedbacks_ai.py", "packages/application/operator_operations.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"], "commands": [["python3", "apps/operator_json_business_settings_smoke.py"]], "pip": ["apsw==3.53.4.0", "openpyxl==3.1.5", "playwright==1.58.0"]},
+    "operator_autoanswers_settings": {"patterns": ["packages/application/operator_autoanswers_settings.py", "packages/application/wb_autoanswers_runtime.py", "packages/application/operator_operations.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"], "commands": [["python3", "apps/operator_autoanswers_settings_smoke.py"]], "pip": ["apsw==3.53.4.0", "openpyxl==3.1.5", "playwright==1.58.0"]},
     "operator_nomenclature": {"patterns": ["packages/application/operator_nomenclature.py", "packages/application/nomenclature_activation_intents.py", "packages/application/operator_operations.py", "packages/application/supplier_shipments.py", "packages/application/wb_finance_weekly.py", "packages/adapters/templates/sheet_vitrina_v1_operator_nomenclature.js", "packages/adapters/templates/sheet_vitrina_v1_settings.html"], "commands": [["python3", "apps/operator_nomenclature_smoke.py"], ["python3", "apps/operator_nomenclature_journal_smoke.py"], ["python3", "apps/operator_nomenclature_browser_smoke.py"]], "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]},
     "operator_compat_uploads": {"patterns": ["packages/application/operator_compat_uploads.py", "packages/application/cost_price_upload.py", "packages/application/registry_upload_db_backed_runtime.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py"], "commands": [["python3", "apps/operator_compat_uploads_smoke.py"], ["python3", "apps/cost_price_upload_http_entrypoint_smoke.py"]], "pip": ["openpyxl==3.1.5"]},
     "operator_manual_ff_stock": {"patterns": ["packages/application/operator_manual_ff_stock.py", "packages/application/ff_stock_ledger.py", "packages/application/registry_upload_db_backed_runtime.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_operator.html", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"], "commands": [["python3", "apps/operator_manual_ff_stock_smoke.py"], ["python3", "apps/operator_manual_ff_stock_http_smoke.py"], ["python3", "apps/operator_manual_ff_stock_browser_smoke.py"]], "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]},
@@ -1524,6 +1529,90 @@
       ],
       "pip": [
         "openpyxl==3.1.5"
+      ]
+    },
+    "operator_external_projections": {
+      "patterns": [
+        "packages/application/operator_external_operations.py",
+        "packages/application/operator_operations.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/adapters/templates/sheet_vitrina_v1_operator_acceptance.js",
+        "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html",
+        "apps/operator_external_operations_browser_smoke.py",
+        "apps/operator_external_forms_browser_smoke.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/operator_external_operations_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_nomenclature_journal_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_acceptance_component_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_external_operations_browser_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_external_forms_browser_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "playwright==1.58.0"
+      ]
+    },
+    "operator_feedback_projections": {
+      "patterns": [
+        "packages/application/operator_feedback_operations.py",
+        "packages/application/operator_operations.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/application/sheet_vitrina_v1_feedbacks_complaints.py",
+        "packages/adapters/templates/sheet_vitrina_v1_operator_acceptance.js",
+        "packages/adapters/templates/sheet_vitrina_v1_operator_journal.html",
+        "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html",
+        "packages/adapters/templates/wb_buyer_support.js",
+        "apps/operator_feedback_operations_smoke.py",
+        "apps/operator_feedback_forms_browser_smoke.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/operator_feedback_operations_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_complaint_capacity_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_feedback_forms_browser_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/sheet_vitrina_v1_feedbacks_complaints_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_buyer_support_pilot_http_smoke.py"
+        ],
+        [
+          "python3",
+          "-m",
+          "apps.wb_autoanswers_publication_test"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "playwright==1.58.0"
       ]
     }
   }

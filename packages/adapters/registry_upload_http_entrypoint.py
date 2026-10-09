@@ -1708,6 +1708,7 @@ def _build_handler(
                 and parsed.path.endswith("/resume")
             )
             if inventory_balance_post:
+                body = {}
                 try:
                     body = _load_request_payload(self)
                     actor = _current_web_user_config_key(self)
@@ -1715,6 +1716,7 @@ def _build_handler(
                         result = entrypoint.handle_sku_inventory_balance_settings_save_request(
                             body,
                             user_key=actor,
+                            actor=_current_web_user_actor(self),
                         )
                     elif parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH:
                         result = entrypoint.handle_sku_inventory_balance_calculate_request(
@@ -1757,10 +1759,12 @@ def _build_handler(
                 except SkuManagementError as exc:
                     response_payload = {"error": str(exc)}
                     response_payload.update(exc.payload)
+                    if parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH:
+                        response_payload.update(_business_settings_request_error(entrypoint,body))
                     _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
                     return
                 except (TypeError, ValueError) as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc), **(_business_settings_request_error(entrypoint,body) if parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH else {})})
                     return
                 except Exception:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -1781,7 +1785,7 @@ def _build_handler(
                 return
 
             sku_management_post_handlers = {
-                DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH: lambda body, actor: entrypoint.handle_sku_management_settings_save_request(body, user_key=actor),
+                DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH: lambda body, actor: entrypoint.handle_sku_management_settings_save_request(body, user_key=actor, actor=_current_web_user_actor(self)),
                 DEFAULT_SKU_MANAGEMENT_PRICE_PREVIEW_PATH: lambda body, actor: entrypoint.handle_sku_management_price_preview_request(body, actor=actor),
                 DEFAULT_SKU_MANAGEMENT_PRICE_COMMIT_PATH: lambda body, actor: entrypoint.handle_sku_management_price_commit_request(body, actor=actor),
                 DEFAULT_SKU_MANAGEMENT_BID_PREVIEW_PATH: lambda body, actor: entrypoint.handle_sku_management_bid_preview_request(body, actor=actor),
@@ -1790,6 +1794,7 @@ def _build_handler(
                 DEFAULT_CHANGE_REGISTRY_ANNOTATIONS_PATH: lambda body, actor: entrypoint.handle_change_registry_annotation_request(body, actor=actor),
             }
             if parsed.path in sku_management_post_handlers:
+                payload = {}
                 try:
                     payload = _load_request_payload(self)
                     actor = _current_web_user_config_key(self)
@@ -1797,6 +1802,8 @@ def _build_handler(
                 except SkuManagementError as exc:
                     response_payload = {"error": str(exc)}
                     response_payload.update(exc.payload)
+                    if parsed.path == DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH:
+                        response_payload.update(_business_settings_request_error(entrypoint,payload))
                     _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
                     return
                 except (WbPricesManagementError, SheetVitrinaV1AdsError) as exc:
@@ -1805,7 +1812,7 @@ def _build_handler(
                     _write_json_response(self, HTTPStatus(exc.http_status), response_payload)
                     return
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc), **(_business_settings_request_error(entrypoint,payload) if parsed.path == DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH else {})})
                     return
                 except Exception:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -1978,12 +1985,13 @@ def _build_handler(
             if parsed.path == DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH:
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_sheet_feedbacks_ai_prompt_save_request(payload)
+                    result = entrypoint.handle_sheet_feedbacks_ai_prompt_save_request(payload,actor=_current_web_user_actor(self))
                 except ValueError as exc:
+                    from packages.application.operator_feedback_analysis_settings import SourceRejected
                     _write_json_response(
                         self,
-                        HTTPStatus.UNPROCESSABLE_ENTITY,
-                        {"error": str(exc)},
+                        HTTPStatus.CONFLICT if isinstance(exc,SourceRejected) else HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc), "code": exc.code if isinstance(exc,SourceRejected) else 'analysis_settings_unknown'},
                     )
                     return
                 except SheetVitrinaV1FeedbacksAiError as exc:
@@ -2094,7 +2102,7 @@ def _build_handler(
             if parsed.path == DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH:
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_sheet_feedbacks_complaints_submit_selected_request(payload)
+                    result = entrypoint.handle_sheet_feedbacks_complaints_submit_selected_request(payload,actor=_current_web_user_actor(self))
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -2123,9 +2131,11 @@ def _build_handler(
             if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH:
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_save_request(payload)
+                    result = entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_save_request(payload,actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    from packages.application.operator_feedback_complaint_schedules import SourceRejected
+                    _write_json_response(self, HTTPStatus.CONFLICT if isinstance(exc,SourceRejected) else HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error":str(exc),"code":exc.code if isinstance(exc,SourceRejected) else 'complaint_schedules_unknown'})
                     return
                 except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
                     _write_json_response(self, HTTPStatus(exc.http_status), _auto_complaints_error_payload(exc))
@@ -2137,11 +2147,16 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH:
+                payload = None
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_sheet_feedbacks_auto_complaints_run_now_request(payload)
+                    result = entrypoint.handle_sheet_feedbacks_auto_complaints_run_now_request(payload,actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    from packages.application.operator_complaint_runs import NotSaved
+                    _write_json_response(self, HTTPStatus.CONFLICT if isinstance(exc,NotSaved) else HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error":str(exc),"code":exc.code if isinstance(exc,NotSaved) else 'complaint_run_unknown',
+                         "status":"not_saved" if isinstance(exc,NotSaved) else 'unknown',
+                         "operation_id":payload.get('operation_id') if isinstance(payload,dict) else None})
                     return
                 except SheetVitrinaV1FeedbacksAutoComplaintsError as exc:
                     _write_json_response(self, HTTPStatus(exc.http_status), _auto_complaints_error_payload(exc))
@@ -3444,6 +3459,8 @@ def _build_handler(
                         payload = entrypoint.buyer_support_pilot.operation(
                             cabinet, operation_id=query.get("operation_id", [""])[0],
                             request_id=query.get("request_id", [""])[0])
+                        if payload.get('operation_id'):
+                            payload=entrypoint._feedback_operator_result(payload,'buyer_support',payload['operation_id'],_current_web_user_actor(self))
                     else:
                         payload = entrypoint.buyer_support_pilot.detail(
                             cabinet, kind=query.get("kind", [""])[0], item_id=query.get("id", [""])[0])
@@ -3543,6 +3560,7 @@ def _build_handler(
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
                         user_config_key=_current_web_user_config_key(self),
+                        complaint_run_actor=_current_web_user_actor(self),
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
                         finance_explicit_sections=_current_web_user_explicit_sections(self),
@@ -3606,6 +3624,7 @@ def _build_handler(
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
                         user_config_key=_current_web_user_config_key(self),
+                        complaint_run_actor=_current_web_user_actor(self),
                         active_tab="settings",
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
@@ -3652,6 +3671,7 @@ def _build_handler(
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
                         user_config_key=_current_web_user_config_key(self),
+                        complaint_run_actor=_current_web_user_actor(self),
                         active_tab="instructions",
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
@@ -3763,6 +3783,7 @@ def _build_handler(
                             refresh_path=sheet_refresh_path,
                             job_path=sheet_job_path,
                             user_config_key=_current_web_user_config_key(self),
+                            complaint_run_actor=_current_web_user_actor(self),
                             role=_current_web_user_role(self),
                             allowed_sections=_current_web_user_allowed_sections(self),
                             finance_explicit_sections=_current_web_user_explicit_sections(self),
@@ -4550,7 +4571,7 @@ def _build_handler(
                     run_id = _resolve_single_query_param(parsed.query, "run_id")
                     if not run_id:
                         raise ValueError("run_id query parameter is required")
-                    payload = entrypoint.handle_sheet_feedbacks_complaints_submit_job_request(run_id)
+                    payload = entrypoint.handle_sheet_feedbacks_complaints_submit_job_request(run_id,actor=_current_web_user_actor(self))
                 except ValueError as exc:
                     _write_json_response(
                         self,
@@ -4655,10 +4676,14 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH:
                 try:
-                    run_id = _resolve_single_query_param(parsed.query, "run_id")
-                    if not run_id:
-                        raise ValueError("run_id query parameter is required")
-                    payload = entrypoint.handle_sheet_feedbacks_auto_complaints_run_request(run_id)
+                    params=urllib_parse.parse_qs(parsed.query,keep_blank_values=True)
+                    if 'operation_id' in params:
+                        if set(params)!={'operation_id'} or len(params['operation_id'])!=1:raise ValueError('one_exact_complaint_run_required')
+                        payload=entrypoint.handle_operator_complaint_run_read(params['operation_id'][0],actor=_current_web_user_actor(self))
+                    else:
+                        run_id = _resolve_single_query_param(parsed.query, "run_id")
+                        if not run_id:raise ValueError("run_id query parameter is required")
+                        payload = entrypoint.handle_sheet_feedbacks_auto_complaints_run_request(run_id)
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
                     return
@@ -5241,22 +5266,61 @@ def _build_handler(
             if parsed.path == "/v1/sheet-vitrina-v1/operations" or parsed.path.startswith("/v1/sheet-vitrina-v1/operations/"):
                 try:
                     from packages.application.operator_operations import journal, read_acceptance
+                    from packages.application.operator_feedback_operations import FeedbackSurface
+                    feedback_scope=FeedbackSurface.from_entrypoint(entrypoint,actor=_current_web_user_actor(self))
                     auth_config = _web_auth_config()
                     if auth_config["enabled"]:
                         allowed_domains = _operator_domains_for_user(_authenticated_web_user(self, auth_config) or {})
                     else:
                         from packages.application.operator_operations import DOMAIN_LABELS
-                        allowed_domains = frozenset(DOMAIN_LABELS)
+                        allowed_domains = frozenset(DOMAIN_LABELS) - {'buyer_support'}
+                    from packages.application.operator_business_settings import SettingsScope,NATIVE_PATHS
+                    from packages.application.wb_incident_policy import canonical_seller_id
+                    settings_user=_authenticated_web_user(self,auth_config) or {}
+                    settings_configs=frozenset(key for key,path in NATIVE_PATHS.items()
+                        if not auth_config['enabled'] or _user_can_access_path(settings_user,path))
+                    settings_scope=SettingsScope(_current_web_user_actor(self),_current_web_user_config_key(self),
+                        canonical_seller_id(),settings_configs)
+                    from packages.application.operator_autoanswers_settings import SettingsSurface
+                    ai_settings_scope=SettingsSurface.from_entrypoint(entrypoint,actor=_current_web_user_actor(self)) if "autoanswers_settings" in allowed_domains else None
+                    from packages.application.operator_feedback_analysis_settings import PromptScope
+                    analysis_settings_scope=PromptScope.from_entrypoint(entrypoint,actor=_current_web_user_actor(self)) if "feedback_analysis_settings" in allowed_domains and entrypoint.change_registry_read_surface is not None else None
+                    from packages.application.operator_feedback_complaint_schedules import ScheduleScope
+                    complaint_schedules_scope=ScheduleScope.from_entrypoint(entrypoint,actor=_current_web_user_actor(self)) if "feedback_complaint_schedules" in allowed_domains and entrypoint.change_registry_read_surface is not None else None
+                    from packages.application.operator_complaint_runs import RunScope
+                    complaint_runs_scope=RunScope.from_entrypoint(entrypoint,actor=_current_web_user_actor(self)) if "feedback_complaint_run" in allowed_domains and entrypoint.change_registry_read_surface is not None else None
                     prefix = "/v1/sheet-vitrina-v1/operations"
-                    if parsed.path == prefix:
+                    if parsed.path == prefix+'/feedback':
+                        from packages.application.operator_feedback_operations import read_native
+                        raw=urllib_parse.parse_qs(parsed.query,keep_blank_values=True)
+                        if set(raw)!={'domain','native_id'} or any(len(values)!=1 for values in raw.values()):raise ValueError('one_exact_feedback_identity_required')
+                        params={key:values[0] for key,values in raw.items()}
+                        acceptance=read_native(entrypoint.runtime.db_path,domain=params['domain'],native_id=params['native_id'],
+                            allowed_domains=allowed_domains,scope=feedback_scope)
+                        if acceptance is None:
+                            _write_json_response(self,HTTPStatus.NOT_FOUND,{'code':'operation_not_found'})
+                            return
+                        payload={'contract_name':'operator_operations_v1','status':'ready','operation':acceptance}
+                    elif parsed.path == prefix+'/external':
+                        from packages.application.operator_external_operations import read_native
+                        raw=urllib_parse.parse_qs(parsed.query,keep_blank_values=True)
+                        if set(raw)!={'domain','native_id'} or any(len(values)!=1 for values in raw.values()):raise ValueError('one_exact_external_identity_required')
+                        params={key:values[0] for key,values in raw.items()}
+                        acceptance=read_native(entrypoint.runtime.db_path,domain=params['domain'],native_id=params['native_id'],
+                            allowed_domains=allowed_domains,scope=entrypoint.change_registry_read_surface)
+                        if acceptance is None:
+                            _write_json_response(self,HTTPStatus.NOT_FOUND,{'code':'operation_not_found'})
+                            return
+                        payload={'contract_name':'operator_operations_v1','status':'ready','operation':acceptance}
+                    elif parsed.path == prefix:
                         params = {key: values[-1] for key, values in urllib_parse.parse_qs(parsed.query).items()}
                         payload = journal(entrypoint.runtime.db_path, page=int(params.get("page") or 1), limit=int(params.get("limit") or 25),
                             allowed_domains=allowed_domains, domain=params.get('domain') or 'all', search=params.get('search') or '',
-                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self))
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self), external_scope=entrypoint.change_registry_read_surface, feedback_scope=feedback_scope, settings_scope=settings_scope, ai_settings_scope=ai_settings_scope, analysis_settings_scope=analysis_settings_scope, complaint_schedules_scope=complaint_schedules_scope, complaint_runs_scope=complaint_runs_scope)
                     else:
                         identity = urllib_parse.unquote(parsed.path[len(prefix) + 1:])
                         acceptance = read_acceptance(entrypoint.runtime.db_path, identity, allowed_domains=allowed_domains,
-                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self))
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self), external_scope=entrypoint.change_registry_read_surface, feedback_scope=feedback_scope, settings_scope=settings_scope, ai_settings_scope=ai_settings_scope, analysis_settings_scope=analysis_settings_scope, complaint_schedules_scope=complaint_schedules_scope, complaint_runs_scope=complaint_runs_scope)
                         if acceptance is None:
                             _write_json_response(self, HTTPStatus.NOT_FOUND, {"code": "operation_not_found"})
                             return
@@ -7049,6 +7113,12 @@ class RegistryUploadHttpServer(HTTPServer):
                 self.RequestHandlerClass._window_v3_service = None
         finally:
             super().server_close()
+
+
+def _business_settings_request_error(entrypoint,body):
+    from packages.application.operator_business_settings import source_not_saved
+    identity=body.get('operation_id')
+    return {'operation_id':identity,'source_not_saved':True} if source_not_saved(entrypoint.runtime.db_path,identity) else {}
 
 
 def _load_request_payload(
@@ -9341,6 +9411,8 @@ def _handle_buyer_support_pilot_post(handler: BaseHTTPRequestHandler, parsed: An
         cabinet = os.environ.get("WB_BUYER_SUPPORT_CABINET_ID", "").strip()
         payload = getattr(entrypoint.buyer_support_pilot, action)(
             cabinet, **body, actor=_current_web_user_actor(handler))
+        if action in {'send','claim','reconcile'} and payload.get('operation_id'):
+            payload=entrypoint._feedback_operator_result(payload,'buyer_support',payload['operation_id'],_current_web_user_actor(handler))
     except BuyerSupportPilotError as exc:
         error_payload = {"error": exc.code, "code": exc.code}
         # These gates run before request reservation or any provider/WB attempt.
@@ -10928,6 +11000,19 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
         domains.update(('plan_report_baseline', 'partner_report_settings'))
     if _role_has_full_operator_access(str(user.get('role') or '').strip()):
         domains.update(('registry_bundle_upload', 'cost_price_upload'))
+    from packages.application.operator_external_operations import SURFACES
+    for domain, (_surface, _label, native_path) in SURFACES.items():
+        if _user_can_access_path(user,native_path):domains.add(domain)
+    if _user_has_section_access(user,WEB_AUTH_SECTION_FEEDBACKS):
+        domains.update(('feedback_complaint','buyer_support'))
+        if _user_has_section_access(user,WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW):domains.add('feedback_reply')
+        if _user_has_section_access(user,WEB_AUTH_PERMISSION_FEEDBACKS_AUTOANSWERS_ADMIN):domains.add('autoanswers_settings')
+
+    from packages.application.operator_business_settings import DOMAIN,NATIVE_PATHS
+    if any(_user_can_access_path(user,path) for path in NATIVE_PATHS.values()):domains.add(DOMAIN)
+    if _user_can_access_path(user,DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH):domains.add('feedback_analysis_settings')
+    if _user_can_access_path(user,DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH):domains.add('feedback_complaint_schedules')
+    if _user_can_access_path(user,DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH):domains.add('feedback_complaint_run')
     return frozenset(domains)
 
 
@@ -11826,6 +11911,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
     finance_explicit_sections: Sequence[str] | None = None,
     active_tab: str = "",
     user_config_key: str = "local_operator",
+    complaint_run_actor: str = "local_operator",
     finished_snapshots_enabled: bool = False,
     finished_snapshots_configured: bool = False,
     history_snapshots_configured: bool = False,
@@ -11851,6 +11937,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "history_snapshots_configured": history_snapshots_configured,
         "current_role": normalized_role,
         "user_config_key": user_config_key,
+        "complaint_run_actor": complaint_run_actor,
         "allowed_sections": normalized_sections,
         "allowed_tabs": allowed_tabs,
         "initial_tab": initial_tab,
@@ -11958,7 +12045,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
     template = _web_vitrina_ui_base_template()
     return (
         template.replace("__SHEET_VITRINA_V1_WEB_VITRINA_PAGE_TITLE__", config_payload["page_title"])
-        .replace("__SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
+        .replace("__SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False).replace("<", "\\u003c"))
         .replace(
             "__SHEET_VITRINA_V1_FINANCE_NAVIGATION_LINK__",
             '<button class="shell-logout-link" type="button" data-unified-tab-button="finance" aria-selected="false">Финансы</button>'
