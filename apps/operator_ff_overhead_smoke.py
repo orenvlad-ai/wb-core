@@ -725,7 +725,7 @@ class NativeCompletionTests(unittest.TestCase):
                 DOCUMENTS_TABLE,'sheet_vitrina_v1_ff_pool_document_expense_lines','sheet_vitrina_v1_ff_pool_document_lines')}
             rows['sources']=[tuple(r) for r in conn.execute(f'SELECT request_id,source_json,source_digest,accepted_at,actor FROM {operations.TABLE}')]
         book,_=accounting.load(self.root)
-        rows['allocation']=deepcopy(book['state']['periods']['2026-09-08']['document_valuation']['allocations'])
+        rows['allocation']=deepcopy(book['state']['periods'][self.now.date().isoformat()]['document_valuation']['allocations'])
         return rows
 
     def proof_inputs(self):
@@ -846,6 +846,54 @@ class NativeCompletionTests(unittest.TestCase):
                             self.assertEqual(case.finance.plan_stale_cost_weeks()['stale_week_count'],1)
                         else:self.assertEqual(case.native_terminal(case.identity),('complete','retained'))
                     self.assertEqual(case.business_image(),case.before)
+                finally:case.doCleanups()
+
+    def test_native_plan_date_bounds_and_supported_operation_fallback(self):
+        import hashlib
+        from datetime import date
+        from apps.wb_finance_weekly_cost_cutover_smoke import _row
+        from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
+        for operation_day,start,end,applicable in (('2026-09-14',7,13,True),('',14,20,True),('',7,13,False)):
+            for changed in (False,True):
+                case=NativeCompletionTests();case.setUp()
+                try:
+                    case.open_book()
+                    for day in range(9,15):
+                        case.now=case.now.replace(day=day);case.publish(case.prepare())
+                    case.finance=WbFinanceWeeklyBlock(case.root,seller_id='canonical',now_factory=lambda:case.now)
+                    case.finance.ensure_schema()
+                    row=_row(1,operation_day,nm_id=1)
+                    native=case.finance.ingest_week(date(2026,9,start),date(2026,9,end),[row])
+                    preview=case.preview(scope='FBS',amount_rub='61425');case.identity=preview['request_id']
+                    case.surface.confirm_document(case.identity);case.drain()
+                    with warehouse_functional_job_lock(case.root):
+                        block,plan=case.functional_plan()
+                        case.functional=block.apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'],backup_dir=case.root/'backups')
+                    case.publish(case.prepare());before=case.business_image()
+                    original=FfPoolDocumentService._finalize_posted;injected=[]
+                    def finalize(service,*args,**kwargs):
+                        if changed:
+                            with sqlite3.connect(case.runtime.db_path) as conn:
+                                operation=json.loads(conn.execute('SELECT raw_json FROM wb_finance_weekly_raw_rows LIMIT 1').fetchone()[0]);operation['quantity']=2
+                                payload=json.dumps(operation,ensure_ascii=False,sort_keys=True,separators=(',',':'))
+                                conn.execute('UPDATE wb_finance_weekly_raw_rows SET raw_json=?,row_hash=?',(payload,hashlib.sha256(payload.encode()).hexdigest()))
+                            injected.append(True)
+                        return original(service,*args,**kwargs)
+                    with self.subTest(operation_day=operation_day,start=start,changed=changed),warehouse_functional_job_lock(case.root):
+                        args=case.proof_inputs()
+                        self.assertEqual(case.finance.shared_cost_snapshot.effective_date,'2026-09-08')
+                        with patch.object(FfPoolDocumentService,'_finalize_posted',finalize):
+                            if changed:
+                                with self.assertRaises(ValueError):case.complete(*args)
+                            else:self.assertEqual(case.complete(*args)['processed_count'],1)
+                        receipt=operations.read_acceptance(case.runtime.db_path,case.identity)
+                        expected=[['canonical',f'2026-09-{start:02}',f'2026-09-{end:02}']] if applicable else []
+                        self.assertEqual(receipt['processing_receipt']['native_completion']['finance_publication']['applicable_weeks'],expected)
+                        if changed:
+                            self.assertEqual(injected,[True]);self.assertEqual(receipt['state'],'processing')
+                            self.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
+                        else:self.assertEqual(case.native_terminal(case.identity),('complete','retained'))
+                    self.assertEqual(case.business_image(),before)
                 finally:case.doCleanups()
 
     def test_false_foreign_economics_and_finance_never_ack_or_retain(self):
@@ -1055,6 +1103,26 @@ class NativeCompletionTests(unittest.TestCase):
             with sqlite3.connect(raw) as conn:conn.execute("DELETE FROM finance_raw_current_rows WHERE week_start='2026-09-14'")
             with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate')):
                 self.assertEqual(self.complete(*self.proof_inputs())['processed_count'],1)
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_split_raw_foreign_commit_outside_nm_scope_keeps_original_token(self):
+        self.old_tail();raw=self.split_finance_raw();injected=[]
+        original=FfPoolDocumentService._finalize_posted
+        def finalize(service,*args,**kwargs):
+            with sqlite3.connect(raw) as conn:
+                conn.row_factory=sqlite3.Row
+                row=dict(conn.execute('SELECT * FROM finance_raw_current_rows LIMIT 1').fetchone())
+                operation=json.loads(row['raw_json']);operation['nmId']=999
+                row.update(week_start='2026-09-14',week_end='2026-09-20',rrd_id=str(int(row['rrd_id'])+1000),row_hash='synthetic-foreign-nm',raw_json=json.dumps(operation))
+                conn.execute('INSERT INTO finance_raw_current_rows('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',list(row.values()))
+            injected.append(True)
+            return original(service,*args,**kwargs)
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            with patch.object(FfPoolDocumentService,'_finalize_posted',finalize),self.assertRaises(ValueError):self.complete(*args)
+        self.assertEqual(injected,[True])
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'processing')
         self.assertEqual(self.business_image(),self.before)
 
     def test_split_scope_insert_during_post_own_commit_seal_is_rejected(self):

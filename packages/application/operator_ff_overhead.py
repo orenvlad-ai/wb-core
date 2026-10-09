@@ -622,7 +622,9 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
         reads=_CompletionReadset(observer)
         aliases,ambiguous,_,_=_nomenclature_identity_index(reads)
         nm_ids=sorted({str(nm) for frozen in captured['sources'] for nm in frozen['affected_nm_ids']})
-        earliest=min(frozen['effective_date'] for frozen in captured['sources'])
+        # The provider's operation date need not lie inside its report week.
+        # Use the exact native planner's candidate bounds, then native dates below.
+        date_from,date_to=plan['date_from'],plan['date_to']
         # Exclude only canonical ASCII positive decimal IDs outside the source
         # cohort. Native Python str(...).strip() also accepts Unicode whitespace;
         # SQLite trim/casts must never decide that such rows are irrelevant.
@@ -631,9 +633,9 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
         # Whole selected weeks retain every native aggregate operand.
         direct_nm="coalesce(CAST(json_extract(raw_json,'$.nmId') AS TEXT),'')"
         canonical_nm=f"({direct_nm} GLOB '[1-9]*' AND {direct_nm} NOT GLOB '*[^0-9]*')"
-        candidates=reads.execute("SELECT week_start,week_end,raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_end>=? AND ("+direct_nm+" IN ("+
+        candidates=reads.execute("SELECT week_start,week_end,raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_end>=? AND (? IS NULL OR week_start<=?) AND ("+direct_nm+" IN ("+
             ','.join('?' for _ in nm_ids)+") OR NOT "+canonical_nm+") ORDER BY week_start,report_id,rrd_id",
-            (finance_block.seller_id,earliest,*nm_ids))
+            (finance_block.seller_id,date_from,date_to,date_to,*nm_ids))
         keys=set()
         for row in candidates:
             operation=json.loads(row['raw_json'])
@@ -646,7 +648,6 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
             day,day_source=_operation_date(operation,date.fromisoformat(row['week_start']))
             for frozen in captured['sources']:
                 if str(nm) not in {str(n) for n in frozen['affected_nm_ids']}: continue
-                if day_source=='week_start_fallback':raise ValueError('overhead_completion_finance_operation_date_unknown')
                 if day.isoformat()>=frozen['effective_date']:
                     keys.add((finance_block.seller_id,str(row['week_start']),str(row['week_end'])))
         image=dict(source=finance_block._finance_source_dependency_fingerprint(reads,target_keys=keys,force_reload=True),
@@ -693,7 +694,10 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
             # Own native commits change main.data_version. Never reset the fence
             # until actual retained source/target/scope bytes have been streamed.
             start=finance_block._sqlite_data_version_token(observer)
-            if (registry.load()!=captured['authority'] or finance_block._sqlite_persistent_identity(observer)!=identity
+            # This completion never writes attached raw stores. Only main's own
+            # commits may advance after an exact outside-writer semantic seal.
+            if (any(start[name]!=before[name] for name,_ in identity if name!='main')
+                    or registry.load()!=captured['authority'] or finance_block._sqlite_persistent_identity(observer)!=identity
                     or files_identity(observer)!=files
                     or finance_block._sqlite_persistent_identity(book_observer)!=book_identity
                     or files_identity(book_observer)!=book_files
