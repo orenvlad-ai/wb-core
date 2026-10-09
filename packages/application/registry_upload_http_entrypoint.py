@@ -3323,13 +3323,21 @@ class RegistryUploadHttpEntrypoint:
             raise CycleStageFailure('cycle_derived_owner_mismatch')
         return dict(job_id=job_id, operation='cycle', pid=os.getpid(), identity=identity)
 
-    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None):
+    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None, historical_receipt=None):
         from apps.web_vitrina_history_candidate_build import build_owned_cycle_history
         from packages.application.sheet_vitrina_v1_cycle import StageProof
         owner = RegistryUploadHttpEntrypoint._cycle_owned_worker_identity(self, receipt)
         proof = build_owned_cycle_history(runtime=self.runtime, config=config, cycle_owner=owner, now=self.now_factory(),
-            backfill_dates=backfill_dates, closed_receipt=closed_receipt)
+            backfill_dates=backfill_dates, closed_receipt=closed_receipt, historical_receipt=historical_receipt)
         self._cycle_verify_ready(ready)
+        if historical_receipt is not None:
+            from packages.application.fbs_accounting_historical_cycle import finalize
+            # The History context has exited and its fixed child is reaped.
+            # Genuine job admission excludes overlap with the next warehouse.
+            with warehouse_functional_job_lock(self.runtime.runtime_dir):
+                completion=finalize(self.runtime,config=config,now=self.now_factory())
+            from packages.application.ready_publication import canonical
+            proof['historical_completion']=canonical(completion)
         return StageProof({'history_' + key: str(value) for key,value in proof.items()})
 
     def _cycle_stock_monitor_tail(self, store, receipt):

@@ -936,6 +936,10 @@
     },
     "web_vitrina_history_activation": {
       "patterns": [
+        "packages/application/fbs_accounting_historical_history.py",
+        "packages/application/fbs_accounting_runtime.py",
+        "packages/application/fbs_inventory_presentation.py",
+        "packages/application/inventory_quantity.py",
         "artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json",
         "artifacts/registry_upload_http_entrypoint/systemd/wb-core-web-vitrina-finished-snapshot.service",
         "artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service",

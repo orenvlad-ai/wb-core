@@ -578,6 +578,12 @@ def reconcile(runtime, *, request_ids, finance_receipt, economics_receipt=None, 
         identity=row['request_id']
         source=json.loads(row['source_json'])
         receipt=json.loads(row['receipt_json'])
+        historical=(book or {}).get('historical_revision',{})
+        if source['business_date'] < max((book or {}).get('state',{}).get('periods',{'':{}})) and any(
+                d['document_id'] in historical.get('receipt_document_ids',[]) for d in source['effect']['documents']):
+            from packages.application.fbs_accounting_historical_cycle import completion_authorized
+            with closing(readonly(runtime.db_path)) as conn:
+                if not completion_authorized(conn,identity):continue
         owned=[d for d in documents.values() if d['document_id'] in {d['document_id'] for d in source['effect']['documents']}]
         if len(owned) != len(source['effect']['documents']):
             continue

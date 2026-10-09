@@ -165,6 +165,7 @@ class _OwnedHistoryWorker:
         self._completion_deadline = None
         self._source_dates = self._backfill_dates = None
         self._target = self._closed_binding = self._closed_proof = None
+        self._historical_binding = self._historical_proof = self._historical_receipt = None
         self._source_binding = source_binding(runtime.runtime_dir)
         self._contract_digest = file_digest(config.runtime_contract)
 
@@ -200,7 +201,7 @@ class _OwnedHistoryWorker:
         self._portion_used = True  # Before Popen; even ambiguous startup is consumed.
         return self._invoke("portion", anchor["now"], anchor)
 
-    def complete(self, now, *, backfill_dates=(), closed_receipt=None, source_range=None,
+    def complete(self, now, *, backfill_dates=(), closed_receipt=None, historical_receipt=None, source_range=None,
                  total_seconds=HISTORY_TOTAL_SECONDS, max_portions=HISTORY_MAX_PORTIONS):
         """One frozen target; only verified strict dated progress permits more work."""
         from packages.business_time import current_business_date_iso
@@ -214,7 +215,7 @@ class _OwnedHistoryWorker:
         today = current_business_date_iso(now)
         first = (datetime.fromisoformat(today) - timedelta(days=13)).date().isoformat()
         if self.operation == "cycle":
-            if source_range is not None or len(backfill_dates) > 2 or any(day >= (datetime.fromisoformat(today) - timedelta(days=1)).date().isoformat() for day in backfill_dates):
+            if source_range is not None or (historical_receipt is None and len(backfill_dates) > 2) or any(day >= (datetime.fromisoformat(today) - timedelta(days=1)).date().isoformat() for day in backfill_dates):
                 raise HistoryDelegationError("history_cycle_backfill_scope_invalid")
             for day in backfill_dates:
                 datetime.strptime(day, "%Y-%m-%d")
@@ -228,11 +229,23 @@ class _OwnedHistoryWorker:
         if closed_receipt is not None:
             from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog
             if (type(closed_receipt) is not ClosedBacklog or closed_receipt.runtime is not self.runtime
-                    or closed_receipt.publication_dates() != backfill_dates):
+                    or not set(closed_receipt.publication_dates()) <= set(backfill_dates)):
                 raise HistoryDelegationError("history_closed_receipt_context_changed")
             from packages.application.owned_history_native_ack import closed_receipt_digest
-            self._closed_binding = {"digest": closed_receipt_digest(closed_receipt.status()), "dates": list(backfill_dates)}
-        elif self.operation == "cycle" and backfill_dates:
+            self._closed_binding = {"digest": closed_receipt_digest(closed_receipt.status()), "dates": list(closed_receipt.publication_dates())}
+        if historical_receipt is not None:
+            from packages.application.fbs_accounting_historical_history import HistoricalReceipt
+            if type(historical_receipt) is not HistoricalReceipt or historical_receipt.runtime is not self.runtime or self.operation!='cycle':
+                raise HistoryDelegationError('historical_history_receipt_context_changed')
+            historical_dates=historical_receipt.publication_dates()
+            old_dates=tuple(day for day in historical_dates if day < (datetime.fromisoformat(today)-timedelta(days=1)).date().isoformat())
+            closed_dates=tuple(self._closed_binding['dates']) if self._closed_binding else ()
+            if backfill_dates != tuple(sorted(set(old_dates)|set(closed_dates))):
+                raise HistoryDelegationError('historical_history_exact_scope_changed')
+            historical_receipt.validate_sources_readonly(now=now)
+            self._historical_binding=historical_receipt.binding()
+            self._historical_receipt=historical_receipt
+        elif self.operation == "cycle" and backfill_dates and closed_receipt is None:
             raise HistoryDelegationError("history_closed_receipt_required")
         self._completion_used = True
         self._source_dates, self._backfill_dates = dates, backfill_dates
@@ -294,13 +307,22 @@ class _OwnedHistoryWorker:
             if not closed or closed["receipt_digest"] != self._closed_binding["digest"]:
                 raise HistoryDelegationError("history_closed_terminal_unproven")
             self._closed_proof = _VerifiedClosedHistory(self, observed["invocation"], closed["receipt_digest"],
-                self._backfill_dates, observed["current"], closed["native"], observed["source_stamp"])
-            closed_receipt._acknowledge_verified_native(self._closed_proof, backfill_dates=self._backfill_dates)
+                tuple(self._closed_binding["dates"]), observed["current"], closed["native"], observed["source_stamp"])
+            closed_receipt._acknowledge_verified_native(self._closed_proof, backfill_dates=tuple(self._closed_binding["dates"]))
+        if self._historical_receipt is not None:
+            from packages.application.owned_history_native_ack import _VerifiedHistoricalHistory
+            historical=observed.get('historical')
+            if not historical or historical['receipt_digest']!=self._historical_binding['digest']:
+                raise HistoryDelegationError('historical_history_terminal_unproven')
+            self._historical_proof=_VerifiedHistoricalHistory(self,observed['invocation'],historical['receipt_digest'],
+                tuple(self._historical_binding['dates']),observed['current'],historical['native'],observed['source_stamp'])
+            self._historical_receipt._acknowledge_verified_native(self._historical_proof)
         return {"status": "unchanged" if observed["current"]["current"] == self._anchor["base"] else "published",
                 "edition_id": observed["current"]["current"], "vector_digest": fingerprint(self._anchor["vector"]),
                 "window_from": self._anchor["window_from"], "window_to": self._anchor["window_to"],
                 "portions": portions, "completed": len(observed["completed"]),
-                "backfill_count": len(self._backfill_dates), "closed_ack": closed_receipt is not None}
+                "backfill_count": len(self._backfill_dates), "closed_ack": closed_receipt is not None,
+                "historical_ack": self._historical_receipt is not None}
 
     def _invoke(self, mode, now, anchor):
         try:
@@ -341,7 +363,7 @@ class _OwnedHistoryWorker:
                 "runtime_contract_digest": file_digest(config.runtime_contract), "source": binding,
                 "cycle_owner": self.cycle_owner, "owner_kind": self.operation, "locks": locks, "now": now,
                 "source_dates": self._source_dates, "backfill_dates": self._backfill_dates,
-                "target": self._target, "closed_receipt": self._closed_binding,
+                "target": self._target, "closed_receipt": self._closed_binding, "historical_receipt": self._historical_binding,
                 "formula_epoch": config.formula_epoch,
                 "inner_seconds": min(float(config.budget_seconds), seconds - PARENT_GRACE_SECONDS),
                 "max_recomputes": config.max_recomputes, "anchor": anchor}

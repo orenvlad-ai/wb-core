@@ -24,6 +24,14 @@ MAX_JSON_FILE = 16 * 1024 * 1024
 
 
 HISTORY_ERROR_CODES = frozenset({
+    'historical_history_ack_not_supervised',
+    'historical_history_ack_owner_or_target_changed',
+    'historical_history_exact_scope_changed',
+    'historical_history_native_anchor_changed',
+    'historical_history_receipt_context_changed',
+    'historical_history_terminal_unproven',
+    'historical_history_worker_binding_changed',
+    'historical_history_worker_scope_changed',
     'history_bound_file_oversized',
     'history_bound_file_unsafe',
     'history_budget_exhausted_before_spawn',

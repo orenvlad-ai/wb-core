@@ -75,7 +75,19 @@ def execute(cap):
             or not set(backfill_dates) <= set(source_dates)):
         raise HistoryDelegationError("history_worker_date_scope_invalid")
     scope_dates = sorted({day for day in source_dates if first <= day <= today} | set(backfill_dates))
-    if cap.get("owner_kind", "cycle") == "cycle" and (len(backfill_dates) > 2
+    historical=None
+    if cap.get('historical_receipt') is not None:
+        from packages.application.fbs_accounting_historical_history import HistoricalReceipt
+        binding=cap['historical_receipt']
+        historical=HistoricalReceipt(runtime,binding['operation_id'],binding['attempt_id']).freeze_scope(now)
+        if cap.get('owner_kind')!='cycle' or historical.binding()!=binding:
+            raise HistoryDelegationError('historical_history_worker_binding_changed')
+        historical.validate_sources_readonly(now=now)
+        old_dates={day for day in binding['dates'] if day < (datetime.fromisoformat(today)-timedelta(days=1)).date().isoformat()}
+        closed_dates=set((cap.get('closed_receipt') or {}).get('dates',[]))
+        if backfill_dates!=sorted(old_dates|closed_dates) or len(closed_dates)>2:
+            raise HistoryDelegationError('historical_history_worker_scope_changed')
+    if cap.get("owner_kind", "cycle") == "cycle" and ((historical is None and len(backfill_dates) > 2)
             or source_dates != dates_between(min((first, *backfill_dates)), today)):
         raise HistoryDelegationError("history_worker_cycle_date_scope_invalid")
 
@@ -128,17 +140,24 @@ def execute(cap):
             value = closed.status()
             binding = cap["closed_receipt"]
             from packages.application.owned_history_native_ack import closed_receipt_digest
-            if closed_receipt_digest(value) != binding["digest"] or binding["dates"] != backfill_dates:
+            if closed_receipt_digest(value) != binding["digest"] or not set(binding["dates"]) <= set(backfill_dates):
                 raise HistoryDelegationError("history_closed_receipt_changed")
             canonical_adapter = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=runtime_dir,
                 cache_dir=root / "proofs", now=now, date_from=source_dates[0], date_to=source_dates[-1],
                 formula_epoch=cap["formula_epoch"])
             native = closed.validate_native_readonly(value=value, adapter=canonical_adapter, store=store,
-                backfill_dates=tuple(backfill_dates))
+                backfill_dates=tuple(binding["dates"]))
             if (native["vector"] != anchor["vector"] or native["fence"] != anchor["fence"]
                     or native["current"] != observed["current"]):
                 raise HistoryDelegationError("history_closed_native_anchor_changed")
             observed["closed"] = {key: native[key] for key in ("receipt_digest", "native")}
+        if observed['terminal'] and historical is not None:
+            canonical_adapter=LiveNativeAdapter(db_path=runtime.db_path,runtime_dir=runtime_dir,cache_dir=root/'proofs',
+                now=now,date_from=source_dates[0],date_to=source_dates[-1],formula_epoch=cap['formula_epoch'])
+            native=historical.validate_native_readonly(adapter=canonical_adapter,store=store,now=now)
+            if native['vector']!=anchor['vector'] or native['fence']!=anchor['fence'] or native['current']!=observed['current']:
+                raise HistoryDelegationError('historical_history_native_anchor_changed')
+            observed['historical']={key:native[key] for key in ('receipt_digest','native')}
         if adapter.capture() != anchor["vector"] or store._current() != observed["current"]:
             raise HistoryDelegationError("history_readback_changed_during_verify")
         _bound(cap)

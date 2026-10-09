@@ -93,6 +93,27 @@ class DiagnosticsTests(unittest.TestCase):
                 self.assertNotIn(SECRET, json.dumps(caught.exception.diagnostic()))
                 self.assertEqual(calls, ["capture", "verify", "portion", "verify"])
 
+    def test_historical_receipt_guards_survive_transport_without_accepting_payload(self):
+        for code in (
+            'historical_history_ack_not_supervised',
+            'historical_history_ack_owner_or_target_changed',
+            'historical_history_exact_scope_changed',
+            'historical_history_native_anchor_changed',
+            'historical_history_receipt_context_changed',
+            'historical_history_terminal_unproven',
+            'historical_history_worker_binding_changed',
+            'historical_history_worker_scope_changed',
+        ):
+            for supplied, expected in ((code, code), (code + ':' + SECRET, 'history_failure_unknown')):
+                with self.subTest(code=supplied):
+                    failure = history_child_failure(HistoryDelegationError(supplied), mode='verify')
+                    worker, calls = self.worker(('verify', {'status': 'complete', 'result': failure}))
+                    with self.assertRaises(HistoryDelegationError) as caught:
+                        worker.complete(NOW)
+                    self.assertEqual(caught.exception.diagnostic()['reason_code'], expected)
+                    self.assertNotIn(SECRET, json.dumps(failure) + str(caught.exception))
+                    self.assertEqual(calls, ['capture', 'verify'])
+
     def test_unknown_capture_is_consumed_and_never_replayed(self):
         worker, calls = self.worker(("capture", {"status": "outcome_unknown", "readback": {}}))
         with self.assertRaises(HistoryDelegationError) as caught:
