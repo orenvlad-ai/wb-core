@@ -5,7 +5,7 @@ posting and dated accounting publication remain separately evidenced effects.
 """
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -222,10 +222,15 @@ def assert_day_can_close(conn, day):
         raise ValueError("confirmed_overhead_day_pending")
 
 
-def _update(db_path, identity, state, reason, receipt=None):
-    with sqlite3.connect(db_path, timeout=2) as conn:
+def _update(db_path, identity, state, reason, receipt=None, *, guard=None):
+    with closing(sqlite3.connect(db_path, timeout=2)) as conn, conn:
+        conn.row_factory=sqlite3.Row
+        if guard is not None:
+            conn.execute("BEGIN IMMEDIATE")
+            guard(conn)
         conn.execute(f"UPDATE {TABLE} SET state=?,reason_code=?,updated_at=?,receipt_json=? WHERE request_id=?",
                      (state, reason, datetime.now(timezone.utc).isoformat(), json.dumps(receipt or {}, ensure_ascii=False), identity))
+        if guard is not None: guard(conn)
 
 
 def _closed_day(runtime_dir, day):
@@ -356,7 +361,7 @@ def reconcile(runtime, *, now=None):
     return {"processed_count": count}
 
 
-def _finalize_confirmed(runtime, acceptance):
+def _finalize_confirmed(runtime, acceptance, *, prepare_guard=None, finish=None):
     """Retain only this posted source, under the same owners as native posting."""
     from packages.application.ff_pool_documents import FfPoolDocumentService, REQUESTS_TABLE, _fingerprint
     from packages.application.warehouse_functional_lock import require_warehouse_job_owner, warehouse_functional_write_lock
@@ -366,24 +371,29 @@ def _finalize_confirmed(runtime, acceptance):
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5):
-                with closing(readonly(runtime.db_path)) as conn:
-                    request = conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?", (identity,)).fetchone()
-                    assert_native_confirmation(conn, request)
-                    if request["posted_document_id"] != acceptance["document"]["document_id"]:
-                        raise ValueError("confirmed_overhead_document_changed")
-                service = FfPoolDocumentService(db_path=runtime.db_path, runtime_dir=runtime.runtime_dir,
-                                               resume=False, bootstrap=False)
-                service._finalize_posted(identity)
-                readback = service._verify_posted_readback(identity)
-                with closing(readonly(runtime.db_path)) as conn:
-                    row = conn.execute(f"""SELECT r.state,recovery.operation_id,recovery.lifecycle_state,recovery.after_digest
-                        FROM {REQUESTS_TABLE} r LEFT JOIN sheet_vitrina_v1_recovery_operations recovery
-                        ON recovery.operation_id=r.recovery_operation_id WHERE r.request_id=?""", (identity,)).fetchone()
-                    if (row["state"] != "complete" or row["lifecycle_state"] != "retained"
-                            or row["after_digest"] != _fingerprint(readback)):
-                        raise ValueError("confirmed_overhead_native_not_terminal")
-                    return {"operation_id": row["operation_id"], "lifecycle": row["lifecycle_state"],
-                            "after_digest": row["after_digest"]}
+                from packages.application.fbs_accounting_runtime import writer_lock
+                with (writer_lock(runtime.runtime_dir) if prepare_guard else nullcontext()):
+                    guard = prepare_guard() if prepare_guard else None
+                    with closing(readonly(runtime.db_path)) as conn:
+                        request = conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?", (identity,)).fetchone()
+                        assert_native_confirmation(conn, request)
+                        if request["posted_document_id"] != acceptance["document"]["document_id"]:
+                            raise ValueError("confirmed_overhead_document_changed")
+                    service = FfPoolDocumentService(db_path=runtime.db_path, runtime_dir=runtime.runtime_dir,
+                                                   resume=False, bootstrap=False)
+                    service._finalize_posted(identity, **({"completion_guard": guard} if guard else {}))
+                    readback = service._verify_posted_readback(identity)
+                    with closing(readonly(runtime.db_path)) as conn:
+                        row = conn.execute(f"""SELECT r.state,recovery.operation_id,recovery.lifecycle_state,recovery.after_digest
+                            FROM {REQUESTS_TABLE} r LEFT JOIN sheet_vitrina_v1_recovery_operations recovery
+                            ON recovery.operation_id=r.recovery_operation_id WHERE r.request_id=?""", (identity,)).fetchone()
+                        if (row["state"] != "complete" or row["lifecycle_state"] != "retained"
+                                or row["after_digest"] != _fingerprint(readback)):
+                            raise ValueError("confirmed_overhead_native_not_terminal")
+                        recovery = {"operation_id": row["operation_id"], "lifecycle": row["lifecycle_state"],
+                                "after_digest": row["after_digest"]}
+                    if finish is not None: finish(recovery, guard)
+                    return recovery
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
@@ -419,3 +429,212 @@ def assert_native_confirmation(conn, request):
 def stale_payment_reason(day):
     return (f"Этот платёж уже загружали {day}, но не подтвердили. "
             "Загрузите этот PDF ещё раз с прежними параметрами расхода, чтобы проверить и подтвердить его текущей датой учёта склада.")
+
+
+def _completion_source(conn, identity):
+    """Original posted operands, including the deterministic queue, never today's pools."""
+    from decimal import Decimal
+    import hashlib
+    from packages.application.ff_pool_documents import REQUESTS_TABLE, DOCUMENTS_TABLE, TARGETED_RECALC_QUEUE_TABLE, _fingerprint, _json
+    row = conn.execute(f'SELECT * FROM {TABLE} WHERE request_id=?', (identity,)).fetchone()
+    request = conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?', (identity,)).fetchone()
+    if row is None or request is None or not request['posted_document_id']:
+        raise ValueError('overhead_completion_source_missing')
+    assert_native_confirmation(conn, request)
+    document = conn.execute(f'SELECT * FROM {DOCUMENTS_TABLE} WHERE document_id=? AND request_id=?',
+                            (request['posted_document_id'], identity)).fetchone()
+    if document is None:
+        raise ValueError('overhead_completion_document_missing')
+    posted = json.loads(document['posted_manifest_json'])
+    plan_manifest={k:posted[k] for k in ('contract_name','request_id','document_kind','business_date','source','feature_epoch','primary_document_id','root_document_id','documents','domain')}
+    domain = posted['domain']; source = json.loads(row['source_json'])
+    if (_fingerprint(posted) != document['posted_manifest_sha256']
+            or request['posted_manifest_sha256'] != _fingerprint(plan_manifest)
+            or posted['request_id'] != identity or posted['business_date'] != request['business_date']
+            or posted['document_id'] != document['document_id']
+            or row['actor'] != request['actor'] or document['actor'] != request['actor']
+            or Decimal(domain['amount_rub']) != Decimal(source['manifest']['amount_rub'])
+            or domain['facility_id'] != source['manifest']['facility_id'] or domain['scope'] != source['manifest']['scope']):
+        raise ValueError('overhead_completion_posted_source_changed')
+    lines = posted['lines']; nm_ids = sorted({int(l['nm_id']) for l in lines})
+    pools = sorted({str(l['pool']) for l in lines})
+    revision = _fingerprint(dict(contract='pool_overhead_targeted_publication_v1',document_id=document['document_id'],
+        request_source_revision=request['source_revision'],facility_id=domain['facility_id'],pools=pools,nm_ids=nm_ids,
+        basis_digest=domain['basis_digest'],amount_rub=domain['amount_rub'],posted_manifest_sha256=_fingerprint(plan_manifest)))
+    stable = 'pool_overhead:' + document['document_id']
+    queue_id = 'whrq_' + hashlib.sha256(_json(dict(stable_source_id=stable,source_revision=revision)).encode()).hexdigest()[:24]
+    queue = conn.execute(f'SELECT * FROM {TARGETED_RECALC_QUEUE_TABLE} WHERE queue_id=?', (queue_id,)).fetchone()
+    source_queues=conn.execute(f'SELECT queue_id FROM {TARGETED_RECALC_QUEUE_TABLE} WHERE stable_source_id=?',(stable,)).fetchall()
+    if (len(source_queues)!=1 or queue is None or queue['status'] != 'complete' or queue['stable_source_id'] != stable
+            or queue['source_revision'] != revision or queue['effective_date'] != request['business_date']
+            or json.loads(queue['affected_nm_ids_json']) != nm_ids):
+        raise ValueError('overhead_completion_queue_identity_changed')
+    # Bind native material rows too; immutability is not replaced by a public flag.
+    materials = {}
+    for table in ('sheet_vitrina_v1_ff_pool_document_lines','sheet_vitrina_v1_ff_pool_document_expense_lines'):
+        materials[table] = [dict(r) for r in conn.execute(f'SELECT * FROM {table} WHERE document_id=? ORDER BY rowid', (document['document_id'],))]
+    if sum(Decimal(r['amount_rub']) for r in materials['sheet_vitrina_v1_ff_pool_document_expense_lines']) != Decimal(domain['amount_rub']):
+        raise ValueError('overhead_completion_money_changed')
+    recovery = conn.execute('SELECT * FROM sheet_vitrina_v1_recovery_operations WHERE operation_id=?', (request['recovery_operation_id'],)).fetchone()
+    scope = json.loads(recovery['target_scope_json']) if recovery else {}
+    if (not recovery or recovery['tier'] != 'T1' or recovery['operation_kind'] != 'ff_pool_document_posting'
+            or recovery['source_digest'] != request['request_identity'] or scope.get('request_id') != identity
+            or scope.get('document_kind') != 'pool_overhead' or recovery['lifecycle_state'] not in ('mutation_running','retained')
+            or not str(recovery['checkpoint_digest']).startswith('sha256:')):
+        raise ValueError('overhead_completion_recovery_unbound')
+    from packages.application.fbs_snapshot_cost_sources import _documents
+    native=next((d for d in _documents(conn) if d['document_id']==document['document_id']),None)
+    if native is None: raise ValueError('overhead_completion_native_document_missing')
+    return dict(native_document_fingerprint=native['fingerprint'],request_id=identity,source_digest=row['source_digest'],source_json=row['source_json'],actor=row['actor'],
+        posted_manifest=posted,materials=materials,recovery_operation_id=request['recovery_operation_id'],
+        queue_id=queue_id,stable_source_id=stable,source_revision=revision,effective_date=queue['effective_date'],affected_nm_ids=nm_ids)
+
+
+def requires_current_completion(db_path, identity):
+    """A recorded cycle proof cannot be bypassed by a legacy resume call."""
+    with closing(readonly(db_path)) as conn:
+        row=conn.execute(f'SELECT receipt_json FROM {TABLE} WHERE request_id=?',(identity,)).fetchone() if _exists(conn) else None
+        return bool(row and json.loads(row[0]).get('native_completion'))
+
+
+def capture_pending_completion(runtime, *, finance_block=None):
+    """Capture existing complete queue tails before this pass's native Finance."""
+    from packages.application.storage_registry import StoreRegistry
+    registry = StoreRegistry(runtime.runtime_dir); authority = registry.load()
+    if registry.resolve('operational',manifest=authority) != Path(runtime.db_path).resolve():
+        raise ValueError('overhead_completion_storage_changed')
+    with closing(readonly(runtime.db_path)) as conn:
+        rows = conn.execute(f"SELECT request_id FROM {TABLE} WHERE state IN ('accepted','processing','delayed') ORDER BY accepted_at,request_id LIMIT 100").fetchall() if _exists(conn) else []
+        sources = []
+        for row in rows:
+            # Unposted or still queued sources belong to another bounded pass.
+            from packages.application.ff_pool_documents import REQUESTS_TABLE, TARGETED_RECALC_QUEUE_TABLE
+            posted = conn.execute(f'SELECT posted_document_id FROM {REQUESTS_TABLE} WHERE request_id=?', (row[0],)).fetchone()
+            queue = conn.execute(f"SELECT status FROM {TARGETED_RECALC_QUEUE_TABLE} WHERE stable_source_id=?", ('pool_overhead:'+posted[0],)).fetchone() if posted and posted[0] else None
+            if queue and queue[0] == 'complete': sources.append(_completion_source(conn,row[0]))
+    planned_finance=None
+    if sources:
+        from datetime import date
+        if finance_block is None: raise ValueError('overhead_completion_finance_owner_required')
+        finance_block._pin_active_cost()
+        planned_finance=finance_block.plan_stale_cost_weeks(date_from=date.fromisoformat(finance_block.shared_cost_snapshot.effective_date))['fingerprint']
+    if registry.load() != authority: raise ValueError('overhead_completion_storage_changed')
+    return dict(authority=authority,sources=sources,finance_plan_fingerprint=planned_finance)
+
+
+def complete_current_cycle(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None):
+    """One native continuation; acknowledgement and retention never repost a source."""
+    from contextlib import ExitStack
+    from datetime import date
+    from packages.application import fbs_accounting_runtime as accounting
+    from packages.application.fbs_overhead_presentation import OverheadAccountingView
+    from packages.application.ff_pool_documents import _fingerprint, TARGETED_RECALC_QUEUE_TABLE
+    from packages.application.warehouse_functional_lock import require_warehouse_job_owner
+    require_warehouse_job_owner(runtime.runtime_dir)
+    if not captured['sources']: return dict(processed_count=0)
+    if (finance_receipt.get('fingerprint') != captured['finance_plan_fingerprint']
+            or finance_receipt.get('status') not in ('applied','already_current')
+            or finance_receipt.get('non_target_preserved') is not True
+            or type(finance_receipt.get('post_verify_stale_week_count')) is not int
+            or finance_receipt['post_verify_stale_week_count'] != 0
+            or finance_receipt.get('source_advanced_after_apply') is True):
+        raise ValueError('overhead_completion_finance_unproven')
+    completed=0
+    for frozen in captured['sources']:
+        with ExitStack() as scope:
+            def prepare_guard():
+                authority=[]
+                observer=scope.enter_context(closing(finance_block._connect_stale_cost_plan(storage_authority=authority)))
+                registry=finance_block.store_registry
+                if authority != [captured['authority']] or registry.load() != captured['authority']:
+                    raise ValueError('overhead_completion_storage_changed')
+                tokens=finance_block._sqlite_data_version_token(observer)
+                identity=finance_block._sqlite_persistent_identity(observer)
+                plan=finance_block._plan_stale_cost_weeks_in_connection(observer,
+                    date_from=date.fromisoformat(finance_block.shared_cost_snapshot.effective_date),date_to=None)
+                if plan['stale_week_count'] != 0: raise ValueError('overhead_completion_finance_stale')
+                # All applicable native raw weeks are retained in the zero-stale proof,
+                # including a genuine empty raw scope, never fabricated target flags.
+                keys={(finance_block.seller_id,str(r[0]),str(r[1])) for r in observer.execute(
+                    'SELECT DISTINCT week_start,week_end FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_end>=? ORDER BY week_start,week_end',
+                    (finance_block.seller_id,finance_block.shared_cost_snapshot.effective_date))}
+                def finance_image(conn):
+                    return dict(source=finance_block._finance_source_dependency_fingerprint(conn,target_keys=keys,force_reload=True),
+                        target_digest=finance_block._json_digest(finance_block._finance_target_images(conn,keys)))
+                image=finance_image(observer)
+                if finance_receipt['status']=='already_current':
+                    if finance_receipt.get('fingerprint') != plan['fingerprint'] or finance_receipt.get('weeks') != []:
+                        raise ValueError('overhead_completion_finance_foreign')
+                else:
+                    targets={(finance_block.seller_id,str(w['week_start']),str(w['week_end'])) for w in finance_receipt.get('weeks',[])}
+                    actual=finance_block._finance_source_dependency_fingerprint(observer,target_keys=targets,force_reload=True)
+                    if (not targets or finance_receipt.get('source_dependency') != actual
+                            or finance_receipt.get('post_source_dependency') != actual
+                            or finance_receipt.get('target_image_digest') != finance_block._json_digest(finance_block._finance_target_images(observer,targets))):
+                        raise ValueError('overhead_completion_finance_foreign')
+                publication=accounting.current_publication_receipt(runtime,now=now)
+                if (not publication or economics_receipt.get('accounting_publication') != publication
+                        or finance_receipt.get('accounting_version') != publication['accounting_version']
+                        or finance_receipt.get('accounting_version_before') != publication['accounting_version']
+                        or finance_receipt.get('accounting_version_unchanged') is not True):
+                    raise ValueError('overhead_completion_economics_foreign')
+                with closing(readonly(runtime.db_path)) as read_conn:
+                    if _completion_source(read_conn,frozen['request_id']) != frozen:
+                        raise ValueError('overhead_completion_source_changed')
+                    acceptance=_public(read_conn,read_conn.execute(f'SELECT * FROM {TABLE} WHERE request_id=?',(frozen['request_id'],)).fetchone())
+                allocation=OverheadAccountingView(runtime.runtime_dir,runtime.db_path,now=now).resolve(
+                    acceptance['summary'],day=acceptance['business_date'],document_id=acceptance['document']['document_id'],posted=True)
+                book,book_version=accounting.load(runtime.runtime_dir)
+                if (book_version!=publication['accounting_version'] or book['state']['periods'].get(frozen['effective_date'],{}).get('applied_documents',{}).get(frozen['posted_manifest']['document_id'])!=frozen['native_document_fingerprint']):
+                    raise ValueError('overhead_completion_dated_document_changed')
+                if (not allocation or allocation['allocation_status']!='published'
+                        or allocation['accounting_version']!=publication['accounting_version']):
+                    raise ValueError('overhead_completion_allocation_unproven')
+                if observer.in_transaction or tokens!=finance_block._sqlite_data_version_token(observer):
+                    raise ValueError('overhead_completion_readback_changed')
+                from packages.application.storage_registry import manifest_payload
+                proof=dict(storage_authority={**manifest_payload(captured['authority']), 'implicit':captured['authority'].implicit},contract='confirmed_overhead_native_completion_v1',source=frozen,allocation=allocation,
+                    accounting_publication=publication,economics_publication=economics_receipt,
+                    finance_publication=dict(receipt=finance_receipt,zero_stale_plan_fingerprint=plan['fingerprint'],
+                        applicable_weeks=sorted(keys),**image),storage_manifest_sha256=captured['authority'].manifest_sha256)
+                def guard(conn=None):
+                    if conn is None:
+                        with closing(readonly(runtime.db_path)) as opened: return guard(opened)
+                    if registry.load()!=captured['authority'] or Path(conn.execute('PRAGMA database_list').fetchone()[2]).resolve()!=registry.resolve('operational',manifest=captured['authority']):
+                        raise ValueError('overhead_completion_storage_changed')
+                    if _completion_source(conn,frozen['request_id'])!=frozen or accounting.current_publication_receipt(runtime,now=now)!=publication:
+                        raise ValueError('overhead_completion_source_or_ready_changed')
+                    # Same long-lived observer after RO reads, never compare fresh-connection tokens.
+                    # Our own native receipt writes change main.data_version; exact financial
+                    # source/target readback remains required at every handoff instead.
+                    current_keys={(finance_block.seller_id,str(r[0]),str(r[1])) for r in observer.execute('SELECT DISTINCT week_start,week_end FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_end>=?', (finance_block.seller_id,finance_block.shared_cost_snapshot.effective_date))}
+                    if current_keys!=keys: raise ValueError('overhead_completion_finance_scope_changed')
+                    before=finance_block._sqlite_data_version_token(observer)
+                    if finance_block._sqlite_persistent_identity(observer)!=identity or finance_image(observer)!=image:
+                        raise ValueError('overhead_completion_finance_changed')
+                    if before!=finance_block._sqlite_data_version_token(observer) or registry.load()!=captured['authority']:
+                        raise ValueError('overhead_completion_readback_changed')
+                with closing(registry.connect('operational',mode='rw',operation='operator_overhead_completion',manifest=captured['authority'])) as writer:
+                    writer.execute('BEGIN IMMEDIATE')
+                    try:
+                        guard(writer)
+                        if tokens!=finance_block._sqlite_data_version_token(observer):raise ValueError('overhead_completion_readback_changed')
+                        changed=writer.execute(f"UPDATE {TARGETED_RECALC_QUEUE_TABLE} SET economics_status='complete',economics_finished_at=?,economics_error='',finance_status='complete',finance_finished_at=?,finance_error='',finance_source_fingerprint=? WHERE queue_id=? AND stable_source_id=? AND source_revision=? AND effective_date=? AND affected_nm_ids_json=? AND status='complete'",
+                            (datetime.now(timezone.utc).isoformat(),datetime.now(timezone.utc).isoformat(),finance_receipt['fingerprint'],frozen['queue_id'],frozen['stable_source_id'],frozen['source_revision'],frozen['effective_date'],json.dumps(frozen['affected_nm_ids'],separators=(',',':')))).rowcount
+                        if changed!=1:raise ValueError('overhead_completion_queue_cas_failed')
+                        writer.execute(f'UPDATE {TABLE} SET receipt_json=? WHERE request_id=? AND source_digest=?',
+                            (json.dumps(dict(native_completion=proof),ensure_ascii=False),frozen['request_id'],frozen['source_digest']))
+                        guard(writer)
+                        writer.commit()
+                    except BaseException:writer.rollback();raise
+                return guard
+            with closing(readonly(runtime.db_path)) as conn:
+                acceptance=_public(conn,conn.execute(f'SELECT * FROM {TABLE} WHERE request_id=?',(frozen['request_id'],)).fetchone())
+            def finish(recovery, guard):
+                with closing(readonly(runtime.db_path)) as conn:
+                    row=conn.execute(f'SELECT receipt_json FROM {TABLE} WHERE request_id=?',(frozen['request_id'],)).fetchone()
+                receipt=json.loads(row[0]);receipt.update(native_state='complete',native_recovery=recovery,native_posted=True,document_id=acceptance['document']['document_id'])
+                _update(runtime.db_path,frozen['request_id'],'completed','',receipt,guard=guard)
+            _finalize_confirmed(runtime,acceptance,prepare_guard=prepare_guard,finish=finish)
+            completed+=1
+    return dict(processed_count=completed)

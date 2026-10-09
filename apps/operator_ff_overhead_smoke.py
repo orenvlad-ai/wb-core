@@ -661,5 +661,324 @@ class VersionedMaterialTests(unittest.TestCase):
             service._verify_posted_readback(preview['request_id'])
 
 
+class NativeCompletionTests(unittest.TestCase):
+    """Actual local HTTP owner and native source/book/Ready/Finance/retention.
+
+    Only external collection and synthetic official input assembly are fixtures;
+    the source posting, serialized functional publisher and all completion proofs
+    execute production native adapters against disposable SQLite files.
+    """
+    setUp=AcceptanceTests.setUp
+    stamp=AcceptanceTests.stamp
+    preview=AcceptanceTests.preview
+    drain=AcceptanceTests.drain
+    prepare=AcceptanceTests.prepare
+    publish=AcceptanceTests.publish
+    open_book=AcceptanceTests.open_book
+    native_terminal=AcceptanceTests.native_terminal
+    counts=AcceptanceTests.counts
+
+    def quantities(self):
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            return conn.execute(f'SELECT facility_id,pool,nm_id,quantity,capital_rub FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id').fetchall()
+
+    def payment(self, *, weekly=True):
+        from datetime import date
+        from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
+        from apps.wb_finance_weekly_cost_cutover_smoke import _row
+        self.open_book()
+        self.finance=WbFinanceWeeklyBlock(self.root,seller_id='canonical',now_factory=lambda:self.now)
+        self.finance.ensure_schema()
+        if weekly:
+            self.finance.ingest_week(date(2026,9,7),date(2026,9,13),[_row(1,'2026-09-08',nm_id=1)])
+        preview=self.preview(scope='FBS',amount_rub='61425')
+        self.identity=preview['request_id']
+        self.surface.confirm_document(self.identity)
+        return self.identity
+
+    def functional_plan(self):
+        from apps.operator_warehouse_documents_smoke import OperatorDocuments
+        from packages.application.warehouse_functional import WarehouseFunctionalBlock
+        captured={}
+        def collect(block,plan,**kwargs):
+            captured.update(block=block,plan=plan);return plan
+        with patch.object(WarehouseFunctionalBlock,'apply_plan',collect):
+            OperatorDocuments.functional_publish(self)
+        return captured['block'],captured['plan']
+
+    def old_tail(self, *, weekly=True):
+        self.payment(weekly=weekly);self.drain()
+        with warehouse_functional_job_lock(self.root):
+            block,plan=self.functional_plan()
+            self.functional=block.apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'],backup_dir=self.root/'backups')
+        self.publish(self.prepare())
+        self.before=self.business_image()
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f'SELECT status,economics_status,finance_status FROM {TARGETED_RECALC_QUEUE_TABLE}').fetchone(),('complete','',''))
+
+    def business_image(self):
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.row_factory=sqlite3.Row
+            rows={table:[dict(r) for r in conn.execute(f'SELECT * FROM {table} ORDER BY rowid')] for table in (
+                DOCUMENTS_TABLE,'sheet_vitrina_v1_ff_pool_document_expense_lines','sheet_vitrina_v1_ff_pool_document_lines')}
+            rows['sources']=[tuple(r) for r in conn.execute(f'SELECT request_id,source_json,source_digest,accepted_at,actor FROM {operations.TABLE}')]
+        book,_=accounting.load(self.root)
+        rows['allocation']=deepcopy(book['state']['periods']['2026-09-08']['document_valuation']['allocations'])
+        return rows
+
+    def proof_inputs(self):
+        captured=operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+        receipt=self.finance.recalculate_stale_cost_weeks()
+        version=accounting.load(self.root)[1]
+        receipt.update(accounting_version=version,accounting_version_before=version,accounting_version_unchanged=True)
+        return captured,receipt,dict(accounting_publication=accounting.current_publication_receipt(self.runtime,now=self.now))
+
+    def complete(self,captured,receipt,economics):
+        return operations.complete_current_cycle(self.runtime,captured,finance_block=self.finance,finance_receipt=receipt,economics_receipt=economics,now=self.now)
+
+    def http_pass(self, *, fresh=False):
+        from types import SimpleNamespace
+        from contextlib import closing
+        from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+        from packages.application.warehouse_update_journal import WarehouseUpdateJournal
+        from packages.application.business_data_heavy_admission import heavy_admitted
+        from packages.application.calculation_parameters import CalculationParametersBlock
+        native={}
+        def build():
+            if fresh:
+                native['block'],native['plan']=self.functional_plan();return native['plan']
+            with closing(operations.readonly(self.runtime.db_path)) as conn:
+                queues=list(conn.execute(f"SELECT queue_id FROM {TARGETED_RECALC_QUEUE_TABLE} WHERE status IN ('queued','running')"))
+            self.assertEqual(queues,[]) # The actual old-tail plan exclusion.
+            return dict(plan_fingerprint='no-new-queue',diff={})
+        def apply(plan,**kwargs):
+            if fresh:return native['block'].apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'],backup_dir=self.root/'backups')
+            return self.functional # No business source/functional replay for a completed old tail.
+        entry=RegistryUploadHttpEntrypoint.__new__(RegistryUploadHttpEntrypoint)
+        entry.runtime=self.runtime;entry.warehouse_update_journal=WarehouseUpdateJournal(db_path=self.runtime.db_path,runtime_dir=self.root)
+        entry.wb_supplies_block=SimpleNamespace(sync_functional_sources=lambda **kw:{},collect_all_due_transit_costs=lambda:{},reconcile_functional_ff_state=lambda:{})
+        entry.our_wb_cost_block=SimpleNamespace(materialize_wb_supply_cost_layers=lambda **kw:0)
+        entry.warehouse_functional_block=SimpleNamespace(build_sync_plan=build,apply_plan=apply,record_failed_sync=lambda exc:None)
+        entry.calculation_parameters_block=CalculationParametersBlock(runtime=self.runtime)
+        entry.inventory_planning=SimpleNamespace(current=lambda:{})
+        entry.wb_finance_weekly_block=self.finance;entry.activated_at_factory=self.stamp;entry.now_factory=lambda:self.now
+        def refresh(*args,**kwargs):
+            from packages.application.fbs_snapshot_cost import fingerprint
+            prepared=self.prepare()
+            if fingerprint(prepared[0])!=accounting.load(self.root)[1]: self.publish(prepared)
+            p=accounting.current_publication_receipt(self.runtime,now=self.now)
+            return dict(status='published',version=p['accounting_version'])
+        actual_publication=accounting.current_publication_receipt
+        with heavy_admitted(self.root,operation='cycle'),warehouse_functional_job_lock(self.root) as owner, \
+             patch.object(accounting,'current_publication_receipt',side_effect=lambda runtime,now=None:actual_publication(runtime,now=now or self.now)), \
+             patch.object(accounting,'refresh',side_effect=refresh), \
+             patch('packages.application.operator_warehouse_documents.drain',return_value={'request_ids':[]}), \
+             patch('packages.application.operator_warehouse_documents.reconcile',return_value={'processed_count':0}), \
+             patch('packages.application.operator_fulfillment_services.reconcile',return_value={'processed_count':0}):
+            return entry._handle_owned_warehouse_manual_sync_request(owner_token=owner['owner_token'])
+
+    def test_actual_http_owned_fresh_native_publication_and_finance(self):
+        self.payment()
+        result=self.http_pass(fresh=True)
+        self.assertEqual(result['status'],'success')
+        self.assertEqual(self.native_terminal(self.identity),('complete','retained'))
+        receipt=operations.read_acceptance(self.runtime.db_path,self.identity)
+        self.assertEqual(receipt['state'],'completed');self.assertEqual(self.counts(),(1,1))
+        proof=receipt['processing_receipt']['native_completion']
+        self.assertEqual(proof['allocation']['allocation_total_rub'],'61425')
+        self.assertEqual(proof['finance_publication']['applicable_weeks'],[['canonical','2026-09-07','2026-09-13']])
+        self.assertTrue(proof['finance_publication']['receipt']['non_target_preserved'])
+
+    def test_actual_http_owned_already_complete_blank_tail_and_repeat_no_repost(self):
+        self.old_tail()
+        with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate target posting')):
+            self.assertEqual(self.http_pass()['status'],'success')
+            self.assertEqual(self.http_pass()['status'],'success')
+        self.assertEqual(self.business_image(),self.before)
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'completed')
+        self.assertEqual(self.native_terminal(self.identity),('complete','retained'))
+
+    def test_actual_no_applicable_raw_is_distinct_from_zero_stale_week_scope(self):
+        self.old_tail(weekly=False)
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs();self.assertEqual(self.complete(*args)['processed_count'],1)
+        proof=operations.read_acceptance(self.runtime.db_path,self.identity)['processing_receipt']['native_completion']
+        self.assertEqual(proof['finance_publication']['applicable_weeks'],[])
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_false_foreign_economics_and_finance_never_ack_or_retain(self):
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            for field,value in [('post_verify_stale_week_count',None),('post_verify_stale_week_count',True),('post_verify_stale_week_count',1),('source_advanced_after_apply',True),('fingerprint','sha256:foreign'),('accounting_version','foreign'),('accounting_version_unchanged',False),('target_image_digest','sha256:foreign'),('post_source_dependency',{})]:
+                c,f,e=deepcopy(args);f[field]=value
+                with self.subTest(field=field,value=value),self.assertRaises(ValueError):self.complete(c,f,e)
+            c,f,e=deepcopy(args);e['accounting_publication']['ready_digest']='sha256:foreign'
+            with self.assertRaises(ValueError):self.complete(c,f,e)
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_queue_exact_revision_nm_date_and_recovery_binding(self):
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            for column,value in [('source_revision','sha256:foreign'),('affected_nm_ids_json','[1,2]'),('effective_date','2026-09-07')]:
+                with sqlite3.connect(self.runtime.db_path) as conn:
+                    old=conn.execute(f'SELECT {column} FROM {TARGETED_RECALC_QUEUE_TABLE}').fetchone()[0]
+                    conn.execute(f'UPDATE {TARGETED_RECALC_QUEUE_TABLE} SET {column}=?',(value,))
+                with self.subTest(column=column),self.assertRaises(ValueError):operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+                with sqlite3.connect(self.runtime.db_path) as conn:conn.execute(f'UPDATE {TARGETED_RECALC_QUEUE_TABLE} SET {column}=?',(old,))
+            with sqlite3.connect(self.runtime.db_path) as conn:
+                conn.row_factory=sqlite3.Row;queue=dict(conn.execute(f'SELECT * FROM {TARGETED_RECALC_QUEUE_TABLE}').fetchone())
+                queue.update(queue_id='foreign',source_revision='foreign')
+                conn.execute(f'INSERT INTO {TARGETED_RECALC_QUEUE_TABLE}({",".join(queue)}) VALUES({",".join("?" for _ in queue)})',list(queue.values()))
+            with self.assertRaises(ValueError):operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+            with sqlite3.connect(self.runtime.db_path) as conn:
+                conn.execute(f"DELETE FROM {TARGETED_RECALC_QUEUE_TABLE} WHERE queue_id='foreign'")
+                conn.execute("UPDATE sheet_vitrina_v1_recovery_operations SET source_digest='foreign'")
+            with self.assertRaises(ValueError):operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+
+    def test_same_path_manifest_drift_after_finance_rejects(self):
+        from dataclasses import replace
+        from packages.application.storage_registry import atomic_write_manifest,manifest_payload,parse_manifest,_sha256
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs();m=self.finance.store_registry.load();changed=replace(m,rollback_generation_id='foreign')
+            payload=manifest_payload(changed,include_digest=False);payload['manifest_sha256']=_sha256(payload)
+            atomic_write_manifest(self.finance.store_registry.manifest_path,parse_manifest(payload))
+            with self.assertRaises(ValueError):self.complete(*args)
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+
+    def test_actual_separate_connection_commit_during_native_readback_rejected(self):
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs();original=self.finance._finance_source_dependency_fingerprint;injected=[]
+            def dependency(*a,**kw):
+                result=original(*a,**kw)
+                if not injected:
+                    injected.append(True)
+                    with sqlite3.connect(self.runtime.db_path) as conn:conn.execute("UPDATE wb_finance_weekly_aggregates SET classifier_version='stale'")
+                return result
+            with patch.object(self.finance,'_finance_source_dependency_fingerprint',side_effect=dependency),self.assertRaises(ValueError):self.complete(*args)
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_retention_lost_reply_next_native_pass_does_not_post(self):
+        from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
+        self.old_tail();original=WarehouseRecoveryRegistry.retain
+        def lost(registry,*a,**kw):original(registry,*a,**kw);raise RuntimeError('lost retain reply')
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            with patch.object(WarehouseRecoveryRegistry,'retain',lost),self.assertRaises(RuntimeError):self.complete(*args)
+            self.assertEqual(self.native_terminal(self.identity),('replay','retained'))
+            with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate')):
+                self.assertEqual(self.complete(*self.proof_inputs())['processed_count'],1)
+        self.assertEqual(self.business_image(),self.before)
+        self.assertEqual(self.native_terminal(self.identity),('complete','retained'))
+
+    def test_actual_after_marker_drift_cannot_finalize_or_bypass_cycle_proof(self):
+        from dataclasses import replace
+        from packages.application.storage_registry import atomic_write_manifest,manifest_payload,parse_manifest,_sha256
+        original=FfPoolDocumentService._finalize_posted
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs();manifest=self.finance.store_registry.load()
+            def changed(service,*a,**kw):
+                payload=manifest_payload(replace(manifest,rollback_generation_id='after-marker'),include_digest=False)
+                payload['manifest_sha256']=_sha256(payload)
+                atomic_write_manifest(self.finance.store_registry.manifest_path,parse_manifest(payload))
+                return original(service,*a,**kw)
+            with patch.object(FfPoolDocumentService,'_finalize_posted',changed),self.assertRaises(ValueError):self.complete(*args)
+            self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+            self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'processing')
+            # Durable queue flags do not let constructor/resume skip the saved proof.
+            self.service._finalize_posted(self.identity)
+            self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+            self.assertEqual(self.business_image(),self.before)
+            if manifest.implicit:self.finance.store_registry.manifest_path.unlink()
+            else:atomic_write_manifest(self.finance.store_registry.manifest_path,manifest)
+            self.assertEqual(self.complete(*self.proof_inputs())['processed_count'],1)
+
+    def test_native_book_pointer_and_finance_target_races_after_marker_refuse(self):
+        from contextlib import closing
+        from packages.application.fbs_accounting_runtime import pack
+        original=FfPoolDocumentService._finalize_posted
+        for mutation in ('book','finance','new_raw_week'):
+            case=NativeCompletionTests();case.setUp()
+            try:
+                case.old_tail()
+                with warehouse_functional_job_lock(case.root):
+                    args=case.proof_inputs()
+                    def changed(service,*a,**kw):
+                        if mutation=='book':
+                            book,version=accounting.load(case.root)
+                            book=deepcopy(book);book['publication_error']='synthetic concurrent book authority'
+                            from packages.application.fbs_snapshot_cost import fingerprint
+                            next_version=fingerprint(book)
+                            with closing(sqlite3.connect(accounting.path(case.root))) as c,c:
+                                c.execute('INSERT INTO accounting_revisions VALUES(?,?,?,?)',(next_version,'foreign-book',pack(c,book),version))
+                                c.execute('UPDATE accounting_current SET version=?',(next_version,))
+                        elif mutation=='finance':
+                            with sqlite3.connect(case.runtime.db_path) as c:c.execute("UPDATE wb_finance_weekly_aggregates SET metrics_json='{}'")
+                        else:
+                            with sqlite3.connect(case.runtime.db_path) as c:
+                                # New real native raw cohort, not a fake projection flag.
+                                c.execute("UPDATE wb_finance_weekly_raw_rows SET week_start='2026-09-14',week_end='2026-09-20'")
+                        return original(service,*a,**kw)
+                    with patch.object(FfPoolDocumentService,'_finalize_posted',changed),case.assertRaises(ValueError):case.complete(*args)
+                    case.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
+                    case.assertEqual(operations.read_acceptance(case.runtime.db_path,case.identity)['state'],'processing')
+            finally:case.doCleanups()
+
+    def test_missing_native_recovery_is_not_recreated(self):
+        self.old_tail()
+        with sqlite3.connect(self.runtime.db_path) as c:c.execute('DELETE FROM sheet_vitrina_v1_recovery_operations')
+        with warehouse_functional_job_lock(self.root),self.assertRaises(ValueError):operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+        with sqlite3.connect(self.runtime.db_path) as c:self.assertEqual(c.execute('SELECT count(*) FROM sheet_vitrina_v1_recovery_operations').fetchone()[0],0)
+        self.assertEqual(self.business_image(),self.before)
+
+
+    def split_finance_raw(self):
+        from contextlib import closing
+        from packages.application.storage_registry import atomic_write_manifest,build_manifest
+        raw=self.root/'native-raw.sqlite3'
+        with closing(sqlite3.connect(self.runtime.db_path)) as src,closing(sqlite3.connect(raw)) as dest:src.backup(dest)
+        for path,table,logical,revision,generation in (
+                (self.runtime.db_path,'finance_operational_schema_meta','operational','operational_v1','native-op'),
+                (raw,'finance_raw_schema_meta','finance_raw','finance_raw_v1','native-raw')):
+            with closing(sqlite3.connect(path)) as conn,conn:
+                conn.execute('PRAGMA journal_mode=WAL')
+                conn.execute(f'CREATE TABLE IF NOT EXISTS {table}(singleton INTEGER PRIMARY KEY,schema_revision TEXT,logical_store TEXT,generation_id TEXT,generation_epoch TEXT,source_fingerprint TEXT,created_at TEXT)')
+                conn.execute(f'INSERT OR REPLACE INTO {table} VALUES(1,?,?,?,?,?,?)',(revision,logical,generation,'fixture','sha256:'+'a'*64,self.stamp()))
+                if path==raw:conn.execute('ALTER TABLE wb_finance_weekly_raw_rows RENAME TO finance_raw_current_rows')
+        manifest=build_manifest(state='cutover',canonical_source='split',generation_epoch='fixture',raw_generation_id='native-raw',raw_relative_path=raw.name,raw_watermark='1',operational_generation_id='native-op',operational_relative_path=self.runtime.db_path.name,operational_watermark='1',rollback_generation_id='original',source_fingerprint='sha256:'+'a'*64)
+        atomic_write_manifest(self.finance.store_registry.manifest_path,manifest)
+        return raw
+
+    def test_actual_split_raw_normal_completion_and_attached_raw_race(self):
+        original=FfPoolDocumentService._finalize_posted
+        for drift in (False,True):
+            case=NativeCompletionTests();case.setUp()
+            try:
+                case.old_tail();raw=case.split_finance_raw()
+                with warehouse_functional_job_lock(case.root):
+                    args=case.proof_inputs()
+                    def changed(service,*a,**kw):
+                        if drift:
+                            with sqlite3.connect(raw) as c:c.execute("UPDATE finance_raw_current_rows SET row_hash='foreign-row'")
+                        return original(service,*a,**kw)
+                    with patch.object(FfPoolDocumentService,'_finalize_posted',changed):
+                        if drift:
+                            with case.assertRaises(ValueError):case.complete(*args)
+                            case.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
+                        else:
+                            case.assertEqual(case.complete(*args)['processed_count'],1)
+                            case.assertEqual(case.native_terminal(case.identity),('complete','retained'))
+                    case.assertEqual(case.business_image(),case.before)
+            finally:case.doCleanups()
+
+
+
 if __name__=='__main__':
     unittest.main()

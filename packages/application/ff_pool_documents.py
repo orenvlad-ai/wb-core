@@ -1994,11 +1994,17 @@ class FfPoolDocumentService:
             return self.status(request_id=request_id)
         return None
 
-    def _finalize_posted(self, request_id: str) -> dict[str, Any]:
+    def _finalize_posted(self, request_id: str, *, completion_guard=None) -> dict[str, Any]:
+        from packages.application.operator_ff_overhead import requires_current_completion
+        if completion_guard is None and requires_current_completion(self.db_path,request_id):
+            return self.status(request_id=request_id)
         from packages.application.operator_warehouse_documents import may_finalize
         if not may_finalize(self.db_path, self.runtime_dir, request_id):
             return self.status(request_id=request_id)
         with _connect(self.db_path) as conn:
+            if completion_guard is not None:
+                conn.execute("BEGIN IMMEDIATE")
+                completion_guard(conn)
             request = conn.execute(
                 f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?",
                 (request_id,),
@@ -2088,6 +2094,7 @@ class FfPoolDocumentService:
         if not recovery_id:
             raise RecoveryPolicyError("posted FF pool document has no recovery operation")
         registry = WarehouseRecoveryRegistry(runtime_dir=self.runtime_dir, db_path=self.db_path)
+        if completion_guard is not None: completion_guard()
         operation = registry.get_operation(recovery_id)
         if operation is None:
             raise RecoveryPolicyError("posted FF pool document recovery operation is missing")
@@ -2104,6 +2111,8 @@ class FfPoolDocumentService:
                 f"posted FF pool document recovery is not retainable: {lifecycle}"
             )
         with _connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if completion_guard is not None: completion_guard(conn)
             now = self._now()
             changed = conn.execute(
                 f"UPDATE {REQUESTS_TABLE} SET state='complete',completed_at=?,updated_at=?,"
@@ -2112,6 +2121,7 @@ class FfPoolDocumentService:
             ).rowcount
             if changed:
                 self._event(conn, request_id=request_id, stage="replay", status="complete", details=readback)
+            if completion_guard is not None: completion_guard(conn)
             conn.commit()
         return self.status(request_id=request_id)
 
