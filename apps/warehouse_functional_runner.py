@@ -585,14 +585,6 @@ def _run_admitted(
                     completed_at=block.timestamp_factory(),
                 ),
             )
-            durable_phase = "recovery_retention_after"
-            journal.phase_started(durable_run_id, durable_phase)
-            retention_after = _run_sync_phase(
-                "recovery_retention_after",
-                phase_timings_ms,
-                lambda: _run_bounded_recovery_retention(runtime),
-            )
-            journal.phase_finished(durable_run_id, durable_phase, details=retention_after)
             _mark_plan_ff_replays(
                 runtime,
                 plan,
@@ -625,6 +617,14 @@ def _run_admitted(
                     "transit_cost_replays": transit_cost_replays,
                 },
             )
+            durable_phase = "recovery_retention_after"
+            journal.phase_started(durable_run_id, durable_phase)
+            retention_after = _run_sync_phase(
+                "recovery_retention_after",
+                phase_timings_ms,
+                lambda: _run_bounded_recovery_retention(runtime),
+            )
+            journal.phase_finished(durable_run_id, durable_phase, details=retention_after)
             payload = {
                 "status": "success",
                 "mode": args.command,
