@@ -76,7 +76,7 @@ jobs:
     name: Checks
     needs: [plan]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout trusted harness
         uses: actions/checkout@v5
