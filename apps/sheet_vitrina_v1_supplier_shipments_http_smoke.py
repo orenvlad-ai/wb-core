@@ -978,6 +978,10 @@ def main() -> None:
             )
             if third_nom_status != 200 or third_nom_payload.get("item", {}).get("nm_id") != 210184534:
                 raise AssertionError("third nomenclature item must exist before atomic invoice acceptance")
+            # Source HTTP acceptance precedes native Dense publication. This
+            # supplier fixture requires applied barcode owners before parsing.
+            from packages.application.nomenclature_activation_intents import drain_nomenclature_activation_intents
+            drain_nomenclature_activation_intents(runtime,raise_errors=True)
             nomenclature_import_bytes = _build_nomenclature_import_fixture(
                 first_item_id=str(create_nom_payload["item"]["item_id"]),
                 compat_item_id=str(compat_nom_payload["item"]["item_id"]),

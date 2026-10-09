@@ -324,6 +324,8 @@ def ensure_wb_fbs_warehouse_registry_schema(conn: sqlite3.Connection) -> None:
         STOCK_ROWS_TABLE,
         (("provenance", "TEXT NOT NULL DEFAULT 'legacy_explicit_wb_row'"),),
     )
+    _ensure_columns(conn, BINDING_CONFIRMATIONS_TABLE,
+        (("operator_receipt_json", "TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(operator_receipt_json))"),))
     ensure_wb_fbs_mapping_evidence_schema(conn)
 
 
@@ -1190,6 +1192,7 @@ class WbFbsWarehouseRegistry:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
             ensure_wb_fbs_warehouse_registry_schema(conn)
+            conn.execute('BEGIN IMMEDIATE')
             official = conn.execute(
                 f"""SELECT registry.*,run.run_sequence FROM {REGISTRY_ROWS_TABLE} registry
                      JOIN {REGISTRY_RUNS_TABLE} run ON run.run_id=registry.run_id
@@ -1224,6 +1227,8 @@ class WbFbsWarehouseRegistry:
                     details=dict(conflict),
                     http_status=409,
                 )
+            from packages.application.operator_facility_mappings import facility_source
+            source_digest = _fingerprint(facility_source(conn, facility_id))
             preview = {
                 "seller_warehouse": {
                     "id": seller_warehouse_id,
@@ -1234,6 +1239,7 @@ class WbFbsWarehouseRegistry:
                 },
                 "facility": {
                     "facility_id": facility_id,
+                    "source_digest": source_digest,
                     "name": str(facility["name"]),
                     "active": bool(facility["active"]),
                 },
@@ -1256,6 +1262,7 @@ class WbFbsWarehouseRegistry:
                     "facility_id": facility_id,
                     "official_evidence_digest": str(official["evidence_digest"]),
                     "facility_updated_at": str(facility["updated_at"]),
+                    "facility_source_digest": source_digest,
                 }
             )
             preview_fingerprint = _fingerprint(preview)
@@ -1356,6 +1363,10 @@ class WbFbsWarehouseRegistry:
                     "Official warehouse or facility changed after preview",
                     http_status=409,
                 )
+            from packages.application.operator_facility_mappings import facility_source
+            preview_source_digest = json.loads(request["preview_json"]).get("facility", {}).get("source_digest")
+            if preview_source_digest and preview_source_digest != _fingerprint(facility_source(conn,str(request["facility_id"]))):
+                raise WbFbsWarehouseRegistryError("binding_source_changed", "Facility source changed after preview",http_status=409)
             conflict = conn.execute(
                 f"""SELECT seller_warehouse_id,facility_id
                        FROM {WAREHOUSE_MAPPINGS_TABLE}
@@ -1416,13 +1427,15 @@ class WbFbsWarehouseRegistry:
             confirmation_id = "fbsbind_" + hashlib.sha256(
                 selected.encode("utf-8")
             ).hexdigest()[:28]
+            from packages.application.operator_facility_mappings import binding_receipt
+            retained_receipt = binding_receipt(conn, request, mapping_id, now)
             conn.execute(
                 f"""INSERT INTO {BINDING_CONFIRMATIONS_TABLE}(
-                       confirmation_id,request_id,mapping_id,actor,confirmed_at,result_digest
-                   ) VALUES(?,?,?,?,?,?)""",
+                       confirmation_id,request_id,mapping_id,actor,confirmed_at,result_digest,operator_receipt_json
+                   ) VALUES(?,?,?,?,?,?,?)""",
                 (
                     confirmation_id, selected, mapping_id, _actor(actor), now,
-                    _fingerprint(result),
+                    _fingerprint(result), retained_receipt,
                 ),
             )
             conn.commit()

@@ -5864,6 +5864,7 @@
     .block-filters-modal .ads-modal-actions { flex-shrink: 0; margin-top: 14px; }
     @media(max-width: 650px) { .table-heading-row, .table-heading-row.is-history { grid-template-columns: minmax(0, 1fr); } .table-heading-right { margin-left: 0; width: 100%; justify-content: flex-start; }  }
   </style>
+<!-- FACILITY_ACCEPTANCE_ASSET -->
 </head>
 <body>
   <main class="page" data-web-vitrina-page="web_vitrina_page_composition">
@@ -28565,11 +28566,13 @@
       updateOverheadBusinessDate();
     }
     async function loadFacilityDetail(id) {
+      if (facilityEditorBusy) return;
       nodes.facilityDetail.hidden = false;
       clear(nodes.facilityDetail);
       nodes.facilityDetail.appendChild(make("p", "warehouse-empty", "Загрузка…"));
       try {
         const payload = await api("/facilities/" + encodeURIComponent(id));
+        if (facilityEditorBusy) return;
         clear(nodes.facilityDetail);
         const title = make("h3", "", payload.facility.name + " · " + payload.facility.code);
         const meta = make("p", "ff-pool-note", (payload.facility.active ? "Активен" : "Неактивен") + " · " + payload.facility.display_timezone + " · ID " + payload.facility.facility_id);
@@ -28619,48 +28622,87 @@
         nodes.facilityDetail.appendChild(section);
       } catch (error) { setAlert(nodes.facilityDetail, error.message, "error"); }
     }
+    const facilityReceipt = make("div", "ff-pool-alert"); facilityReceipt.hidden = true;
+    facilityReceipt.dataset.ffFacilityAcceptance = "";
+    nodes.facilityDetail.parentNode.insertBefore(facilityReceipt, nodes.facilityDetail);
+    let facilityEditorBusy = false, facilityEditorLock = null;
+    const facilityAcceptance = window.FacilitySourceAcceptance.create({
+      scope: WEB_VITRINA_CONFIG.user_config_key || "local_operator", path: base,
+      container: facilityReceipt,
+      onLock: locked => {
+        modal.querySelectorAll("[data-ff-directory-final]").forEach(button => {button.disabled = locked || facilityEditorBusy || button.dataset.sourceAccepted === "true";});
+        if (facilityEditorLock) facilityEditorLock(locked);
+      },
+      onError: error => {if (!facilityAcceptance.isPending()) setAlert(facilityReceipt, error.message, "error");},
+      onRecovered: async () => {await loadFacilities(); await loadWbWarehouses();}
+    });
     function showFacilityEditor(facility) {
+      if (facilityEditorBusy) return;
       nodes.facilityDetail.hidden = false;
       clear(nodes.facilityDetail);
       nodes.facilityDetail.appendChild(make("h3", "", facility ? "Изменить склад" : "Новый склад FF"));
-      const form = make("form", "ff-pool-form");
-      const nameLabel = make("label", "wide", "Название"); const name = make("input", "input"); name.required = true; name.maxLength = 200; name.value = facility ? facility.name : ""; nameLabel.appendChild(name);
-      const tzLabel = make("label", "", "Часовой пояс"); const tz = make("input", "input"); tz.required = true; tz.value = facility ? facility.display_timezone : "Asia/Yekaterinburg"; tzLabel.appendChild(tz);
-      const activeLabel = make("label", "", "Статус"); const active = make("select", "input"); [{v:"true",t:"Активен"},{v:"false",t:"Неактивен"}].forEach(function(x){const o=make("option","",x.t);o.value=x.v;active.appendChild(o);}); active.value = String(facility ? facility.active : false); active.disabled = !facility; activeLabel.appendChild(active);
-      const cityLabel = make("label", "", "Город"); const city = make("input", "input"); city.maxLength = 120; city.value = facility ? (facility.city || "") : ""; city.disabled = Boolean(facility); cityLabel.appendChild(city);
-      const submit = make("button", "button primary", facility ? "Сохранить" : "Проверить создание"); submit.type = "submit";
+      const form = make("form", "ff-pool-form"); form.dataset.ffFacilityForm = "";
+      const nameLabel = make("label", "wide", "Название"); const name = make("input", "input"); name.name="name";name.required = true; name.maxLength = 200; name.value = facility ? facility.name : ""; nameLabel.appendChild(name);
+      const tzLabel = make("label", "", "Часовой пояс"); const tz = make("input", "input"); tz.name="display_timezone";tz.required = true; tz.value = facility ? facility.display_timezone : "Asia/Yekaterinburg"; tzLabel.appendChild(tz);
+      const activeLabel = make("label", "", "Статус"); const active = make("select", "input");active.name="active"; [{v:"true",t:"Активен"},{v:"false",t:"Неактивен"}].forEach(function(x){const o=make("option","",x.t);o.value=x.v;active.appendChild(o);}); active.value = String(facility ? facility.active : false); active.disabled = !facility; activeLabel.appendChild(active);
+      const cityLabel = make("label", "", "Город"); const city = make("input", "input");city.name="city"; city.maxLength = 120; city.value = facility ? (facility.city || "") : ""; city.disabled = Boolean(facility); cityLabel.appendChild(city);
+      const submit = make("button", "button primary", facility ? "Сохранить" : "Проверить создание"); submit.type = "submit";submit.dataset.ffDirectoryFinal="";submit.disabled=facilityAcceptance.isPending();
       const result = make("div", "ff-pool-alert"); result.hidden = true;
       form.append(nameLabel, cityLabel, tzLabel, activeLabel, submit, result);
       let pendingPreview = null;
+      const editDraft = make("button", "button secondary", "Изменить черновик");
+      editDraft.type = "button"; editDraft.hidden = true; editDraft.dataset.ffFacilityEditDraft = "";
+      form.appendChild(editDraft);
+      function lockEditor(locked) {
+        const blocked = locked || facilityEditorBusy || submit.dataset.sourceAccepted === "true";
+        submit.disabled = blocked;
+        [name, tz].forEach(control => {control.disabled = blocked || Boolean(pendingPreview);});
+        city.disabled = blocked || Boolean(pendingPreview) || Boolean(facility);
+        active.disabled = blocked || Boolean(pendingPreview) || !facility;
+        editDraft.hidden = !pendingPreview || submit.dataset.sourceAccepted === "true";
+        editDraft.disabled = blocked;
+        const newButton = modal.querySelector("[data-ff-pool-facility-new]");
+        if (newButton) newButton.disabled = locked || facilityEditorBusy || !((state.capabilities || {}).feature || {}).writer_effective;
+      }
+      facilityEditorLock = lockEditor;
+      editDraft.addEventListener("click", function () {
+        if (editDraft.disabled || !pendingPreview) return;
+        name.value = pendingPreview.facility.name; city.value = pendingPreview.facility.city;
+        tz.value = pendingPreview.facility.display_timezone;
+        pendingPreview = null; submit.textContent = "Проверить создание";
+        setAlert(result, "Измените черновик и проверьте создание ещё раз.", "neutral");
+        lockEditor(facilityAcceptance.isPending()); name.focus();
+      });
       form.addEventListener("submit", async function (event) {
-        event.preventDefault(); submit.disabled = true;
-        const requestId = "fffui_" + Date.now() + "_" + Math.random().toString(16).slice(2, 10);
-        const body = { request_id: requestId, name: name.value, city: city.value, display_timezone: tz.value, active: active.value === "true" };
-        if (facility) body.expected_updated_at = facility.updated_at;
+        event.preventDefault(); if(submit.disabled || facilityEditorBusy)return;
+        facilityEditorBusy = true; lockEditor(facilityAcceptance.isPending());
         try {
           if (facility) {
-            await jsonPost("/facilities/" + encodeURIComponent(facility.facility_id), body);
-            setAlert(result, "Изменение подтверждено чтением с сервера.", "success");
+            let body={name:name.value,display_timezone:tz.value,active:active.value==="true",expected_updated_at:facility.updated_at,expected_source_digest:facility.operator_source_digest};
+            if(!facility.active&&body.active&&body.name===facility.name&&body.display_timezone===facility.display_timezone)
+              body={active:true,expected_updated_at:facility.updated_at,expected_source_digest:facility.operator_source_digest};
+            await facilityAcceptance.mutate(base+"/facilities/"+encodeURIComponent(facility.facility_id),body.active&&!Object.hasOwn(body,"name")?"activate":"update",body,facility.facility_id);
           } else if (!pendingPreview) {
-            pendingPreview = await jsonPost("/facilities/preview", body);
-            setAlert(result, "Предпросмотр: будет создан пустой неактивный склад «" + name.value + "». Остаток, капитал, документы и WB не изменятся.", "neutral");
-            submit.textContent = "Подтвердить создание";
-            name.disabled = true;
-            city.disabled = true;
-            tz.disabled = true;
+            const selected = Object.freeze({name:name.value.trim(),city:city.value.trim(),display_timezone:tz.value,active:false});
+            const requestId = "fffui_"+crypto.randomUUID().replaceAll("-","");
+            const preview = await jsonPost("/facilities/preview",{request_id:requestId,...selected});
+            const accepted = (preview.manifest || {}).facility;
+            if (preview.request_id !== requestId || !accepted || Object.keys(selected).some(key => accepted[key] !== selected[key]))
+              throw new Error("Предпросмотр не соответствует выбранному черновику. Проверьте создание ещё раз.");
+            pendingPreview = Object.freeze({request_id:preview.request_id,preview_fingerprint:preview.preview_fingerprint,facility:Object.freeze({...accepted})});
+            name.value=accepted.name;city.value=accepted.city;tz.value=accepted.display_timezone;
+            setAlert(result,"Предпросмотр: будет создан пустой неактивный склад «"+pendingPreview.facility.name+"». Город: "+(pendingPreview.facility.city || "не указан")+". Часовой пояс: "+pendingPreview.facility.display_timezone+". Остаток, капитал, документы и WB не изменятся.","neutral");
+            submit.textContent="Подтвердить создание";
           } else {
-            await jsonPost("/facilities/onboarding/" + encodeURIComponent(pendingPreview.request_id) + "/confirm", {confirm:true, preview_fingerprint:pendingPreview.preview_fingerprint});
-            setAlert(result, "Пустой неактивный склад создан и ожидает привязки к WB.", "success");
-            pendingPreview = null;
-            submit.textContent = "Проверить создание";
-            await loadFacilities();
-            await loadWbWarehouses();
+            await facilityAcceptance.mutate(base+"/facilities/onboarding/"+encodeURIComponent(pendingPreview.request_id)+"/confirm","create",
+              {confirm:true,preview_request_id:pendingPreview.request_id,preview_fingerprint:pendingPreview.preview_fingerprint},"");
+            submit.textContent="Склад создан";submit.dataset.sourceAccepted="true";
           }
-        }
-        catch (error) { setAlert(result, error.message, "error"); }
-        finally { submit.disabled = false; }
+        } catch(error) {setAlert(result,error.message,"error");}
+        finally {facilityEditorBusy=false;lockEditor(facilityAcceptance.isPending());}
       });
       nodes.facilityDetail.appendChild(form);
+      lockEditor(facilityAcceptance.isPending());
     }
     async function loadWbWarehouses() {
       if (!nodes.wbWarehouses) return;
@@ -28709,6 +28751,7 @@
       }
     }
     function showBindingEditor(selection) {
+      if (facilityEditorBusy) return;
       nodes.facilityDetail.hidden = false;
       clear(nodes.facilityDetail);
       nodes.facilityDetail.appendChild(make("h3", "", "Точная привязка склада WB"));
@@ -28729,10 +28772,13 @@
       const result = make("div", "ff-pool-alert"); result.hidden=true;
       let preview=null;
       form.append(warehouseLabel,facilityLabel,submit,result);
-      form.addEventListener("submit",async function(event){event.preventDefault();submit.disabled=true;try{
-        if(!preview){preview=await jsonPost("/wb-warehouses/binding/preview",{request_id:"fbsbindui_"+Date.now()+"_"+Math.random().toString(16).slice(2,10),seller_warehouse_id:Number(warehouseSelect.value),facility_id:facilitySelect.value});setAlert(result,"Предпросмотр готов: создаётся только точная связь ID↔ID. Склад, остатки и перемещения не создаются.","neutral");submit.textContent="Подтвердить привязку";warehouseSelect.disabled=true;facilitySelect.disabled=true;}
-        else{await jsonPost("/wb-warehouses/binding/"+encodeURIComponent(preview.request_id)+"/confirm",{confirm:true,preview_fingerprint:preview.preview_fingerprint});setAlert(result,"Привязка подтверждена. Глобальное восстановление backlog не запускалось.","success");submit.textContent="Привязано";await loadWbWarehouses();await loadFacilities();}
-      }catch(error){setAlert(result,error.message,"error");}finally{submit.disabled=false;}});
+      form.dataset.ffBindingForm="";submit.dataset.ffDirectoryFinal="";submit.disabled=facilityAcceptance.isPending();
+      form.addEventListener("submit",async function(event){event.preventDefault();if(submit.disabled)return;submit.disabled=true;try{
+        if(!preview){preview=await jsonPost("/wb-warehouses/binding/preview",{request_id:"fbsbindui_"+crypto.randomUUID().replaceAll("-",""),seller_warehouse_id:Number(warehouseSelect.value),facility_id:facilitySelect.value});setAlert(result,"Предпросмотр готов: создаётся только точная связь ID↔ID. Склад, остатки и перемещения не создаются.","neutral");submit.textContent="Подтвердить привязку";warehouseSelect.disabled=true;facilitySelect.disabled=true;}
+        else{await facilityAcceptance.mutate(base+"/wb-warehouses/binding/"+encodeURIComponent(preview.request_id)+"/confirm","binding",
+          {confirm:true,preview_request_id:preview.request_id,preview_fingerprint:preview.preview_fingerprint,facility_id:facilitySelect.value},facilitySelect.value);
+          submit.textContent="Привязано";submit.dataset.sourceAccepted="true";}
+      }catch(error){setAlert(result,error.message,"error");}finally{submit.disabled=facilityAcceptance.isPending()||submit.dataset.sourceAccepted==="true";}});
       nodes.facilityDetail.appendChild(form);
     }
     async function loadDocuments() {
@@ -28812,7 +28858,7 @@
     function applyNonOverheadDefaults() {
       const kind = nodes.kind.value;
       const action = actions[kind] || { fields: [] };
-      if (!kind || kind === "pool_overhead") return;
+      if (!kind || kind === "pool_overhead" || state.manualDraft) return;
       if (action.fields.indexOf("facility") >= 0 && !nodes.facility.value && nodes.facility.options.length > 1) nodes.facility.selectedIndex = 1;
       if (action.fields.indexOf("destination_facility") >= 0 && !nodes.destinationFacility.value && nodes.destinationFacility.options.length > 1) nodes.destinationFacility.selectedIndex = 1;
       if (action.fields.indexOf("scope") >= 0 && !nodes.scope.value) nodes.scope.value = "both";
@@ -28847,6 +28893,7 @@
       }
       nodes.overheadComment.required = kind === "pool_overhead" && nodes.overheadCategory.value === "other";
       nodes.help.textContent = action.help;
+      nodes.preview.disabled = !kind || !(state.capabilities && state.capabilities.feature && state.capabilities.feature.writer_effective);
       nodes.template.hidden = !action.workbook;
       nodes.preview.textContent = action.workbook ? "Загрузить и проверить" : "Проверить документ";
       state.currentAction = kind;
@@ -29244,6 +29291,8 @@
     }
 
     async function openModal(preferredAction) {
+      state.manualDraft = false;
+      const manualNote = nodes.form.querySelector("[data-ff-manual-draft]"); if (manualNote) manualNote.hidden = true;
       state.opener=document.activeElement;modal.hidden=false;document.body.style.overflow="hidden";dialog.focus();
       const alreadyLoaded = state.loaded;
       await initialize();
@@ -29257,9 +29306,54 @@
         activateTab("workflow", alreadyLoaded);
       }
     }
+    const manualPurpose = new URLSearchParams(window.location.search).get("ff_manual_action");
+    const validManualPurpose = function(value) {return value === "manual_receipt" || value === "manual_writeoff";};
+    async function openManualDraft(payload) {
+      if (!validManualPurpose(payload.purpose)) return;
+      const recovering = Boolean(savedOverheadConfirmation());
+      await openModal("");
+      // An unresolved modern submission retains its exact recovery identity.
+      if (recovering || savedOverheadConfirmation()) {activateTab("workflow", false); return;}
+      activateUnifiedTab("warehouses", {persist: false});
+      state.manualDraft = true;
+      activateTab("create");
+      if (!Array.from(nodes.kind.options).some(function(option) {return option.value === "";})) {
+        const choice = make("option", "", "Выберите вид документа"); choice.value = ""; nodes.kind.insertBefore(choice, nodes.kind.firstChild);
+      }
+      [nodes.sourcePool, nodes.destinationPool].forEach(function(control) {
+        if (!Array.from(control.options).some(function(option) {return option.value === "";})) {
+          const choice = make("option", "", "Выберите сегмент"); choice.value = ""; control.insertBefore(choice, control.firstChild);
+        }
+        control.value = "";
+      });
+      nodes.kind.value = ""; nodes.facility.value = ""; nodes.destinationFacility.value = "";
+      nodes.scope.value = ""; nodes.sourcePool.value = ""; nodes.items.value = "";
+      updateActionFields();
+      let note = nodes.form.querySelector("[data-ff-manual-draft]");
+      if (!note) {note = make("p", "ff-pool-note"); note.dataset.ffManualDraft = "1"; nodes.form.prepend(note);}
+      const rows = Array.isArray(payload.rows) ? payload.rows.slice(0, 200).filter(function(row) {return row && Number.isSafeInteger(row.nm_id) && row.nm_id > 0 && Number.isSafeInteger(row.quantity_delta);}) : [];
+      note.hidden = false;
+      note.textContent = (payload.purpose === "manual_receipt" ? "Приход. " : "Списание. ") + "Выберите склад и вид документа. Без документа-основания используйте инвентаризацию фактического остатка.";
+      if (rows.length) note.appendChild(make("span", "", " Черновик изменений (не итоговый остаток): " + rows.map(function(row) {return row.nm_id + ": " + row.quantity_delta;}).join("; ")));
+      nodes.kind.focus();
+    }
+    window.addEventListener("message", function(event) {
+      if (event.origin !== window.location.origin || !event.data || event.data.type !== "wbc_manual_ff_stock_draft") return;
+      const embedded = operatorEmbedFrames.some(function(frame) {return frame.contentWindow === event.source;});
+      const opened = validManualPurpose(manualPurpose) && window.opener && event.source === window.opener;
+      if (embedded || opened) openManualDraft(event.data);
+    });
+    if (validManualPurpose(manualPurpose)) {
+      openManualDraft({purpose: manualPurpose, rows: []}).then(function() {
+        if (window.opener) window.opener.postMessage({type: "wbc_manual_ff_stock_draft_ready"}, window.location.origin);
+      });
+    }
     openButton.addEventListener("click", function () { openModal(""); });
     const linkedOperation = new URLSearchParams(window.location.search).get("operation_id");
-    if (linkedOperation && /^[A-Za-z0-9:_-]{1,160}$/.test(linkedOperation)) openModal().then(function(){activateTab("journal");showOperationDetail(linkedOperation);});
+    if (linkedOperation && /^ff_directory_[a-f0-9]{32}$/.test(linkedOperation)) openModal().then(function(){activateTab("facilities");return facilityAcceptance.showOperation(linkedOperation);}).catch(facilityAcceptanceError);
+    else if (linkedOperation && /^[A-Za-z0-9:_-]{1,160}$/.test(linkedOperation)) openModal().then(function(){activateTab("journal");showOperationDetail(linkedOperation);});
+    function facilityAcceptanceError(error){if(!facilityAcceptance.isPending())setAlert(facilityReceipt,error.message,"error");}
+    facilityAcceptance.recover().catch(facilityAcceptanceError);
     document.querySelectorAll("[data-ff-pool-open-overhead]").forEach(function(button){ button.addEventListener("click", function(){ openModal("pool_overhead"); }); });
     function closeModal(){state.workflowGeneration += 1;modal.hidden=true;document.body.style.overflow="";if(state.opener&&state.opener.focus)state.opener.focus();}
     document.querySelector("[data-ff-operations-open]").addEventListener("click", async function () { await openModal(""); activateTab("journal"); });

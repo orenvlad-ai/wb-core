@@ -81,7 +81,7 @@ def ensure_ff_pool_foundation_schema(conn: sqlite3.Connection) -> None:
             request_id TEXT NOT NULL,
             request_identity TEXT NOT NULL,
             facility_id TEXT NOT NULL REFERENCES {FACILITIES_TABLE}(facility_id),
-            action TEXT NOT NULL CHECK(action IN ('created','renamed','activated','deactivated','timezone_changed')),
+            action TEXT NOT NULL CHECK(action IN ('created','renamed','activated','deactivated','timezone_changed','unchanged')),
             actor TEXT NOT NULL,
             previous_json TEXT NOT NULL DEFAULT '{{}}',
             current_json TEXT NOT NULL,
@@ -420,6 +420,65 @@ def ensure_ff_pool_foundation_schema(conn: sqlite3.Connection) -> None:
         END;
         """
     )
+
+    _upgrade_facility_change_actions(conn)
+
+
+def _upgrade_facility_change_actions(conn: sqlite3.Connection) -> None:
+    """Widen the native immutable audit CHECK, without changing its identities.
+
+    SQLite requires a table rebuild for CHECK. Foreign keys are disabled only
+    outside the atomic schema transaction, preventing incoming ON DELETE actions;
+    all native/custom indexes and triggers and all row values survive unchanged.
+    """
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                       (FACILITY_CHANGES_TABLE,)).fetchone()[0]
+    old = "'activated','deactivated','timezone_changed'))"
+    if old not in sql:
+        return
+    if conn.in_transaction:
+        raise RuntimeError('facility audit schema upgrade requires its native schema boundary')
+    foreign_keys = int(conn.execute('PRAGMA foreign_keys').fetchone()[0])
+    legacy_alter = int(conn.execute('PRAGMA legacy_alter_table').fetchone()[0])
+    replacement = FACILITY_CHANGES_TABLE + '_action_upgrade'
+    try:
+        conn.execute('PRAGMA foreign_keys=OFF')
+        conn.execute('PRAGMA legacy_alter_table=ON')
+        conn.execute('BEGIN IMMEDIATE')
+        # Capture objects and rows under the same schema writer snapshot.
+        sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                           (FACILITY_CHANGES_TABLE,)).fetchone()[0]
+        if old not in sql:
+            conn.rollback()
+            return
+        objects = [row[0] for row in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name",
+            (FACILITY_CHANGES_TABLE,))]
+        columns = [row[1] for row in conn.execute(f'PRAGMA table_info({FACILITY_CHANGES_TABLE})')]
+        quoted = ','.join('"'+name.replace('"','""')+'"' for name in columns)
+        conn.execute(sql.replace(FACILITY_CHANGES_TABLE, replacement, 1).replace(
+            old, "'activated','deactivated','timezone_changed','unchanged'))", 1))
+        conn.execute(f'INSERT INTO {replacement}({quoted}) SELECT {quoted} FROM {FACILITY_CHANGES_TABLE}')
+        conn.execute(f'DROP TABLE {FACILITY_CHANGES_TABLE}')
+        conn.execute(f'ALTER TABLE {replacement} RENAME TO {FACILITY_CHANGES_TABLE}')
+        for statement in objects:
+            conn.execute(statement)
+        affected = [FACILITY_CHANGES_TABLE]
+        for table in (row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")):
+            quoted_table = '"' + table.replace('"', '""') + '"'
+            if any(row[2] == FACILITY_CHANGES_TABLE for row in conn.execute(f'PRAGMA foreign_key_list({quoted_table})')):
+                affected.append(table)
+        for table in set(affected):
+            quoted_table = '"' + table.replace('"', '""') + '"'
+            if conn.execute(f'PRAGMA foreign_key_check({quoted_table})').fetchone() is not None:
+                raise RuntimeError('facility audit upgrade failed foreign key integrity')
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute(f'PRAGMA legacy_alter_table={legacy_alter}')
+        conn.execute(f'PRAGMA foreign_keys={foreign_keys}')
 
 
 def canonical_decimal_text(value: Any) -> str:

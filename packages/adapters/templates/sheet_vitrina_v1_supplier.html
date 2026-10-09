@@ -585,6 +585,7 @@
       <section class="block" aria-label="订单登记表 / Order registry / Реестр заказов">
         <div class="card-head">
           <div id="supplierSourceAcceptance" hidden></div>
+          <div id="supplierContractAcceptance" hidden></div>
           <p id="registryMessage" class="message">读取订单 / Loading orders / Читаем заказы...</p>
         </div>
         <div class="registry-wrap">
@@ -932,6 +933,8 @@
       const config = JSON.parse(document.getElementById("sheet-vitrina-v1-supplier-config").textContent);
       let supplierAcceptance = null;
       let sourceAcceptanceLocked = false;
+      let contractAcceptance = null;
+      let contractAcceptanceLocked = false;
       const queryParams = new URLSearchParams(window.location.search || "");
       const shipmentsPath = config.supplier_shipments_path;
       const parsePath = config.supplier_shipments_parse_path;
@@ -2261,7 +2264,7 @@
           contractDocumentLabel.textContent = "Контракт: выбрать";
         }
         const candidates = Array.isArray(shipment.contract_candidates) ? shipment.contract_candidates : [];
-        contractManageControls.hidden = !canManageDocuments || !shipment.shipment_id || !shipment.invoice_document_id;
+        contractManageControls.hidden = !canManageDocuments || !shipment.shipment_id;
         if (!contractManageControls.hidden) {
           const contracts = activeContracts.length ? activeContracts : candidates;
           const candidateIds = new Set(candidates.map((candidate) => candidate.document_id).filter(Boolean));
@@ -2269,7 +2272,9 @@
             '<option value="' + escapeHtml(contract.document_id || "") + '">' + escapeHtml(contractOptionLabel(contract) + (candidateIds.has(contract.document_id) ? " · match" : "")) + '</option>'
           ))).join("");
           contractCandidateSelect.innerHTML = options;
-          linkContractButton.disabled = !contracts.length;
+          linkContractButton.disabled = contractAcceptanceLocked || !contracts.length;
+          uploadContractButton.disabled = contractAcceptanceLocked;
+          contractCandidateSelect.disabled = contractAcceptanceLocked;
         }
       }
 
@@ -4255,64 +4260,38 @@
         }
       }
 
+      function lockContractControls(value) {
+        contractAcceptanceLocked = value;
+        linkContractButton.disabled = value || !contractCandidateSelect.options.length;
+        uploadContractButton.disabled = value;
+        contractCandidateSelect.disabled = value;
+        contractFileInput.disabled = value;
+      }
+
       async function linkSelectedContract() {
-        if (!canManageDocuments || !currentShipment || !currentShipment.shipment_id) {
-          return;
-        }
-        const contractDocumentId = contractCandidateSelect.value || "";
-        if (!contractDocumentId) {
-          setMessage(cardMessage, "Выберите контракт.", "error");
-          return;
-        }
-        setMessage(cardMessage, "Связываем контракт...", "");
+        if (!canManageDocuments || !currentShipment || !currentShipment.shipment_id) return;
+        const target = contractCandidateSelect.value || "";
+        if (!target) {setMessage(cardMessage, "Выберите договор.", "error"); return;}
         try {
-          const payload = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id) + "/contract", {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
-            body: JSON.stringify({ contract_document_id: contractDocumentId })
-          });
-          currentShipment = payload.shipment || (await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id), { headers: { Accept: "application/json" } }));
-          renderCard();
-          await loadRegistry();
-          if (activeCardTab === "financial" && canManageFinancialDocuments) {
-            await loadFinancialDocuments();
-          }
-          setMessage(cardMessage, "Контракт связан.", "success");
-        } catch (error) {
-          setMessage(cardMessage, error.message, "error");
-        }
+          const sid = currentShipment.shipment_id;
+          await contractAcceptance.mutate(shipmentsPath + "/" + encodeURIComponent(sid) + "/contract",
+            "link", {contract_document_id: target}, "PATCH", null, sid);
+        } catch (error) {setMessage(cardMessage, error.message, "error");}
       }
 
       async function uploadContractFile(file) {
-        if (!canManageDocuments || !file || !currentShipment || !currentShipment.shipment_id) {
-          return;
-        }
-        const formData = new FormData();
-        const metadata = currentShipment.metadata || {};
-        formData.append("number", metadata.contract_no || currentShipment.contract_no || "");
-        formData.append("document_date", metadata.contract_date || currentShipment.contract_date || "");
-        formData.append("supplier_name", currentShipment.supplier_name || defaultSupplierName);
-        formData.append("file", file, file.name || "contract.pdf");
-        setMessage(cardMessage, "Загружаем контракт...", "");
+        if (!canManageDocuments || !file || !currentShipment || !currentShipment.shipment_id) return;
         try {
-          const payload = await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id) + "/contract", {
-            method: "POST",
-            body: formData,
-            headers: { Accept: "application/json" }
-          });
-          currentShipment = payload.shipment || (await fetchJson(shipmentsPath + "/" + encodeURIComponent(currentShipment.shipment_id), { headers: { Accept: "application/json" } }));
-          await loadActiveContracts();
-          renderCard();
-          await loadRegistry();
-          if (activeCardTab === "financial" && canManageFinancialDocuments) {
-            await loadFinancialDocuments();
-          }
-          setMessage(cardMessage, "Контракт загружен и связан.", "success");
-        } catch (error) {
-          setMessage(cardMessage, error.message, "error");
-        } finally {
-          contractFileInput.value = "";
-        }
+          const metadata = currentShipment.metadata || {};
+          const sid = currentShipment.shipment_id;
+          const operands = {number: metadata.contract_no || currentShipment.contract_no || "",
+            document_date: metadata.contract_date || currentShipment.contract_date || "",
+            supplier_name: currentShipment.supplier_name || defaultSupplierName,
+            filename: file.name || "contract.pdf", file_sha256: await contractAcceptance.fileHash(file)};
+          await contractAcceptance.mutate(shipmentsPath + "/" + encodeURIComponent(sid) + "/contract",
+            "upload_link", operands, "POST", file, sid);
+        } catch (error) {setMessage(cardMessage, error.message, "error");}
+        finally {contractFileInput.value = "";}
       }
 
       function closeCard() {
@@ -4753,6 +4732,17 @@
           if (!shipment.archived) {currentShipment = shipment; isNewShipment = false; currentUploadId = ""; cardDirty = false; renderCard(); shipmentCard.hidden = false;} await loadRegistry();
         }
       });
+      if (canManageDocuments) {
+        contractAcceptance = window.SupplierContractAcceptance.create({
+          path: shipmentsPath, scope: config.user_config_key || "local_operator",
+          container: document.getElementById("supplierContractAcceptance"),
+          onLock: lockContractControls,
+          onError: error => setMessage(cardMessage, error.message, "error"),
+          onRecovered: async () => {await loadActiveContracts();}
+        });
+        contractAcceptance.recover().catch(error => setMessage(cardMessage, error.message, "error"));
+        contractAcceptance.showOperation(new URLSearchParams(location.search).get("operation_id") || "").catch(error => setMessage(cardMessage, error.message, "error"));
+      }
       loadRegistry();
     })();
   </script>

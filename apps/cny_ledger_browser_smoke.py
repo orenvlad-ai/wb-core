@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import threading
+from unittest.mock import patch
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -49,52 +50,39 @@ class ObservedCnyEntrypoint(RegistryUploadHttpEntrypoint):
         self.slow_delete_release = threading.Event()
         self.next_upload_pending = False
         self.next_upload_failure = False
+        self.upload_request_ids = []
 
     def handle_cny_account_status_request(self) -> dict[str, object]:
         self.cny_status_request_count += 1
         return super().handle_cny_account_status_request()
 
-    def handle_cny_account_document_delete_request(self, document_id: str) -> dict[str, object]:
+    def handle_cny_account_document_delete_request(self, document_id: str, payload=None, **kwargs) -> dict[str, object]:
         self.cny_delete_document_ids.append(document_id)
         if document_id == self.slow_delete_document_id:
             self.slow_delete_started.set()
             if not self.slow_delete_release.wait(timeout=5):
                 raise RuntimeError("browser smoke did not release bounded CNY delete")
-        return super().handle_cny_account_document_delete_request(document_id)
+        return super().handle_cny_account_document_delete_request(document_id, payload, **kwargs)
 
     def handle_cny_account_upload_request(
         self,
         file_bytes: bytes,
         **kwargs: object,
     ) -> dict[str, object]:
+        self.upload_request_ids.append(str(dict(kwargs.get("fields") or {}).get("request_id") or ""))
         if self.next_upload_failure:
             self.next_upload_failure = False
-            raise ValueError("injected pre-save validation failure")
-        result = super().handle_cny_account_upload_request(file_bytes, **kwargs)
+            # Inject native validation INSIDE source admission, so same-ID GET
+            # retains a definitive refusal rather than losing a pre-route error.
+            with patch.object(self.cny_ledger_block, "upload_document", side_effect=ValueError("injected pre-save validation failure")):
+                return super().handle_cny_account_upload_request(file_bytes, **kwargs)
         if self.next_upload_pending:
             self.next_upload_pending = False
-            document_id = str(result.get("document_id") or "")
-            result.update(
-                {
-                    "contract_name": "sheet_vitrina_v1_cny_write_pending_v1",
-                    "status": "pending",
-                    "document_status": "posted",
-                    "operation_applied": True,
-                    "readback_confirmed": True,
-                    "pending_phase": "derived_replay",
-                    "retryable": True,
-                    "message": (
-                        "Операция CNY сохранена, ledger подтверждён; "
-                        "связанный пересчёт ожидает безопасного повтора."
-                    ),
-                    "durable_retry_identity": {
-                        "stable_source_id": f"cny_document:{document_id}",
-                        "source_revision": "sha256:browser-pending",
-                    },
-                    "http_status": 202,
-                }
-            )
-        return result
+            # Actual source+intent+receipt commit with interrupted financial core.
+            with patch.object(self.cny_ledger_block, "replay_ledger", return_value={"status":"pending"}):
+                return super().handle_cny_account_upload_request(file_bytes, **kwargs)
+        return super().handle_cny_account_upload_request(file_bytes, **kwargs)
+
 
 
 def main() -> None:
@@ -167,10 +155,9 @@ def main() -> None:
                     }
                 )
                 pending_message = operator_frame.locator("#cnyAccountMessage")
-                expect(pending_message).to_contain_text(
-                    "сохранена, ledger подтверждён", timeout=10000
-                )
-                expect(pending_message).to_have_class("section-message is-warning")
+                expect(operator_frame.locator("#cnySourceReceipt")).to_contain_text("Документ сохранён.", timeout=10000)
+                expect(operator_frame.locator("#cnySourceReceipt")).to_contain_text("Финансовая обработка ожидает подтверждения.")
+                expect(operator_frame.locator("#cnyBalanceCny")).to_have_text("Ожидает подтверждения")
                 expect(operator_frame.locator("#cnyAccountFileInput")).to_have_value("")
                 expect(
                     operator_frame.locator(
@@ -178,7 +165,19 @@ def main() -> None:
                     )
                 ).to_be_visible()
                 if entrypoint.cny_status_request_count <= status_count_before_pending:
-                    raise AssertionError("HTTP 202 must immediately reload the CNY account read model")
+                    raise AssertionError("saved pending source must immediately reload the CNY account read model")
+                from packages.application.cny_preparation_intents import read_account_request, drain_cny_preparation_intents
+                pending_request = read_account_request(runtime)
+                if pending_request["status"] != "pending":
+                    raise AssertionError(f"source must retain its actual native pending intent: {pending_request}")
+                writes_before_worker = list(entrypoint.upload_request_ids)
+                drained = drain_cny_preparation_intents(runtime, block=entrypoint.cny_ledger_block)
+                if not entrypoint.handle_cny_account_status_request()["financial_authority"]["current"]:
+                    raise AssertionError(f"actual native worker must confirm the pending financial source: {drained}")
+                operator_frame.locator("#cnyAccountReplayButton").click()
+                expect(operator_frame.locator("#cnyBalanceCny")).not_to_have_text("Ожидает подтверждения")
+                if entrypoint.upload_request_ids != writes_before_worker:
+                    raise AssertionError("native continuation must not re-submit source")
 
                 document_count_before_failure = len(runtime.list_cny_documents())
                 entrypoint.next_upload_failure = True
@@ -190,7 +189,7 @@ def main() -> None:
                     }
                 )
                 expect(operator_frame.locator("#cnyAccountMessage")).to_contain_text(
-                    "Не удалось загрузить CNY документ", timeout=10000
+                    "injected pre-save validation failure", timeout=10000
                 )
                 expect(operator_frame.locator("#cnyAccountMessage")).to_have_class(
                     "section-message is-error"
@@ -200,11 +199,9 @@ def main() -> None:
 
                 ambiguous_url = f"{base_url}{DEFAULT_CNY_ACCOUNT_DOCUMENTS_PATH}"
                 ambiguous_body = b"browser-ambiguous-conversion"
-                # Establish the exact durable postcondition first, then make the
-                # browser's matching upload lose its response.  Backend same-file
-                # idempotency is covered by cny_ledger_smoke; this fixture owns the
-                # UI's SHA-based reconciliation without a nested loopback request
-                # inside Playwright's synchronous route callback.
+                # Existing native source is final. The browser's one alias
+                # acknowledges it without a second source write, loses the
+                # actual reply, then reads only that exact retained request ID.
                 ambiguous_status, ambiguous_payload = _post_multipart(
                     ambiguous_url,
                     ambiguous_body,
@@ -223,9 +220,7 @@ def main() -> None:
                         "buffer": ambiguous_body,
                     }
                 )
-                expect(operator_frame.locator("#cnyAccountMessage")).to_contain_text(
-                    "Ответ загрузки не был получен полностью", timeout=10000
-                )
+                expect(operator_frame.locator("#cnySourceReceipt")).to_contain_text("Документ сохранён.", timeout=10000)
                 transport_failure_triggered = operator_frame.locator("body").evaluate(
                     """(body) => Boolean(
                       body.ownerDocument.defaultView.__cnyLostResponseFixture
@@ -234,9 +229,9 @@ def main() -> None:
                 )
                 if not transport_failure_triggered:
                     raise AssertionError("ambiguous transport fixture did not reject the browser upload")
-                expect(operator_frame.locator("#cnyAccountMessage")).to_have_class(
-                    "section-message is-warning"
-                )
+                lost_request_id = operator_frame.locator("body").evaluate("body => body.ownerDocument.defaultView.__cnyLostResponseFixture.request_id")
+                if entrypoint.upload_request_ids.count(lost_request_id) != 1:
+                    raise AssertionError("lost response recovery re-submitted the same source alias")
                 expect(operator_frame.locator("#cnyAccountFileInput")).to_have_value("")
                 expect(
                     operator_frame.locator(
@@ -293,7 +288,7 @@ def main() -> None:
                 page.once("dialog", lambda dialog: _accept_dialog(dialog, error_dialogs))
                 error_button.click()
                 expect(operator_frame.locator("#cnyAccountMessage")).to_contain_text(
-                    "CNY document not found: missing-browser-document", timeout=10000
+                    "CNY document not found", timeout=10000
                 )
                 expect(direct_two_row).to_be_visible()
                 expect(error_button).to_be_enabled()
@@ -324,9 +319,8 @@ def main() -> None:
                     timeout=10000,
                 ):
                     entrypoint.slow_delete_release.set()
-                    expect(operator_frame.locator("#cnyAccountMessage")).to_contain_text(
-                        "CNY ledger и связанные расчётные показатели пересчитаны", timeout=10000
-                    )
+                    expect(operator_frame.locator("#cnySourceReceipt")).to_contain_text("Документ сохранён.", timeout=10000)
+                    expect(operator_frame.locator("#cnySourceReceipt")).to_contain_text("Финансовая обработка этой версии подтверждена.")
                 expect(direct_one_row).to_have_count(0)
                 ui_after_success = _cny_ui_snapshot(operator_frame)
                 for field in ("balance_cny", "balance_rub", "replay", "state"):
@@ -345,8 +339,8 @@ def main() -> None:
                 if entrypoint.cny_status_request_count <= status_count_before:
                     raise AssertionError("successful browser delete must reload the CNY account read model from the server")
                 expected_warning = (
-                    "Документ будет удалён. Остаток CNY, рублёвая стоимость остатка, "
-                    "средний курс и последующие операции ledger будут пересчитаны"
+                    "Документ будет исключён. Остаток CNY, рублёвая стоимость остатка, "
+                    "средний курс и последующие операции будут пересчитаны"
                 )
                 if (
                     not success_dialogs
@@ -432,9 +426,9 @@ def _upload_pdf(operator_frame: object, filename: str, body: bytes) -> None:
     operator_frame.locator("#cnyAccountFileInput").set_input_files(
         {"name": filename, "mimeType": "application/pdf", "buffer": body}
     )
-    expect(operator_frame.locator("#cnyAccountMessage")).to_contain_text(
-        "Документ CNY сохранён и ledger пересчитан", timeout=10000
-    )
+    expect(operator_frame.locator("#cnySourceReceipt .ff-operation-check")).to_be_visible(timeout=10000)
+    expect(operator_frame.locator("#cnySourceReceipt")).to_contain_text("Документ сохранён.")
+    expect(operator_frame.locator("#cnySourceReceipt")).to_contain_text("Финансовая обработка этой версии подтверждена.")
     expect(operator_frame.locator("#cnyConversionsBody tr", has_text=filename)).to_be_visible()
 
 
@@ -454,7 +448,8 @@ def _fail_next_cny_upload_transport(operator_frame: object, upload_url: str) -> 
             if (!fixture.triggered && requestMethod === "POST" && resolvedUrl === exactUploadUrl) {
               fixture.triggered = true;
               view.fetch = originalFetch;
-              return Promise.reject(new TypeError("injected lost CNY upload response"));
+              fixture.request_id = init.body.get("request_id");
+              return originalFetch(input, init).then(() => {throw new TypeError("injected lost CNY upload response");});
             }
             return originalFetch(input, init);
           };

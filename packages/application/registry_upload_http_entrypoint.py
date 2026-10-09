@@ -1481,10 +1481,11 @@ class RegistryUploadHttpEntrypoint:
             runner=self._run_warehouse_manual_sync_job,
         )
 
-    def handle_bundle_payload(self, payload: Mapping[str, Any]) -> RegistryUploadResult:
+    def handle_bundle_payload(self, payload: Mapping[str, Any], *, actor: str | None = None) -> RegistryUploadResult:
         return self.runtime.ingest_bundle(
             payload,
             activated_at=self.activated_at_factory(),
+            operator_actor=actor,
         )
 
     def handle_wb_finance_weekly_request(self) -> dict[str, Any]:
@@ -1515,10 +1516,11 @@ class RegistryUploadHttpEntrypoint:
             expected_source_digest=str(payload.get("expected_source_digest") or ""),
         )
 
-    def handle_cost_price_payload(self, payload: Mapping[str, Any]) -> CostPriceUploadResult:
+    def handle_cost_price_payload(self, payload: Mapping[str, Any], *, actor: str | None = None) -> CostPriceUploadResult:
         return self.runtime.ingest_cost_price_payload(
             payload,
             activated_at=self.activated_at_factory(),
+            operator_actor=actor,
         )
 
     def handle_sheet_plan_request(self, as_of_date: str | None = None) -> dict[str, Any]:
@@ -3146,6 +3148,12 @@ class RegistryUploadHttpEntrypoint:
                 for row in generation['warehouses']])),
             'fbs_run_sequence': str(latest['run_sequence'])})
 
+    def _cycle_drain_facility_activations(self, owner_token):
+        require_heavy_owner(self.runtime.runtime_dir)
+        require_warehouse_job_owner(self.runtime.runtime_dir, owner_token)
+        from packages.application.ff_pool_dense_fbs import DenseFbsService
+        return DenseFbsService(db_path=self.runtime.db_path, runtime_dir=self.runtime.runtime_dir).drain_facility_activations(limit=32)
+
     def _cycle_warehouse(self, store, receipt, fbs):
         require_heavy_owner(self.runtime.runtime_dir)
         from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
@@ -3154,6 +3162,7 @@ class RegistryUploadHttpEntrypoint:
         from packages.application.warehouse_update_journal import PHASES
         with warehouse_functional_job_lock(self.runtime.runtime_dir) as metrics:
             token = str(metrics['owner_token'])
+            self._cycle_drain_facility_activations(token)
             run_id = self.warehouse_update_journal.start(trigger_source='cycle', scheduled_for=receipt['slot_utc'], owner_token=token)
             item = next(i for i in receipt['stages'] if i['stage'] == 'warehouse')
             item['durable_ref'] = run_id
@@ -4974,9 +4983,17 @@ class RegistryUploadHttpEntrypoint:
         return read(self.runtime.db_path, request_id, shipment_id=shipment_id, request_scope=request_scope)
 
     def handle_supplier_operator_operation_read(self, operation_id: str, *, request_scope: str, supplier_safe: bool = False) -> dict[str, Any]:
+        if operation_id.startswith('supplier_contract_'):
+            if supplier_safe:
+                return {'domain': 'supplier_contract', 'status': 'unknown', 'settled': False, 'acceptance': None}
+            from packages.application.operator_supplier_contracts import read_operation
+            return read_operation(self.runtime.db_path, operation_id, request_scope=request_scope) or {'status': 'unknown', 'acceptance': None}
         if operation_id.startswith('supplier_financial_'):
-            from packages.application.operator_supplier_financial import read_operation
-            return read_operation(self.runtime.runtime_dir,self.runtime.db_path,operation_id,request_scope=request_scope)
+            from packages.application import operator_cny_documents as cny_operations
+            from packages.application import operator_supplier_financial as financial_operations
+            action = cny_operations.operation_action(self.runtime.db_path, operation_id, request_scope=request_scope)
+            reader = cny_operations.read_operation if action in cny_operations.ACTIONS else financial_operations.read_operation
+            return reader(self.runtime.runtime_dir,self.runtime.db_path,operation_id,request_scope=request_scope)
         if operation_id.startswith("ssfc_job_"):
             from packages.application.operator_supplier_factual_dates import read_operation
             return read_operation(self.runtime.db_path, operation_id, request_scope=request_scope)
@@ -6737,13 +6754,21 @@ class RegistryUploadHttpEntrypoint:
         return self.supplier_financial_documents_block.download_document_file(shipment_id, document_id)
 
     def handle_cny_account_status_request(self) -> dict[str, Any]:
-        return self.cny_ledger_block.get_status()
+        from packages.application.operator_cny_documents import read_status
+        return read_status(self.cny_ledger_block)
+
+    def handle_cny_operator_request_read(self, request_id: str, *, request_scope: str) -> dict[str, Any]:
+        from packages.application.operator_cny_documents import read_request
+        return read_request(self.runtime.runtime_dir, self.runtime.db_path, request_id, request_scope=request_scope)
 
     def handle_cny_account_conversions_request(self) -> dict[str, Any]:
-        return self.cny_ledger_block.list_conversions()
+        payload = self.handle_cny_account_status_request()
+        return {k: payload[k] for k in ('contract_name', 'status', 'conversions', 'summary', 'replay', 'financial_authority')}
 
     def handle_cny_account_ledger_request(self) -> dict[str, Any]:
-        return self.cny_ledger_block.list_ledger_operations()
+        payload = self.handle_cny_account_status_request()
+        return {**{k: payload[k] for k in ('contract_name', 'status', 'summary', 'replay', 'financial_authority')},
+            'operations': payload['ledger_operations']}
 
     def handle_cny_account_upload_request(
         self,
@@ -6753,8 +6778,14 @@ class RegistryUploadHttpEntrypoint:
         uploaded_content_type: str | None = None,
         fields: Mapping[str, Any] | None = None,
         actor: str = "",
+        request_scope: str = "",
     ) -> dict[str, Any]:
         upload_fields = dict(fields or {})
+        if upload_fields.get('request_id'):
+            from packages.application.operator_cny_documents import upload
+            return upload(self.cny_ledger_block, file_bytes, fields=upload_fields,
+                filename=uploaded_filename, content_type=uploaded_content_type,
+                request_scope=request_scope or actor, actor=actor)
         return self.cny_ledger_block.upload_document(
             file_bytes=file_bytes,
             uploaded_filename=uploaded_filename,
@@ -6765,7 +6796,11 @@ class RegistryUploadHttpEntrypoint:
             manual_payment_date_actor=actor,
         )
 
-    def handle_cny_account_opening_balance_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def handle_cny_account_opening_balance_request(self, payload: Mapping[str, Any], *, actor: str = '', request_scope: str = '') -> dict[str, Any]:
+        if payload.get('request_id'):
+            from packages.application.operator_cny_documents import execute
+            return execute(self.cny_ledger_block, action='cny_opening', payload=payload, actor=actor,
+                request_scope=request_scope or actor, native_write=lambda: self.cny_ledger_block.create_opening_balance(payload))
         return self.cny_ledger_block.create_opening_balance(payload)
 
     def handle_cny_account_replay_request(self) -> dict[str, Any]:
@@ -6774,98 +6809,135 @@ class RegistryUploadHttpEntrypoint:
     def handle_cny_account_document_file_request(self, document_id: str) -> tuple[bytes, str, str]:
         return self.cny_ledger_block.download_document_file(document_id)
 
-    def handle_cny_account_document_delete_request(self, document_id: str) -> dict[str, Any]:
+    def handle_cny_account_document_delete_request(self, document_id: str, payload: Mapping[str, Any] | None = None, *, actor: str = '', request_scope: str = '') -> dict[str, Any]:
+        if payload and payload.get('request_id'):
+            from packages.application.operator_cny_documents import execute
+            return execute(self.cny_ledger_block, action='cny_exclude', payload=payload, actor=actor,
+                document_id=document_id, request_scope=request_scope or actor,
+                native_write=lambda: self.cny_ledger_block.delete_document(document_id))
         return self.cny_ledger_block.delete_document(document_id)
 
-    def handle_supplier_shipments_contract_patch_request(
-        self,
-        shipment_id: str,
-        payload: Mapping[str, Any],
-        *,
-        actor: str = "",
-    ) -> dict[str, Any]:
-        contract_document_id = str(payload.get("contract_document_id") or "").strip()
-        if contract_document_id:
-            return self.supplier_shipments_block.link_shipment_contract(
-                shipment_id,
-                contract_document_id=contract_document_id,
-                linked_by=actor,
-            )
+    def handle_cny_account_document_patch_request(self, document_id: str, payload: Mapping[str, Any], *, actor: str, request_scope: str) -> dict[str, Any]:
+        from packages.application.operator_cny_documents import execute
+        target = str(payload.get('supplier_order_id') or '').strip()
+        action = str(payload.get('action') or '')
+        if action not in {'restore','relink'} or not target or not payload.get('request_id'):
+            raise ValueError('CNY action, target order and request identity are required')
+        native = self.cny_ledger_block.restore_document if action == 'restore' else self.cny_ledger_block.relink_document
+        return execute(self.cny_ledger_block, action='cny_' + action, payload=payload, actor=actor,
+            document_id=document_id, target_shipment_id=target, request_scope=request_scope,
+            native_write=lambda: native(document_id, target_shipment_id=target))
+
+    def handle_supplier_contract_read(self, shipment_id, request_id, *, request_scope):
+        from packages.application.operator_supplier_contracts import read
+        return read(self.runtime.db_path, request_id, shipment_id=shipment_id, request_scope=request_scope)
+
+    def handle_supplier_shipments_contract_patch_request(self, shipment_id, payload, *, actor="", request_scope="local_operator"):
+        target = str(payload.get("contract_document_id") or "").strip()
+        if payload.get("request_id"):
+            from packages.application.operator_supplier_contracts import accept
+            return accept(self.supplier_shipments_block, shipment_id, payload, action="link" if target else "unlink",
+                actor=actor, request_scope=request_scope)
+        if target:
+            return self.supplier_shipments_block.link_shipment_contract(shipment_id, contract_document_id=target, linked_by=actor)
         return self.supplier_shipments_block.unlink_shipment_contract(shipment_id)
 
-    def handle_supplier_shipments_contract_upload_request(
-        self,
-        shipment_id: str,
-        file_bytes: bytes,
-        *,
-        uploaded_filename: str | None = None,
-        uploaded_content_type: str | None = None,
-        fields: Mapping[str, Any] | None = None,
-        actor: str = "",
-    ) -> dict[str, Any]:
-        del actor
-        fields = fields or {}
-        return self.supplier_shipments_block.upload_shipment_contract(
-            shipment_id,
-            file_bytes=file_bytes,
-            uploaded_filename=uploaded_filename,
-            uploaded_content_type=uploaded_content_type,
-            number=str(fields.get("number") or ""),
-            document_date=str(fields.get("document_date") or ""),
-            supplier_name=str(fields.get("supplier_name") or ""),
-        )
+    def handle_supplier_shipments_contract_upload_request(self, shipment_id, file_bytes, *,
+        uploaded_filename=None, uploaded_content_type=None, fields=None, actor="", request_scope="local_operator"):
+        fields = dict(fields or {})
+        if not fields.get("request_id"):
+            return self.supplier_shipments_block.upload_shipment_contract(shipment_id, file_bytes=file_bytes,
+                uploaded_filename=uploaded_filename, uploaded_content_type=uploaded_content_type,
+                number=str(fields.get("number") or ""), document_date=str(fields.get("document_date") or ""),
+                supplier_name=str(fields.get("supplier_name") or ""))
+        import hashlib
+        from packages.application.operator_supplier_contracts import accept
+        fields["filename"] = str(uploaded_filename or "")
+        fields["file_sha256"] = hashlib.sha256(file_bytes).hexdigest()
+        return accept(self.supplier_shipments_block, shipment_id, fields, action="upload_link", actor=actor,
+            request_scope=request_scope, native_upload=lambda header: self.supplier_shipments_block.create_trade_document_from_upload(
+                document_type="contract", file_bytes=file_bytes, uploaded_filename=uploaded_filename,
+                uploaded_content_type=uploaded_content_type, number=str(fields.get("number") or header.get("contract_no") or ""),
+                document_date=str(fields.get("document_date") or header.get("contract_date") or ""),
+                supplier_name=str(fields.get("supplier_name") or header.get("supplier_name") or "")))
 
     def handle_trade_documents_list_request(self) -> dict[str, Any]:
-        return self.supplier_shipments_block.list_trade_documents()
+        from packages.application.operator_trade_documents import read_documents
+        return {"contract_name": "sheet_vitrina_v1_trade_documents", "status": "ok",
+                "documents": read_documents(self.supplier_shipments_block)}
+
+    def handle_trade_operator_read(self, *, request_id="", operation_id="", request_scope="local_operator"):
+        from packages.application.operator_trade_documents import read_request, read_operation
+        if operation_id:
+            return read_operation(self.runtime.db_path, operation_id, request_scope=request_scope) or {"status": "unknown", "settled": False, "acceptance": None}
+        return read_request(self.runtime.db_path, request_id, request_scope=request_scope)
 
     def handle_trade_documents_create_request(
-        self,
-        file_bytes: bytes,
-        *,
-        uploaded_filename: str | None = None,
-        uploaded_content_type: str | None = None,
-        fields: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        fields = fields or {}
-        return self.supplier_shipments_block.create_trade_document_from_upload(
-            document_type=str(fields.get("document_type") or ""),
-            file_bytes=file_bytes,
-            uploaded_filename=uploaded_filename,
-            uploaded_content_type=uploaded_content_type,
-            number=str(fields.get("number") or ""),
-            document_date=str(fields.get("document_date") or ""),
-            supplier_name=str(fields.get("supplier_name") or ""),
-            currency=str(fields.get("currency") or ""),
-            amount_total=fields.get("amount_total"),
-        )
+        self, file_bytes: bytes, *, uploaded_filename=None, uploaded_content_type=None,
+        fields=None, actor="", request_scope="local_operator",
+    ):
+        fields = dict(fields or {})
+        def write(operands):
+            return self.supplier_shipments_block.create_trade_document_from_upload(
+                document_type=str(operands.get("document_type") or ""), file_bytes=file_bytes,
+                uploaded_filename=uploaded_filename, uploaded_content_type=uploaded_content_type,
+                number=str(operands.get("number") or ""), document_date=str(operands.get("document_date") or ""),
+                supplier_name=str(operands.get("supplier_name") or ""), currency=str(operands.get("currency") or ""),
+                amount_total=operands.get("amount_total"))
+        if not fields.get("request_id"):
+            return write(fields)
+        import hashlib
+        from packages.application.operator_trade_documents import execute
+        # Never trust the client file hash for identity or source binding.
+        fields["file_sha256"] = hashlib.sha256(file_bytes).hexdigest()
+        fields["filename"] = str(uploaded_filename or "")
+        return execute(self.supplier_shipments_block, action="upload", payload=fields, native_write=write,
+                       request_scope=request_scope, actor=actor)
 
-    def handle_trade_documents_patch_request(self, document_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.supplier_shipments_block.update_trade_document(document_id, payload)
+    def handle_trade_documents_patch_request(self, document_id, payload, *, actor="", request_scope="local_operator"):
+        from packages.application.operator_trade_documents import execute
+        write = lambda operands: self.supplier_shipments_block.update_trade_document(document_id, operands)
+        if not payload.get("request_id"):
+            return write(payload)
+        return execute(self.supplier_shipments_block, action="edit", payload=payload, native_write=write,
+                       document_id=document_id, request_scope=request_scope, actor=actor)
 
-    def handle_trade_documents_archive_request(self, document_id: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.archive_trade_document(document_id)
+    def handle_trade_documents_archive_request(self, document_id, payload=None, *, actor="", request_scope="local_operator"):
+        from packages.application.operator_trade_documents import execute
+        payload = payload or {}
+        write = lambda _: self.supplier_shipments_block.archive_trade_document(document_id)
+        if not payload.get("request_id"):
+            return write(payload)
+        return execute(self.supplier_shipments_block, action="archive", payload=payload, native_write=write,
+                       document_id=document_id, request_scope=request_scope, actor=actor)
 
-    def handle_trade_documents_file_request(self, document_id: str) -> tuple[bytes, str, str]:
-        return self.supplier_shipments_block.download_trade_document_file(document_id)
+    def handle_trade_documents_file_request(self, document_id):
+        from packages.application.operator_trade_documents import read_documents
+        rows = read_documents(self.supplier_shipments_block, document_id=document_id)
+        if not rows or rows[0].get("status") != "active":
+            raise ValueError(f"trade document not found: {document_id}")
+        document = rows[0]
+        path = self.supplier_shipments_block._resolve_runtime_file(str(document.get("file_path") or ""))
+        if not path.is_file():
+            raise ValueError(f"trade document file is missing: {document_id}")
+        return path.read_bytes(), str(document.get("file_original_name") or "document"), str(document.get("file_content_type") or "application/octet-stream")
 
-    def handle_trade_documents_contract_patch_request(
-        self,
-        invoice_document_id: str,
-        payload: Mapping[str, Any],
-        *,
-        actor: str = "",
-    ) -> dict[str, Any]:
-        contract_document_id = str(payload.get("contract_document_id") or "").strip()
-        if contract_document_id:
-            return self.supplier_shipments_block.link_invoice_to_contract(
-                invoice_document_id,
-                contract_document_id=contract_document_id,
-                linked_by=actor,
-            )
-        return self.supplier_shipments_block.unlink_invoice_contract(invoice_document_id)
+    def handle_trade_documents_contract_patch_request(self, invoice_document_id, payload, *, actor="", request_scope="local_operator"):
+        from packages.application.operator_trade_documents import execute
+        target = str(payload.get("contract_document_id") or "").strip()
+        def write(_):
+            if target:
+                return self.supplier_shipments_block.link_invoice_to_contract(invoice_document_id,
+                    contract_document_id=target, linked_by=actor)
+            return self.supplier_shipments_block.unlink_invoice_contract(invoice_document_id)
+        if not payload.get("request_id"):
+            return write(payload)
+        return execute(self.supplier_shipments_block, action="link" if target else "unlink", payload=payload,
+                       native_write=write, document_id=invoice_document_id, request_scope=request_scope, actor=actor)
 
-    def handle_trade_documents_contract_delete_request(self, invoice_document_id: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.unlink_invoice_contract(invoice_document_id)
+    def handle_trade_documents_contract_delete_request(self, invoice_document_id, payload=None, *, actor="", request_scope="local_operator"):
+        return self.handle_trade_documents_contract_patch_request(invoice_document_id, payload or {},
+            actor=actor, request_scope=request_scope)
 
     def handle_wb_supplies_list_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.list_supplies(params)
@@ -7032,7 +7104,14 @@ class RegistryUploadHttpEntrypoint:
         *,
         preview_fingerprint: str,
         actor: str,
+        operator_payload: Mapping[str, Any] | None = None,
+        request_scope: str = "local_operator",
     ) -> dict[str, Any]:
+        if operator_payload is not None and operator_payload.get("request_id"):
+            from packages.application import operator_facility_mappings as receipts
+            return receipts.execute(self.ff_pool_surface, action="binding", payload={**operator_payload, "preview_request_id": request_id},
+                actor=actor, request_scope=request_scope, entity_id=str(operator_payload.get("facility_id") or ""),
+                native_write=lambda: self.wb_fbs_warehouse_registry.confirm_binding(request_id,preview_fingerprint=preview_fingerprint,actor=actor))
         return self.wb_fbs_warehouse_registry.confirm_binding(
             request_id,
             preview_fingerprint=preview_fingerprint,
@@ -7108,7 +7187,14 @@ class RegistryUploadHttpEntrypoint:
         *,
         preview_fingerprint: str,
         actor: str,
+        operator_payload: Mapping[str, Any] | None = None,
+        request_scope: str = "local_operator",
     ) -> dict[str, Any]:
+        if operator_payload is not None and operator_payload.get("request_id"):
+            from packages.application import operator_facility_mappings as receipts
+            return receipts.execute(self.ff_pool_surface, action="create", payload={**operator_payload, "preview_request_id": request_id},
+                actor=actor, request_scope=request_scope,
+                native_write=lambda: self.ff_pool_surface.confirm_facility_create(request_id,preview_fingerprint=preview_fingerprint,actor=actor))
         return self.ff_pool_surface.confirm_facility_create(
             request_id,
             preview_fingerprint=preview_fingerprint,
@@ -7116,9 +7202,18 @@ class RegistryUploadHttpEntrypoint:
         )
 
     def handle_ff_pool_facility_update_request(
-        self, facility_id: str, payload: Mapping[str, Any], *, actor: str
+        self, facility_id: str, payload: Mapping[str, Any], *, actor: str, request_scope: str = "local_operator"
     ) -> dict[str, Any]:
+        if "operator_wire_json" in payload:
+            from packages.application import operator_facility_mappings as receipts
+            action="activate" if payload.get("active") is True and set(payload) & {"active","name","display_timezone"} == {"active"} else "update"
+            return receipts.execute(self.ff_pool_surface,action=action,payload=payload,actor=actor,request_scope=request_scope,entity_id=facility_id,
+                native_write=lambda:self.ff_pool_surface.update_facility(facility_id,payload,actor=actor))
         return self.ff_pool_surface.update_facility(facility_id, payload, actor=actor)
+
+    def handle_ff_facility_operation_read(self, *, request_scope: str, request_id: str = "", operation_id: str = "") -> dict[str, Any]:
+        from packages.application import operator_facility_mappings as receipts
+        return receipts.read(self.runtime.db_path,request_scope=request_scope,request_id=request_id,operation_id=operation_id)
 
     def handle_ff_pool_document_preview_request(
         self, payload: Mapping[str, Any], *, actor: str
@@ -8068,50 +8163,63 @@ class RegistryUploadHttpEntrypoint:
     def handle_nomenclature_export_request(self) -> tuple[bytes, str, str]:
         return self.supplier_shipments_block.export_nomenclature_xlsx()
 
+    def _nomenclature_operator_request(self, payload, *, action, actor, target=''):
+        from packages.application.operator_nomenclature import request
+        body=dict(payload)
+        identity=body.pop('_operator_request_id',None) or 'opsku_'+uuid4().hex
+        expected=body.pop('_operator_expected_revision',None)
+        return body,request(identity,actor=actor,action=action,
+            payload={'target':target,'body':body},expected=expected)
+
+    def handle_nomenclature_operation_request(self, identity, *, actor):
+        from packages.application.operator_nomenclature import read
+        return {'contract_name':'operator_operations_v1','status':'ready',
+                'operation':read(self.runtime.db_path,identity,actor=actor)}
+
     def handle_nomenclature_import_request(
-        self,
-        workbook_bytes: bytes,
-        *,
-        uploaded_filename: str | None = None,
-        uploaded_content_type: str | None = None,
-        dry_run: bool = False,
+        self, workbook_bytes: bytes, *, uploaded_filename: str | None = None,
+        uploaded_content_type: str | None = None, dry_run: bool = False,
+        actor: str = 'local_operator', request_id=None, expected_revision=None,
     ) -> dict[str, Any]:
-        result = self.supplier_shipments_block.import_nomenclature_xlsx(
-            workbook_bytes,
-            uploaded_filename=uploaded_filename,
-            uploaded_content_type=uploaded_content_type,
-            dry_run=dry_run,
-        )
-        return (
-            result
-            if dry_run
-            else self._attach_wb_finance_cost_recalculation(result)
-        )
+        if dry_run:
+            return self.supplier_shipments_block.import_nomenclature_xlsx(workbook_bytes,
+                uploaded_filename=uploaded_filename,uploaded_content_type=uploaded_content_type,dry_run=True)
+        from packages.application.operator_nomenclature import perform
+        _body,req=self._nomenclature_operator_request({
+            '_operator_request_id':request_id,'_operator_expected_revision':expected_revision,
+            'file_sha256':hashlib.sha256(workbook_bytes).hexdigest(),
+            'filename':uploaded_filename},action='import',actor=actor)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.import_nomenclature_xlsx(
+            workbook_bytes,uploaded_filename=uploaded_filename,
+            uploaded_content_type=uploaded_content_type,operator_request=req))
 
-    def handle_nomenclature_create_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self._attach_wb_finance_cost_recalculation(
-            self.supplier_shipments_block.create_nomenclature_item(payload)
-        )
+    def handle_nomenclature_create_request(self, payload: Mapping[str, Any], *, actor='local_operator') -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        body,req=self._nomenclature_operator_request(payload,action='create',actor=actor)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.create_nomenclature_item(body,operator_request=req))
 
-    def handle_nomenclature_patch_request(self, item_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self._attach_wb_finance_cost_recalculation(
-            self.supplier_shipments_block.update_nomenclature_item(item_id, payload)
-        )
+    def handle_nomenclature_patch_request(self, item_id: str, payload: Mapping[str, Any], *, actor='local_operator') -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        body,req=self._nomenclature_operator_request(payload,action='update',actor=actor,target=item_id)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.update_nomenclature_item(item_id,body,operator_request=req))
 
-    def handle_nomenclature_delete_request(self, item_id: str) -> dict[str, Any]:
-        return self._attach_wb_finance_cost_recalculation(
-            self.supplier_shipments_block.deactivate_nomenclature_item(item_id)
-        )
+    def handle_nomenclature_delete_request(self, item_id: str, *, actor='local_operator', request_id=None, expected_revision=None) -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        _body,req=self._nomenclature_operator_request({'_operator_request_id':request_id,
+            '_operator_expected_revision':expected_revision},action='delete',actor=actor,target=item_id)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.deactivate_nomenclature_item(item_id,operator_request=req))
 
-    def handle_nomenclature_barcode_sync_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self._attach_wb_finance_cost_recalculation(
-            self.supplier_shipments_block.sync_nomenclature_barcodes(payload)
-        )
+    def handle_nomenclature_barcode_sync_request(self, payload: Mapping[str, Any], *, actor='local_operator') -> dict[str, Any]:
+        from packages.application.operator_nomenclature import accept_external
+        body,req=self._nomenclature_operator_request(payload,action='wb_sync',actor=actor)
+        return accept_external(self.runtime,req,body,accepted_at=self.supplier_shipments_block.timestamp_factory())
 
-    def handle_nomenclature_item_barcode_sync_request(self, item_id: str) -> dict[str, Any]:
-        return self._attach_wb_finance_cost_recalculation(
-            self.supplier_shipments_block.sync_nomenclature_item_barcode(item_id)
-        )
+    def handle_nomenclature_item_barcode_sync_request(self, item_id: str, *, actor='local_operator', request_id=None, expected_revision=None) -> dict[str, Any]:
+        from packages.application.operator_nomenclature import accept_external
+        body,req=self._nomenclature_operator_request({'item_id':item_id,
+            '_operator_request_id':request_id,'_operator_expected_revision':expected_revision},
+            action='barcode',actor=actor,target=item_id)
+        return accept_external(self.runtime,req,body,accepted_at=self.supplier_shipments_block.timestamp_factory())
 
     def _attach_wb_finance_cost_recalculation(
         self, result: Mapping[str, Any]
@@ -8144,14 +8252,21 @@ class RegistryUploadHttpEntrypoint:
     def handle_sku_groups_list_request(self) -> dict[str, Any]:
         return self.supplier_shipments_block.list_sku_groups(include_inactive=True)
 
-    def handle_sku_groups_create_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.supplier_shipments_block.create_sku_group(payload)
+    def handle_sku_groups_create_request(self, payload: Mapping[str, Any], *, actor='local_operator') -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        body,req=self._nomenclature_operator_request(payload,action='group_create',actor=actor)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.create_sku_group(body,operator_request=req))
 
-    def handle_sku_groups_patch_request(self, group_key: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.supplier_shipments_block.update_sku_group(group_key, payload)
+    def handle_sku_groups_patch_request(self, group_key: str, payload: Mapping[str, Any], *, actor='local_operator') -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        body,req=self._nomenclature_operator_request(payload,action='group_update',actor=actor,target=group_key)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.update_sku_group(group_key,body,operator_request=req))
 
-    def handle_sku_groups_delete_request(self, group_key: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.deactivate_sku_group(group_key)
+    def handle_sku_groups_delete_request(self, group_key: str, *, actor='local_operator', request_id=None, expected_revision=None) -> dict[str, Any]:
+        from packages.application.operator_nomenclature import perform
+        _body,req=self._nomenclature_operator_request({'_operator_request_id':request_id,
+            '_operator_expected_revision':expected_revision},action='group_delete',actor=actor,target=group_key)
+        return perform(self.runtime,req,lambda:self.supplier_shipments_block.deactivate_sku_group(group_key,operator_request=req))
 
     @_heavy_http_method
     def _run_sheet_auto_update(

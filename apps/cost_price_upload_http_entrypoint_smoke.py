@@ -100,7 +100,7 @@ def main() -> None:
                 raise AssertionError("cost price current state must canonicalize dates and preserve row order")
 
             persisted_result = runtime.load_persisted_cost_price_upload_result(accepted_payload["dataset_version"])
-            if asdict(persisted_result) != accepted_result:
+            if asdict(persisted_result) != {k:v for k,v in accepted_result.items() if k != 'acceptance'}:
                 raise AssertionError("persisted cost price upload result must match HTTP result")
 
             duplicate_status, duplicate_result = _post_json(url, accepted_payload)

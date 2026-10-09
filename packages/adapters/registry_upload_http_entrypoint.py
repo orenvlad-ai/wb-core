@@ -490,6 +490,7 @@ DEFAULT_CNY_ACCOUNT_REPLAY_PATH = f"{DEFAULT_CNY_ACCOUNT_PATH}/replay"
 DEFAULT_SETTINGS_UI_PATH = "/sheet-vitrina-v1/settings"
 DEFAULT_INSTRUCTIONS_UI_PATH = "/sheet-vitrina-v1/instructions"
 DEFAULT_NOMENCLATURE_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature"
+DEFAULT_NOMENCLATURE_OPERATIONS_PATH = DEFAULT_NOMENCLATURE_PATH + "/operations/"
 DEFAULT_NOMENCLATURE_EXPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/export.xlsx"
 DEFAULT_NOMENCLATURE_IMPORT_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/import.xlsx"
 DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH = "/v1/sheet-vitrina-v1/settings/nomenclature/barcode-sync"
@@ -547,6 +548,7 @@ def _web_vitrina_ui_base_template() -> str:
                              ("<!-- BUYER_SUPPORT_PANEL -->", "wb_buyer_support.html"),
                              ("/* BUYER_SUPPORT_SCRIPT */", "wb_buyer_support.js")):
         template = template.replace(marker, WEB_VITRINA_UI_TEMPLATE_PATH.with_name(filename).read_text(encoding="utf-8"))
+    template=template.replace('<!-- FACILITY_ACCEPTANCE_ASSET -->','<script>'+UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_facility_acceptance.js').read_text(encoding='utf-8')+'</script>')
     return _inject_sheet_vitrina_ui_system(template)
 
 
@@ -1242,7 +1244,7 @@ def _build_handler(
                     return
 
                 try:
-                    result = entrypoint.handle_bundle_payload(payload)
+                    result = entrypoint.handle_bundle_payload(payload, actor=_current_web_user_actor(self))
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -1251,10 +1253,14 @@ def _build_handler(
                     )
                     return
 
+                response = asdict(result)
+                if result.status == "accepted":
+                    from packages.application.operator_compat_uploads import read_version
+                    response["acceptance"] = read_version(entrypoint.runtime.db_path, "registry_bundle_upload", result.bundle_version)
                 _write_json_response(
                     self,
                     _http_status_for_result(result),
-                    asdict(result),
+                    response,
                 )
                 return
 
@@ -1270,7 +1276,7 @@ def _build_handler(
                     return
 
                 try:
-                    result = entrypoint.handle_cost_price_payload(payload)
+                    result = entrypoint.handle_cost_price_payload(payload, actor=_current_web_user_actor(self))
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -1279,10 +1285,14 @@ def _build_handler(
                     )
                     return
 
+                response = asdict(result)
+                if result.status == "accepted":
+                    from packages.application.operator_compat_uploads import read_version
+                    response["acceptance"] = read_version(entrypoint.runtime.db_path, "cost_price_upload", result.dataset_version)
                 _write_json_response(
                     self,
                     _http_status_for_cost_price_result(result),
-                    asdict(result),
+                    response,
                 )
                 return
 
@@ -2517,7 +2527,7 @@ def _build_handler(
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                         fields=(upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {}),
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -2538,7 +2548,7 @@ def _build_handler(
                     return
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_cny_account_opening_balance_request(payload)
+                    result = entrypoint.handle_cny_account_opening_balance_request(payload, actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -2581,7 +2591,7 @@ def _build_handler(
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                         fields=upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {},
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -2825,6 +2835,7 @@ def _build_handler(
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                         fields=upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {},
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -2894,9 +2905,12 @@ def _build_handler(
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                         dry_run=_resolve_optional_query_bool(parsed.query, "dry_run"),
+                        actor=_current_web_user_actor(self),
+                        request_id=self.headers.get("X-Operator-Request-ID") or upload_payload["fields"].get("operator_request_id"),
+                        expected_revision=_nomenclature_expected_value(upload_payload["fields"].get("operator_expected_revision")) if upload_payload["fields"].get("operator_expected_revision") else _nomenclature_expected_header(self),
                     )
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -2905,6 +2919,9 @@ def _build_handler(
                         {"error": f"nomenclature import failed: {exc}"},
                     )
                     return
+                if result.get("status")!="ok":
+                    rejection=_nomenclature_rejection_payload(self,entrypoint,ValueError('import validation rejected'))
+                    result={**result,**{key:value for key,value in rejection.items() if key!='error'}}
                 response_status = HTTPStatus.OK if result.get("status") == "ok" else HTTPStatus.BAD_REQUEST
                 _write_json_response(self, response_status, result)
                 return
@@ -2914,9 +2931,9 @@ def _build_handler(
                     return
                 try:
                     payload = _load_optional_request_payload(self)
-                    result = entrypoint.handle_nomenclature_barcode_sync_request(payload)
+                    result = entrypoint.handle_nomenclature_barcode_sync_request(payload, actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -2933,9 +2950,9 @@ def _build_handler(
                     return
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_sku_groups_create_request(payload)
+                    result = entrypoint.handle_sku_groups_create_request(payload, actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -2952,9 +2969,9 @@ def _build_handler(
                     return
                 try:
                     item_id = _resolve_nomenclature_item_barcode_sync_id(parsed.path)
-                    result = entrypoint.handle_nomenclature_item_barcode_sync_request(item_id)
+                    result = entrypoint.handle_nomenclature_item_barcode_sync_request(item_id, actor=_current_web_user_actor(self), request_id=self.headers.get("X-Operator-Request-ID"), expected_revision=_nomenclature_expected_header(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -2971,9 +2988,9 @@ def _build_handler(
                     return
                 try:
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_nomenclature_create_request(payload)
+                    result = entrypoint.handle_nomenclature_create_request(payload, actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -3261,6 +3278,10 @@ def _build_handler(
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                     )
                 except ValueError as exc:
+                    from packages.application.operator_manual_ff_stock import ModernFfWorkflowRequired
+                    if isinstance(exc, ModernFfWorkflowRequired):
+                        _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc), "code": exc.code, "source_not_saved": True, "modern_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH + "?tab=warehouses&warehouse=ff"})
+                        return
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
@@ -3283,6 +3304,10 @@ def _build_handler(
                         actor=_current_web_user_actor(self),
                     )
                 except ValueError as exc:
+                    from packages.application.operator_manual_ff_stock import ModernFfWorkflowRequired
+                    if isinstance(exc, ModernFfWorkflowRequired):
+                        _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc), "code": exc.code, "source_not_saved": True, "modern_path": DEFAULT_SHEET_WEB_VITRINA_UI_PATH + "?tab=warehouses&warehouse=ff"})
+                        return
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
@@ -3562,6 +3587,8 @@ def _build_handler(
                         _render_sheet_vitrina_settings_ui(
                             embedded=True,
                             can_manage_users=_current_web_user_can_manage_users(self),
+                            operator_actor_scope=_current_web_user_config_key(self),
+                            user_config_key=_current_web_user_config_key(self),
                         ),
                     )
                     return
@@ -4894,7 +4921,9 @@ def _build_handler(
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
                 try:
-                    payload = entrypoint.handle_cny_account_status_request()
+                    request_id = urllib_parse.parse_qs(parsed.query).get('request_id', [''])[0]
+                    payload = (entrypoint.handle_cny_operator_request_read(request_id, request_scope=_current_web_user_config_key(self))
+                        if request_id else entrypoint.handle_cny_account_status_request())
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -5185,6 +5214,25 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path in {upload_path, cost_price_upload_path}:
+                from packages.application.operator_compat_uploads import read_version
+                domain = 'registry_bundle_upload' if parsed.path == upload_path else 'cost_price_upload'
+                key = 'bundle_version' if domain == 'registry_bundle_upload' else 'dataset_version'
+                params = urllib_parse.parse_qs(parsed.query)
+                try:
+                    if set(params) != {key} or len(params[key]) != 1:
+                        raise ValueError('one_exact_source_version_required')
+                    operation = read_version(entrypoint.runtime.db_path, domain, params[key][0])
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {'error': str(exc)})
+                    return
+                if operation is None:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {'code': 'compatibility_upload_not_tracked',
+                        'reason_ru': 'Нет квитанции этой версии. Это не доказывает отсутствие сохранённых данных.'})
+                    return
+                _write_json_response(self, HTTPStatus.OK, {'contract_name': 'operator_operations_v1', 'operation': operation})
+                return
+
             if parsed.path == "/sheet-vitrina-v1/operations":
                 html = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_operator_journal.html").read_text(encoding="utf-8")
                 _write_html_response(self, HTTPStatus.OK, _inject_sheet_vitrina_ui_system(html))
@@ -5204,11 +5252,11 @@ def _build_handler(
                         params = {key: values[-1] for key, values in urllib_parse.parse_qs(parsed.query).items()}
                         payload = journal(entrypoint.runtime.db_path, page=int(params.get("page") or 1), limit=int(params.get("limit") or 25),
                             allowed_domains=allowed_domains, domain=params.get('domain') or 'all', search=params.get('search') or '',
-                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir)
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self))
                     else:
                         identity = urllib_parse.unquote(parsed.path[len(prefix) + 1:])
                         acceptance = read_acceptance(entrypoint.runtime.db_path, identity, allowed_domains=allowed_domains,
-                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir)
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self))
                         if acceptance is None:
                             _write_json_response(self, HTTPStatus.NOT_FOUND, {"code": "operation_not_found"})
                             return
@@ -5227,6 +5275,7 @@ def _build_handler(
                         entrypoint=entrypoint,
                         path=parsed.path,
                         query=parsed.query,
+                        request_scope=_current_web_user_config_key(self),
                     )
                 except (
                     FfPoolSurfaceError,
@@ -5544,6 +5593,17 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path.startswith(DEFAULT_NOMENCLATURE_OPERATIONS_PATH):
+                if not _ensure_operator_role(self, parsed.path):
+                    return
+                identity=parsed.path[len(DEFAULT_NOMENCLATURE_OPERATIONS_PATH):]
+                if not re.fullmatch(r'opsku_[a-f0-9]{32}',identity):
+                    _write_json_response(self,HTTPStatus.NOT_FOUND,{'error':'operation not found'})
+                    return
+                payload=entrypoint.handle_nomenclature_operation_request(identity,actor=_current_web_user_actor(self))
+                _write_json_response(self,HTTPStatus.OK if payload['operation'] else HTTPStatus.NOT_FOUND,payload)
+                return
+
             if parsed.path == DEFAULT_NOMENCLATURE_EXPORT_PATH:
                 if not _ensure_operator_role(self, parsed.path):
                     return
@@ -5600,7 +5660,10 @@ def _build_handler(
                 if not _ensure_operator_role(self, parsed.path):
                     return
                 try:
-                    payload = entrypoint.handle_trade_documents_list_request()
+                    request_id = _resolve_single_query_param(parsed.query, "request_id")
+                    operation_id = _resolve_single_query_param(parsed.query, "operation_id")
+                    payload = entrypoint.handle_trade_operator_read(request_id=request_id, operation_id=operation_id,
+                        request_scope=_current_web_user_config_key(self)) if request_id or operation_id else entrypoint.handle_trade_documents_list_request()
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -5800,6 +5863,12 @@ def _build_handler(
                     return
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_contract_path(parsed.path)
+                    request_id = _resolve_single_query_param(parsed.query, "request_id")
+                    if request_id:
+                        result = entrypoint.handle_supplier_contract_read(shipment_id, request_id,
+                            request_scope=_current_web_user_config_key(self))
+                        _write_json_response(self, HTTPStatus.OK, result)
+                        return
                     file_bytes, filename, content_type = entrypoint.handle_supplier_shipments_contract_request(shipment_id)
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
@@ -6330,7 +6399,7 @@ def _build_handler(
                     result = entrypoint.handle_supplier_shipments_contract_patch_request(
                         shipment_id,
                         payload,
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -6354,7 +6423,7 @@ def _build_handler(
                     result = entrypoint.handle_trade_documents_contract_patch_request(
                         invoice_document_id,
                         payload,
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -6375,7 +6444,7 @@ def _build_handler(
                 try:
                     document_id = _resolve_trade_document_id(parsed.path)
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_trade_documents_patch_request(document_id, payload)
+                    result = entrypoint.handle_trade_documents_patch_request(document_id, payload, actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -6385,6 +6454,19 @@ def _build_handler(
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"trade document patch failed: {exc}"},
                     )
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
+                return
+
+            if _is_cny_account_document_detail_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    result = entrypoint.handle_cny_account_document_patch_request(
+                        _resolve_cny_account_document_id(parsed.path), _load_request_payload(self),
+                        actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self))
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                     return
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
@@ -6497,9 +6579,9 @@ def _build_handler(
                 try:
                     item_id = _resolve_nomenclature_item_id(parsed.path)
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_nomenclature_patch_request(item_id, payload)
+                    result = entrypoint.handle_nomenclature_patch_request(item_id, payload, actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -6517,9 +6599,9 @@ def _build_handler(
                 try:
                     group_key = _resolve_sku_group_key(parsed.path)
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_sku_groups_patch_request(group_key, payload)
+                    result = entrypoint.handle_sku_groups_patch_request(group_key, payload, actor=_current_web_user_actor(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -6640,7 +6722,9 @@ def _build_handler(
                     return
                 try:
                     document_id = _resolve_cny_account_document_id(parsed.path)
-                    payload = entrypoint.handle_cny_account_document_delete_request(document_id)
+                    payload = entrypoint.handle_cny_account_document_delete_request(document_id,
+                        _load_request_payload(self) if int(self.headers.get('Content-Length') or 0) > 0 else {},
+                        actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
                     return
@@ -6660,7 +6744,9 @@ def _build_handler(
                     return
                 try:
                     invoice_document_id = _resolve_trade_document_id(parsed.path)
-                    payload = entrypoint.handle_trade_documents_contract_delete_request(invoice_document_id)
+                    source_payload = _load_request_payload(self) if int(self.headers.get("Content-Length") or 0) else {}
+                    payload = entrypoint.handle_trade_documents_contract_delete_request(invoice_document_id, source_payload,
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -6679,7 +6765,9 @@ def _build_handler(
                     return
                 try:
                     document_id = _resolve_trade_document_id(parsed.path)
-                    payload = entrypoint.handle_trade_documents_archive_request(document_id)
+                    source_payload = _load_request_payload(self) if int(self.headers.get("Content-Length") or 0) else {}
+                    payload = entrypoint.handle_trade_documents_archive_request(document_id, source_payload,
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -6698,9 +6786,9 @@ def _build_handler(
                     return
                 try:
                     item_id = _resolve_nomenclature_item_id(parsed.path)
-                    payload = entrypoint.handle_nomenclature_delete_request(item_id)
+                    payload = entrypoint.handle_nomenclature_delete_request(item_id, actor=_current_web_user_actor(self), request_id=self.headers.get("X-Operator-Request-ID"), expected_revision=_nomenclature_expected_header(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -6717,9 +6805,9 @@ def _build_handler(
                     return
                 try:
                     group_key = _resolve_sku_group_key(parsed.path)
-                    payload = entrypoint.handle_sku_groups_delete_request(group_key)
+                    payload = entrypoint.handle_sku_groups_delete_request(group_key, actor=_current_web_user_actor(self), request_id=self.headers.get("X-Operator-Request-ID"), expected_revision=_nomenclature_expected_header(self))
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _nomenclature_rejection_payload(self,entrypoint,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -7232,7 +7320,7 @@ def _handle_ff_pool_post(
             _load_request_payload(
                 handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
             ),
-            actor=actor,
+            actor=actor, request_scope=_current_web_user_config_key(handler),
         )
     if (
         len(parts) == 4
@@ -7248,9 +7336,8 @@ def _handle_ff_pool_post(
                 "explicit_confirmation_required", "Explicit confirm=true is required"
             )
         return entrypoint.handle_ff_pool_facility_create_confirm_request(
-            parts[2],
-            preview_fingerprint=str(body.get("preview_fingerprint") or ""),
-            actor=actor,
+            parts[2], preview_fingerprint=str(body.get("preview_fingerprint") or ""), actor=actor,
+            operator_payload=body, request_scope=_current_web_user_config_key(handler),
         )
     if len(parts) == 3 and parts[0] == "requests" and parts[2] == "confirm":
         body = _load_request_payload(
@@ -7275,9 +7362,8 @@ def _handle_ff_pool_post(
                 "explicit_confirmation_required", "Explicit confirm=true is required"
             )
         return entrypoint.handle_wb_fbs_binding_confirm_request(
-            parts[2],
-            preview_fingerprint=str(body.get("preview_fingerprint") or ""),
-            actor=actor,
+            parts[2], preview_fingerprint=str(body.get("preview_fingerprint") or ""), actor=actor,
+            operator_payload=body, request_scope=_current_web_user_config_key(handler),
         )
     raise FfPoolSurfaceError("invalid_ff_pool_path", "Invalid FF facility/pool mutation path", http_status=404)
 
@@ -7287,9 +7373,13 @@ def _handle_ff_pool_get(
     entrypoint: RegistryUploadHttpEntrypoint,
     path: str,
     query: str,
+    request_scope: str = "local_operator",
 ) -> dict[str, Any] | tuple[bytes, str, str]:
     normalized = str(path or "").rstrip("/")
     params = _flatten_query_params(query)
+    if normalized == f"{DEFAULT_FF_POOL_PREFIX}facility-operations":
+        return entrypoint.handle_ff_facility_operation_read(request_scope=request_scope,
+            request_id=str(params.get("request_id") or ""), operation_id=str(params.get("operation_id") or ""))
     if normalized in {DEFAULT_FF_POOL_PATH, f"{DEFAULT_FF_POOL_PATH}/capabilities"}:
         return entrypoint.handle_ff_pool_capabilities_request()
     if normalized == DEFAULT_FF_POOL_FACILITIES_PATH:
@@ -10823,12 +10913,21 @@ def _required_section_for_path(path: str) -> str:
 def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
     """Source grants are applied before journal counts, rows and exact reads."""
     domains = set()
+    if _user_can_access_path(user, DEFAULT_TRADE_DOCUMENTS_PATH):
+        domains.add('trade_document_library')
+    if _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS):
+        domains.add('nomenclature')
     if _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY):
-        domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services', 'supplier_factual_date', 'supplier_financial_document'))
+        domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services', 'supplier_factual_date', 'supplier_financial_document', 'cny_account_document', 'facility_mapping'))
     if _user_can_access_path(user, DEFAULT_SUPPLIER_SHIPMENTS_PATH):
         domains.add('supplier_shipment')
+    if (_user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY)
+            and _user_can_access_path(user, DEFAULT_SUPPLIER_SHIPMENTS_PATH + '/source/contract')):
+        domains.add('supplier_contract')
     if _user_has_section_access(user, WEB_AUTH_SECTION_REPORTS):
         domains.update(('plan_report_baseline', 'partner_report_settings'))
+    if _role_has_full_operator_access(str(user.get('role') or '').strip()):
+        domains.update(('registry_bundle_upload', 'cost_price_upload'))
     return frozenset(domains)
 
 
@@ -11333,6 +11432,8 @@ def _render_sheet_vitrina_operator_ui(
     template = _inject_sheet_vitrina_ui_system(
         OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     )
+    cny_acceptance = UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_cny_acceptance.js').read_text(encoding='utf-8')
+    template = template.replace('</head>', '<script>\n' + cny_acceptance + '\n</script>\n</head>', 1)
     return (
         template.replace("__SHEET_VITRINA_V1_OPERATOR_PAGE_TITLE__", config_payload["page_title"])
         .replace(
@@ -11392,6 +11493,7 @@ def _render_sheet_vitrina_supplier_ui(
         SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     )
     source_acceptance = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_supplier_acceptance.js").read_text(encoding="utf-8")
+    source_acceptance += "\n" + UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_contract_acceptance.js").read_text(encoding="utf-8")
     template = template.replace("</head>", "<script>\n"+source_acceptance+"\n</script>\n</head>", 1)
     return (
         template.replace(
@@ -11430,12 +11532,16 @@ def _render_sheet_vitrina_supplier_safe_ui(*, user_config_key: str = "local_oper
     )
 
 
-def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_users: bool = True) -> str:
+def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_users: bool = True, operator_actor_scope: str = "local_operator", user_config_key: str | None = None) -> str:
+    user_config_key = user_config_key or operator_actor_scope
     config_payload = {
         "page_title": "Настройки",
+        "user_config_key": user_config_key,
         "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,
         "nomenclature_export_path": DEFAULT_NOMENCLATURE_EXPORT_PATH,
         "nomenclature_import_path": DEFAULT_NOMENCLATURE_IMPORT_PATH,
+        "nomenclature_operations_path": DEFAULT_NOMENCLATURE_OPERATIONS_PATH,
+        "operator_actor_scope": operator_actor_scope,
         "nomenclature_barcode_sync_path": DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH,
         "sku_groups_path": DEFAULT_SKU_GROUPS_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
@@ -11477,6 +11583,11 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
     template = _inject_sheet_vitrina_ui_system(
         SETTINGS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     )
+    template=template.replace('<!-- FACILITY_ACCEPTANCE_ASSET -->','<script>'+UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_facility_acceptance.js').read_text(encoding='utf-8')+'</script>')
+    asset = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_trade_acceptance.js").read_text(encoding="utf-8")
+    template = template.replace("</head>", "<script>\n" + asset + "\n</script>\n</head>", 1)
+    driver=(SETTINGS_UI_TEMPLATE_PATH.parent / "sheet_vitrina_v1_operator_nomenclature.js").read_text(encoding="utf-8")
+    template=template.replace("<!-- operator-nomenclature-driver -->","<script>"+driver+"</script>")
     return (
         template.replace("__SHEET_VITRINA_V1_SETTINGS_BODY_CLASS__", "is-embedded" if embedded else "")
         .replace(
@@ -11905,3 +12016,31 @@ def _resolve_operator_embedded_tab_from_query(query: str) -> str:
     if tab in {"vitrina", "factory-order", "reports"}:
         return tab
     raise ValueError("unsupported embedded_tab: expected 'vitrina', 'factory-order', or 'reports'")
+
+
+def _nomenclature_expected_header(handler):
+    value=handler.headers.get('X-Operator-Expected-Revision')
+    if not value:
+        return None
+    return _nomenclature_expected_value(value)
+
+
+def _nomenclature_expected_value(value):
+    try:
+        return json.loads(value)
+    except (ValueError,TypeError) as exc:
+        raise ValueError('operator_nomenclature_expected_revision_invalid') from exc
+
+
+def _nomenclature_rejection_payload(handler,entrypoint,error):
+    """Only a completed rejection plus same-ID absent readback permits new input."""
+    result={'error':str(error)}
+    identity=handler.headers.get('X-Operator-Request-ID','')
+    if re.fullmatch(r'opsku_[a-f0-9]{32}',identity):
+        from packages.application.operator_nomenclature import read
+        try:
+            receipt=read(entrypoint.runtime.db_path,identity,actor=_current_web_user_actor(handler))
+            result.update(operation_id=identity,source_not_saved=receipt is None)
+        except Exception:
+            pass  # Unknown is not proof of an unsaved source.
+    return result

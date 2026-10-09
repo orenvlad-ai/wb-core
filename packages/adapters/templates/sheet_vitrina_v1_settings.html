@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Настройки</title>
+  <!-- FACILITY_ACCEPTANCE_ASSET -->
   <style>
     :root {
       color-scheme: dark;
@@ -240,6 +241,7 @@
 </head>
 <body class="__SHEET_VITRINA_V1_SETTINGS_BODY_CLASS__">
   <main>
+    <div id="nomenclatureAcceptance" hidden></div>
     <div class="shell">
       <section class="topbar">
         <div>
@@ -360,7 +362,7 @@
         <div class="toolbar" style="justify-content: space-between;">
           <div>
             <h2 id="contractsTitle">Договоры</h2>
-            <p>Server-owned файлы договоров без Google Sheets/localStorage.</p>
+            <p>Договоры и связи с инвойсами.</p>
           </div>
           <div class="toolbar">
             <button id="addContractButton" class="primary" type="button">Добавить контракт</button>
@@ -414,7 +416,7 @@
         <div class="toolbar" style="justify-content: space-between;">
           <div>
             <h2 id="invoicesTitle">Инвойсы</h2>
-            <p>Server-owned файлы invoice без создания поставки из settings upload.</p>
+            <p>Файлы инвойсов. Загрузка сюда не создаёт заказ поставщику.</p>
           </div>
           <div class="toolbar">
             <button id="addInvoiceButton" class="primary" type="button">Добавить invoice</button>
@@ -541,10 +543,12 @@
           <label class="field"><span>Название</span><input id="warehouseNameInput" placeholder="Например, FF Москва"></label>
           <label class="field"><span>Город</span><input id="warehouseCityInput" placeholder="Москва"></label>
           <label class="field"><span>Часовой пояс</span><input id="warehouseTimezoneInput" value="Asia/Yekaterinburg"></label>
-          <label class="field"><span>Статус</span><select id="warehouseActiveInput"><option value="true">Активен</option><option value="false">Неактивен</option></select></label>
-          <button id="createWarehouseButton" class="primary" type="button">Создать</button>
+          <p class="warehouse-meta">Новый склад создаётся неактивным. Активировать его можно после создания.</p>
+          <button id="createWarehouseButton" class="primary" type="button">Проверить создание</button>
+          <button id="editWarehouseDraftButton" type="button" hidden>Изменить черновик</button>
         </div>
         <p class="warehouse-meta">Identity и code назначает сервер и не меняет при переименовании. Адрес в MVP отсутствует. Удаление не поддерживается. Рекомендуемый будущий setup: FF Москва — active; FF Оренбург — inactive. Эта подсказка не создаёт строки.</p>
+        <div id="warehouseSourceReceipt" class="message" hidden></div>
         <div id="warehouseCards" class="warehouse-grid"><p>Склады загружаются...</p></div>
         <h2 style="margin-top:22px;">FBS read-only shadow</h2>
         <p class="warehouse-meta">Review range начинается с 2026-08-01; фактическая earliest official date вычисляется только из наблюдений. Сбор и backfill default-off.</p>
@@ -689,6 +693,7 @@
   </main>
 
   <script id="sheet-vitrina-v1-settings-config" type="application/json">__SHEET_VITRINA_V1_SETTINGS_CONFIG_JSON__</script>
+  <!-- operator-nomenclature-driver -->
   <script>
     (() => {
       const config = JSON.parse(document.getElementById("sheet-vitrina-v1-settings-config").textContent);
@@ -834,10 +839,11 @@
       const sourcesSessionsMessage = document.getElementById("sourcesSessionsMessage");
       const reloadWarehousesButton = document.getElementById("reloadWarehousesButton");
       const createWarehouseButton = document.getElementById("createWarehouseButton");
+      const editWarehouseDraftButton = document.getElementById("editWarehouseDraftButton");
       const warehouseNameInput = document.getElementById("warehouseNameInput");
       const warehouseCityInput = document.getElementById("warehouseCityInput");
       const warehouseTimezoneInput = document.getElementById("warehouseTimezoneInput");
-      const warehouseActiveInput = document.getElementById("warehouseActiveInput");
+      const warehouseSourceReceipt = document.getElementById("warehouseSourceReceipt");
       const warehouseCards = document.getElementById("warehouseCards");
       const warehousesActivationMessage = document.getElementById("warehousesActivationMessage");
       const fbsShadowCards = document.getElementById("fbsShadowCards");
@@ -867,6 +873,15 @@
       ];
       let items = [];
       let skuGroups = [];
+      const nomenclatureOperator = OperatorNomenclature.create(config, document.getElementById("nomenclatureAcceptance"), (url) => {
+        if (url === nomenclatureImportPath) return Object.fromEntries(items.map(item => [item.item_id,item.operator_source_revision]));
+        const group = url.startsWith(skuGroupsPath + "/");
+        const root = group ? skuGroupsPath : nomenclaturePath;
+        const id = decodeURIComponent(url.slice(root.length + 1).split("/")[0]);
+        const row = (group ? skuGroups : items).find(item => (group ? item.group_key : item.item_id) === id);
+        return row && row.operator_source_revision;
+      }, fetchJsonNative);
+      nomenclatureOperator.restore();
       let visibleColumnKeys = restoreVisibleColumns();
       let documents = [];
       let pendingDocumentType = "";
@@ -1058,6 +1073,13 @@
       }
 
       async function fetchJson(url, options) {
+        if (nomenclatureOperator.handles(url,options)) return nomenclatureOperator.mutate(url,options);
+        const payload=await fetchJsonNative(url,options);
+        if ((url === skuGroupsPath || url.startsWith(nomenclaturePath + "?")) && String(options && options.method || "GET").toUpperCase()==="GET") nomenclatureOperator.sourceRefreshed();
+        return payload;
+      }
+
+      async function fetchJsonNative(url, options) {
         const response = await fetch(url, options || {});
         const contentType = response.headers.get("content-type") || "";
         const text = await response.text();
@@ -1068,26 +1090,39 @@
         const payload = text ? JSON.parse(text) : {};
         if (!response.ok) {
           const rowErrors = Array.isArray(payload.errors) ? payload.errors.map((item) => item.message || String(item)).join("; ") : "";
-          throw new Error(payload.error || rowErrors || ("HTTP " + response.status));
+          const error=new Error(payload.error || rowErrors || ("HTTP " + response.status));
+          error.httpStatus=response.status; error.sourceNotSaved=payload.source_not_saved === true; error.operationId=payload.operation_id; throw error;
         }
         return payload;
       }
 
-      function warehouseRequestId(prefix) {
-        const suffix = window.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
-        return String(prefix) + ":" + suffix;
+      let warehouseCanWrite = false, warehouseBusy = false, warehousePreview = null;
+      let warehouseSources = new Map();
+      function lockWarehouseForms(locked) {
+        const blocked = locked || warehouseBusy || !warehouseCanWrite;
+        createWarehouseButton.disabled = blocked;
+        editWarehouseDraftButton.hidden = !warehousePreview; editWarehouseDraftButton.disabled = blocked;
+        warehouseCards.querySelectorAll('[data-warehouse-save], [data-warehouse-toggle]').forEach(button => {button.disabled = blocked;});
+        [warehouseNameInput, warehouseCityInput, warehouseTimezoneInput].forEach(input => {input.disabled = blocked || Boolean(warehousePreview);});
       }
-
-      function ffPoolJsonPost(url, payload) {
-        return fetchJson(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-WB-FF-Pool-CSRF": "1"
-          },
-          body: JSON.stringify(payload)
-        });
-      }
+      const warehouseOperator = FacilitySourceAcceptance.create({
+        scope: config.user_config_key || config.operator_actor_scope, path: ffPoolPath,
+        container: warehouseSourceReceipt, onLock: lockWarehouseForms,
+        onError: error => {if (!warehouseOperator.isPending()) {warehousesActivationMessage.textContent = error.message; warehousesActivationMessage.className = 'message error';}},
+        onRecovered: async result => {
+          if (result.action === 'create') {
+            warehousePreview = null; warehouseNameInput.value = ''; warehouseCityInput.value = '';
+            createWarehouseButton.textContent = 'Проверить создание';
+          }
+          if (document.getElementById('warehousesGroupPanel').hidden) activateSettingsGroup('warehouses');
+          else await loadWarehouses();
+        }
+      });
+      warehouseOperator.recover().catch(error => {
+        activateSettingsGroup('warehouses');
+        warehousesActivationMessage.textContent = error.message;
+        warehousesActivationMessage.className = 'message error';
+      });
 
       async function loadWarehouses() {
         warehousesActivationMessage.textContent = "Читаем склады и безопасные gates...";
@@ -1100,12 +1135,13 @@
           const management = capabilities.facility_management || {};
           const guided = capabilities.guided_acceptance || {};
           const canWrite = Boolean(management.available);
-          createWarehouseButton.disabled = !canWrite;
+          warehouseCanWrite = canWrite;
           warehousesActivationMessage.textContent = canWrite
             ? (guided.reason_ru || "Управление складами включено.")
             : "Создание и изменение выключены до exact production gate. Просмотр безопасен; production rows не создаются.";
           warehousesActivationMessage.className = "message " + (canWrite ? "success" : "warning");
           renderWarehouses(facilities.facilities || [], canWrite);
+          lockWarehouseForms(warehouseOperator.isPending());
           renderFbsShadow(fbs.shadow || {}, fbs.collector || {});
         } catch (error) {
           warehousesActivationMessage.textContent = error.message;
@@ -1114,6 +1150,7 @@
       }
 
       function renderWarehouses(rows, canWrite) {
+        warehouseSources = new Map(rows.map(row => [row.facility_id, row]));
         if (!rows.length) {
           warehouseCards.innerHTML = '<article class="warehouse-card"><h3>Склады ещё не созданы</h3><p class="warehouse-meta">FF Москва и FF Оренбург показаны только как reviewed setup contract; production rows отсутствуют.</p></article>';
           return;
@@ -1131,30 +1168,44 @@
       }
 
       async function createWarehouse() {
-        createWarehouseButton.disabled = true;
+        if (createWarehouseButton.disabled) return;
+        warehouseBusy = true; lockWarehouseForms(warehouseOperator.isPending());
         try {
-          await ffPoolJsonPost(ffPoolFacilitiesPath, {request_id:warehouseRequestId('facility-create'), name:warehouseNameInput.value.trim(), city:warehouseCityInput.value.trim(), display_timezone:warehouseTimezoneInput.value.trim(), active:warehouseActiveInput.value === 'true'});
-          warehouseNameInput.value = '';
-          warehouseCityInput.value = '';
-          await loadWarehouses();
+          if (!warehousePreview) {
+            warehousePreview = await fetchJsonNative(ffPoolFacilitiesPath + '/preview', {
+              method: 'POST', headers: {'Content-Type': 'application/json', 'X-WB-FF-Pool-CSRF': '1'},
+              body: JSON.stringify({request_id: 'facility_preview_' + crypto.randomUUID().replaceAll('-', ''), name: warehouseNameInput.value.trim(),
+                city: warehouseCityInput.value.trim(), display_timezone: warehouseTimezoneInput.value.trim(), active: false})
+            });
+            warehousesActivationMessage.textContent = 'Будет создан пустой неактивный склад. После создания его можно активировать.';
+            warehousesActivationMessage.className = 'message';
+            createWarehouseButton.textContent = 'Подтвердить создание';
+          } else {
+            await warehouseOperator.mutate(ffPoolFacilitiesPath + '/onboarding/' + encodeURIComponent(warehousePreview.request_id) + '/confirm', 'create',
+              {confirm: true, preview_request_id: warehousePreview.request_id, preview_fingerprint: warehousePreview.preview_fingerprint}, '');
+          }
         } catch (error) {
           warehousesActivationMessage.textContent = error.message;
           warehousesActivationMessage.className = 'message error';
-        } finally { createWarehouseButton.disabled = false; }
+        } finally {warehouseBusy = false; lockWarehouseForms(warehouseOperator.isPending());}
       }
 
       async function updateWarehouse(button, changes) {
+        if (button.disabled) return;
         const card = button.closest('[data-facility-id]');
-        button.disabled = true;
+        const shown = warehouseSources.get(card.dataset.facilityId);
+        warehouseBusy = true; lockWarehouseForms(warehouseOperator.isPending());
         try {
-          const detail = await fetchJson(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId));
-          await ffPoolJsonPost(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId), {...changes, request_id:warehouseRequestId('facility-update'), expected_updated_at:detail.facility.updated_at});
-          await loadWarehouses();
+          const detail = await fetchJsonNative(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId));
+          const source = detail.facility;
+          if (!shown || ['name', 'city', 'active', 'display_timezone', 'updated_at'].some(key => source[key] !== shown[key]))
+            throw new Error('Склад изменился. Обновите список перед сохранением.');
+          await warehouseOperator.mutate(ffPoolFacilitiesPath + '/' + encodeURIComponent(card.dataset.facilityId), changes.active === true ? 'activate' : 'update',
+            {...changes, expected_updated_at: source.updated_at, expected_source_digest: source.operator_source_digest}, card.dataset.facilityId);
         } catch (error) {
           warehousesActivationMessage.textContent = error.message;
           warehousesActivationMessage.className = 'message error';
-          button.disabled = false;
-        }
+        } finally {warehouseBusy = false; lockWarehouseForms(warehouseOperator.isPending());}
       }
 
       async function loadWarehouseAudit(button) {
@@ -2047,7 +2098,7 @@
             headers: { Accept: "application/json" }
           });
           await loadItems();
-          setMessage("ШК обновлён.", "success");
+          setMessage("Задание сохранено. Результат обработки — в квитанции.", "success");
         } catch (error) {
           setMessage(error.message, "error");
         }
@@ -2066,7 +2117,7 @@
           });
           await loadItems();
           setMessage(
-            "WB sync: карточек " + (payload.cards_processed || 0) + ", создано " + (payload.created || 0) + ", обновлено " + (payload.updated || 0) + ", review " + (payload.created_needs_review || 0) + ".",
+            "Задание сохранено. Результат обработки — в квитанции.",
             payload.status === "ok" ? "success" : "warning"
           );
         } catch (error) {
@@ -2169,7 +2220,7 @@
           const payload = await fetchJson(nomenclatureImportPath, { method: "POST", body: formData, headers: { Accept: "application/json" } });
           await loadItems();
           setMessage(
-            "Импорт: создано " + payload.created_count + ", обновлено " + payload.updated_count + ", выключено " + payload.deactivated_count + ", пропущено " + payload.skipped_count + ".",
+            "Импорт сохранён. Результат обработки — в квитанции.",
             "success"
           );
         } catch (error) {
@@ -2253,9 +2304,7 @@
             headers: { "Content-Type": "application/json", Accept: "application/json" },
             body: JSON.stringify(payload)
           });
-          skuGroups = Array.isArray(result.groups) ? result.groups : skuGroups;
-          renderSkuGroups();
-          renderRows();
+          await loadSkuGroups();
           setSkuGroupsMessage("Группа сохранена.", "success");
         } catch (error) {
           setSkuGroupsMessage(error.message, "error");
@@ -2277,9 +2326,7 @@
             method: "DELETE",
             headers: { Accept: "application/json" }
           });
-          skuGroups = Array.isArray(result.groups) ? result.groups : skuGroups;
-          renderSkuGroups();
-          renderRows();
+          await loadSkuGroups();
           setSkuGroupsMessage("Группа отключена.", "success");
         } catch (error) {
           setSkuGroupsMessage(error.message, "error");
@@ -2317,6 +2364,7 @@
           return;
         }
         contractRows.innerHTML = visible.map(renderContractRow).join("");
+        lockTradeForms(tradeLocked);
         Array.from(contractRows.querySelectorAll("[data-document-download]")).forEach((link) => {
           link.addEventListener("click", (event) => event.stopPropagation());
         });
@@ -2342,6 +2390,7 @@
           return;
         }
         invoiceRows.innerHTML = visible.map(renderInvoiceRow).join("");
+        lockTradeForms(tradeLocked);
         Array.from(invoiceRows.querySelectorAll("[data-document-download]")).forEach((link) => {
           link.addEventListener("click", (event) => event.stopPropagation());
         });
@@ -2522,45 +2571,55 @@
         }[source] || source || "-";
       }
 
+      const tradeReceipt = document.createElement("div");
+      tradeReceipt.id = "tradeSourceReceipt"; tradeReceipt.hidden = true;
+      document.querySelector(".settings-panels").prepend(tradeReceipt);
+      let tradeLocked = false, tradeUploadBusy = false;
+      function lockTradeForms(locked) {
+        tradeLocked = locked;
+        const blocked = locked || tradeUploadBusy;
+        [addContractButton, addInvoiceButton, documentFileInput, invoiceNumberInput, invoiceDateInput, invoiceSupplierInput,
+          contractNumberInput, contractDateInput, contractSupplierInput].forEach(el => {el.disabled = blocked;});
+        document.querySelectorAll("[data-document-archive], [data-contract-save], [data-document-link], [data-document-unlink]").forEach(el => {el.disabled = blocked;});
+      }
+      const tradeAcceptance = window.TradeSourceAcceptance.create({container: tradeReceipt, path: tradeDocumentsPath,
+        scope: config.user_config_key || "local_operator", onLock: lockTradeForms,
+        onError: error => setAllDocumentMessages(error.message, "error"),
+        onRecovered: async result => {editingContractId = ""; activateSettingsGroup("directories");
+          activateSettingsTab(result.acceptance.source_ref.document_type === "contract" ? "contracts" : "invoices");
+          await loadDocuments(); lockTradeForms(tradeLocked);}});
+      tradeAcceptance.recover().catch(error => setAllDocumentMessages(error.message, "error"));
+      const tradeOperationId = new URLSearchParams(location.search).get("operation_id");
+      if (tradeOperationId) tradeAcceptance.showOperation(tradeOperationId).catch(error => setAllDocumentMessages(error.message, "error"));
+
       function startDocumentUpload(documentType) {
+        if (tradeLocked || tradeUploadBusy) return;
         pendingDocumentType = documentType;
         documentFileInput.value = "";
         documentFileInput.click();
       }
 
       async function uploadDocument(file) {
-        if (!file || !pendingDocumentType) {
-          return;
-        }
-        const formData = new FormData();
-        formData.append("document_type", pendingDocumentType);
-        const controls = pendingDocumentType === "invoice" ? {
-          number: invoiceNumberInput,
-          date: invoiceDateInput,
-          supplier: invoiceSupplierInput
-        } : {
-          number: contractNumberInput,
-          date: contractDateInput,
-          supplier: contractSupplierInput
-        };
-        formData.append("number", controls.number.value.trim());
-        formData.append("document_date", controls.date.value.trim());
-        formData.append("supplier_name", controls.supplier.value.trim());
-        formData.append("file", file, file.name || (pendingDocumentType + ".xlsx"));
-        setDocumentMessage(pendingDocumentType, "Загружаем документ...", "");
+        if (!file || !pendingDocumentType || tradeLocked || tradeUploadBusy) return;
+        const documentType = pendingDocumentType;
+        const controls = documentType === "invoice" ? {number: invoiceNumberInput, date: invoiceDateInput, supplier: invoiceSupplierInput}
+          : {number: contractNumberInput, date: contractDateInput, supplier: contractSupplierInput};
+        // Capture the selected file's complete intent before the first async read.
+        const operands = {document_type: documentType, number: controls.number.value.trim(),
+          document_date: controls.date.value.trim(), supplier_name: controls.supplier.value.trim(), filename: file.name};
+        pendingDocumentType = "";
+        tradeUploadBusy = true; lockTradeForms(tradeLocked);
+        setDocumentMessage(documentType, "Загружаем документ...", "");
         try {
-          const uploadedType = pendingDocumentType;
-          const payload = await fetchJson(tradeDocumentsPath, { method: "POST", body: formData, headers: { Accept: "application/json" } });
-          await loadDocuments();
-          const document = payload.document || {};
-          const warnings = Array.isArray(document.parser_warnings) ? document.parser_warnings.filter(Boolean) : [];
-          const baseMessage = payload.status === "duplicate_existing" ? "Документ уже был в справочнике." : "Документ сохранён.";
-          setDocumentMessage(uploadedType, warnings.length ? baseMessage + " Есть parser warning." : baseMessage, warnings.length ? "warning" : "success");
+          const fileBytes = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+          operands.file_sha256 = Array.from(new Uint8Array(fileBytes), b => b.toString(16).padStart(2, "0")).join("");
+          await tradeAcceptance.mutate(tradeDocumentsPath, "upload", operands, "POST", file);
+          setDocumentMessage(documentType, "", "");
         } catch (error) {
-          setDocumentMessage(pendingDocumentType, error.message, "error");
+          setDocumentMessage(documentType, error.message, "error");
         } finally {
-          pendingDocumentType = "";
           documentFileInput.value = "";
+          tradeUploadBusy = false; lockTradeForms(tradeLocked);
         }
       }
 
@@ -2571,13 +2630,9 @@
         }
         setDocumentMessage("invoice", "Связываем invoice с контрактом...", "");
         try {
-          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(invoiceDocumentId) + "/contract", {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
-            body: JSON.stringify({ contract_document_id: contractDocumentId })
-          });
-          await loadDocuments();
-          setDocumentMessage("invoice", "Связь сохранена.", "success");
+          await tradeAcceptance.mutate(tradeDocumentsPath + "/" + encodeURIComponent(invoiceDocumentId) + "/contract",
+            "link", {contract_document_id: contractDocumentId}, "PATCH", null, invoiceDocumentId);
+          setDocumentMessage("invoice", "", "");
         } catch (error) {
           setDocumentMessage("invoice", error.message, "error");
         }
@@ -2608,14 +2663,8 @@
         });
         setDocumentMessage("contract", "Сохраняем договор...", "");
         try {
-          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(documentId), {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
-            body: JSON.stringify(payload)
-          });
-          editingContractId = "";
-          await loadDocuments();
-          setDocumentMessage("contract", "Договор сохранён.", "success");
+          await tradeAcceptance.mutate(tradeDocumentsPath + "/" + encodeURIComponent(documentId), "edit", payload, "PATCH", null, documentId);
+          setDocumentMessage("contract", "", "");
         } catch (error) {
           setDocumentMessage("contract", error.message, "error");
         }
@@ -2628,12 +2677,8 @@
         }
         setDocumentMessage("invoice", "Отвязываем invoice от контракта...", "");
         try {
-          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(invoiceDocumentId) + "/contract", {
-            method: "DELETE",
-            headers: { Accept: "application/json" }
-          });
-          await loadDocuments();
-          setDocumentMessage("invoice", "Связь удалена.", "success");
+          await tradeAcceptance.mutate(tradeDocumentsPath + "/" + encodeURIComponent(invoiceDocumentId) + "/contract", "unlink", {}, "DELETE", null, invoiceDocumentId);
+          setDocumentMessage("invoice", "", "");
         } catch (error) {
           setDocumentMessage("invoice", error.message, "error");
         }
@@ -2645,9 +2690,8 @@
         }
         setAllDocumentMessages("Архивируем документ...", "");
         try {
-          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(documentId), { method: "DELETE", headers: { Accept: "application/json" } });
-          await loadDocuments();
-          setAllDocumentMessages("Документ архивирован.", "success");
+          await tradeAcceptance.mutate(tradeDocumentsPath + "/" + encodeURIComponent(documentId), "archive", {}, "DELETE", null, documentId);
+          setAllDocumentMessages("", "");
         } catch (error) {
           setAllDocumentMessages(error.message, "error");
         }
@@ -4170,6 +4214,12 @@
       reloadSourcesSessionsButton.addEventListener("click", () => loadSourcesSessions({refreshStale: false}));
       reloadWarehousesButton.addEventListener("click", loadWarehouses);
       createWarehouseButton.addEventListener("click", createWarehouse);
+      editWarehouseDraftButton.addEventListener("click", () => {
+        if (editWarehouseDraftButton.disabled) return;
+        warehousePreview = null; createWarehouseButton.textContent = "Проверить создание";
+        warehousesActivationMessage.textContent = "Черновик можно изменить. Склад ещё не создан.";
+        warehousesActivationMessage.className = "message"; lockWarehouseForms(warehouseOperator.isPending());
+      });
       Array.from(document.querySelectorAll("[data-source-check]")).forEach((button) => {
         button.addEventListener("click", () => checkSource(button.dataset.sourceCheck || ""));
       });

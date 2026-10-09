@@ -134,6 +134,20 @@ def main() -> None:
         route = next((route for route in routes if route["path"] == path), None)
         if not route or route["match"] != match or route["methods"] != ["GET"]:
             raise AssertionError(f"Operator journal read route must be GET-only: {path}")
+    # The most specific nginx route must allow exact-ID recovery reads.
+    # Existing POST permissions stay confined to the two legacy upload paths.
+    def route_for(path):
+        exact = [route for route in routes if route["match"] == "exact" and route["path"] == path]
+        prefixes = [route for route in routes if route["match"] == "prefix" and path.startswith(route["path"])]
+        return exact[0] if exact else max(prefixes, key=lambda route: len(route["path"]), default=None)
+    for path in ("/v1/sheet-vitrina-v1/settings/nomenclature/operations/receipt-id",):
+        route = route_for(path)
+        if not route or route["methods"] != ["GET"]:
+            raise AssertionError(f"Native operation recovery must publish GET only: {path}")
+    for path in ("/v1/registry-upload/bundle", "/v1/cost-price/upload"):
+        route = route_for(path)
+        if not route or route["match"] != "exact" or set(route["methods"]) != {"GET", "POST"}:
+            raise AssertionError(f"Compatibility upload must expose its native version readback: {path}")
     proxy_v4_route = next(
         route
         for route in routes

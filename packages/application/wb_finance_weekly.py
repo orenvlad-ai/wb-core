@@ -6068,6 +6068,10 @@ class WbFinanceWeeklyBlock:
                 conn, target_keys=target_keys, target_only=False
             ),
         }
+        from packages.application.operator_nomenclature import finance_sources
+        operator_sources=finance_sources(conn)
+        if operator_sources:
+            plan['operator_nomenclature_sources']=operator_sources
         plan["fingerprint"] = (
             "sha256:"
             + hashlib.sha256(
@@ -6095,9 +6099,13 @@ class WbFinanceWeeklyBlock:
         original_authority: list[GenerationManifest] = []
         with self._connect_stale_cost_plan(storage_authority=original_authority) as plan_conn:
             self._assert_readonly_plan_connection(plan_conn)
+            operator_plan_token=self._sqlite_data_version_token(plan_conn)
             plan = self._plan_stale_cost_weeks_in_connection(
                 plan_conn, date_from=date_from, date_to=date_to
             )
+            operator_sources=plan.get('operator_nomenclature_sources',[])
+            if operator_sources and self._sqlite_data_version_token(plan_conn)!=operator_plan_token:
+                raise ValueError('Finance operator source changed during query planning')
             if str(plan["fingerprint"]) != expected_fingerprint:
                 raise ValueError("stale Finance cost plan fingerprint changed before apply")
             target_keys = {
@@ -6112,7 +6120,33 @@ class WbFinanceWeeklyBlock:
                     ).total_seconds()
                     * 1000,
                 )
+                if operator_sources:
+                    from packages.application.operator_nomenclature import acknowledge_finance
+                    proof={'status':'already_current','outcome':'derived_no_change',
+                        'consumer':'wb_finance_stale_cost_recalculation_v1',
+                        'fingerprint':expected_fingerprint,'checked_week_count':plan['checked_week_count'],
+                        'source_dependency':plan['source_dependency'],
+                        'catalog_price_policy':'supplier_reference_not_historical_cost',
+                        'non_target_preserved':True,'post_verify_stale_week_count':0}
+                    ack_authority: list[GenerationManifest] = []
+                    with self._connect(storage_authority=ack_authority) as operator_writer:
+                        operator_writer.execute('BEGIN IMMEDIATE')
+                        try:
+                            if (ack_authority != original_authority
+                                    or self.store_registry.load() != original_authority[0]
+                                    or self._sqlite_persistent_identity(operator_writer) != self._sqlite_persistent_identity(plan_conn)):
+                                raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
+                                    phase='writer_handoff', classification='unclassified_commit', attempt=1,
+                                    before=operator_plan_token, after=self._sqlite_data_version_token(plan_conn))
+                            if self._sqlite_data_version_token(plan_conn)!=operator_plan_token:
+                                raise ValueError('Finance operator source changed during acknowledgement handoff')
+                            acknowledge_finance(operator_writer,selected=operator_sources,proof=proof)
+                            operator_writer.commit()
+                        except BaseException:
+                            operator_writer.rollback()
+                            raise
                 return {
+                    'operator_nomenclature_acks':[item['operation_id'] for item in operator_sources],
                     "status": "already_current",
                     "runtime_mutation": False,
                     "fingerprint": expected_fingerprint,
@@ -6256,8 +6290,14 @@ class WbFinanceWeeklyBlock:
                 else:
                     break
 
-        with self._connect_stale_cost_plan() as conn:
+        readback_authority: list[GenerationManifest] = []
+        with self._connect_stale_cost_plan(storage_authority=readback_authority) as conn:
             self._assert_readonly_plan_connection(conn)
+            if operator_sources and (readback_authority != original_authority
+                    or self._sqlite_persistent_identity(conn) != observer_identity):
+                raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
+                    phase='writer_handoff', classification='unclassified_commit', attempt=1)
+            operator_post_token=self._sqlite_data_version_token(conn)
             non_target_after = self._finance_state_digest(
                 conn, target_keys=target_keys, target_only=False
             )
@@ -6278,11 +6318,41 @@ class WbFinanceWeeklyBlock:
             )
             if int(post_verify["stale_week_count"]) != 0 and not source_advanced:
                 raise ValueError("post-recalculation verification still contains stale weeks")
+            operator_acks=[]
+            if operator_sources and not source_advanced and int(post_verify['stale_week_count'])==0:
+                from packages.application.operator_nomenclature import acknowledge_finance
+                proof={'status':'applied','outcome':'native_cost_evaluated',
+                    'consumer':'wb_finance_stale_cost_recalculation_v1',
+                    'fingerprint':expected_fingerprint,'checked_week_count':plan['checked_week_count'],
+                    'source_dependency':plan['source_dependency'],
+                    'post_source_dependency':post_source_dependency,
+                    'target_image_digest':target_image_digest,
+                    'non_target_preserved':True,'post_verify_stale_week_count':0,
+                    'catalog_price_policy':'supplier_reference_not_historical_cost'}
+                ack_authority: list[GenerationManifest] = []
+                with self._connect(storage_authority=ack_authority) as operator_writer:
+                    operator_writer.execute('BEGIN IMMEDIATE')
+                    try:
+                        if (ack_authority != readback_authority
+                                or self.store_registry.load() != readback_authority[0]
+                                or self._sqlite_persistent_identity(operator_writer) != self._sqlite_persistent_identity(conn)):
+                            raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
+                                phase='writer_handoff', classification='unclassified_commit', attempt=1,
+                                before=operator_post_token, after=self._sqlite_data_version_token(conn))
+                        if self._sqlite_data_version_token(conn)!=operator_post_token:
+                            raise ValueError('Finance operator source changed during post-readback acknowledgement')
+                        acknowledge_finance(operator_writer,selected=operator_sources,proof=proof)
+                        operator_writer.commit()
+                    except BaseException:
+                        operator_writer.rollback()
+                        raise
+                operator_acks=[item['operation_id'] for item in operator_sources]
         phase_finished = datetime.now(timezone.utc)
         milliseconds = lambda start, end: max(
             0.0, (end - start).total_seconds() * 1000
         )
         return {
+            "operator_nomenclature_acks":operator_acks,
             "status": "already_current" if not recalculated else "applied",
             "runtime_mutation": bool(recalculated),
             "fingerprint": expected_fingerprint,

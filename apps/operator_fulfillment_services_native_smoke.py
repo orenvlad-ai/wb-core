@@ -23,6 +23,7 @@ from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.warehouse_functional import WarehouseFunctionalBlock
 from packages.application import fbs_accounting_runtime as accounting, operator_fulfillment_services as receipt
 from packages.application.operator_fulfillment_services_proof import read_native_proof
+from packages.application.operator_manual_ff_stock import ModernFfWorkflowRequired
 from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
 from packages.application.business_data_heavy_admission import heavy_admitted
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
@@ -40,6 +41,13 @@ def seed(raw):
     _seed_functional(rt)
     from packages.application.canonical_cost_engine import CanonicalCostEngine
     CanonicalCostEngine(runtime=rt)
+    # Historical legacy stock exists before the native facility/pool cutover.
+    for op, kind, supply, delta, stamp in (
+        ('opening','manual_excel','',30,'2026-07-01T00:00:00Z'),
+        ('debit-1001','wb_supply','1001',-10,'2026-07-05T00:00:00Z'),
+        ('debit-1002','wb_supply','1002',-20,'2026-07-05T01:00:00Z')):
+        rt.create_ff_stock_operation(operation_id=op, operation_type='manual_receipt' if delta>0 else 'auto_writeoff',
+            source_type=kind,source_key=op,source_object_id=supply,created_at=stamp,lines=[{'nm_id':1,'quantity_delta':delta}])
     with _connect(rt.db_path) as conn:
         conn.execute('DELETE FROM sheet_vitrina_v1_warehouse_functional_balances')
         conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_wb_snapshots WHERE version_id<>'base'")
@@ -67,12 +75,6 @@ def seed(raw):
         for pool in ('FBS','FBO'):
             conn.execute("INSERT INTO sheet_vitrina_v1_ff_pool_balances VALUES('A',?,1,1,0,'0',NULL,'opening',?)", (pool,NOW))
         conn.commit()
-    for op, kind, supply, delta, stamp in (
-        ('opening','manual_excel','',30,'2026-07-01T00:00:00Z'),
-        ('debit-1001','wb_supply','1001',-10,'2026-07-05T00:00:00Z'),
-        ('debit-1002','wb_supply','1002',-20,'2026-07-05T01:00:00Z')):
-        rt.create_ff_stock_operation(operation_id=op, operation_type='manual_receipt' if delta>0 else 'auto_writeoff',
-            source_type=kind,source_key=op,source_object_id=supply,created_at=stamp,lines=[{'nm_id':1,'quantity_delta':delta}])
     return rt, block
 
 
@@ -122,6 +124,20 @@ def separate_commit(rt):
 def main():
     with TemporaryDirectory() as raw:
         rt, block = seed(raw)
+        # Backdating must not admit a new legacy source after native cutover.
+        with receipt.readonly(rt.db_path) as conn:
+            before_manual = tuple(conn.iterdump())
+        try:
+            rt.create_ff_stock_operation(operation_id='blocked-opening', operation_type='manual_receipt',
+                source_type='manual_excel', source_key='blocked-opening', created_at='2026-07-01T00:00:00Z',
+                lines=[{'nm_id':1,'quantity_delta':30}])
+        except ModernFfWorkflowRequired as exc:
+            assert exc.code=='modern_workflow_required'
+        else:
+            raise AssertionError('legacy manual source admitted after native cutover')
+        with receipt.readonly(rt.db_path) as conn:
+            assert tuple(conn.iterdump())==before_manual
+        print('historical legacy opening retained; post-cutover backdated manual source rejected with zero database changes')
         row = _valid_row('1001'); row[1]='Other upload'
         other = block.upload_xlsx(_build_workbook([row]))
         published = publish_functional(rt)

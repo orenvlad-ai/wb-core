@@ -208,6 +208,8 @@ def _prepare_post_actions(runtime: Any, request: dict[str, Any]) -> None:
     for kind, action in json.loads(request["post_actions_json"]).items():
         shipment = runtime.load_supplier_shipment(request["shipment_id"])
         invoice_id = str(action.get("invoice_document_id") or "")
+        contract_operation = action.get("operator_contract_operation_id")
+        native_action = {key: value for key, value in action.items() if key != "operator_contract_operation_id"}
         if shipment is None or not invoice_id or shipment["header"].get("invoice_document_id") != invoice_id:
             raise ValueError("supplier invoice link continuation has no exact invoice source")
         block = SupplierShipmentsBlock(runtime=runtime)
@@ -218,9 +220,9 @@ def _prepare_post_actions(runtime: Any, request: dict[str, Any]) -> None:
         elif kind == "invoice_contract":
             existing = runtime.load_invoice_contract_link(invoice_id)
             if action.get("contract_document_id"):
-                if existing is None or existing["contract_document_id"] != action["contract_document_id"]:
-                    block.link_invoice_to_contract(**action, preparation_request=request)
-            elif existing is not None:
+                if contract_operation or existing is None or existing["contract_document_id"] != action["contract_document_id"]:
+                    block.link_invoice_to_contract(**native_action, preparation_request=request)
+            elif contract_operation or existing is not None:
                 block.unlink_invoice_contract(invoice_id, preparation_request=request)
         else:
             raise ValueError("unknown supplier post-save continuation")
