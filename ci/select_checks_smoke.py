@@ -453,6 +453,35 @@ def operator_fulfillment_dependency_checks():
         assert {'openpyxl==3.1.5','pypdf==6.4.1','reportlab==4.4.5','playwright==1.58.0'} <= set(plan['pip']),plan
 
 
+def stock_monitor_dependency_checks():
+    browser = "apps/stock_monitor_browser_smoke.py"
+    backend = ["apps/stock_monitor_smoke.py", "apps/stock_monitor_jobs_smoke.py",
+               "apps/stock_monitor_market_smoke.py", "apps/stock_monitor_http_smoke.py"]
+    install = ["python3", "-m", "playwright", "install", "--with-deps", "chromium"]
+    # The market smoke arrives in the dependent feature PR. Model that one
+    # future file, while checking the existing independent entrypoints normally.
+    exists = lambda _, path: path == "apps/stock_monitor_market_smoke.py" or (select_checks.ROOT / path).is_file()
+    for script in backend:
+        plan = build_plan_from_paths(pull_request=147, base=BASE, head=HEAD,
+            paths=[script], file_exists=exists)
+        verify_plan(plan)
+        assert plan["pip"] == ["openpyxl==3.1.5"], plan
+        assert install not in plan["commands"], plan
+        assert plan["commands"][-1] == ["python3", script], plan
+        assert plan["groups"] == [], plan
+    for paths in ([browser], [browser, *backend]):
+        plan = build_plan_from_paths(pull_request=147, base=BASE, head=HEAD,
+            paths=paths, file_exists=exists)
+        verify_plan(plan)
+        assert set(plan["pip"]) == {"openpyxl==3.1.5", "playwright==1.58.0"}, plan
+        assert plan["commands"].count(install) == 1, plan
+        assert plan["commands"].index(install) < plan["commands"].index(["python3", browser]), plan
+        selected = [command[1] for command in plan["commands"]
+                    if command[:1] == ["python3"] and len(command) == 2]
+        assert sorted(selected) == sorted(paths), plan
+    print("stock monitor dependencies: browser install precedes checks; backend stays narrow")
+
+
 def command_dependency_checks():
     # Independent entrypoint expectations: browser dependencies follow commands,
     # not a filename heuristic or an unrelated changed-path group.
@@ -979,6 +1008,7 @@ def main() -> None:
     operator_warehouse_dependency_checks()
     operator_fulfillment_dependency_checks()
     command_dependency_checks()
+    stock_monitor_dependency_checks()
     payment_pdf_dependency_checks()
     ads_dependency_checks()
     buyout_percent_dependency_checks()
