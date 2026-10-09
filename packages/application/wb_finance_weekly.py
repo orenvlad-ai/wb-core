@@ -756,6 +756,42 @@ def _finance_heavy_method(method):
     return admitted
 
 
+class FinanceStaleCostHandoffError(ValueError):
+    """Fixed, bounded pre-write diagnostics; never retain provider/row payloads."""
+    REASONS = frozenset({'finance_handoff_changed', 'finance_handoff_exhausted',
+        'finance_dependency_changed', 'finance_target_changed', 'finance_shared_cost_changed',
+        'finance_raw_handoff_changed', 'finance_handoff_identity_changed'})
+    CLASSIFICATIONS = frozenset({'unclassified_commit', 'dependency_drift', 'target_drift', 'shared_cost_drift'})
+
+    def __init__(self, reason, *, phase, classification, attempt, before=None, after=None):
+        reason = reason if reason in self.REASONS else 'finance_handoff_exhausted'
+        super().__init__(reason)
+        self.reason = reason
+        def token(value):
+            return {k: v for k, v in (value or {}).items()
+                if k in {'main', 'finance_raw_store'} and type(v) is int and 0 <= v <= 2**63-1}
+        before, after = token(before), token(after)
+        self._diagnostic = {'reason_code': reason,
+            'phase': phase if phase in {'validation', 'writer_handoff', 'target_cas', 'shared_fence'} else 'validation',
+            'classification': classification if classification in self.CLASSIFICATIONS else 'unclassified_commit',
+            'attempt': attempt if type(attempt) is int and attempt in (1, 2) else 2,
+            'before_tokens': before, 'after_tokens': after,
+            'changed_schemas': sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))}
+
+    def diagnostic(self):
+        return json.loads(json.dumps(self._diagnostic))
+
+    @classmethod
+    def changed(cls, before, after, *, phase, attempt):
+        reason = 'finance_handoff_changed'
+        if set(before) != set(after) or not set(before) <= {'main', 'finance_raw_store'}:
+            reason = 'finance_handoff_identity_changed'
+        elif before.get('finance_raw_store') != after.get('finance_raw_store'):
+            reason = 'finance_raw_handoff_changed'
+        return cls(reason, phase=phase, classification='unclassified_commit',
+            attempt=attempt, before=before, after=after)
+
+
 class WbFinanceWeeklyBlock:
     allocation_raw_table = "wb_finance_weekly_raw_rows"
     allocation_sync_table = "wb_finance_weekly_sync"
@@ -6056,7 +6092,8 @@ class WbFinanceWeeklyBlock:
         """Build and verify a query-only projection, then run one short CAS."""
 
         phase_started = datetime.now(timezone.utc)
-        with self._connect_stale_cost_plan() as plan_conn:
+        original_authority: list[GenerationManifest] = []
+        with self._connect_stale_cost_plan(storage_authority=original_authority) as plan_conn:
             self._assert_readonly_plan_connection(plan_conn)
             plan = self._plan_stale_cost_weeks_in_connection(
                 plan_conn, date_from=date_from, date_to=date_to
@@ -6094,6 +6131,9 @@ class WbFinanceWeeklyBlock:
                         "post_commit_readback": 0,
                     },
                 }
+            planned_shared = self.shared_cost_snapshot
+            shared_scope = self._finance_shared_handoff_scope(plan_conn, target_keys)
+            planned_shared_digest = self._finance_shared_handoff_digest(planned_shared, shared_scope)
             snapshot_started = datetime.now(timezone.utc)
             recalculated: list[dict[str, Any]] = []
             after_images: dict[str, Any] = {}
@@ -6138,69 +6178,83 @@ class WbFinanceWeeklyBlock:
             snapshot_finished = datetime.now(timezone.utc)
 
             dependency_started = datetime.now(timezone.utc)
-            fresh_source_dependency = self._finance_source_dependency_fingerprint(
-                plan_conn,
-                target_keys=target_keys,
-                force_reload=True,
-            )
-            if (
-                str(fresh_source_dependency["digest"])
-                != str(plan["source_dependency"]["digest"])
-            ):
-                raise ValueError(
-                    "Finance exact dependency changed after snapshot planning; rebuild the plan"
-                )
-            if self._json_digest(
-                self._finance_target_images(plan_conn, target_keys)
-            ) != str(plan["target_before_image_digest"]):
-                raise ValueError(
-                    "Finance target changed after snapshot planning; rebuild the plan"
-                )
-            non_target_before_apply = self._finance_state_digest(
-                plan_conn,
-                target_keys=target_keys,
-                target_only=False,
-            )
-            handoff_data_version = self._sqlite_data_version_token(plan_conn)
-            dependency_finished = datetime.now(timezone.utc)
-
-            with self._connect() as writer_conn:
-                writer_started = datetime.now(timezone.utc)
-                writer_conn.execute("BEGIN IMMEDIATE")
+            last_guard = None
+            observer_identity = self._sqlite_persistent_identity(plan_conn)
+            from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+            for attempt in (1, 2):
+                dml_started = False
                 try:
-                    # The exact dependency digest above is deliberately built
-                    # on the query-only connection.  Once the writer lock is
-                    # held, a data-version handshake on that same observer
-                    # closes the small handoff race without repeating any
-                    # source scan inside the blocking transaction.
-                    if self._sqlite_data_version_token(plan_conn) != handoff_data_version:
-                        raise ValueError(
-                            "Finance SQLite source changed during snapshot-to-writer handoff; rebuild the plan"
-                        )
-                    if self._json_digest(
-                        self._finance_target_images(writer_conn, target_keys)
-                    ) != str(plan["target_before_image_digest"]):
-                        raise ValueError(
-                            "Finance target changed after snapshot planning; rebuild the plan"
-                        )
-                    self._replace_finance_target_images(
-                        writer_conn,
-                        target_keys=target_keys,
-                        images=after_images,
+                    # All scans stay outside the common writer and SQLite locks.
+                    before = self._sqlite_data_version_token(plan_conn)
+                    fresh_source_dependency = self._finance_source_dependency_fingerprint(
+                        plan_conn, target_keys=target_keys, force_reload=True,
                     )
-                    applied_images = self._finance_target_images(
-                        writer_conn, target_keys
+                    if fresh_source_dependency["digest"] != plan["source_dependency"]["digest"]:
+                        raise FinanceStaleCostHandoffError('finance_dependency_changed',
+                            phase='validation', classification='dependency_drift', attempt=attempt,
+                            before=before, after=self._sqlite_data_version_token(plan_conn))
+                    if self._json_digest(self._finance_target_images(plan_conn, target_keys)) != plan["target_before_image_digest"]:
+                        raise FinanceStaleCostHandoffError('finance_target_changed',
+                            phase='validation', classification='target_drift', attempt=attempt,
+                            before=before, after=self._sqlite_data_version_token(plan_conn))
+                    non_target_before_apply = self._finance_state_digest(
+                        plan_conn, target_keys=target_keys, target_only=False,
                     )
-                    target_image_digest = self._json_digest(after_images)
-                    if self._json_digest(applied_images) != target_image_digest:
-                        raise ValueError(
-                            "Finance target CAS readback differs from snapshot"
-                        )
-                    writer_conn.commit()
-                except Exception:
-                    writer_conn.rollback()
-                    raise
-                writer_finished = datetime.now(timezone.utc)
+                    handoff_data_version = self._sqlite_data_version_token(plan_conn)
+                    if before != handoff_data_version:
+                        raise FinanceStaleCostHandoffError.changed(before, handoff_data_version,
+                            phase='validation', attempt=attempt)
+                    dependency_finished = datetime.now(timezone.utc)
+
+                    # All book publishers own this same warehouse->book/main order.
+                    # Hold it only for fresh compact shared refs and the final CAS.
+                    with warehouse_functional_write_lock(self.runtime_dir, timeout_seconds=5):
+                        writer_authority: list[GenerationManifest] = []
+                        with self._connect(storage_authority=writer_authority) as writer_conn:
+                            if (writer_authority != original_authority
+                                    or self._sqlite_persistent_identity(writer_conn) != observer_identity):
+                                raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
+                                    phase='writer_handoff', classification='unclassified_commit', attempt=attempt,
+                                    before=handoff_data_version, after=self._sqlite_data_version_token(plan_conn))
+                            if self._finance_shared_handoff_digest(self.shared_cost_snapshot, shared_scope) != planned_shared_digest:
+                                raise FinanceStaleCostHandoffError('finance_shared_cost_changed',
+                                    phase='shared_fence', classification='shared_cost_drift', attempt=attempt,
+                                    before=handoff_data_version, after=self._sqlite_data_version_token(plan_conn))
+                            self._shared_cost_snapshot = planned_shared
+                            writer_started = datetime.now(timezone.utc)
+                            writer_conn.execute("BEGIN IMMEDIATE")
+                            try:
+                                current = self._sqlite_data_version_token(plan_conn)
+                                if current != handoff_data_version:
+                                    raise FinanceStaleCostHandoffError.changed(handoff_data_version, current,
+                                        phase='writer_handoff', attempt=attempt)
+                                if self._json_digest(self._finance_target_images(writer_conn, target_keys)) != plan["target_before_image_digest"]:
+                                    raise FinanceStaleCostHandoffError('finance_target_changed',
+                                        phase='target_cas', classification='target_drift', attempt=attempt,
+                                        before=handoff_data_version, after=current)
+                                dml_started = True  # No retry after this boundary, even on rollback.
+                                self._replace_finance_target_images(writer_conn,
+                                    target_keys=target_keys, images=after_images)
+                                applied_images = self._finance_target_images(writer_conn, target_keys)
+                                target_image_digest = self._json_digest(after_images)
+                                if self._json_digest(applied_images) != target_image_digest:
+                                    raise ValueError("Finance target CAS readback differs from snapshot")
+                                writer_conn.commit()
+                            except BaseException:
+                                writer_conn.rollback()
+                                raise
+                            writer_finished = datetime.now(timezone.utc)
+                except FinanceStaleCostHandoffError as exc:
+                    if dml_started or exc.reason != 'finance_handoff_changed':
+                        raise
+                    last_guard = exc.diagnostic()
+                    if attempt == 2:
+                        raise FinanceStaleCostHandoffError('finance_handoff_exhausted',
+                            phase=last_guard['phase'], classification='unclassified_commit', attempt=2,
+                            before=last_guard['before_tokens'], after=last_guard['after_tokens']) from None
+                    continue  # Exactly one pre-write revalidation; never rebuild/replay.
+                else:
+                    break
 
         with self._connect_stale_cost_plan() as conn:
             self._assert_readonly_plan_connection(conn)
@@ -6220,6 +6274,7 @@ class WbFinanceWeeklyBlock:
             source_advanced = (
                 str(post_source_dependency["digest"])
                 != str(plan["source_dependency"]["digest"])
+                or self._finance_shared_handoff_digest(self.shared_cost_snapshot, shared_scope) != planned_shared_digest
             )
             if int(post_verify["stale_week_count"]) != 0 and not source_advanced:
                 raise ValueError("post-recalculation verification still contains stale weeks")
@@ -6242,6 +6297,8 @@ class WbFinanceWeeklyBlock:
             "source_dependency": plan["source_dependency"],
             "post_source_dependency": post_source_dependency,
             "source_advanced_after_apply": source_advanced,
+            "handoff_revalidation_count": attempt - 1,
+            "handoff_guard": ({**last_guard, "classification": "unrelated_to_target"} if last_guard else None),
             "target_image_digest": target_image_digest,
             "phase_timings_ms": {
                 "query_plan": milliseconds(
@@ -6257,6 +6314,35 @@ class WbFinanceWeeklyBlock:
                 "post_commit_readback": milliseconds(writer_finished, phase_finished),
             },
         }
+
+    def _finance_shared_handoff_scope(self, conn, target_keys):
+        """Only sale/return day+SKU refs read by this target projection."""
+        aliases, ambiguous, _groups, _items = _nomenclature_identity_index(conn)
+        scope = set()
+        for seller, start, end in sorted(target_keys):
+            for row in conn.execute('SELECT raw_json FROM wb_finance_weekly_raw_rows '
+                    'WHERE seller_id=? AND week_start=? AND week_end=?', (seller, start, end)):
+                operation = json.loads(row['raw_json'])
+                if (str(operation.get('docTypeName') or '').casefold() not in {'продажа', 'возврат'}
+                        or int(_decimal(operation.get('quantity'))) == 0):
+                    continue
+                nm, _method, _problem = _resolve_finance_nm_id(operation,
+                    alias_to_nm=aliases, ambiguous_aliases=ambiguous)
+                day, _source = _operation_date(operation, date.fromisoformat(start))
+                scope.add((day.isoformat(), str(nm)))
+        return sorted(scope)
+
+    def _finance_shared_handoff_digest(self, shared, scope):
+        policy = shared.metadata() if shared is not None else None
+        material = {'policy': ({key: policy.get(key) for key in
+            ('effective_date', 'cost_method_version', 'candidate_only')} if policy is not None else None),
+            'refs': []}
+        for day, nm in scope:
+            resolution = shared.resolve(nm_id=nm, operation_date=date.fromisoformat(day)) if shared is not None else None
+            material['refs'].append([day, nm, ({key: resolution.get(key) for key in
+                ('status', 'reason', 'unit_cost_rub', 'source_digest', 'canonical_source_version',
+                 'canonical_source_identity', 'quality', 'formula_version')} if resolution is not None else None)])
+        return self._json_digest(material)
 
     def _finance_source_dependency_fingerprint(
         self,
@@ -6907,7 +6993,7 @@ class WbFinanceWeeklyBlock:
             raise
         return conn
 
-    def _connect_stale_cost_plan(self) -> sqlite3.Connection:
+    def _connect_stale_cost_plan(self, *, storage_authority: list[GenerationManifest] | None = None) -> sqlite3.Connection:
         self._pin_active_cost()
         manifest = self.store_registry.load()
         conn = self.store_registry.connect(
@@ -6927,6 +7013,9 @@ class WbFinanceWeeklyBlock:
         except Exception:
             conn.close()
             raise
+        if storage_authority is not None:
+            # Bind the immutable manifest actually used for this open/attach.
+            storage_authority.append(manifest)
         return conn
 
     @staticmethod
@@ -6935,6 +7024,11 @@ class WbFinanceWeeklyBlock:
             raise ValueError("Finance query plan opened an implicit transaction")
         if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
             raise ValueError("Finance query plan requires query_only")
+
+    @staticmethod
+    def _sqlite_persistent_identity(conn):
+        return tuple(sorted((str(row[1]), str(Path(row[2]).resolve()))
+            for row in conn.execute('PRAGMA database_list') if row[1] != 'temp'))
 
     @staticmethod
     def _sqlite_data_version_token(conn: sqlite3.Connection) -> dict[str, int]:
@@ -6954,7 +7048,7 @@ class WbFinanceWeeklyBlock:
             raise ValueError("Finance SQLite main data version is unavailable")
         return versions
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, storage_authority: list[GenerationManifest] | None = None) -> sqlite3.Connection:
         self._pin_active_cost()
         if self.shared_cost_is_candidate:
             return self._connect_shared_cost_preview()
@@ -6970,6 +7064,9 @@ class WbFinanceWeeklyBlock:
             manifest=manifest,
             query_only_primary=False,
         )
+        if storage_authority is not None:
+            # Bind the immutable manifest actually used for this open/attach.
+            storage_authority.append(manifest)
         return conn
 
 

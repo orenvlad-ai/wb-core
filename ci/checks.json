@@ -193,6 +193,7 @@
         "apps/wb_fbs_warehouse_registry.py",
         "apps/ff_pool_overhead_backfill.py",
         "apps/business_data_heavy_sources_smoke.py",
+        "apps/wb_finance_weekly_handoff_smoke.py",
         "apps/wb_fbs_*snapshot_smoke.py",
         "apps/wb_fbs_warehouse_registry_smoke.py",
         "apps/wb_fbs_mapping_evidence_smoke.py"
@@ -213,6 +214,10 @@
         [
           "python3",
           "apps/wb_finance_weekly_stale_cost_safety_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_finance_weekly_handoff_smoke.py"
         ],
         [
           "python3",

@@ -24,6 +24,7 @@ from apps.wb_finance_weekly_cost_cutover_smoke import (  # noqa: E402
     _seed_sources,
 )
 from packages.application.wb_finance_weekly import (  # noqa: E402
+    FinanceStaleCostHandoffError,
     WbFinanceWeeklyBlock,
 )
 
@@ -284,8 +285,8 @@ def main() -> None:
         _assert(not background.is_alive(), "exact dependency CAS did not terminate")
         _assert(
             background_errors
-            and "exact dependency changed after snapshot planning"
-            in str(background_errors[0]),
+            and isinstance(background_errors[0], FinanceStaleCostHandoffError)
+            and background_errors[0].reason == 'finance_dependency_changed',
             f"canonical source drift must fail closed: {background_errors}",
         )
         plan = block.plan_stale_cost_weeks(
