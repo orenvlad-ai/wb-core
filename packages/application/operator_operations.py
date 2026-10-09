@@ -5,14 +5,17 @@ from packages.application import operator_warehouse_documents as warehouse
 from packages.application import operator_report_source_versions as report_sources
 from packages.application import operator_fulfillment_services as fulfillment
 from packages.application import operator_partner_report as partner_report
+from packages.application import operator_supplier_journal as supplier_journal
 
 DOMAIN_LABELS = {'ff_pool_document': 'Складские документы', fulfillment.DOMAIN: 'Услуги фулфилмента',
     'plan_report_baseline': 'Исходные данные отчётов',
     'factory_order_dataset': 'Исходные данные планирования',
     partner_report.DOMAIN: 'Настройки партнёрского отчёта'}
+DOMAIN_LABELS.update(supplier_journal.LABELS)
 DEFAULT_DOMAINS = frozenset({'ff_pool_document', fulfillment.DOMAIN})
 DOMAIN_SECTIONS = {'ff_pool_document': 'supply', fulfillment.DOMAIN: 'supply',
     'plan_report_baseline': 'reports', 'factory_order_dataset': 'supply', partner_report.DOMAIN: 'reports'}
+DOMAIN_SECTIONS.update({name: 'supply' for name in supplier_journal.LABELS})
 
 
 def _allowed(allowed_domains, allowed_sections):
@@ -36,7 +39,7 @@ def _overhead_public(conn,row):
     return value
 
 
-def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections=None, domain='all', search=''):
+def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections=None, domain='all', search='', request_scope='', supplier_safe=False, runtime_dir=None):
     if type(page) is not int or type(limit) is not int or not 1<=page<=100000 or not 1<=limit<=100:
         raise ValueError('invalid_operation_journal_page')
     allowed = _allowed(allowed_domains, allowed_sections)
@@ -47,7 +50,7 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
         raise ValueError('invalid_operation_search')
     selected = allowed if domain in ('', 'all') else allowed.intersection({domain})
     with closing(overhead.readonly(db_path)) as conn:
-        sources=[]
+        sources=supplier_journal.sources(conn, selected=selected, request_scope=request_scope, supplier_safe=supplier_safe, db_path=db_path, runtime_dir=runtime_dir)
         if 'ff_pool_document' in selected:
             if overhead._exists(conn):
                 sources.append((overhead.TABLE, 'request_id', '*', '1', (), _overhead_public))
@@ -64,7 +67,18 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
                 lambda connection, row: report_sources.public(dict(row))))
         if search:
             value = '%' + search.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
-            sources = [(table, key, columns, where + " AND lower(" + ({report_sources.TABLE: 'after_json', partner_report.TABLE: "product_name || ' ' || nm_id"}.get(table, 'source_json')) + ") LIKE lower(?) ESCAPE '\\'",
+            search_columns = {report_sources.TABLE: 'after_json', partner_report.TABLE: "product_name || ' ' || nm_id"}
+            financial = supplier_journal.financial
+            search_columns[financial.REQUESTS] = ("shipment_id || ' ' || action || ' ' || coalesce((SELECT group_concat(child.subject_id,' ') FROM "
+                + financial.CHILDREN + ' child WHERE child.request_scope=' + financial.REQUESTS + '.request_scope AND child.request_id='
+                + financial.REQUESTS + ".request_id),'')")
+            if supplier_safe:
+                # Safe supplier routes must not reveal internal operands through
+                # search existence/counts even when rows themselves are redacted.
+                search_columns[supplier_journal.shipments.TABLE] = (
+                    "coalesce(json_extract(source_json,'$.header.invoice_no'),'') || ' ' || "
+                    "coalesce(json_extract(source_json,'$.header.shipment_date'),'')")
+            sources = [(table, key, columns, where + " AND lower(" + search_columns.get(table, 'source_json') + ") LIKE lower(?) ESCAPE '\\'",
                         (*params, value), reader) for table, key, columns, where, params, reader in sources]
         total = sum(conn.execute(f'SELECT count(*) FROM {table} WHERE {where}', params).fetchone()[0]
                     for table, _, _, where, params, _ in sources)
@@ -85,13 +99,24 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
         'available_domains':[{'domain':key,'label_ru':DOMAIN_LABELS[key]} for key in sorted(allowed)]}
 
 
-def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections=None, domain=''):
+def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections=None, domain='', request_scope='', supplier_safe=False, runtime_dir=None):
     allowed = _allowed(allowed_domains, allowed_sections)
     if domain:
         if domain not in DOMAIN_LABELS:
             raise ValueError('invalid_operation_domain')
         allowed.intersection_update({domain})
     with closing(overhead.readonly(db_path)) as conn:
+        financial = supplier_journal.financial
+        if financial.DOMAIN in allowed and request_scope and not supplier_safe and runtime_dir is not None:
+            value = supplier_journal.financial_acceptance(conn, runtime_dir, db_path, identity, request_scope=request_scope)
+            if value:
+                return _common(value)
+        for table, key, columns, where, values, reader in supplier_journal.sources(conn,
+                selected=allowed, request_scope=request_scope, supplier_safe=supplier_safe, db_path=db_path, runtime_dir=runtime_dir):
+            row=conn.execute(f'SELECT {columns} FROM {table} WHERE {key}=? AND ({where})', (identity,*values)).fetchone()
+            if row is not None:
+                value=reader(conn,row)
+                return _common(value) if value else None
         if fulfillment.DOMAIN in allowed and fulfillment._exists(conn, fulfillment.TABLE):
             row = conn.execute(f'SELECT * FROM {fulfillment.TABLE} WHERE operation_id=?', (identity,)).fetchone()
             if row:

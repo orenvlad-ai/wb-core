@@ -709,6 +709,8 @@ class WbSuppliesBlock:
         """
         from packages.application.supplier_preparation_intents import drain_supplier_preparation_intents
 
+        from packages.application.operator_supplier_factual_dates import consume as consume_factual_requests
+        factual_requests = consume_factual_requests(self.runtime)
         supplier_preparation = drain_supplier_preparation_intents(self.runtime)
         from packages.application.cny_preparation_intents import drain_cny_preparation_intents
         cny_preparation = drain_cny_preparation_intents(self.runtime)
@@ -747,6 +749,7 @@ class WbSuppliesBlock:
         )
         return {
             "supplier_preparation": supplier_preparation,
+            "supplier_factual_requests": factual_requests,
             "cny_preparation": cny_preparation,
             "fulfillment_preparation": fulfillment_preparation,
             "nomenclature_activation": nomenclature_activation,

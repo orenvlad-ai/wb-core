@@ -584,6 +584,7 @@
 
       <section class="block" aria-label="订单登记表 / Order registry / Реестр заказов">
         <div class="card-head">
+          <div id="supplierSourceAcceptance" hidden></div>
           <p id="registryMessage" class="message">读取订单 / Loading orders / Читаем заказы...</p>
         </div>
         <div class="registry-wrap">
@@ -929,6 +930,8 @@
   <script>
     (() => {
       const config = JSON.parse(document.getElementById("sheet-vitrina-v1-supplier-config").textContent);
+      let supplierAcceptance = null;
+      let sourceAcceptanceLocked = false;
       const queryParams = new URLSearchParams(window.location.search || "");
       const shipmentsPath = config.supplier_shipments_path;
       const parsePath = config.supplier_shipments_parse_path;
@@ -1797,7 +1800,12 @@
             return rows.filter((row) => allowed.has(orderStatusLabels[row.order_status] ? row.order_status : "production"));
           }
 
-          async function fetchJson(url, options) {
+          async function fetchJson(url, options = {}) {
+        const action = supplierAcceptance && !options.supplierFactualDates
+          ? supplierAcceptance.classify(url, String(options.method || "GET").toUpperCase()) : null;
+        if (action) return supplierAcceptance.submit(url, options, action);
+        if (options.supplierFactualDates) {options = Object.assign({}, options); delete options.supplierFactualDates;}
+
         const response = await fetch(url, options || {});
         const contentType = response.headers.get("content-type") || "";
         const text = await response.text();
@@ -3414,7 +3422,7 @@
                 + '</strong> · ' + escapeHtml(currentShipment.shipment_id) + '</p>'
                 + '<p>Файлов: <strong>' + String(previews.length) + '</strong></p><ul>' + rows + '</ul>'
                 + (requiresRelink
-                  ? '<p class="message warning">Перенос атомарно уберёт прежнюю активную связь, перенесёт CNY-ledger/капитал и запустит пересчёт обеих поставок. Двойная сумма не создаётся.</p>'
+                  ? '<p class="message warning">Перенос сохранит новую связь и обновит финансовые строки. Расчёт обеих поставок продолжится отдельно. Двойная сумма не создаётся.</p>'
                   : "")
                 + (requiresReason
                   ? '<label>Причина сохранения вероятного дубликата<textarea data-confirmation-reason required></textarea></label>'
@@ -3443,11 +3451,14 @@
               ? batchPayload.results
               : [batchPayload];
             let pendingConfirmedBankFeePreview = null;
+            const failedChildren = batchResults.filter(result => result.status === "not_saved" || result.status === "rejected");
+            errorCount += failedChildren.length;
             for (const result of batchResults) {
+              if (result.status === "not_saved" || result.status === "rejected") continue;
               if (!result.readback_confirmed) {
                 throw new Error("Сервер не подтвердил документ в целевой поставке");
               }
-              uploadedCount += 1;
+              if (result.status !== "preview") uploadedCount += 1;
               confirmedResults.push(result);
               lastDocumentId = result.document_id || lastDocumentId;
               if (result.preview_required && result.document_id) {
@@ -3469,6 +3480,7 @@
               }
             });
             await refreshCurrentShipmentCostProof();
+            if (failedChildren.length) setMessage(financialDocumentsMessage, "Сохранено документов: " + uploadedCount + ". Не сохранено: " + failedChildren.length + ". Результат каждого указан в подтверждении.", "warning");
             if (pendingConfirmedBankFeePreview) {
               pendingBankFeePreview = pendingConfirmedBankFeePreview;
               dismissedBankFeePreviewDocumentId = "";
@@ -3628,7 +3640,7 @@
           if (confirmResult.status === "pending" && confirmResult.retryable) {
             setMessage(
               financialDocumentsMessage,
-              confirmResult.message || "Комиссии сохранены. Безопасно повторите подтверждение для завершения связанных расчётов.",
+              confirmResult.message || "Комиссии сохранены. Ожидает обработки.",
               "warning"
             );
           } else {
@@ -3953,9 +3965,9 @@
         );
         shipmentDateField.classList.toggle("required-missing", !hasDate);
         targetFacilityField.classList.toggle("required-missing", !hasTargetFacility);
-        saveShipmentButton.disabled = factualCorrectionInFlight || saveRequestInFlight || !hasDate || !hasTargetFacility || (isNewShipment && !currentUploadId);
+        saveShipmentButton.disabled = sourceAcceptanceLocked || factualCorrectionInFlight || saveRequestInFlight || !hasDate || !hasTargetFacility || (isNewShipment && !currentUploadId);
         if (priceCheckButton) {
-          priceCheckButton.disabled = !currentShipment || !currentShipment.shipment_id || cardDirty || !canRecheckPrices;
+          priceCheckButton.disabled = sourceAcceptanceLocked || !currentShipment || !currentShipment.shipment_id || cardDirty || !canRecheckPrices;
         }
         const status = resolveStatus(lines, currentShipment && currentShipment.match_status);
         matchStatusBadge.textContent = statusLabels[status] || status;
@@ -4729,7 +4741,19 @@
           configureRegistryColumns();
           configureOrderStatusFilter();
           loadActiveContracts();
-          loadRegistry();
+          supplierAcceptance = window.SupplierSourceAcceptance.create({
+        path: shipmentsPath, scope: config.user_config_key || "local_operator",
+        container: document.getElementById("supplierSourceAcceptance"),
+        onLock: value => {sourceAcceptanceLocked = value; updateTotalsAndState();},
+        onFinancialRecovered: async result => {
+          if (currentShipment && currentShipment.shipment_id === result.supplier_order_id) await loadFinancialDocuments();
+          await loadRegistry();
+        },
+        onRecovered: async shipment => {
+          if (!shipment.archived) {currentShipment = shipment; isNewShipment = false; currentUploadId = ""; cardDirty = false; renderCard(); shipmentCard.hidden = false;} await loadRegistry();
+        }
+      });
+      loadRegistry();
     })();
   </script>
 </body>

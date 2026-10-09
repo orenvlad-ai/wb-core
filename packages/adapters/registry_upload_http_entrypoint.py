@@ -2619,6 +2619,7 @@ def _build_handler(
                         shipment_id,
                         _load_request_payload(self),
                         actor=_current_web_user_config_key(self),
+                        request_scope=_current_web_user_config_key(self),
                     )
                 except HeavyAdmissionBusy as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {
@@ -2643,7 +2644,8 @@ def _build_handler(
                 try:
                     shipment_id = _supplier_financial_path_parts(parsed.path)[0]
                     payload = entrypoint.handle_supplier_financial_documents_confirm_upload_request(
-                        shipment_id, _load_request_payload(self)
+                        shipment_id, _load_request_payload(self),
+                        actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
@@ -2665,7 +2667,7 @@ def _build_handler(
                         shipment_id,
                         payment_document_id,
                         _load_request_payload(self),
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(
@@ -2703,7 +2705,8 @@ def _build_handler(
                         shipment_id,
                         document_id,
                         str(request_payload.get("confirmation_token") or ""),
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_config_key(self), operator_payload=request_payload,
+                        request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
@@ -2764,6 +2767,8 @@ def _build_handler(
                         expected_target_revision=str(
                             confirm_payload.get("target_revision") or ""
                         ),
+                        operator_payload=confirm_payload, actor=_current_web_user_actor(self),
+                        request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -2789,6 +2794,7 @@ def _build_handler(
                     result = entrypoint.handle_supplier_shipments_create_request(
                         payload,
                         supplier_safe=_current_web_user_is_supplier(self),
+                        actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -2839,7 +2845,7 @@ def _build_handler(
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_rematch_path(parsed.path)
                     payload = _load_optional_request_payload(self)
-                    result = entrypoint.handle_supplier_shipments_rematch_request(shipment_id, payload)
+                    result = entrypoint.handle_supplier_shipments_rematch_request(shipment_id, payload, actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -2862,7 +2868,8 @@ def _build_handler(
                     result = entrypoint.handle_supplier_shipments_price_check_request(
                         shipment_id,
                         payload,
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self),
+                        native_actor=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -3531,7 +3538,7 @@ def _build_handler(
                 _write_html_response(
                     self,
                     HTTPStatus.OK,
-                    _render_sheet_vitrina_supplier_safe_ui()
+                    _render_sheet_vitrina_supplier_safe_ui(user_config_key=_current_web_user_config_key(self))
                     if is_supplier_role
                     else _render_sheet_vitrina_supplier_ui(
                         can_delete_shipments=has_supply_access,
@@ -3540,6 +3547,7 @@ def _build_handler(
                         can_manage_documents=is_operator_embedded,
                         can_manage_financial_documents=is_operator_embedded,
                         embedded="operator" if is_operator_embedded else "",
+                        user_config_key=_current_web_user_config_key(self),
                     ),
                 )
                 return
@@ -4821,11 +4829,36 @@ def _build_handler(
                 )
                 return
 
+            if _is_supplier_factual_dates_action_path(parsed.path, "status"):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    payload = entrypoint.handle_supplier_factual_dates_status_request(
+                        _resolve_supplier_factual_dates_shipment_id(parsed.path),
+                        urllib_parse.parse_qs(parsed.query).get("request_id", [""])[0],
+                        request_scope=_current_web_user_config_key(self))
+                except Exception:
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "factual request read failed"})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_SUPPLIER_SHIPMENTS_PATH:
                 try:
-                    payload = entrypoint.handle_supplier_shipments_list_request(
-                        supplier_safe=_current_web_user_is_supplier(self),
-                    )
+                    request_id = urllib_parse.parse_qs(parsed.query).get("request_id", [""])[0]
+                    operation_id = urllib_parse.parse_qs(parsed.query).get("operation_id", [""])[0]
+                    if operation_id:
+                        if operation_id.startswith(("ssfc_job_", "supplier_financial_")) and not _ensure_supply_operator_role(self, parsed.path):
+                            return
+                        payload = entrypoint.handle_supplier_operator_operation_read(operation_id,
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self))
+                    elif request_id:
+                        payload = entrypoint.handle_supplier_operator_request_read(request_id,
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self))
+                    else:
+                        payload = entrypoint.handle_supplier_shipments_list_request(
+                            supplier_safe=_current_web_user_is_supplier(self),
+                        )
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -5170,10 +5203,12 @@ def _build_handler(
                     if parsed.path == prefix:
                         params = {key: values[-1] for key, values in urllib_parse.parse_qs(parsed.query).items()}
                         payload = journal(entrypoint.runtime.db_path, page=int(params.get("page") or 1), limit=int(params.get("limit") or 25),
-                            allowed_domains=allowed_domains, domain=params.get('domain') or 'ff_pool_document', search=params.get('search') or '')
+                            allowed_domains=allowed_domains, domain=params.get('domain') or 'all', search=params.get('search') or '',
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir)
                     else:
                         identity = urllib_parse.unquote(parsed.path[len(prefix) + 1:])
-                        acceptance = read_acceptance(entrypoint.runtime.db_path, identity, allowed_domains=allowed_domains)
+                        acceptance = read_acceptance(entrypoint.runtime.db_path, identity, allowed_domains=allowed_domains,
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir)
                         if acceptance is None:
                             _write_json_response(self, HTTPStatus.NOT_FOUND, {"code": "operation_not_found"})
                             return
@@ -5641,7 +5676,10 @@ def _build_handler(
                     return
                 try:
                     shipment_id = _resolve_supplier_financial_shipment_id(parsed.path)
-                    payload = entrypoint.handle_supplier_financial_documents_list_request(shipment_id)
+                    request_id = urllib_parse.parse_qs(parsed.query).get("request_id", [""])[0]
+                    payload = (entrypoint.handle_supplier_financial_operator_request_read(
+                        shipment_id, request_id, request_scope=_current_web_user_config_key(self))
+                        if request_id else entrypoint.handle_supplier_financial_documents_list_request(shipment_id))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
                     return
@@ -6358,9 +6396,8 @@ def _build_handler(
                     shipment_id, document_id = _resolve_supplier_financial_document_ids(parsed.path)
                     payload = _load_request_payload(self)
                     result = entrypoint.handle_supplier_financial_document_patch_request(
-                        shipment_id,
-                        document_id,
-                        payload,
+                        shipment_id, document_id, payload, actor=_current_web_user_actor(self),
+                        request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -6382,7 +6419,7 @@ def _build_handler(
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_expenses_complete_path(parsed.path)
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_supplier_shipments_expenses_complete_patch_request(shipment_id, payload)
+                    result = entrypoint.handle_supplier_shipments_expenses_complete_patch_request(shipment_id, payload, actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -6411,14 +6448,14 @@ def _build_handler(
                             result = entrypoint.handle_supplier_shipments_patch_request(
                                 shipment_id,
                                 payload,
-                                actor=_current_web_user_config_key(self),
+                                actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self),
                                 supplier_safe=_current_web_user_is_supplier(self),
                             )
                     else:
                         result = entrypoint.handle_supplier_shipments_patch_request(
                             shipment_id,
                             payload,
-                            actor=_current_web_user_config_key(self),
+                            actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self),
                             supplier_safe=_current_web_user_is_supplier(self),
                         )
                 except HeavyAdmissionBusy as exc:
@@ -6548,7 +6585,7 @@ def _build_handler(
                     return
                 try:
                     shipment_id = _resolve_supplier_shipment_id_from_detail_path(parsed.path)
-                    payload = entrypoint.handle_supplier_shipments_delete_request(shipment_id)
+                    payload = entrypoint.handle_supplier_shipments_delete_request(shipment_id, {"request_id": urllib_parse.parse_qs(parsed.query).get("request_id", [""])[0]}, actor=_current_web_user_actor(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
                     return
@@ -7952,7 +7989,7 @@ def _is_supplier_factual_dates_action_path(path: str, action: str) -> bool:
 
 
 def _resolve_supplier_factual_dates_shipment_id(path: str) -> str:
-    for action in ("preview", "confirm"):
+    for action in ("preview", "confirm", "status"):
         if _is_supplier_factual_dates_action_path(path, action):
             return _supplier_financial_path_parts(path)[0]
     raise ValueError(f"unsupported supplier factual dates path: {path}")
@@ -10787,7 +10824,9 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
     """Source grants are applied before journal counts, rows and exact reads."""
     domains = set()
     if _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY):
-        domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services'))
+        domains.update(('ff_pool_document', 'factory_order_dataset', 'fulfillment_services', 'supplier_factual_date', 'supplier_financial_document'))
+    if _user_can_access_path(user, DEFAULT_SUPPLIER_SHIPMENTS_PATH):
+        domains.add('supplier_shipment')
     if _user_has_section_access(user, WEB_AUTH_SECTION_REPORTS):
         domains.update(('plan_report_baseline', 'partner_report_settings'))
     return frozenset(domains)
@@ -11307,6 +11346,7 @@ def _render_sheet_vitrina_operator_ui(
 
 def _render_sheet_vitrina_supplier_ui(
     *,
+    user_config_key: str = "local_operator",
     can_delete_shipments: bool = True,
     can_edit_order_status: bool = False,
     can_recheck_prices: bool = True,
@@ -11315,6 +11355,7 @@ def _render_sheet_vitrina_supplier_ui(
     embedded: str = "",
 ) -> str:
     config_payload = {
+        "user_config_key": user_config_key,
         "page_title": "Реестр заказов",
         "surface": "internal",
         "embedded": str(embedded or ""),
@@ -11350,6 +11391,8 @@ def _render_sheet_vitrina_supplier_ui(
     template = _inject_sheet_vitrina_ui_system(
         SUPPLIER_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     )
+    source_acceptance = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_supplier_acceptance.js").read_text(encoding="utf-8")
+    template = template.replace("</head>", "<script>\n"+source_acceptance+"\n</script>\n</head>", 1)
     return (
         template.replace(
             "__SHEET_VITRINA_V1_SUPPLIER_CONFIG_JSON__",
@@ -11359,8 +11402,9 @@ def _render_sheet_vitrina_supplier_ui(
     )
 
 
-def _render_sheet_vitrina_supplier_safe_ui() -> str:
+def _render_sheet_vitrina_supplier_safe_ui(*, user_config_key: str = "local_operator") -> str:
     config_payload = {
+        "user_config_key": user_config_key,
         "page_title": "订单登记表 / Order registry / Реестр заказов",
         "surface": "supplier",
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
@@ -11378,6 +11422,8 @@ def _render_sheet_vitrina_supplier_safe_ui() -> str:
     template = _inject_sheet_vitrina_ui_system(
         SUPPLIER_SAFE_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     )
+    source_acceptance = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_supplier_acceptance.js").read_text(encoding="utf-8")
+    template = template.replace("</head>", "<script>\n"+source_acceptance+"\n</script>\n</head>", 1)
     return template.replace(
         "__SHEET_VITRINA_V1_SUPPLIER_SAFE_CONFIG_JSON__",
         json.dumps(config_payload, ensure_ascii=False),

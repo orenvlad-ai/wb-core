@@ -46,7 +46,9 @@
   function stateNode(receipt) {
     const accepted = acceptedOperation(receipt);
     const stage = sourceStage(receipt);
-    const label = accepted ? (receipt.primary_effect === "source_saved" && receipt.state === "completed" ? "Сохранено" : labels[receipt.state])
+    const sourceOnly = receipt && receipt.primary_effect === "source_saved"
+      && (receipt.calculation_completed === false || (object(receipt.processing) && receipt.processing.kind === "source_only"));
+    const label = accepted ? (sourceOnly && receipt.state === "completed" ? "Сохранено" : labels[receipt.state])
       : stage === "draft" ? "Черновик сохранён"
       : stage ? "Предпросмотр" : "Проверяем сохранение";
     const node = make("span", "ff-operation-status", label);

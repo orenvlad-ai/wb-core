@@ -1028,6 +1028,7 @@ def _publish_fbs_snapshot_accounting(runtime: RegistryUploadDbBackedRuntime) -> 
 
 def _recalculate_downstream_finance_cost(
     runtime: RegistryUploadDbBackedRuntime,
+    *, now=None,
 ) -> dict[str, Any]:
     """Publish Finance from a fingerprinted snapshot after warehouse commit.
 
@@ -1042,10 +1043,13 @@ def _recalculate_downstream_finance_cost(
     from packages.application.fbs_accounting_runtime import writer_lock
     with writer_lock(runtime.runtime_dir):
         before=load(runtime.runtime_dir)[1]
-        receipt=block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks()
+        finance_block=block_from_env(runtime.runtime_dir)
+        receipt=finance_block.recalculate_stale_cost_weeks()
         after=load(runtime.runtime_dir)[1]
+    from packages.application.operator_supplier_processing import reconcile as reconcile_supplier_operations
+    supplier_completion=reconcile_supplier_operations(runtime,seller_id=getattr(finance_block,'seller_id','canonical'),now=now)
     return {**receipt,'accounting_version_before':before,'accounting_version':after,
-            'accounting_version_unchanged':before==after}
+            'accounting_version_unchanged':before==after,'supplier_operation_completion':supplier_completion}
 
 
 def _verify_cutover_external_recheck(

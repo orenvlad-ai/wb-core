@@ -56,6 +56,10 @@ def checks(page) -> None:
         assert page.locator("#second .ff-operation-status").inner_text() == label
         assert page.locator("#second .ff-operation-check").count() == 0
 
+    for processing, label in [({"kind":"source_only"}, "Сохранено"), ({"kind":"cost_history", "complete":True}, "Обработано")]:
+        page.evaluate("processing => render('first', {...receipt,state:'completed',primary_effect:'source_saved',processing})", processing)
+        assert first.locator(".ff-operation-status").inner_text() == label
+
     for override in [{"state": "draft"}, {"status": "draft"}, {"primary_effect": "preview"},
                      {"source_state": "staged"}, {"durable_saved": False}, {"operation_id": ""},
                      {"operation_id": " native-1"}, {"accepted_at": ""}, {"state": "toString"}]:

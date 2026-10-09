@@ -77,12 +77,17 @@ def capture_source(conn: sqlite3.Connection, shipment_id: str) -> dict[str, Any]
     lines = conn.execute(f"SELECT * FROM {PREFIX}supplier_shipment_lines WHERE shipment_id=? ORDER BY line_id", (shipment_id,)).fetchall()
     documents = conn.execute(f"SELECT * FROM {PREFIX}supplier_financial_documents WHERE supplier_order_id=? ORDER BY document_id", (shipment_id,)).fetchall()
     expenses = conn.execute(f"SELECT * FROM {PREFIX}supplier_financial_expense_lines WHERE supplier_order_id=? ORDER BY line_id", (shipment_id,)).fetchall()
-    return {
+    captured = {
         "header": _selected(header, HEADER_FIELDS) if header is not None else {},
         "lines": [_selected(row, LINE_FIELDS) for row in lines],
         "documents": [_selected(row, DOCUMENT_FIELDS) for row in documents if row["document_type"] in COST_DOCUMENT_TYPES],
         "expenses": [_selected(row, EXPENSE_FIELDS) for row in expenses if row["financial_document_id"] in {doc["document_id"] for doc in documents if doc["document_type"] in COST_DOCUMENT_TYPES}],
     }
+
+    fees = [dict(row) for row in conn.execute(f"SELECT * FROM {PREFIX}supplier_payment_fee_confirmations WHERE supplier_order_id=? ORDER BY confirmation_id", (shipment_id,))] if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(PREFIX+'supplier_payment_fee_confirmations',)).fetchone() else []
+    if fees:
+        captured['payment_fee_confirmations'] = fees
+    return captured
 
 
 def begin_source_change(conn: sqlite3.Connection, shipment_ids: Iterable[str]) -> dict[str, Any]:

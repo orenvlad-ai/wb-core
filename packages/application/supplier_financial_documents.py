@@ -2182,6 +2182,10 @@ class SupplierFinancialDocumentsBlock:
     def _resume_saved_preparation(self, supplier_order_id: str, *, prepared_result: dict[str, Any] | None = None) -> dict[str, Any]:
         from packages.application.supplier_preparation_intents import resume_supplier_preparation
 
+        from packages.application.operator_supplier_financial import active
+        if active() is not None:
+            return {'operation_applied': True, 'readback_confirmed': True, 'status': 'pending', 'http_status': 202,
+                    'pending_phase': 'derived_replay', 'message': 'Документ сохранён. Ожидает обработки.'}
         result = prepared_result if prepared_result is not None else resume_supplier_preparation(self.runtime, supplier_order_id)
         outcome = {
             "operation_applied": True,

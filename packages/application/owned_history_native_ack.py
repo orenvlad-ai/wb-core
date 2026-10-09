@@ -213,3 +213,34 @@ def consume_historical_history_ack(proof, runtime_dir, receipt_digest, dates):
         raise HistoryDelegationError('historical_history_ack_owner_or_target_changed')
     owner._historical_proof=None
     return MappingProxyType({day:MappingProxyType(deepcopy(proof.native[day])) for day in proof.dates})
+
+
+
+
+
+
+@dataclass(frozen=True)
+class _VerifiedSupplierHistory:
+    supervisor: object
+    invocation: str
+    receipt_digest: str
+    dates: tuple[str, ...]
+    current: dict
+    native: dict
+    source_stamp: dict
+
+
+def consume_supplier_history_ack(proof, runtime_dir, receipt_digest, dates):
+    """Separate one-use supplier cost authority from the authenticated live parent."""
+    from packages.application.business_data_heavy_admission import require_heavy_owner
+    if type(proof) is not _VerifiedSupplierHistory:
+        raise HistoryDelegationError('supplier_history_ack_not_supervised')
+    owner=proof.supervisor;owner._check()
+    if (owner.pid!=os.getpid() or owner.thread is not threading.current_thread() or owner._process is not None
+            or owner._supplier_proof is not proof or owner.runtime.runtime_dir.resolve()!=Path(runtime_dir).resolve()
+            or require_heavy_owner(runtime_dir).operation!='cycle' or proof.receipt_digest!=receipt_digest
+            or proof.dates!=tuple(dates) or source_stamp(runtime_dir,owner.runtime.db_path)!=proof.source_stamp
+            or read_json(Path(owner.config.candidate_root)/'history'/'CURRENT.json',limit=4096)!=proof.current):
+        raise HistoryDelegationError('supplier_history_ack_owner_or_target_changed')
+    owner._supplier_proof=None
+    return MappingProxyType({day:MappingProxyType(deepcopy(proof.native[day])) for day in proof.dates})

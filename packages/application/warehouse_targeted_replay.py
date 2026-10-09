@@ -669,6 +669,7 @@ class WarehouseTargetedSupplierReplay:
         *,
         confirm_fingerprint: str,
         lock_wait_ms: int = 0,
+        _native_correction_id: str | None = None,
     ) -> dict[str, Any]:
         with warehouse_functional_write_lock(
             self.runtime.runtime_dir,
@@ -678,6 +679,7 @@ class WarehouseTargetedSupplierReplay:
                 plan,
                 confirm_fingerprint=confirm_fingerprint,
                 lock_wait_ms=max(lock_wait_ms, int(lock_info["wait_ms"])),
+                _native_correction_id=_native_correction_id,
             )
 
     def _apply_locked(
@@ -686,6 +688,7 @@ class WarehouseTargetedSupplierReplay:
         *,
         confirm_fingerprint: str,
         lock_wait_ms: int,
+        _native_correction_id: str | None = None,
     ) -> dict[str, Any]:
         approved = str(confirm_fingerprint or "")
         if approved != str(plan.get("plan_fingerprint") or ""):
@@ -820,6 +823,10 @@ class WarehouseTargetedSupplierReplay:
                     }
                 conn.execute("BEGIN IMMEDIATE")
                 try:
+                    factual_source_before = None
+                    if _native_correction_id:
+                        from packages.application.operator_supplier_factual_dates import before_apply
+                        factual_source_before = before_apply(conn, _native_correction_id)
                     self._inject("after_begin")
                     current_header, current_revision, _, _ = _header_and_revision(
                         conn, shipment_id
@@ -899,6 +906,9 @@ class WarehouseTargetedSupplierReplay:
                         raise WarehouseTargetedReplayError(
                             "target header changed before atomic apply"
                         )
+                    if factual_source_before is not None:
+                        from packages.application.supplier_preparation_intents import finish_source_change
+                        finish_source_change(conn, factual_source_before)
                     base_version = conn.execute(
                         """
                         SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions
@@ -1333,6 +1343,10 @@ class WarehouseTargetedSupplierReplay:
                         published_at=now,
                         inject_failure=self._inject,
                     )
+                    if _native_correction_id:
+                        from packages.application.operator_supplier_factual_dates import record_applied
+                        record_applied(conn, _native_correction_id, plan=plan, version_id=version_id,
+                            publication_id=publication_id, queue_id=queue_id)
                     self._inject("before_commit")
                     conn.commit()
                 except Exception:

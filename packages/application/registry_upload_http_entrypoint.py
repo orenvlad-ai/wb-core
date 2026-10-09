@@ -3325,11 +3325,51 @@ class RegistryUploadHttpEntrypoint:
 
     def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None, historical_receipt=None):
         from apps.web_vitrina_history_candidate_build import build_owned_cycle_history
-        from packages.application.sheet_vitrina_v1_cycle import StageProof
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
         owner = RegistryUploadHttpEntrypoint._cycle_owned_worker_identity(self, receipt)
-        proof = build_owned_cycle_history(runtime=self.runtime, config=config, cycle_owner=owner, now=self.now_factory(),
-            backfill_dates=backfill_dates, closed_receipt=closed_receipt, historical_receipt=historical_receipt)
         self._cycle_verify_ready(ready)
+        supplier_receipt = None
+        if historical_receipt is None and hasattr(self.runtime, 'db_path'):
+            from packages.application.operator_supplier_history import pending as pending_supplier_history
+            with warehouse_functional_job_lock(self.runtime.runtime_dir):
+                supplier_receipt = pending_supplier_history(self.runtime, now=self.now_factory())
+        supplier_options = {}
+        dated_receipt = supplier_receipt
+        if dated_receipt is not None:
+            from datetime import timedelta
+            from packages.business_time import current_business_date_iso
+            yesterday = (datetime.fromisoformat(current_business_date_iso(self.now_factory())) - timedelta(days=1)).date().isoformat()
+            backfill_dates = tuple(sorted(set(backfill_dates) | {day for day in dated_receipt.publication_dates() if day < yesterday}))
+            supplier_options['supplier_receipt'] = dated_receipt
+        proof = build_owned_cycle_history(runtime=self.runtime, config=config, cycle_owner=owner, now=self.now_factory(),
+            backfill_dates=backfill_dates, closed_receipt=closed_receipt, historical_receipt=historical_receipt, **supplier_options)
+        if dated_receipt is None:
+            self._cycle_verify_ready(ready)
+        else:
+            dated_receipt.validate_sources_readonly(now=self.now_factory())
+        if supplier_receipt is not None:
+            from apps.warehouse_functional_runner import _recalculate_downstream_finance_cost
+            from packages.application.ready_publication import canonical
+            # The fixed History child is reaped before reacquiring the native
+            # book owner. Finance and each supplier parent still prove their
+            # own exact dependencies through the existing native consumer.
+            with warehouse_functional_job_lock(self.runtime.runtime_dir):
+                sources_before = supplier_receipt.validate_sources_readonly(now=self.now_factory())
+                manifest, diagnostics = supplier_receipt._read()
+                history_ack = diagnostics.get('supplier_history_ack')
+                if not (history_ack and history_ack.get('manifest_digest') == manifest['manifest_digest']
+                        and set(history_ack.get('native', {})) == set(supplier_receipt.publication_dates())):
+                    raise CycleStageFailure('supplier_history_completion_ack_missing')
+                completion = _recalculate_downstream_finance_cost(self.runtime, now=self.now_factory())
+                if not (completion.get('status') in {'applied', 'already_current'}
+                        and completion.get('non_target_preserved') is True
+                        and completion.get('post_verify_stale_week_count') == 0
+                        and completion.get('accounting_version_unchanged') is True
+                        and completion.get('source_advanced_after_apply') is not True):
+                    raise CycleStageFailure('supplier_history_finance_unproven')
+                if supplier_receipt.validate_sources_readonly(now=self.now_factory()) != sources_before:
+                    raise CycleStageFailure('supplier_history_completion_source_changed')
+            proof['supplier_completion'] = canonical(completion)
         if historical_receipt is not None:
             from packages.application.fbs_accounting_historical_cycle import finalize
             # The History context has exited and its fixed child is reaped.
@@ -4717,15 +4757,22 @@ class RegistryUploadHttpEntrypoint:
         payload: Mapping[str, Any],
         *,
         supplier_safe: bool = False,
+        actor: str = "operator", request_scope: str = "local_operator",
     ) -> dict[str, Any]:
-        nested = payload.get("payload") if isinstance(payload.get("payload"), Mapping) else {}
-        if str(payload.get("actual_ff_acceptance_date") or nested.get("actual_ff_acceptance_date") or "").strip():
-            raise ValueError(
-                "Новый заказ не может быть сохранён с приёмкой на FF; используйте «Принять на FF» после создания."
-            )
-        if supplier_safe:
-            return self.supplier_shipments_block.create_shipment_supplier_safe(payload)
-        return self.supplier_shipments_block.create_shipment(payload)
+        from packages.application import operator_supplier_shipments as receipts
+        def save_source(request):
+            operands = receipts.source_payload(payload)
+            nested = operands.get("payload") if isinstance(operands.get("payload"), Mapping) else {}
+            if str(operands.get("actual_ff_acceptance_date") or nested.get("actual_ff_acceptance_date") or "").strip():
+                raise ValueError(
+                    "Новый заказ не может быть сохранён с приёмкой на FF; используйте «Принять на FF» после создания."
+                )
+            sanitized = self.supplier_shipments_block.sanitize_supplier_write_payload(operands, require_upload_id=True) if supplier_safe else operands
+            return self.supplier_shipments_block.create_shipment(sanitized,
+                allow_unassigned_target_facility=supplier_safe, operator_request=request)
+        return receipts.execute(self.runtime, action="create", payload=payload, actor=actor,
+            request_scope=request_scope, supplier_safe=supplier_safe,
+            write=save_source)
 
     def handle_supplier_shipments_detail_request(
         self,
@@ -4756,20 +4803,34 @@ class RegistryUploadHttpEntrypoint:
         payload: Mapping[str, Any],
         *,
         actor: str = "operator",
+        request_scope: str = "local_operator",
         supplier_safe: bool = False,
         confirmed_factual_dates: bool = False,
     ) -> dict[str, Any]:
-        if supplier_safe:
-            payload = self.supplier_shipments_block.sanitize_supplier_write_payload(payload)
-        if (
-            self.supplier_shipments_block.factual_dates_change_required(
-                shipment_id, payload
-            )
-            and not confirmed_factual_dates
-        ):
-            raise ValueError(
-                "Изменение фактической даты требует server-owned preview и confirmation token."
-            )
+        operator_payload = dict(payload)
+        from packages.application import operator_supplier_shipments as receipts
+        try:
+            payload = receipts.source_payload(payload)
+            if supplier_safe:
+                payload = self.supplier_shipments_block.sanitize_supplier_write_payload(payload)
+            if (
+                self.supplier_shipments_block.factual_dates_change_required(
+                    shipment_id, payload
+                )
+                and not confirmed_factual_dates
+            ):
+                raise ValueError(
+                    "Изменение фактической даты требует server-owned preview и confirmation token."
+                )
+        except ValueError as error:
+            # Identified source edits must retain definite validation refusals;
+            # no factual job is started or token consumed by this boundary.
+            if not operator_payload.get("request_id"):
+                raise
+            def refuse_source(request):
+                raise ValueError(str(error))
+            return receipts.execute(self.runtime, action="edit", payload=operator_payload, shipment_id=shipment_id,
+                actor=actor, request_scope=request_scope, supplier_safe=supplier_safe, write=refuse_source)
         if self.supplier_shipments_block.factual_date_change_required(shipment_id, payload):
             existing = self.runtime.load_supplier_shipment(shipment_id) or {}
             existing_header = dict(existing.get("header") or {})
@@ -4876,9 +4937,10 @@ class RegistryUploadHttpEntrypoint:
                     heavy.close()
                 else:
                     heavy.close_if_unstarted(thread)
-        if supplier_safe:
-            return self.supplier_shipments_block.update_shipment_supplier_safe(shipment_id, payload)
-        return self.supplier_shipments_block.update_shipment(shipment_id, payload)
+        from packages.application import operator_supplier_shipments as receipts
+        return receipts.execute(self.runtime, action="edit", payload=operator_payload, shipment_id=shipment_id,
+            actor=actor, request_scope=request_scope, supplier_safe=supplier_safe,
+            write=lambda request: self.supplier_shipments_block.update_shipment(shipment_id, payload, operator_request=request))
 
     def handle_supplier_factual_dates_preview_request(
         self,
@@ -4895,13 +4957,31 @@ class RegistryUploadHttpEntrypoint:
         payload: Mapping[str, Any],
         *,
         actor: str,
+        request_scope: str | None = None,
     ) -> dict[str, Any]:
+        if payload.get("request_id"):
+            from packages.application.operator_supplier_factual_dates import accept
+            return accept(self, shipment_id, payload, actor=actor, request_scope=request_scope or actor)
         with self._supplier_confirmation_lock:
             return self._handle_supplier_factual_dates_confirm_request(
                 shipment_id,
                 payload,
                 actor=actor,
             )
+
+    def handle_supplier_factual_dates_status_request(self, shipment_id: str, request_id: str, *, request_scope: str) -> dict[str, Any]:
+        from packages.application.operator_supplier_factual_dates import read
+        return read(self.runtime.db_path, request_id, shipment_id=shipment_id, request_scope=request_scope)
+
+    def handle_supplier_operator_operation_read(self, operation_id: str, *, request_scope: str, supplier_safe: bool = False) -> dict[str, Any]:
+        if operation_id.startswith('supplier_financial_'):
+            from packages.application.operator_supplier_financial import read_operation
+            return read_operation(self.runtime.runtime_dir,self.runtime.db_path,operation_id,request_scope=request_scope)
+        if operation_id.startswith("ssfc_job_"):
+            from packages.application.operator_supplier_factual_dates import read_operation
+            return read_operation(self.runtime.db_path, operation_id, request_scope=request_scope)
+        from packages.application.operator_supplier_shipments import read_operation
+        return read_operation(self.runtime.db_path, operation_id, request_scope=request_scope, supplier_safe=supplier_safe)
 
     def _handle_supplier_factual_dates_confirm_request(
         self,
@@ -4959,8 +5039,12 @@ class RegistryUploadHttpEntrypoint:
         self,
         shipment_id: str,
         payload: Mapping[str, Any],
+        *, actor: str = "operator", request_scope: str = "local_operator",
     ) -> dict[str, Any]:
-        return self.supplier_shipments_block.update_expenses_complete(shipment_id, payload.get("expenses_complete"))
+        from packages.application import operator_supplier_shipments as receipts
+        return receipts.execute(self.runtime, action="completeness", payload=payload, shipment_id=shipment_id,
+            actor=actor, request_scope=request_scope,
+            write=lambda request: self.supplier_shipments_block.update_expenses_complete(shipment_id, payload.get("expenses_complete"), operator_request=request))
 
     @_heavy_http_method
     def handle_our_wb_cost_recalculate_request(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -5003,25 +5087,31 @@ class RegistryUploadHttpEntrypoint:
     def handle_own_product_capital_status_request(self) -> dict[str, Any]:
         return self.own_product_capital_block.status()
 
-    def handle_supplier_shipments_delete_request(self, shipment_id: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.delete_shipment(shipment_id)
+    def handle_supplier_shipments_delete_request(self, shipment_id: str, payload: Mapping[str, Any] | None = None, *, actor: str = "operator", request_scope: str = "local_operator") -> dict[str, Any]:
+        from packages.application import operator_supplier_shipments as receipts
+        return receipts.execute(self.runtime, action="archive", payload=payload or {}, shipment_id=shipment_id,
+            actor=actor, request_scope=request_scope,
+            write=lambda request: self.supplier_shipments_block.delete_shipment(shipment_id, operator_request=request))
 
-    def handle_supplier_shipments_rematch_request(self, shipment_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.supplier_shipments_block.rematch_shipment(shipment_id, payload)
+    def handle_supplier_shipments_rematch_request(self, shipment_id: str, payload: Mapping[str, Any], *, actor: str = "operator", request_scope: str = "local_operator") -> dict[str, Any]:
+        from packages.application import operator_supplier_shipments as receipts
+        return receipts.execute(self.runtime, action="rematch", payload=payload, shipment_id=shipment_id,
+            actor=actor, request_scope=request_scope,
+            write=lambda request: self.supplier_shipments_block.rematch_shipment(shipment_id, receipts.source_payload(payload), operator_request=request))
 
     def handle_supplier_shipments_price_check_request(
-        self,
-        shipment_id: str,
-        payload: Mapping[str, Any],
-        *,
-        actor: str = "",
+        self, shipment_id: str, payload: Mapping[str, Any], *, actor: str = "", request_scope: str = "local_operator", native_actor: str | None = None,
     ) -> dict[str, Any]:
+        from packages.application import operator_supplier_shipments as receipts
         context = payload.get("context") if isinstance(payload, Mapping) else {}
-        return self.supplier_shipments_block.recheck_shipment_prices(
-            shipment_id,
-            actor=actor,
-            context=context if isinstance(context, Mapping) else {},
-        )
+        return receipts.execute(self.runtime, action="price_check", payload=payload, shipment_id=shipment_id,
+            actor=actor, request_scope=request_scope,
+            write=lambda request: self.supplier_shipments_block.recheck_shipment_prices(shipment_id,
+                actor=native_actor or actor, context=context if isinstance(context, Mapping) else {}, operator_request=request))
+
+    def handle_supplier_operator_request_read(self, request_id: str, *, request_scope: str, supplier_safe: bool = False) -> dict[str, Any]:
+        from packages.application import operator_supplier_shipments as receipts
+        return receipts.read_request(self.runtime.db_path, request_id, request_scope=request_scope, supplier_safe=supplier_safe)
 
     def handle_supplier_shipments_price_backfill_request(self) -> dict[str, Any]:
         return self.supplier_shipments_block.backfill_price_conformity_checks()
@@ -5302,7 +5392,7 @@ class RegistryUploadHttpEntrypoint:
         filename = _safe_archive_filename(f"{invoice_no}-{package_type}-documents.zip")
         return archive_bytes, filename, receipt
 
-    def handle_supplier_payment_zero_fee_confirmation_request(
+    def _native_handle_supplier_payment_zero_fee_confirmation_request(
         self,
         shipment_id: str,
         payment_document_id: str,
@@ -5353,6 +5443,9 @@ class RegistryUploadHttpEntrypoint:
             actor=str(actor or "").strip(),
             confirmed_at=self.activated_at_factory(),
         )
+        from packages.application.operator_supplier_financial import active
+        if active() is not None:
+            return {'confirmation':confirmation,'document_id':confirmation_id,'readback_confirmed':True,'status':'pending'}
         recalculation = (
             self.supplier_financial_documents_block._enqueue_functional_recalculation(
                 normalized_shipment_id,
@@ -5441,11 +5534,104 @@ class RegistryUploadHttpEntrypoint:
             actor=actor,
         )
 
+    def _execute_supplier_financial(self, action, shipment_id, payload, *, document_id='', actor='', request_scope='local_operator'):
+        from packages.application import operator_supplier_financial as receipts
+        from packages.application.operator_supplier_shipments import source_payload
+        body=source_payload(payload)
+        if action=='confirm_upload':
+            tokens=[str(token or '').strip() for token in body.get('confirmation_tokens') or [body.get('confirmation_token')]]
+            manifest=[{'child_key':token or 'upload','kind':'financial','subject_id':'','confirmation_token':token} for token in tokens]
+        else:
+            manifest=[{'child_key':document_id or 'action','kind':'zero_fee' if action=='zero_fee' else 'financial','subject_id':document_id}]
+        def validate():
+            self.supplier_shipments_block.get_shipment(shipment_id)
+            owners={shipment_id}
+            if not manifest or len(manifest)>32 or len({r['child_key'] for r in manifest})!=len(manifest):
+                raise ValueError('financial batch requires 1..32 distinct child identities')
+            if action=='confirm_upload':
+                previews=[]
+                for item in manifest:
+                    preview=self.runtime.load_supplier_confirmation_preview(item['confirmation_token'])
+                    if not preview or preview.get('supplier_order_id')!=shipment_id or preview.get('confirmation_type') not in {'financial_document_upload','supplier_cny_document_upload'}:
+                        raise ValueError('confirmation token does not match this supplier source')
+                    if preview.get('consumed_at') and not (preview.get('result') or {}).get('durable_preview'):
+                        saved_id=str((preview.get('result') or {}).get('document_id') or '')
+                        saved=(self.runtime.load_cny_document(saved_id) if preview['confirmation_type']=='supplier_cny_document_upload' else self.runtime.load_supplier_financial_document(supplier_order_id=shipment_id,document_id=saved_id))
+                        if not saved or str(saved.get('file_sha256') or '')!=preview['source_sha256'] or str(saved.get('source_order_id') or saved.get('supplier_order_id') or '')!=shipment_id or str(saved.get('status') or saved.get('parse_status') or '')=='excluded':
+                            raise ValueError('confirmed token no longer names the exact active source; request a new preview')
+                    if not preview.get('consumed_at'):
+                        if _timestamp_as_utc(preview['expires_at'])<=_timestamp_as_utc(self.activated_at_factory()):
+                            raise ValueError('confirmation token expired; request a new preview')
+                        current=self._supplier_cny_target_revision(shipment_id) if preview['confirmation_type']=='supplier_cny_document_upload' else self.supplier_financial_documents_block._financial_target_revision(shipment_id)
+                        if preview['target_revision']!=current:
+                            raise ValueError('confirmation token is stale; source dependencies changed')
+                    item['kind']='cny' if preview['confirmation_type']=='supplier_cny_document_upload' else 'financial'
+                    previews.append(preview)
+                    if item['kind']=='cny':
+                        owners.update(str(d.get('source_order_id') or '') for d in self.runtime.list_cny_documents() if d.get('file_sha256')==preview.get('source_sha256'))
+                semantic={}
+                for preview in previews:
+                    key=_supplier_upload_preview_semantic_key(preview)
+                    if any(key):semantic.setdefault(key,set()).add(preview.get('source_sha256'))
+                if any(len(values)>1 for values in semantic.values()) and (not body.get('allow_semantic_duplicate') or not str(body.get('duplicate_reason') or '').strip()):
+                    raise ValueError('batch semantic duplicate requires explicit confirmation and a reason')
+            elif action=='zero_fee':
+                manifest[0]['subject_id']='spfc_'+hashlib.sha256((shipment_id+'|'+document_id+'|zero_fee').encode()).hexdigest()
+            else:
+                item=self.runtime.load_cny_document(document_id)
+                if item is not None:
+                    manifest[0]['kind']='cny'
+                    owners.add(str(item.get('source_order_id') or ''))
+            return owners
+        def write(child):
+            if action=='confirm_upload':
+                result=self._confirm_supplier_upload_token(shipment_id=shipment_id,confirmation_token=child['confirmation_token'],payload=body,skip_target_revision_check=True)
+            elif action=='confirm_import':
+                result=self._native_handle_supplier_financial_document_confirm_import_request(shipment_id,document_id,
+                    selected_operation_ids=body.get('selected_operation_ids'),expected_source_sha256=body.get('source_sha256'),expected_target_revision=body.get('target_revision'))
+            elif action=='exclude':
+                result=self._handle_supplier_financial_document_delete_request(shipment_id,document_id,str(body.get('confirmation_token') or ''),actor=actor)
+            elif action=='status':
+                result=self._native_handle_supplier_financial_document_patch_request(shipment_id,document_id,body)
+            else:
+                result=self._native_handle_supplier_payment_zero_fee_confirmation_request(shipment_id,document_id,body,actor=actor)
+            if not child.get('saved') and not (result.get('preview_required') and result.get('active_saved') is False):
+                subject=str(result.get('document_id') or document_id)
+                if subject:
+                    receipts.adopt_existing(self.runtime,kind=child['kind'],subject_id=subject,owners=child['expected_owners'])
+            return result
+        def after(child,result):
+            if child.get('core_needed') and not child.get('core_done'):
+                self.cny_ledger_block.replay_ledger(reason='supplier_attachment_source')
+        return receipts.execute(self.runtime,action=action,payload=payload,shipment_id=shipment_id,actor=actor,request_scope=request_scope,manifest=manifest,validate=validate,write_child=write,after_source=after)
+
+    def handle_supplier_financial_operator_request_read(self, shipment_id, request_id, *, request_scope):
+        from packages.application.operator_supplier_financial import read_request
+        return read_request(self.runtime.runtime_dir,self.runtime.db_path,request_id,request_scope=request_scope,shipment_id=shipment_id)
+
+    def handle_supplier_payment_zero_fee_confirmation_request(self, shipment_id, payment_document_id, payload, *, actor, request_scope='local_operator'):
+        if payload.get('request_id'):
+            return self._execute_supplier_financial('zero_fee',shipment_id,payload,document_id=payment_document_id,actor=actor,request_scope=request_scope)
+        return self._native_handle_supplier_payment_zero_fee_confirmation_request(shipment_id,payment_document_id,payload,actor=actor)
+
+    def handle_supplier_financial_document_patch_request(self, shipment_id, document_id, payload, *, actor='', request_scope='local_operator'):
+        if payload.get('request_id'):
+            return self._execute_supplier_financial('status',shipment_id,payload,document_id=document_id,actor=actor,request_scope=request_scope)
+        return self._native_handle_supplier_financial_document_patch_request(shipment_id,document_id,payload)
+
+    def handle_supplier_financial_document_confirm_import_request(self, shipment_id, document_id, *, selected_operation_ids=None,expected_source_sha256=None,expected_target_revision=None,operator_payload=None,actor='',request_scope='local_operator'):
+        if operator_payload and operator_payload.get('request_id'):
+            return self._execute_supplier_financial('confirm_import',shipment_id,operator_payload,document_id=document_id,actor=actor,request_scope=request_scope)
+        return self._native_handle_supplier_financial_document_confirm_import_request(shipment_id,document_id,selected_operation_ids=selected_operation_ids,expected_source_sha256=expected_source_sha256,expected_target_revision=expected_target_revision)
+
     def handle_supplier_financial_documents_confirm_upload_request(
         self,
         shipment_id: str,
         payload: Mapping[str, Any],
+        *, actor: str = '', request_scope: str = 'local_operator',
     ) -> dict[str, Any]:
+        if payload.get('request_id'):
+            return self._execute_supplier_financial('confirm_upload', shipment_id, payload, actor=actor, request_scope=request_scope)
         with self._supplier_confirmation_lock:
             return self._handle_supplier_financial_documents_confirm_upload_request(
                 shipment_id,
@@ -6063,7 +6249,7 @@ class RegistryUploadHttpEntrypoint:
             json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
-    def handle_supplier_financial_document_confirm_import_request(
+    def _native_handle_supplier_financial_document_confirm_import_request(
         self,
         shipment_id: str,
         document_id: str,
@@ -6101,6 +6287,9 @@ class RegistryUploadHttpEntrypoint:
         )
         payload.pop("cny_fee_rows_for_ledger", None)
         payload.pop("cny_ledger_replay_required", None)
+        from packages.application.operator_supplier_financial import active
+        if active() is not None:
+            return payload
         replay_outcome: dict[str, Any] = {}
         try:
             # The source transaction owns the entire statement continuation.
@@ -6263,7 +6452,7 @@ class RegistryUploadHttpEntrypoint:
     def handle_supplier_financial_document_detail_request(self, shipment_id: str, document_id: str) -> dict[str, Any]:
         return self.supplier_financial_documents_block.get_document(shipment_id, document_id)
 
-    def handle_supplier_financial_document_patch_request(
+    def _native_handle_supplier_financial_document_patch_request(
         self,
         shipment_id: str,
         document_id: str,
@@ -6359,8 +6548,10 @@ class RegistryUploadHttpEntrypoint:
         document_id: str,
         confirmation_token: str,
         *,
-        actor: str = "",
+        actor: str = "", operator_payload: Mapping[str, Any] | None = None, request_scope: str = 'local_operator',
     ) -> dict[str, Any]:
+        if operator_payload and operator_payload.get('request_id'):
+            return self._execute_supplier_financial('exclude', shipment_id, operator_payload, document_id=document_id, actor=actor, request_scope=request_scope)
         with self._supplier_confirmation_lock:
             return self._handle_supplier_financial_document_delete_request(
                 shipment_id,
@@ -7519,6 +7710,9 @@ class RegistryUploadHttpEntrypoint:
                 finance_block=self.wb_finance_weekly_block,
                 finance_receipt=dependent['finance_cost_recalculation'],
                 economics_receipt=dependent['economics_publication'], now=self.now_factory())
+            from packages.application.operator_supplier_processing import reconcile as reconcile_supplier_operations
+            supplier_operation_completion = reconcile_supplier_operations(self.runtime,
+                seller_id=getattr(self.wb_finance_weekly_block, "seller_id", "canonical"))
             reconcile_overheads(self.runtime)
             reconcile_operator_documents(self.runtime,request_ids=operator_documents['request_ids'],
                 finance_receipt=dict(dependent.get('finance_cost_recalculation') or {}),
@@ -7552,6 +7746,7 @@ class RegistryUploadHttpEntrypoint:
                 "planning_inventory_readback": planning_inventory_readback,
                 "proxy_targeted_recalculation": proxy_recalculation,
                 "wb_finance_cost_recalculation": finance_cost_recalculation,
+                "supplier_operation_completion": supplier_operation_completion,
                 "wb_transit_cost_replays": transit_cost_replays,
                 "functional_economics_publication": {
                     "plan_fingerprint": economics_publication.get("plan_fingerprint"),

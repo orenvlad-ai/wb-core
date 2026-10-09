@@ -635,6 +635,203 @@
       "commands": [["python3", "apps/sheet_vitrina_v1_buyout_confirmation_recovery_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
+    "operator_supplier_acceptance": {
+      "patterns": [
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/operator_operations.py",
+        "packages/application/operator_supplier_journal.py",
+        "packages/application/operator_supplier_shipments.py",
+        "packages/application/operator_supplier_factual_dates.py",
+        "packages/application/operator_supplier_processing.py",
+        "packages/application/operator_supplier_cost_proof.py",
+        "packages/adapters/templates/sheet_vitrina_v1_supplier*"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/operator_supplier_shipments_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_shipments_http_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_shipments_browser_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_factual_dates_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_factual_dates_browser_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_processing_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_processing_cohort_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_journal_http_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "pypdf==6.4.1"
+      ]
+    },
+    "operator_supplier_financial": {
+      "patterns": [
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/operator_operations.py",
+        "packages/application/operator_supplier_journal.py",
+        "packages/application/operator_supplier_financial.py",
+        "packages/application/cny_ledger.py",
+        "packages/application/supplier_financial_documents.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/operator_supplier_financial_native_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_financial_processing_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_financial_http_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_financial_journal_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_financial_browser_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "pypdf==6.4.1"
+      ]
+    },
+    "operator_supplier_history": {
+      "patterns": [
+        "packages/application/operator_supplier_history*.py",
+        "packages/application/operator_supplier_cost_proof.py",
+        "packages/application/operator_supplier_processing.py",
+        "packages/application/historical_dated_inputs.py",
+        "packages/application/owned_history*.py",
+        "packages/application/fbs_accounting_historical_stages.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "apps/web_vitrina_history_candidate_build.py",
+        "apps/web_vitrina_owned_history_worker.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/operator_supplier_history_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_history_sources_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_history_cycle_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "pypdf==6.4.1"
+      ]
+    },
+    "warehouse_ff_cost_fold": {
+      "patterns": [
+        "packages/application/warehouse_functional.py",
+        "apps/fixtures/warehouse_ff_fold_a46d0dad.json"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/warehouse_ff_cost_fold_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/warehouse_functional_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "pypdf==6.4.1"
+      ]
+    },
+    "supplier_receipt_component": {
+      "patterns": [
+        "packages/adapters/templates/sheet_vitrina_v1_operator_acceptance.js"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/operator_acceptance_component_smoke.py"
+        ]
+      ],
+      "pip": [
+        "playwright==1.58.0"
+      ]
+    },
+    "supplier_release_scope": {
+      "patterns": [
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/operator_operations.py",
+        "packages/application/operator_supplier_journal.py",
+        "packages/application/operator_supplier*.py",
+        "packages/application/historical_dated_inputs.py",
+        "packages/application/owned_history*.py",
+        "apps/web_vitrina*history*.py",
+        "packages/adapters/templates/sheet_vitrina_v1_supplier*"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/operator_supplier_release_scope_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "pypdf==6.4.1"
+      ]
+    },
+    "historical_dated_inputs": {
+      "patterns": [
+        "packages/application/historical_dated_inputs.py",
+        "packages/application/operator_supplier_history.py",
+        "packages/application/operator_supplier_history_candidate.py",
+        "apps/fixtures/historical_dated_inputs_67138346.json"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/historical_dated_inputs_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "pypdf==6.4.1"
+      ]
+    },
     "supplier_source_operations": {
       "patterns": [
         "apps/supplier_confirmation_flows_smoke.py",

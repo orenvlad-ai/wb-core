@@ -528,8 +528,17 @@ class CnyLedgerBlock:
 
         try:
             with heavy_admitted(self.runtime.runtime_dir, operation="cny-preparation"):
-                self._sync_supplier_payment_documents_from_financial_documents(now=self.timestamp_factory())
+                from packages.application.operator_supplier_financial import active
+                operator_action = active()
+                if operator_action is None:
+                    self._sync_supplier_payment_documents_from_financial_documents(now=self.timestamp_factory())
                 ensure_account_request(self.runtime)
+                if operator_action is not None:
+                    from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+                    with warehouse_functional_write_lock(self.runtime.runtime_dir, timeout_seconds=45):
+                        result = self._replay_ledger(reason=reason, core_only=True)
+                    operator_action['core_done'] = bool(result.get('readback_confirmed'))
+                    return result
                 return drain_cny_preparation_intents(self.runtime, block=self, reason=reason)
         except (HeavyAdmissionBusy, MaintenanceAdmissionBlocked) as exc:
             request = read_account_request(self.runtime)
@@ -541,8 +550,10 @@ class CnyLedgerBlock:
             return {"status": "pending", "operation_applied": True, "durable_saved": True,
                     "readback_confirmed": False, "error": str(exc).replace("\n", " ")[:500]}
 
-    def _replay_ledger(self, *, reason: str = "manual") -> dict[str, Any]:
+    def _replay_ledger(self, *, reason: str = "manual", core_only: bool = False) -> dict[str, Any]:
         now = self.timestamp_factory()
+        from packages.application.cny_preparation_intents import read_account_request
+        operator_core_request = read_account_request(self.runtime)
         from packages.application.own_product_capital import OwnProductCapitalBlock
 
         capital = OwnProductCapitalBlock(
@@ -551,7 +562,7 @@ class CnyLedgerBlock:
         )
         for item in self.runtime.list_cny_documents():
             if (
-                str(item.get("document_type") or "") == CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
+                not core_only and str(item.get("document_type") or "") == CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
                 and str(item.get("status") or "") == CNY_DOCUMENT_STATUS_EXCLUDED
             ):
                 capital.remove_supplier_payment(
@@ -714,7 +725,8 @@ class CnyLedgerBlock:
                 op["updated_at"] = str(existing.get("updated_at") or op.get("updated_at") or "")
             posted_operations.append(op)
 
-        self._reconcile_changed_capital_operations(existing_operations, posted_operations)
+        if not core_only:
+            self._reconcile_changed_capital_operations(existing_operations, posted_operations)
         self.runtime.replace_cny_ledger_operations(posted_operations)
         order_updates = self._build_order_updates(order_accumulator, calculated_at=now)
         self.runtime.update_supplier_shipments_cny_calculations(order_updates)
@@ -740,6 +752,16 @@ class CnyLedgerBlock:
         derived_error = ""
         own_capital_diagnostics: list[dict[str, Any]] = []
         try:
+            from packages.application.operator_supplier_financial import retain_native_core
+            retained = retain_native_core(self.runtime, request=operator_core_request, operations=posted_operations, replay_state=replay_state) if core_readback.get("confirmed") else False
+            if core_only:
+                # Financial rows and balance above are the SAME native replay.
+                # Existing CNY source intent stays pending; the worker owns
+                # capital/cost afterimages and its actual delivery CAS.
+                return {"contract_name": CNY_LEDGER_CONTRACT_NAME, "status": "ok", "replay": replay_state,
+                        "summary": _ledger_summary(documents, posted_operations, replay_state),
+                        "operation_applied": True, "readback_confirmed": bool(core_readback.get("confirmed")),
+                        "cost_preparation_pending": True, "operator_core_retained": retained}
             own_capital_diagnostics = self._sync_own_product_capital_payments(
                 posted_operations,
                 recalculate=False,
@@ -1348,41 +1370,7 @@ class CnyLedgerBlock:
             natural_key = f"{CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT}:financial:{document_id}"
             if self.runtime.load_cny_document_by_natural_key(natural_key) is not None:
                 continue
-            operation_datetime, operation_date = _operation_time_fields(normalized)
-            document = {
-                "document_id": "cnydoc_" + uuid4().hex,
-                "document_type": CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
-                "source": CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
-                "source_order_id": source_order_id,
-                "context_order_id": source_order_id,
-                "linked_financial_document_id": document_id,
-                "original_filename": financial_document.get("original_filename") or "",
-                "stored_file_path": financial_document.get("stored_file_path") or "",
-                "file_content_type": financial_document.get("file_content_type") or CNY_LEDGER_CONTENT_TYPE,
-                "file_sha256": financial_document.get("file_sha256") or "",
-                "natural_key": natural_key,
-                "uploaded_at": financial_document.get("uploaded_at") or now,
-                "created_at": financial_document.get("uploaded_at") or now,
-                "updated_at": now,
-                "operation_date": operation_date,
-                "operation_datetime": operation_datetime,
-                "status": (
-                    CNY_DOCUMENT_STATUS_POSTED
-                    if str(financial_document.get("parse_status") or "")
-                    == FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED
-                    else CNY_DOCUMENT_STATUS_EXCLUDED
-                ),
-                "document_number": normalized.get("document_number") or financial_document.get("document_number") or "",
-                "currency": "CNY",
-                "rub_amount": "",
-                "cny_amount": _decimal_to_storage(_parse_decimal(normalized.get("transfer_amount") or financial_document.get("total_amount"))),
-                "bank_rate": "",
-                "parsed_payload": {**normalized, "document_type": CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT},
-                "raw_parse": dict(financial_document.get("raw_parse") or {}),
-                "parser_version": CNY_LEDGER_PARSER_VERSION,
-                "warnings": _string_list(financial_document.get("warnings")),
-                "errors": _string_list(financial_document.get("errors")),
-            }
+            document = supplier_payment_document_from_financial_document(financial_document, now=now)
             self.runtime.save_cny_document(document)
 
     def _build_order_updates(
@@ -2138,3 +2126,47 @@ def _path_is_relative_to(path: Path, parent: Path) -> bool:
 
 def _default_timestamp_factory() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def supplier_payment_document_from_financial_document(financial_document, *, now):
+    """Native companion builder shared by source transaction and replay recovery."""
+    normalized = dict(financial_document.get("normalized_parse") or {})
+    source_order_id = str(financial_document.get("supplier_order_id") or "").strip()
+    document_id = str(financial_document.get("document_id") or "").strip()
+    natural_key = f"{CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT}:financial:{document_id}"
+    operation_datetime, operation_date = _operation_time_fields(normalized)
+    document = {
+        "document_id": "cnydoc_" + uuid4().hex,
+        "document_type": CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT,
+        "source": CNY_DOCUMENT_SOURCE_SUPPLIER_ORDER,
+        "source_order_id": source_order_id,
+        "context_order_id": source_order_id,
+        "linked_financial_document_id": document_id,
+        "original_filename": financial_document.get("original_filename") or "",
+        "stored_file_path": financial_document.get("stored_file_path") or "",
+        "file_content_type": financial_document.get("file_content_type") or CNY_LEDGER_CONTENT_TYPE,
+        "file_sha256": financial_document.get("file_sha256") or "",
+        "natural_key": natural_key,
+        "uploaded_at": financial_document.get("uploaded_at") or now,
+        "created_at": financial_document.get("uploaded_at") or now,
+        "updated_at": now,
+        "operation_date": operation_date,
+        "operation_datetime": operation_datetime,
+        "status": (
+            CNY_DOCUMENT_STATUS_POSTED
+            if str(financial_document.get("parse_status") or "")
+            == FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED
+            else CNY_DOCUMENT_STATUS_EXCLUDED
+        ),
+        "document_number": normalized.get("document_number") or financial_document.get("document_number") or "",
+        "currency": "CNY",
+        "rub_amount": "",
+        "cny_amount": _decimal_to_storage(_parse_decimal(normalized.get("transfer_amount") or financial_document.get("total_amount"))),
+        "bank_rate": "",
+        "parsed_payload": {**normalized, "document_type": CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT},
+        "raw_parse": dict(financial_document.get("raw_parse") or {}),
+        "parser_version": CNY_LEDGER_PARSER_VERSION,
+        "warnings": _string_list(financial_document.get("warnings")),
+        "errors": _string_list(financial_document.get("errors")),
+    }
+    return document

@@ -355,6 +355,7 @@ class SupplierShipmentsBlock:
         payload: Mapping[str, Any],
         *,
         allow_unassigned_target_facility: bool = False,
+        operator_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if "historical_status_exception" in payload:
             raise ValueError(
@@ -485,9 +486,9 @@ class SupplierShipmentsBlock:
                 "contract_document_id": str(contracts[0]["document_id"]),
                 "linked_by": "system", "source": TRADE_DOCUMENT_LINK_SOURCE_SUPPLIER_SHIPMENT_AUTO,
             }
-        self.runtime.save_supplier_shipment(header=header, lines=lines, preparation_actions=actions)
-        targeted = self._enqueue_warehouse_recalculation({"header": header})
-        result = self._saved_shipment_payload(header, lines)
+        self.runtime.save_supplier_shipment(header=header, lines=lines, preparation_actions=actions, operator_request=operator_request)
+        targeted = self._enqueue_warehouse_recalculation({"header": header}, defer=bool(operator_request))
+        result = self._saved_shipment_payload(header, lines, source_only=bool(operator_request))
         result["warehouse_targeted_recalculation"] = targeted
         result["operation_applied"] = True
         return result
@@ -547,6 +548,7 @@ class SupplierShipmentsBlock:
         self,
         shipment_id: str,
         payload: Mapping[str, Any],
+        *, operator_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
@@ -749,9 +751,9 @@ class SupplierShipmentsBlock:
                 "contract_document_id": contract_id,
                 "linked_by": "operator", "source": TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
             }
-        self.runtime.save_supplier_shipment(header=header, lines=lines, preparation_actions=actions)
-        targeted = self._enqueue_warehouse_recalculation({"header": header}) if warehouse_affecting_changed or actions else None
-        result = self._saved_shipment_payload(header, lines)
+        self.runtime.save_supplier_shipment(header=header, lines=lines, preparation_actions=actions, operator_request=operator_request)
+        targeted = self._enqueue_warehouse_recalculation({"header": header}, defer=bool(operator_request)) if warehouse_affecting_changed or actions else None
+        result = self._saved_shipment_payload(header, lines, source_only=bool(operator_request))
         if targeted is not None:
             result["warehouse_targeted_recalculation"] = targeted
         result["operation_applied"] = True
@@ -1070,7 +1072,7 @@ class SupplierShipmentsBlock:
             or "contract_document_id" in payload
         )
 
-    def update_expenses_complete(self, shipment_id: str, expenses_complete: Any) -> dict[str, Any]:
+    def update_expenses_complete(self, shipment_id: str, expenses_complete: Any, *, operator_request: dict[str, Any] | None = None) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
@@ -1080,11 +1082,12 @@ class SupplierShipmentsBlock:
             shipment_id=shipment_id,
             expenses_complete=normalized,
             updated_at=self.timestamp_factory(),
+            operator_request=operator_request,
         )
         if not updated:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
-        result = self._saved_shipment_payload({**existing["header"], "expenses_complete": normalized}, list(existing.get("lines") or []))
-        result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
+        result = self._saved_shipment_payload({**existing["header"], "expenses_complete": normalized}, list(existing.get("lines") or []), source_only=bool(operator_request))
+        result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result, defer=bool(operator_request))
         return result
 
     def _materialize_ff_cost_layer(self, shipment_id: str) -> None:
@@ -1097,13 +1100,25 @@ class SupplierShipmentsBlock:
         cost_block.materialize_supplier_ff_cost_layer(shipment_id)
         cost_block.materialize_wb_supply_cost_layers()
 
-    def _enqueue_warehouse_recalculation(self, shipment: Mapping[str, Any]) -> dict[str, Any]:
-        from packages.application.supplier_preparation_intents import resume_supplier_preparation
-
+    def _enqueue_warehouse_recalculation(self, shipment: Mapping[str, Any], *, defer: bool = False) -> dict[str, Any]:
+        from contextlib import closing
+        from packages.application import operator_supplier_shipments as receipts
+        from packages.application import supplier_preparation_intents as intents
         header = dict(shipment.get("header") or shipment)
-        return resume_supplier_preparation(self.runtime, str(header.get("shipment_id") or ""))
+        if not defer:
+            # Native owner/migration callers retain their existing synchronous
+            # contract; operator HTTP always supplies an acknowledgement context.
+            return intents.resume_supplier_preparation(self.runtime, str(header.get("shipment_id") or ""))
+        with closing(receipts.readonly(self.runtime.db_path)) as conn:
+            row = conn.execute(f"SELECT * FROM {intents.TABLE} WHERE shipment_id=?", (str(header.get("shipment_id") or ""),)).fetchone() if receipts._exists(conn, intents.TABLE) else None
+            if row:
+                return {"status": "pending", "durable_saved": True, "shipment_id": row["shipment_id"],
+                        "preparation_revision": row["revision"], "native_state": row["status"]}
+        return {"status": "pending", "durable_saved": True, "reason": "source_has_no_preparation_intent"}
 
-    def _saved_shipment_payload(self, header: Mapping[str, Any], lines: list[Mapping[str, Any]]) -> dict[str, Any]:
+    def _saved_shipment_payload(self, header: Mapping[str, Any], lines: list[Mapping[str, Any]], *, source_only: bool = False) -> dict[str, Any]:
+        if source_only:
+            return _detail_payload({"header": dict(header), "lines": [dict(line) for line in lines]})
         try:
             return self.get_shipment(str(header["shipment_id"]))
         except Exception as exc:
@@ -1133,10 +1148,11 @@ class SupplierShipmentsBlock:
             timestamp_factory=self.timestamp_factory,
         ).record_wb_supply_debits(self.runtime.list_wb_supplies_cache_records())
 
-    def recheck_shipment_prices(self, shipment_id: str, *, actor: str = "", context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def recheck_shipment_prices(self, shipment_id: str, *, actor: str = "", context: Mapping[str, Any] | None = None, operator_request: dict[str, Any] | None = None) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
+        _assert_supplier_shipment_active(existing, shipment_id=shipment_id)
         now = self.timestamp_factory()
         header = dict(existing["header"])
         lines = _apply_price_conformity_checks(
@@ -1149,8 +1165,8 @@ class SupplierShipmentsBlock:
             default_currency=str(header.get("currency") or ""),
         )
         header["updated_at"] = now
-        self.runtime.save_supplier_shipment(header=header, lines=lines)
-        return self.get_shipment(shipment_id)
+        self.runtime.save_supplier_shipment(header=header, lines=lines, operator_request=operator_request)
+        return self._saved_shipment_payload(header, lines, source_only=bool(operator_request))
 
     def backfill_price_conformity_checks(self) -> dict[str, Any]:
         shipments = self.runtime.list_supplier_shipments()
@@ -1213,7 +1229,7 @@ class SupplierShipmentsBlock:
             "missing_count": missing,
         }
 
-    def delete_shipment(self, shipment_id: str) -> dict[str, Any]:
+    def delete_shipment(self, shipment_id: str, *, operator_request: dict[str, Any] | None = None) -> dict[str, Any]:
         detail = self.runtime.load_supplier_shipment(shipment_id)
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
@@ -1222,6 +1238,8 @@ class SupplierShipmentsBlock:
         archive_event = self.runtime.archive_supplier_shipment(
             shipment_id=shipment_id,
             archived_at=archived_at,
+            actor=operator_request["actor"] if operator_request else "operator",
+            operator_request=operator_request,
         )
         if archive_event is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
@@ -1235,7 +1253,7 @@ class SupplierShipmentsBlock:
             "archive_event_id": str(archive_event.get("event_id") or ""),
         }
         targeted = self._enqueue_warehouse_recalculation(
-            {"header": archived_header, "lines": list(detail.get("lines") or [])}
+            {"header": archived_header, "lines": list(detail.get("lines") or [])}, defer=bool(operator_request)
         )
         return {
             "contract_name": "sheet_vitrina_v1_supplier_shipments",
@@ -1251,7 +1269,7 @@ class SupplierShipmentsBlock:
             "warehouse_targeted_recalculation": targeted,
         }
 
-    def rematch_shipment(self, shipment_id: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def rematch_shipment(self, shipment_id: str, payload: Mapping[str, Any] | None = None, *, operator_request: dict[str, Any] | None = None) -> dict[str, Any]:
         existing = self.runtime.load_supplier_shipment(shipment_id)
         if existing is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
@@ -1263,7 +1281,11 @@ class SupplierShipmentsBlock:
             if item.get("line_type") == LINE_TYPE_PRODUCT and not str(item.get("barcode") or "").strip()
         ]
         if missing_barcode_lines:
-            result = self.get_shipment(shipment_id)
+            if operator_request:
+                self.runtime.save_supplier_shipment(header=existing["header"], lines=list(existing.get("lines") or []), operator_request=operator_request)
+                result = self._saved_shipment_payload(existing["header"], list(existing.get("lines") or []), source_only=True)
+            else:
+                result = self.get_shipment(shipment_id)
             result["rematch_diagnostics"] = {
                 "status": "skipped",
                 "reason": "legacy_product_barcode_missing",
@@ -1326,10 +1348,10 @@ class SupplierShipmentsBlock:
         }
         if rematch_changed:
             header["expenses_complete"] = False
-        self.runtime.save_supplier_shipment(header=header, lines=lines)
-        result = self._saved_shipment_payload(header, lines)
+        self.runtime.save_supplier_shipment(header=header, lines=lines, operator_request=operator_request)
+        result = self._saved_shipment_payload(header, lines, source_only=bool(operator_request))
         if rematch_changed:
-            result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
+            result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result, defer=bool(operator_request))
         return result
 
     def download_invoice(self, shipment_id: str) -> tuple[bytes, str, str]:
