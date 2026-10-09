@@ -477,7 +477,7 @@ def _test_heavy_job_lock_does_not_block_interactive_writer() -> None:
 
 
 def _test_http_manual_snapshot_publication_order() -> None:
-    from packages.application.warehouse_update_journal import _require_phase
+    from packages.application.warehouse_update_journal import WarehouseUpdateJournal, _require_phase
     for status in ("published", "not_active", "failed"):
         events = []
         def action(name, result):
@@ -532,6 +532,8 @@ def _test_http_manual_snapshot_publication_order() -> None:
              patch("packages.application.fbs_accounting_runtime.current_publication_receipt", return_value={"status":"not_active"}):
             entry.runtime.runtime_dir = Path(temporary)
             entry.runtime.db_path = Path(temporary) / "registry.sqlite3"
+            # Native construction owns schema creation before any read-only drain.
+            WarehouseUpdateJournal(db_path=entry.runtime.db_path, runtime_dir=entry.runtime.runtime_dir)
             if status == "failed":
                 try:
                     entry.handle_warehouse_manual_sync_request()

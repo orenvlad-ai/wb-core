@@ -3435,21 +3435,25 @@ class RegistryUploadHttpEntrypoint:
         from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
         owner = RegistryUploadHttpEntrypoint._cycle_owned_worker_identity(self, receipt)
         self._cycle_verify_ready(ready)
-        supplier_receipt = None
+        policy_receipt = supplier_receipt = None
         if historical_receipt is None and hasattr(self.runtime, 'db_path'):
+            from packages.application.operator_policy_history import pending as pending_policy_history
             from packages.application.operator_supplier_history import pending as pending_supplier_history
+            # One native dated publication owner per pass: FF, policy, supplier.
             with warehouse_functional_job_lock(self.runtime.runtime_dir):
-                supplier_receipt = pending_supplier_history(self.runtime, now=self.now_factory())
-        supplier_options = {}
-        dated_receipt = supplier_receipt
+                policy_receipt = pending_policy_history(self.runtime, now=self.now_factory())
+                if policy_receipt is None:
+                    supplier_receipt = pending_supplier_history(self.runtime, now=self.now_factory())
+        dated_options = {}
+        dated_receipt = policy_receipt if policy_receipt is not None else supplier_receipt
         if dated_receipt is not None:
             from datetime import timedelta
             from packages.business_time import current_business_date_iso
             yesterday = (datetime.fromisoformat(current_business_date_iso(self.now_factory())) - timedelta(days=1)).date().isoformat()
             backfill_dates = tuple(sorted(set(backfill_dates) | {day for day in dated_receipt.publication_dates() if day < yesterday}))
-            supplier_options['supplier_receipt'] = dated_receipt
+            dated_options['policy_receipt' if policy_receipt is not None else 'supplier_receipt'] = dated_receipt
         proof = build_owned_cycle_history(runtime=self.runtime, config=config, cycle_owner=owner, now=self.now_factory(),
-            backfill_dates=backfill_dates, closed_receipt=closed_receipt, historical_receipt=historical_receipt, **supplier_options)
+            backfill_dates=backfill_dates, closed_receipt=closed_receipt, historical_receipt=historical_receipt, **dated_options)
         if dated_receipt is None:
             self._cycle_verify_ready(ready)
         else:
@@ -4644,10 +4648,7 @@ class RegistryUploadHttpEntrypoint:
         *,
         user_key: str,
     ) -> dict[str, Any]:
-        return self.sku_management_block.save_warehouse_exclusion_settings(
-            user_key=user_key,
-            payload=payload,
-        )
+        return self._accept_policy_command('wb_incident_policy',payload,actor=user_key)
 
     def handle_factory_order_template_request(self, dataset_type: str) -> tuple[bytes, str]:
         return self.factory_order_supply_block.build_template(dataset_type)
@@ -7854,6 +7855,8 @@ class RegistryUploadHttpEntrypoint:
             overhead_completion = None
             def dependent_replay() -> dict[str, Any]:
                 nonlocal overhead_completion
+                from packages.application.operator_policy import drain as drain_policy_commands
+                policy_operations=drain_policy_commands(self)
                 proxy_recalculation = (
                     self.calculation_parameters_block.process_pending_targeted_recalculations(
                         verified_backup=economics_backup,
@@ -7889,6 +7892,7 @@ class RegistryUploadHttpEntrypoint:
                     )
                 )
                 return {
+                    "policy_operations": policy_operations,
                     "proxy_recalculation": proxy_recalculation,
                     "economics_publication": economics_publication,
                     "finance_cost_recalculation": finance_cost_recalculation,
@@ -8191,11 +8195,7 @@ class RegistryUploadHttpEntrypoint:
     def handle_calculation_parameters_save_request(
         self, payload: Mapping[str, Any], *, actor: str
     ) -> dict[str, Any]:
-        return self.calculation_parameters_block.create_version(
-            payload,
-            preview_fingerprint=str(payload.get("preview_fingerprint") or ""),
-            created_by=actor,
-        )
+        return self._accept_policy_command('legacy_proxy',payload,actor=actor)
 
     def handle_proxy_v4_parameters_request(self) -> dict[str, Any]:
         return self.proxy_v4_parameters_block.get_payload()
@@ -8208,11 +8208,22 @@ class RegistryUploadHttpEntrypoint:
     def handle_proxy_v4_parameters_save_request(
         self, payload: Mapping[str, Any], *, actor: str
     ) -> dict[str, Any]:
-        return self.proxy_v4_parameters_block.create_tax_version(
-            payload,
-            preview_fingerprint=str(payload.get("preview_fingerprint") or ""),
-            created_by=actor,
-        )
+        return self._accept_policy_command('proxy_v4_tax',payload,actor=actor)
+
+    def _accept_policy_command(self,kind,payload,*,actor):
+        from uuid import uuid4
+        from packages.application.operator_policy import accept,read_bound
+        identity=str(payload.get('_operator_request_id') or ('oppolicy_'+uuid4().hex))
+        try:return accept(self,kind,payload,actor=actor,operation_id=identity)
+        except Exception:
+            saved=read_bound(self.runtime.db_path,identity,actor=actor,kind=kind,payload=payload)
+            if saved:return {'status':'ok','acceptance':saved}
+            raise
+
+    def handle_policy_operation_request(self,identity,*,actor):
+        from packages.application.operator_policy import read
+        saved=read(self.runtime.db_path,identity,actor=actor)
+        return {'status':'ok','operation':saved} if saved else None
 
     def handle_ff_stock_status_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         query = dict(params or {})

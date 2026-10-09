@@ -277,6 +277,24 @@ class ClosedCompletionTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == 'linux', 'kernel FD supervisor required')
 class CompletionLimitTests(unittest.TestCase):
+    def test_separate_operator_authorities_and_exact_closed_dates_before_spawn(self):
+        from types import SimpleNamespace
+        from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = simple_runtime(directory)
+            before = logical_source_digest(runtime.db_path)
+            with ownership(runtime, Path(directory)/'candidate') as worker, patch.object(supervisor, '_POPEN') as spawn:
+                with self.assertRaisesRegex(HistoryDelegationError, 'multiple_source_authorities'):
+                    worker.complete(NOW, historical_receipt=object(), policy_receipt=object())
+                closed = ClosedBacklog(SimpleNamespace(block=SimpleNamespace(runtime=runtime)))
+                with patch.object(closed, 'publication_dates', return_value=('2026-04-01',)):
+                    with self.assertRaisesRegex(HistoryDelegationError, 'closed_receipt_context_changed'):
+                        worker.complete(NOW, backfill_dates=('2026-04-01', '2026-04-02'), closed_receipt=closed)
+                self.assertFalse(spawn.called)
+                self.assertIsNone(worker._process)
+                self.assertFalse(worker._completion_used)
+            self.assertEqual(logical_source_digest(runtime.db_path), before)
+
     def test_total_deadline_and_invalid_limits_never_spawn(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime=simple_runtime(directory)

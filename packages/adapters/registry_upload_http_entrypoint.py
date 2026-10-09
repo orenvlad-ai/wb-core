@@ -499,6 +499,7 @@ DEFAULT_TRADE_DOCUMENTS_PATH = "/v1/sheet-vitrina-v1/settings/documents"
 DEFAULT_SETTINGS_USERS_PATH = "/v1/sheet-vitrina-v1/settings/users"
 DEFAULT_CALCULATION_PARAMETERS_PATH = "/v1/sheet-vitrina-v1/settings/calculation-parameters"
 DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH = f"{DEFAULT_CALCULATION_PARAMETERS_PATH}/preview"
+DEFAULT_POLICY_OPERATIONS_PATH = '/v1/sheet-vitrina-v1/settings/policy-operations/'
 DEFAULT_PROXY_V4_PARAMETERS_PATH = "/v1/sheet-vitrina-v1/settings/calculation-parameters-v4"
 DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH = f"{DEFAULT_PROXY_V4_PARAMETERS_PATH}/preview"
 DEFAULT_AUTO_UPDATES_PATH = "/v1/sheet-vitrina-v1/settings/auto-updates"
@@ -549,6 +550,7 @@ def _web_vitrina_ui_base_template() -> str:
                              ("/* BUYER_SUPPORT_SCRIPT */", "wb_buyer_support.js")):
         template = template.replace(marker, WEB_VITRINA_UI_TEMPLATE_PATH.with_name(filename).read_text(encoding="utf-8"))
     template=template.replace('<!-- FACILITY_ACCEPTANCE_ASSET -->','<script>'+UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_facility_acceptance.js').read_text(encoding='utf-8')+'</script>')
+    template=template.replace('<!-- OPERATOR_POLICY_ASSET -->','<script>'+UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_operator_policy.js').read_text(encoding='utf-8')+'</script>')
     return _inject_sheet_vitrina_ui_system(template)
 
 
@@ -1023,8 +1025,10 @@ def _build_handler(
             }:
                 if not _ensure_operator_role(self, parsed.path):
                     return
+                body = {}
                 try:
                     body = _load_request_payload(self)
+                    _bind_policy_request_identity(self,body)
                     if parsed.path == DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH:
                         payload = entrypoint.handle_calculation_parameters_preview_request(body)
                     elif parsed.path == DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH:
@@ -1032,18 +1036,18 @@ def _build_handler(
                     elif parsed.path == DEFAULT_PROXY_V4_PARAMETERS_PATH:
                         payload = entrypoint.handle_proxy_v4_parameters_save_request(
                             body,
-                            actor=_current_web_user_config_key(self),
+                            actor=_current_web_user_actor(self),
                         )
                     else:
                         payload = entrypoint.handle_calculation_parameters_save_request(
                             body,
-                            actor=_current_web_user_config_key(self),
+                            actor=_current_web_user_actor(self),
                         )
                 except WarehouseSyncBusyError as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
                     return
                 except ValueError as exc:
-                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, _policy_request_error(entrypoint,body,exc))
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -1677,20 +1681,28 @@ def _build_handler(
             if parsed.path == DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH:
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
+                body = {}
                 try:
                     body = _load_request_payload(self)
+                    _bind_policy_request_identity(self,body)
                     result = entrypoint.handle_wb_warehouse_exclusion_settings_save_request(
                         body,
-                        user_key=_current_web_user_config_key(self),
+                        user_key=_current_web_user_actor(self),
                     )
                 except SkuManagementError as exc:
-                    response_payload = {"error": str(exc)}
+                    response_payload = _policy_request_error(entrypoint,body,exc)
                     response_payload.update(exc.payload)
                     _write_json_response(
                         self,
                         HTTPStatus(exc.http_status),
                         response_payload,
                     )
+                    return
+                except ValueError as exc:
+                    _write_json_response(self,HTTPStatus.UNPROCESSABLE_ENTITY,_policy_request_error(entrypoint,body,exc))
+                    return
+                except Exception:
+                    _write_json_response(self,HTTPStatus.INTERNAL_SERVER_ERROR,{'error':'policy acceptance result unknown; read the same operation'})
                     return
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
@@ -3688,6 +3700,19 @@ def _build_handler(
                 _handle_settings_users_list(self, entrypoint, query=parsed.query)
                 return
 
+            if parsed.path.startswith(DEFAULT_POLICY_OPERATIONS_PATH):
+                parts=parsed.path[len(DEFAULT_POLICY_OPERATIONS_PATH):].split('/')
+                if len(parts)!=2 or parts[0] not in {'legacy_proxy','proxy_v4_tax','wb_incident_policy'}:
+                    _write_json_response(self,HTTPStatus.NOT_FOUND,{'status':'unknown'});return
+                kind,identity=parts
+                guard=_ensure_supply_operator_role if kind=='wb_incident_policy' else _ensure_operator_role
+                if not guard(self,parsed.path):return
+                try:payload=entrypoint.handle_policy_operation_request(identity,actor=_current_web_user_actor(self))
+                except Exception:
+                    _write_json_response(self,HTTPStatus.SERVICE_UNAVAILABLE,{'status':'unknown','error':'policy receipt read unavailable'});return
+                if payload is None or payload['operation']['domain']!=kind:
+                    _write_json_response(self,HTTPStatus.NOT_FOUND,{'status':'unknown'});return
+                _write_json_response(self,HTTPStatus.OK,payload);return
             if parsed.path == DEFAULT_CALCULATION_PARAMETERS_PATH:
                 if not _ensure_operator_role(self, parsed.path):
                     return
@@ -7133,6 +7158,19 @@ class RegistryUploadHttpServer(HTTPServer):
         finally:
             super().server_close()
 
+
+def _bind_policy_request_identity(handler,body):
+    identity=handler.headers.get('X-Operator-Request-ID')
+    if identity:
+        if body.get('_operator_request_id') not in (None,'',identity):raise ValueError('operator_policy_identity_alias_conflict')
+        body['_operator_request_id']=identity
+
+def _policy_request_error(entrypoint,body,error):
+    from packages.application.operator_policy import source_not_saved
+    identity=str(body.get('_operator_request_id') or '')
+    result={'error':str(error)}
+    if identity and source_not_saved(entrypoint.runtime.db_path,identity):result.update(operation_id=identity,source_not_saved=True)
+    return result
 
 def _business_settings_request_error(entrypoint,body):
     from packages.application.operator_business_settings import source_not_saved
@@ -10925,6 +10963,9 @@ def _ensure_cycle_dispatch_access(handler, parsed):
 
 def _required_section_for_path(path: str) -> str:
     normalized = str(path or "").split("?", 1)[0]
+    if normalized.startswith(DEFAULT_POLICY_OPERATIONS_PATH):
+        kind=normalized[len(DEFAULT_POLICY_OPERATIONS_PATH):].split('/',1)[0]
+        return WEB_AUTH_SECTION_SUPPLY if kind=='wb_incident_policy' else WEB_AUTH_SECTION_SETTINGS
     if normalized in {
         DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
         DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH,
@@ -11019,6 +11060,11 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
         domains.update(('plan_report_baseline', 'partner_report_settings'))
     if _role_has_full_operator_access(str(user.get('role') or '').strip()):
         domains.update(('registry_bundle_upload', 'cost_price_upload'))
+    from packages.application.operator_policy import KINDS as POLICY_KINDS, PATH as POLICY_PATH
+    for kind in POLICY_KINDS:
+        native_grant = _user_can_access_path(user, POLICY_PATH + kind + '/')
+        if native_grant:
+            domains.add(kind)
     from packages.application.operator_external_operations import SURFACES
     for domain, (_surface, _label, native_path) in SURFACES.items():
         if _user_can_access_path(user,native_path):domains.add(domain)
@@ -11125,6 +11171,9 @@ def _allowed_roles_for_path(path: str) -> set[str]:
     normalized = str(path or "").split("?", 1)[0]
     full_operator_roles = set(WEB_AUTH_FULL_OPERATOR_ROLES)
     supply_operator_roles = set(WEB_AUTH_SUPPLY_OPERATOR_ROLES)
+    if normalized.startswith(DEFAULT_POLICY_OPERATIONS_PATH):
+        kind=normalized[len(DEFAULT_POLICY_OPERATIONS_PATH):].split('/',1)[0]
+        return supply_operator_roles if kind=='wb_incident_policy' else full_operator_roles
     if normalized == DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
         return supply_operator_roles
     if normalized == DEFAULT_SHEET_OPERATOR_UI_PATH:
@@ -11653,6 +11702,8 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "sku_groups_path": DEFAULT_SKU_GROUPS_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
         "settings_users_path": DEFAULT_SETTINGS_USERS_PATH,
+        "policy_operations_path": DEFAULT_POLICY_OPERATIONS_PATH,
+        "operator_policy_actor_scope": operator_actor_scope,
         "calculation_parameters_path": DEFAULT_CALCULATION_PARAMETERS_PATH,
         "proxy_v4_parameters_path": DEFAULT_PROXY_V4_PARAMETERS_PATH,
         "auto_updates_path": DEFAULT_AUTO_UPDATES_PATH,
@@ -11695,6 +11746,7 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
     template = template.replace("</head>", "<script>\n" + asset + "\n</script>\n</head>", 1)
     driver=(SETTINGS_UI_TEMPLATE_PATH.parent / "sheet_vitrina_v1_operator_nomenclature.js").read_text(encoding="utf-8")
     template=template.replace("<!-- operator-nomenclature-driver -->","<script>"+driver+"</script>")
+    template=template.replace('<!-- OPERATOR_POLICY_ASSET -->','<script>'+UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_operator_policy.js').read_text(encoding='utf-8')+'</script>')
     return (
         template.replace("__SHEET_VITRINA_V1_SETTINGS_BODY_CLASS__", "is-embedded" if embedded else "")
         .replace(
@@ -11971,6 +12023,8 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "warehouses_path": DEFAULT_WAREHOUSES_PATH,
         "wb_incident_policy_options_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH,
         "wb_incident_policy_settings_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_SETTINGS_PATH,
+        "policy_operations_path": DEFAULT_POLICY_OPERATIONS_PATH,
+        "operator_policy_actor_scope": user_config_key,
         "refresh_path": refresh_path,
         "group_refresh_path": DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
         "health_path": DEFAULT_SHEET_WEB_VITRINA_HEALTH_PATH,

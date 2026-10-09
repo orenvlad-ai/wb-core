@@ -777,9 +777,15 @@ class ProxyV4ParametersBlock:
         *,
         preview_fingerprint: str,
         created_by: str,
+        operator_command: Any = None,
     ) -> dict[str, Any]:
         with warehouse_sync_lock(self.runtime.runtime_dir, blocking=False):
-            preview = self.preview_tax_version(payload)
+            if operator_command is None:
+                preview = self.preview_tax_version(payload)
+            else:
+                preview = operator_command.source['preview']
+                if _bounded_rate(payload.get('tax_rate'),'tax_rate')*Decimal('100') != _decimal(preview['after_tax_rate_pct']):
+                    raise ValueError('operator_policy_authorized_tax_changed')
             if str(preview_fingerprint or "") != str(preview["preview_fingerprint"]):
                 raise ValueError("Proxy V4 tax or current version changed after preview")
             if not preview["changed"]:
@@ -802,7 +808,10 @@ class ProxyV4ParametersBlock:
                 finance_net_revenue_weight=current.finance_net_revenue_weight,
                 version_kind="operator_tax",
                 created_by=created_by,
+                operator_command=operator_command,
             )
+        if operator_command is not None:
+            return {"status":"source_saved","created_version_id":created["version_id"],"idempotent":False}
         return {
             **self.get_payload(),
             "created_version_id": created["version_id"],
@@ -972,10 +981,14 @@ class ProxyV4ParametersBlock:
         finance_net_revenue_weight: Decimal,
         version_kind: str,
         created_by: str,
+        operator_command: Any = None,
     ) -> dict[str, Any]:
         now = _timestamp(self.now_factory())
         with _connect(self.runtime.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if operator_command is not None:
+                from packages.application.operator_policy import before_native
+                before_native(conn,operator_command)
             revision = int(
                 conn.execute(
                     "SELECT COALESCE(MAX(revision),0)+1 FROM sheet_vitrina_v1_proxy_v4_parameter_versions WHERE block_key=?",
@@ -1025,6 +1038,9 @@ class ProxyV4ParametersBlock:
                     now,
                 ),
             )
+            if operator_command is not None:
+                from packages.application.operator_policy import bind_native
+                bind_native(conn,operator_command,identity=version_id,effective_date=effective_date)
             conn.commit()
         return {"version_id": version_id, "revision": revision, "fingerprint": fingerprint}
 

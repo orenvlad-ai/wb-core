@@ -283,12 +283,14 @@ class CalculationParametersBlock:
         *,
         preview_fingerprint: str,
         created_by: str,
+        operator_command: Any = None,
     ) -> dict[str, Any]:
         with warehouse_sync_lock(self.runtime.runtime_dir, blocking=False):
             return self._create_version_locked(
                 payload,
                 preview_fingerprint=preview_fingerprint,
                 created_by=created_by,
+                operator_command=operator_command,
             )
 
     def _create_version_locked(
@@ -297,6 +299,7 @@ class CalculationParametersBlock:
         *,
         preview_fingerprint: str,
         created_by: str,
+        operator_command: Any = None,
     ) -> dict[str, Any]:
         with _connect(self.runtime.db_path) as preflight_conn:
             initial = preflight_conn.execute(
@@ -387,6 +390,9 @@ class CalculationParametersBlock:
             with _connect(self.runtime.db_path) as conn:
                 ensure_calculation_parameters_schema(conn)
                 conn.execute("BEGIN IMMEDIATE")
+                if operator_command is not None:
+                    from packages.application.operator_policy import before_native
+                    before_native(conn,operator_command)
                 locked_revision = int(
                     conn.execute(
                         "SELECT COALESCE(MAX(revision),0)+1 FROM sheet_vitrina_v1_calculation_parameter_versions WHERE block_key=?",
@@ -424,6 +430,10 @@ class CalculationParametersBlock:
                     """,
                     (request_id, parameters.effective_date, version_id, "pending", now),
                 )
+                if operator_command is not None:
+                    from packages.application.operator_policy import bind_native
+                    bind_native(conn,operator_command,identity=version_id,effective_date=parameters.effective_date,
+                        queue_id=request_id,recovery_operation_id=str(recovery["operation_id"]))
                 conn.commit()
         except Exception as exc:
             recovery_registry.fail_recoverable(
@@ -432,6 +442,9 @@ class CalculationParametersBlock:
                 next_action="retry_or_rollback_calculation_parameter_update",
             )
             raise
+        if operator_command is not None:
+            return {"status":"source_saved","created_version_id":version_id,"diff":preview["diff"],
+                "targeted_recalculation":{"status":"pending","request_count":1},"recovery_policy":recovery}
         recalculation = self.process_pending_targeted_recalculations(
             verified_backup=economics_backup,
         )

@@ -2,7 +2,7 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:fa1c1760982f82b991b7497ffaa10f361d7a85d4b53b28b4663380ea7eed563c",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:64d31a1e11b11e0e95a557e1631170d6d9c1896a92594bbfb953d0e4dec6cfdc",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
     "packages/application/sheet_vitrina_v1_web_vitrina.py": "5c5530e35e1b87520a0b536855d37e821e11c6029b12cd09d5a900688d986a07",
@@ -16,8 +16,8 @@
     "packages/application/ff_pool_fbs_lifecycle.py": "42ea8eb968dd5148b7e6edde777ff83e0af0371e53a43a81921942cba90ff63e",
     "packages/application/sheet_vitrina_v1_buyout_percent.py": "cfa65410f9a9cb41555bcb03967c1d8e62c7dfa3537eec258b40e022c1099628",
     "packages/application/sheet_vitrina_v1_breakglass_last_good.py": "0bf46af67f5174e799501e353f8af8bb6cd57d4b97af44fdbab6237eb6d44f2f",
-    "packages/application/calculation_parameters.py": "3821cb4e22eaf858772f374cf88d3b8ac1f0159ae69f2d45a60d1d7290c2abcd",
-    "packages/application/calculation_parameters_v4.py": "d535ca85a5eb1ca4ea64f02516c9e71ebb0393ccc9d5c7c1a16dc9a53cb1c640",
+    "packages/application/calculation_parameters.py": "0e9de75f078f3a2d7a6c598de0b075836535dac8f2e61681e12fd52b52fd6a15",
+    "packages/application/calculation_parameters_v4.py": "e0aacdbc72406fa288692afcd6b3e4e698be765043fb6759998607cfdac8dbe3",
     "packages/application/fbs_snapshot_cost.py": "8f438e1f541d91097c6e26cbbb071311089305fe46e587e1e6b059af594204be",
     "packages/business_time.py": "66abe943518c88683f39d8670f9174cf4b31333ef3ee4f060431c21cb6eb92b2",
     "packages/application/sheet_vitrina_v1_card_rating.py": "da2f7e9f1cd1115bddbfad91cf0609074654f1fd0c0a2f49b0787d925de46cfc",
@@ -31,7 +31,11 @@
     "packages/application/fbs_accounting_historical_history.py": "82b4ed5da762364ccdbdffc4b3950eee8b68d9e92f2850160be4d808a9ff8eaa",
     "packages/application/fbs_accounting_runtime.py": "39adbd155400c517cb7cc43b2095c0accc60f506b3797420c2f903f64e9a6261",
     "packages/application/fbs_inventory_presentation.py": "625cf4378eeb14dcdba11026b0cc0dc5fa2998686e7c60e63fe51e50b965fa27",
-    "packages/application/inventory_quantity.py": "88ad0b3374ca226771ee004fe45f30c34cbd13519353d9893bb1ac967c08bce5"
+    "packages/application/inventory_quantity.py": "88ad0b3374ca226771ee004fe45f30c34cbd13519353d9893bb1ac967c08bce5",
+    "packages/application/operator_policy_history.py": "63aac9fc607bce9319f10ad6f499f90169c5c53be0115e875c9ea63ff4841065",
+    "packages/application/historical_dated_inputs.py": "28fd39c17c21b54903455146bc7984d2907becfaf40721c9c4460747299d91cf",
+    "packages/application/vitrina_incident_rematerialization.py": "7beb9eeb4da162e48681c19c2b4416335088b6636541242a401b23a877b48635",
+    "packages/application/wb_incident_policy.py": "f4aed79b712002dffe39dd2adcb42f7a8574a67762c5e406092af95c23ea4c3d"
   },
   "group_migration_root": "/mnt/wb-core-extra100/web-vitrina-history-groups-candidate",
   "repair_code_hashes": {

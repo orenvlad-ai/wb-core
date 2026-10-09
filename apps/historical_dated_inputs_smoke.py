@@ -64,6 +64,61 @@ class Tests(unittest.TestCase):
         unbound=deepcopy(payload);unbound['metadata']['fbs_accounting_bindings'].pop(FIRST)
         self.assertEqual(self.parity('book_lineage',self.runtime,new.canonical(unbound),FIRST),('value',None))
 
+    def test_prepared_native_revisions_once_scoped_memory_and_default_parity(self):
+        from unittest.mock import patch
+        from packages.application import fbs_accounting_runtime as accounting
+        with ready.readonly(self.runtime.db_path) as conn:encoded=new.selected(conn,[FIRST,DAY],DAY)[0][0]['plan_json']
+        bindings=json.loads(encoded)['metadata']['fbs_accounting_bindings']
+        expected={day:new.book_lineage(self.runtime,encoded,day) for day in (FIRST,DAY)}
+        loads=[];original=accounting.load
+        def load(*args,**kwargs):
+            observer=kwargs['connection']
+            self.assertTrue(observer.in_transaction);self.assertEqual(observer.execute('PRAGMA query_only').fetchone()[0],1)
+            loads.append(kwargs['version']);return original(*args,**kwargs)
+        with patch.object(accounting,'load',load),new.prepared_book_lineage(self.runtime,[(encoded,[FIRST,DAY])]) as books:
+            self.assertEqual(set(loads),{bindings[day]['book_version'] for day in (FIRST,DAY)})
+            self.assertEqual(len(loads),len(set(loads)))
+            for day in (FIRST,DAY):self.assertEqual(new.book_lineage(self.runtime,encoded,day,prepared=books),expected[day])
+            self.assertEqual(len(books.cache),2)
+            for (_,day),slice in books.cache.items():
+                self.assertEqual(set(slice),{'effective_date','wb_days','retained_days','shared_days','presentations'})
+                self.assertTrue(all(set(slice[field])=={day} for field in ('wb_days','retained_days','shared_days','presentations')))
+            with self.assertRaisesRegex(ValueError,'dated_book_cache_missing'):books.book('unprepared-revision',FIRST)
+            self.assertFalse(books.observer.in_transaction);books.guard()
+
+    def test_prepared_live_observer_rejects_commit_and_same_path_replacement(self):
+        import sqlite3,os
+        from contextlib import closing
+        from packages.application import fbs_accounting_runtime as accounting
+        with ready.readonly(self.runtime.db_path) as conn:encoded=new.selected(conn,[FIRST,DAY],DAY)[0][0]['plan_json']
+        for mutation in ('commit','replace'):
+            with self.subTest(mutation=mutation),self.assertRaisesRegex(ValueError,'dated_book_observer_changed'):
+                with new.prepared_book_lineage(self.runtime,[(encoded,[FIRST,DAY])]) as books:
+                    file=accounting.path(self.runtime.runtime_dir)
+                    if mutation=='commit':
+                        with sqlite3.connect(file) as writer:writer.execute("UPDATE accounting_current SET version='foreign-pointer'")
+                    else:
+                        replacement=file.with_suffix('.replacement')
+                        with closing(sqlite3.connect(file)) as original,closing(sqlite3.connect(replacement)) as target:original.backup(target)
+                        os.replace(replacement,file)
+                    books.guard()
+
+    def test_failed_preparation_and_validation_close_before_attempt_writer(self):
+        import sqlite3
+        from packages.application import fbs_accounting_runtime as accounting
+        with ready.readonly(self.runtime.db_path) as conn:encoded=new.selected(conn,[FIRST,DAY],DAY)[0][0]['plan_json']
+        for failure in ('load','validation'):
+            raw=json.loads(encoded);bound=raw['metadata']['fbs_accounting_bindings'][FIRST]
+            bound['book_version' if failure=='load' else 'presentation_version']='missing-native-binding'
+            changed=new.canonical(raw)
+            with self.subTest(failure=failure),self.assertRaises(ValueError):
+                with new.prepared_book_lineage(self.runtime,[(changed,[FIRST])]) as books:
+                    new.book_lineage(self.runtime,changed,FIRST,prepared=books)
+            # A failed __enter__ cannot leave its read transaction in an outer
+            # owner scope and self-block the next native failure/attempt writer.
+            with sqlite3.connect(accounting.path(self.runtime.runtime_dir),timeout=0) as writer:
+                writer.execute('BEGIN EXCLUSIVE');writer.execute('UPDATE accounting_current SET version=version');writer.commit()
+
     def test_authority_binds_actual_helper_bytes(self):
         import hashlib
         from packages.application.operator_supplier_history_candidate import code_authority

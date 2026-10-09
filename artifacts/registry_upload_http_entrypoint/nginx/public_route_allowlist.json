@@ -1001,6 +1001,9 @@
       "path": "/v1/finance/",
       "methods": ["GET", "POST", "PATCH"],
       "proxy_pass_url": "http://127.0.0.1:8767"
-    }
+    },
+    {"name": "sheet_vitrina_policy_legacy_proxy_detail", "match": "prefix", "path": "/v1/sheet-vitrina-v1/settings/policy-operations/legacy_proxy/", "methods": ["GET"]},
+    {"name": "sheet_vitrina_policy_proxy_v4_tax_detail", "match": "prefix", "path": "/v1/sheet-vitrina-v1/settings/policy-operations/proxy_v4_tax/", "methods": ["GET"]},
+    {"name": "sheet_vitrina_policy_wb_incident_policy_detail", "match": "prefix", "path": "/v1/sheet-vitrina-v1/settings/policy-operations/wb_incident_policy/", "methods": ["GET"]}
   ]
 }

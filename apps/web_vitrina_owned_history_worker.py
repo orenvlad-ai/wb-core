@@ -75,7 +75,7 @@ def execute(cap):
             or not set(backfill_dates) <= set(source_dates)):
         raise HistoryDelegationError("history_worker_date_scope_invalid")
     scope_dates = sorted({day for day in source_dates if first <= day <= today} | set(backfill_dates))
-    if sum(cap.get(key) is not None for key in ("historical_receipt", "supplier_receipt")) > 1:
+    if sum(cap.get(key) is not None for key in ("historical_receipt", "policy_receipt", "supplier_receipt")) > 1:
         raise HistoryDelegationError("history_multiple_source_authorities")
     historical=None
     if cap.get('historical_receipt') is not None:
@@ -89,6 +89,17 @@ def execute(cap):
         closed_dates=set((cap.get('closed_receipt') or {}).get('dates',[]))
         if backfill_dates!=sorted(old_dates|closed_dates) or len(closed_dates)>2:
             raise HistoryDelegationError('historical_history_worker_scope_changed')
+    policy=None
+    if cap.get('policy_receipt') is not None:
+        from packages.application.operator_policy_history import PolicyHistory
+        binding=cap['policy_receipt'];policy=PolicyHistory(runtime,binding['operation_id'],binding['attempt_id'])
+        if cap.get('owner_kind')!='cycle' or policy.binding()!=binding:
+            raise HistoryDelegationError('policy_history_worker_binding_changed')
+        policy.validate_sources_readonly(now=now)
+        selected={d for d in binding['dates'] if d<(datetime.fromisoformat(today)-timedelta(days=1)).date().isoformat()}
+        closed_dates=set((cap.get('closed_receipt') or {}).get('dates',[]))
+        if backfill_dates!=sorted(selected|closed_dates) or len(closed_dates)>2:
+            raise HistoryDelegationError('policy_history_worker_scope_changed')
     supplier=None
     if cap.get('supplier_receipt') is not None:
         from packages.application.operator_supplier_history import SupplierHistory
@@ -100,11 +111,11 @@ def execute(cap):
         closed_dates=set((cap.get('closed_receipt') or {}).get('dates',[]))
         if backfill_dates!=sorted(selected|closed_dates) or len(closed_dates)>2:
             raise HistoryDelegationError('supplier_history_worker_scope_changed')
-    if cap.get("owner_kind", "cycle") == "cycle" and ((historical is None and supplier is None and len(backfill_dates) > 2)
+    if cap.get("owner_kind", "cycle") == "cycle" and ((historical is None and policy is None and supplier is None and len(backfill_dates) > 2)
             or source_dates != dates_between(min((first, *backfill_dates)), today)):
         raise HistoryDelegationError("history_worker_cycle_date_scope_invalid")
 
-    if cap.get("owner_kind", "cycle") == "cycle" and historical is None and supplier is None:
+    if cap.get("owner_kind", "cycle") == "cycle" and historical is None and policy is None and supplier is None:
         if backfill_dates != sorted((cap.get("closed_receipt") or {}).get("dates", [])):
             raise HistoryDelegationError("history_closed_exact_scope_changed")
 
@@ -175,6 +186,13 @@ def execute(cap):
             if native['vector']!=anchor['vector'] or native['fence']!=anchor['fence'] or native['current']!=observed['current']:
                 raise HistoryDelegationError('historical_history_native_anchor_changed')
             observed['historical']={key:native[key] for key in ('receipt_digest','native')}
+        if observed['terminal'] and policy is not None:
+            canonical_adapter=LiveNativeAdapter(db_path=runtime.db_path,runtime_dir=runtime_dir,cache_dir=root/'proofs',
+                now=now,date_from=source_dates[0],date_to=source_dates[-1],formula_epoch=cap['formula_epoch'])
+            native=policy.validate_native_readonly(adapter=canonical_adapter,store=store,now=now)
+            if native['vector']!=anchor['vector'] or native['fence']!=anchor['fence'] or native['current']!=observed['current']:
+                raise HistoryDelegationError('policy_history_native_anchor_changed')
+            observed['policy']={key:native[key] for key in ('receipt_digest','native')}
         if observed['terminal'] and supplier is not None:
             canonical_adapter=LiveNativeAdapter(db_path=runtime.db_path,runtime_dir=runtime_dir,cache_dir=root/'proofs',
                 now=now,date_from=source_dates[0],date_to=source_dates[-1],formula_epoch=cap['formula_epoch'])

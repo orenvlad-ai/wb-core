@@ -83,7 +83,8 @@ class _Server(AbstractContextManager):
         elif path == DEFAULT_PROXY_V4_PARAMETERS_PATH:
             if method == "POST":
                 self.saved = True
-            payload = _v4_payload(saved=self.saved)
+                payload={'status':'ok','acceptance':{'operation_id':body['_operator_request_id'],'domain':'proxy_v4_tax','document_kind':'proxy_v4_tax','accepted_at':'2026-08-09T08:00:00Z','durable_saved':True,'state':'processing','physical_applied':False,'primary_effect':'source_saved'}}
+            else:payload = _v4_payload(saved=False)
         else:
             payload = {
                 "items": [],
@@ -316,11 +317,12 @@ def main() -> None:
             page.locator("#previewProxyV4TaxButton").click()
             page.wait_for_function("() => !document.querySelector('#saveProxyV4TaxButton')?.disabled")
             page.locator("#saveProxyV4TaxButton").click()
-            page.wait_for_function("() => document.querySelector('#proxyV4TaxRate')?.value === '7'")
+            page.wait_for_selector('#policyAcceptance .ff-operation-check')
+            if page.locator('#policyAcceptance .ff-operation-status').inner_text()!='Обрабатывается':raise AssertionError('Saved source must retain pending publication state')
             v4_posts = [body for path, body in server.bodies if path in {DEFAULT_PROXY_V4_PARAMETERS_PATH, DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH}]
             if len(v4_posts) != 2 or any("effective_date" in body for body in v4_posts):
                 raise AssertionError(f"V4 browser must never submit manual effective_date: {v4_posts}")
-            if any(set(body) - {"tax_rate", "preview_fingerprint"} for body in v4_posts):
+            if any(set(body) - {"tax_rate", "preview_fingerprint", "_operator_request_id"} for body in v4_posts):
                 raise AssertionError(f"V4 browser submitted non-tax editable fields: {v4_posts}")
             page.screenshot(path=str(Path(temp_dir) / "proxy-v4-settings.png"), full_page=True)
             if page_errors or console_errors:
