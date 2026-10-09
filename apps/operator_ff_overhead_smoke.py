@@ -1003,6 +1003,18 @@ class NativeCompletionTests(unittest.TestCase):
             self.assertEqual(injected,[True])
             self.assertEqual(self.finance.plan_stale_cost_weeks()['stale_week_count'],1)
         self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'processing')
+        proof=operations.read_acceptance(self.runtime.db_path,self.identity)['processing_receipt']['native_completion']
+        with warehouse_functional_job_lock(self.root):
+            operations.drain(self.runtime.db_path,self.root,timestamp_factory=self.stamp)
+            self.assertEqual(operations.reconcile(self.runtime,now=self.now)['processed_count'],0)
+            acceptance=operations.read_acceptance(self.runtime.db_path,self.identity)
+            self.assertEqual(acceptance['processing_receipt']['native_completion'],proof)
+            with self.assertRaises(ValueError):operations._finalize_confirmed(self.runtime,acceptance)
+            # Restore the intentionally malformed foreign-row fixture. Native Finance
+            # refuses that un-ingested week; never promote it with an invented proof.
+            with sqlite3.connect(raw) as conn:conn.execute("DELETE FROM finance_raw_current_rows WHERE week_start='2026-09-14'")
+            with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate')):
+                self.assertEqual(self.complete(*self.proof_inputs())['processed_count'],1)
         self.assertEqual(self.business_image(),self.before)
 
     def test_split_scope_insert_during_post_own_commit_seal_is_rejected(self):

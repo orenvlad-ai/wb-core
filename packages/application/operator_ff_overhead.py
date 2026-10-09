@@ -231,6 +231,10 @@ def _update(db_path, identity, state, reason, receipt=None, *, guard=None):
             initial_changes=conn.total_changes
             conn.execute("BEGIN IMMEDIATE")
             transaction=guard(conn,begin=True,initial_changes=initial_changes)
+        previous=conn.execute(f'SELECT receipt_json FROM {TABLE} WHERE request_id=?',(identity,)).fetchone()
+        retained=json.loads(previous[0]).get('native_completion') if previous else None
+        if retained and not (receipt or {}).get('native_completion'):
+            receipt={**(receipt or {}),'native_completion':retained}
         conn.execute(f"UPDATE {TABLE} SET state=?,reason_code=?,updated_at=?,receipt_json=? WHERE request_id=?",
                      (state, reason, datetime.now(timezone.utc).isoformat(), json.dumps(receipt or {}, ensure_ascii=False), identity))
         if guard is not None: guard(conn,transaction=transaction)
@@ -334,6 +338,7 @@ def reconcile(runtime, *, now=None):
         receipts = [_public(conn, row) for row in rows]
     count = 0
     for acceptance in receipts:
+        if requires_current_completion(runtime.db_path,acceptance["request_id"]): continue
         document = acceptance["document"]
         if not document:
             continue
@@ -370,6 +375,8 @@ def _finalize_confirmed(runtime, acceptance, *, prepare_guard=None, finish=None)
     from packages.application.warehouse_functional_lock import require_warehouse_job_owner, warehouse_functional_write_lock
     require_warehouse_job_owner(runtime.runtime_dir)
     identity = acceptance["request_id"]
+    if prepare_guard is None and requires_current_completion(runtime.db_path,identity):
+        raise ValueError("overhead_completion_current_guard_required")
     with (Path(runtime.runtime_dir) / ".ff-pool-document-posting.lock").open("a+b") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
@@ -546,14 +553,15 @@ class _CompletionReadset:
     def seal(self):
         import hashlib
         digest=hashlib.sha256()
-        rows=0
+        rows=0;size=0
         for sql,parameters in self.queries:
             cursor=self.connection.execute(sql,parameters)
-            digest.update(json.dumps([sql,parameters,cursor.description],default=lambda value:{'sqlite_blob_hex':value.hex()},separators=(',',':')).encode())
+            encoded=json.dumps([sql,parameters,cursor.description],default=lambda value:{'sqlite_blob_hex':value.hex()},separators=(',',':')).encode()
+            digest.update(encoded);size+=len(encoded)
             for row in cursor:
-                digest.update(json.dumps(list(row),ensure_ascii=False,default=lambda value:{'sqlite_blob_hex':value.hex()},separators=(',',':')).encode())
-                digest.update(b'\n');rows+=1
-        return dict(digest='sha256:'+digest.hexdigest(),rows=rows,queries=len(self.queries))
+                encoded=json.dumps(list(row),ensure_ascii=False,default=lambda value:{'sqlite_blob_hex':value.hex()},separators=(',',':')).encode()+b'\n'
+                digest.update(encoded);size+=len(encoded);rows+=1
+        return dict(digest='sha256:'+digest.hexdigest(),rows=rows,bytes=size,queries=len(self.queries))
 
 
 def complete_current_cycle(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None):
