@@ -7467,7 +7467,9 @@ class RegistryUploadHttpEntrypoint:
 
             result = run_phase("functional_publication", publish_functional)
             planning_inventory_readback = result["planning_inventory_readback"]
+            overhead_completion = None
             def dependent_replay() -> dict[str, Any]:
+                nonlocal overhead_completion
                 proxy_recalculation = (
                     self.calculation_parameters_block.process_pending_targeted_recalculations(
                         verified_backup=economics_backup,
@@ -7488,6 +7490,8 @@ class RegistryUploadHttpEntrypoint:
                 from packages.application.fbs_accounting_runtime import load as load_accounting_book, current_publication_receipt
                 economics_publication = {**economics_publication,
                     "accounting_publication": current_publication_receipt(self.runtime)}
+                from packages.application.operator_ff_overhead import capture_pending_completion
+                overhead_completion = capture_pending_completion(self.runtime,finance_block=self.wb_finance_weekly_block)
                 finance_accounting_before = load_accounting_book(self.runtime.runtime_dir)[1]
                 finance_cost_recalculation = self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
                 finance_accounting_after = load_accounting_book(self.runtime.runtime_dir)[1]
@@ -7510,6 +7514,11 @@ class RegistryUploadHttpEntrypoint:
             dependent = run_phase("dependent_replay_economics", dependent_replay)
             from packages.application.operator_fulfillment_services import reconcile as reconcile_fulfillment
             fulfillment_operations = reconcile_fulfillment(self.runtime, seller_id=self.wb_finance_weekly_block.seller_id, now=self.now_factory())
+            from packages.application.operator_ff_overhead import complete_current_cycle
+            complete_current_cycle(self.runtime, overhead_completion,
+                finance_block=self.wb_finance_weekly_block,
+                finance_receipt=dependent['finance_cost_recalculation'],
+                economics_receipt=dependent['economics_publication'], now=self.now_factory())
             reconcile_overheads(self.runtime)
             reconcile_operator_documents(self.runtime,request_ids=operator_documents['request_ids'],
                 finance_receipt=dict(dependent.get('finance_cost_recalculation') or {}),

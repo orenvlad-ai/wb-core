@@ -121,7 +121,7 @@ state. A timestamp cutoff alone never establishes the initialization boundary.
     return result
 
 
-def _documents(conn: sqlite3.Connection) -> list[dict]:
+def _documents(conn: sqlite3.Connection, *, document_id: str | None = None) -> list[dict]:
     # FBO's auxiliary book must remain completely document-owned. Unlike the
     # intentionally excluded FBS observer, an unmapped FBO movement is a source
     # contract change, not an operand to import from the old ledger.
@@ -129,27 +129,29 @@ def _documents(conn: sqlite3.Connection) -> list[dict]:
         f"SELECT 1 FROM {PREFIX}ff_pool_movement_lines m "
         f"LEFT JOIN {PREFIX}ff_pool_documents d ON d.operation_id=m.operation_id "
         "WHERE m.pool='FBO' AND d.document_id IS NULL LIMIT 1"
-    ).fetchone()
+    ).fetchone() if document_id is None else None
     if unmapped is not None:
         raise ValueError("unmapped_fbo_document_movement")
+    own = " WHERE document_id=?" if document_id is not None else ""
+    args = (document_id,) if document_id is not None else ()
     documents = _rows(conn, f"SELECT document_id,document_kind,root_document_id,operation_id,"
                       "source_system,source_type,source_id,source_revision,idempotency_epoch,business_date,posted_at,"
-                      f"posted_manifest_sha256,posted_manifest_json FROM {PREFIX}ff_pool_documents ORDER BY document_id")
+                      f"posted_manifest_sha256,posted_manifest_json FROM {PREFIX}ff_pool_documents" + own + " ORDER BY document_id", args)
     lines = _rows(conn, f"SELECT document_id,line_no,line_role,facility_id,pool,nm_id,quantity,"
                   f"capital_rub,expense_rub,metadata_json FROM {PREFIX}ff_pool_document_lines "
-                  "ORDER BY document_id,line_no")
+                  + own + " ORDER BY document_id,line_no", args)
     expenses = _rows(conn, f"SELECT document_id,expense_line_no,amount_rub,basis,source_file_sha256,"
                      f"metadata_json FROM {PREFIX}ff_pool_document_expense_lines "
-                     "ORDER BY document_id,expense_line_no")
+                     + own + " ORDER BY document_id,expense_line_no", args)
     relations = _rows(conn, f"SELECT parent_document_id,child_document_id,root_document_id,relation_type "
-                      f"FROM {PREFIX}ff_pool_document_relations ORDER BY child_document_id,relation_type")
+                      f"FROM {PREFIX}ff_pool_document_relations" + (" WHERE child_document_id=?" if args else "") + " ORDER BY child_document_id,relation_type", args)
     movements = _rows(conn, f"SELECT m.operation_id,m.line_no,m.facility_id,m.pool,m.nm_id,"
                       f"m.quantity_delta,m.capital_delta_rub,m.metadata_json FROM {PREFIX}ff_pool_movement_lines m "
                       f"JOIN {PREFIX}ff_pool_documents d USING(operation_id) "
-                      "ORDER BY m.operation_id,m.line_no")
+                      + (" WHERE d.document_id=?" if args else "") + " ORDER BY m.operation_id,m.line_no", args)
     operations = {row["operation_id"] for row in conn.execute(
         f"SELECT o.operation_id FROM {PREFIX}warehouse_business_operations o "
-        f"JOIN {PREFIX}ff_pool_documents d USING(operation_id)"
+        f"JOIN {PREFIX}ff_pool_documents d USING(operation_id)" + (" WHERE d.document_id=?" if args else ""), args
     )}
     by_id: dict[str, list[dict]] = {}
     by_expense: dict[str, list[dict]] = {}

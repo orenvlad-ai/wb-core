@@ -661,5 +661,587 @@ class VersionedMaterialTests(unittest.TestCase):
             service._verify_posted_readback(preview['request_id'])
 
 
+class NativeCompletionTests(unittest.TestCase):
+    """Actual local HTTP owner and native source/book/Ready/Finance/retention.
+
+    Only external collection and synthetic official input assembly are fixtures;
+    the source posting, serialized functional publisher and all completion proofs
+    execute production native adapters against disposable SQLite files.
+    """
+    setUp=AcceptanceTests.setUp
+    stamp=AcceptanceTests.stamp
+    preview=AcceptanceTests.preview
+    drain=AcceptanceTests.drain
+    prepare=AcceptanceTests.prepare
+    publish=AcceptanceTests.publish
+    open_book=AcceptanceTests.open_book
+    native_terminal=AcceptanceTests.native_terminal
+    counts=AcceptanceTests.counts
+
+    def quantities(self):
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            return conn.execute(f'SELECT facility_id,pool,nm_id,quantity,capital_rub FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id').fetchall()
+
+    def payment(self, *, weekly=True, pdf=None):
+        from datetime import date
+        from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
+        from apps.wb_finance_weekly_cost_cutover_smoke import _row
+        self.open_book()
+        self.finance=WbFinanceWeeklyBlock(self.root,seller_id='canonical',now_factory=lambda:self.now)
+        self.finance.ensure_schema()
+        if weekly:
+            self.finance.ingest_week(date(2026,9,7),date(2026,9,13),[_row(1,'2026-09-08',nm_id=1)])
+        preview=(AcceptanceTests.pdf_preview(self,'native-pdf-source',pdf=pdf,scope='FBS') if pdf is not None
+                 else self.preview(scope='FBS',amount_rub='61425'))
+        self.identity=preview['request_id']
+        self.surface.confirm_document(self.identity)
+        return self.identity
+
+    def functional_plan(self):
+        from apps.operator_warehouse_documents_smoke import OperatorDocuments
+        from packages.application.warehouse_functional import WarehouseFunctionalBlock
+        captured={}
+        def collect(block,plan,**kwargs):
+            captured.update(block=block,plan=plan);return plan
+        with patch.object(WarehouseFunctionalBlock,'apply_plan',collect):
+            OperatorDocuments.functional_publish(self)
+        return captured['block'],captured['plan']
+
+    def old_tail(self, *, weekly=True, pdf=None):
+        self.payment(weekly=weekly,pdf=pdf);self.drain()
+        with warehouse_functional_job_lock(self.root):
+            block,plan=self.functional_plan()
+            self.functional=block.apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'],backup_dir=self.root/'backups')
+        self.publish(self.prepare())
+        self.before=self.business_image()
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f'SELECT status,economics_status,finance_status FROM {TARGETED_RECALC_QUEUE_TABLE}').fetchone(),('complete','',''))
+
+    def business_image(self):
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.row_factory=sqlite3.Row
+            rows={table:[dict(r) for r in conn.execute(f'SELECT * FROM {table} ORDER BY rowid')] for table in (
+                DOCUMENTS_TABLE,'sheet_vitrina_v1_ff_pool_document_expense_lines','sheet_vitrina_v1_ff_pool_document_lines')}
+            rows['sources']=[tuple(r) for r in conn.execute(f'SELECT request_id,source_json,source_digest,accepted_at,actor FROM {operations.TABLE}')]
+        book,_=accounting.load(self.root)
+        rows['allocation']=deepcopy(book['state']['periods'][self.now.date().isoformat()]['document_valuation']['allocations'])
+        return rows
+
+    def proof_inputs(self):
+        captured=operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+        receipt=self.finance.recalculate_stale_cost_weeks()
+        version=accounting.load(self.root)[1]
+        receipt.update(accounting_version=version,accounting_version_before=version,accounting_version_unchanged=True)
+        return captured,receipt,dict(accounting_publication=accounting.current_publication_receipt(self.runtime,now=self.now))
+
+    def complete(self,captured,receipt,economics):
+        return operations.complete_current_cycle(self.runtime,captured,finance_block=self.finance,finance_receipt=receipt,economics_receipt=economics,now=self.now)
+
+    def http_pass(self, *, fresh=False):
+        from types import SimpleNamespace
+        from contextlib import closing
+        from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+        from packages.application.warehouse_update_journal import WarehouseUpdateJournal
+        from packages.application.business_data_heavy_admission import heavy_admitted
+        from packages.application.calculation_parameters import CalculationParametersBlock
+        native={}
+        def build():
+            if fresh:
+                native['block'],native['plan']=self.functional_plan();return native['plan']
+            with closing(operations.readonly(self.runtime.db_path)) as conn:
+                queues=list(conn.execute(f"SELECT queue_id FROM {TARGETED_RECALC_QUEUE_TABLE} WHERE status IN ('queued','running')"))
+            self.assertEqual(queues,[]) # The actual old-tail plan exclusion.
+            return dict(plan_fingerprint='no-new-queue',diff={})
+        def apply(plan,**kwargs):
+            if fresh:return native['block'].apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'],backup_dir=self.root/'backups')
+            return self.functional # No business source/functional replay for a completed old tail.
+        entry=RegistryUploadHttpEntrypoint.__new__(RegistryUploadHttpEntrypoint)
+        entry.runtime=self.runtime;entry.warehouse_update_journal=WarehouseUpdateJournal(db_path=self.runtime.db_path,runtime_dir=self.root)
+        entry.wb_supplies_block=SimpleNamespace(sync_functional_sources=lambda **kw:{},collect_all_due_transit_costs=lambda:{},reconcile_functional_ff_state=lambda:{})
+        entry.our_wb_cost_block=SimpleNamespace(materialize_wb_supply_cost_layers=lambda **kw:0)
+        entry.warehouse_functional_block=SimpleNamespace(build_sync_plan=build,apply_plan=apply,record_failed_sync=lambda exc:None)
+        entry.calculation_parameters_block=CalculationParametersBlock(runtime=self.runtime)
+        entry.inventory_planning=SimpleNamespace(current=lambda:{})
+        entry.wb_finance_weekly_block=self.finance;entry.activated_at_factory=self.stamp;entry.now_factory=lambda:self.now
+        def refresh(*args,**kwargs):
+            from packages.application.fbs_snapshot_cost import fingerprint
+            prepared=self.prepare()
+            if fingerprint(prepared[0])!=accounting.load(self.root)[1]: self.publish(prepared)
+            p=accounting.current_publication_receipt(self.runtime,now=self.now)
+            return dict(status='published',version=p['accounting_version'])
+        actual_publication=accounting.current_publication_receipt
+        with heavy_admitted(self.root,operation='cycle'),warehouse_functional_job_lock(self.root) as owner, \
+             patch.object(accounting,'current_publication_receipt',side_effect=lambda runtime,now=None:actual_publication(runtime,now=now or self.now)), \
+             patch.object(accounting,'refresh',side_effect=refresh), \
+             patch('packages.application.operator_warehouse_documents.drain',return_value={'request_ids':[]}), \
+             patch('packages.application.operator_warehouse_documents.reconcile',return_value={'processed_count':0}), \
+             patch('packages.application.operator_fulfillment_services.reconcile',return_value={'processed_count':0}):
+            return entry._handle_owned_warehouse_manual_sync_request(owner_token=owner['owner_token'])
+
+    def test_actual_http_owned_fresh_native_publication_and_finance(self):
+        self.payment()
+        result=self.http_pass(fresh=True)
+        self.assertEqual(result['status'],'success')
+        self.assertEqual(self.native_terminal(self.identity),('complete','retained'))
+        receipt=operations.read_acceptance(self.runtime.db_path,self.identity)
+        self.assertEqual(receipt['state'],'completed');self.assertEqual(self.counts(),(1,1))
+        proof=receipt['processing_receipt']['native_completion']
+        self.assertEqual(proof['allocation']['allocation_total_rub'],'61425')
+        self.assertEqual(proof['finance_publication']['applicable_weeks'],[['canonical','2026-09-07','2026-09-13']])
+        self.assertTrue(proof['finance_publication']['receipt']['non_target_preserved'])
+
+    def test_actual_http_owned_already_complete_blank_tail_and_repeat_no_repost(self):
+        self.old_tail()
+        with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate target posting')):
+            self.assertEqual(self.http_pass()['status'],'success')
+            self.assertEqual(self.http_pass()['status'],'success')
+        self.assertEqual(self.business_image(),self.before)
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'completed')
+        self.assertEqual(self.native_terminal(self.identity),('complete','retained'))
+
+    def test_actual_no_applicable_raw_is_distinct_from_zero_stale_week_scope(self):
+        self.old_tail(weekly=False)
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs();self.assertEqual(self.complete(*args)['processed_count'],1)
+        proof=operations.read_acceptance(self.runtime.db_path,self.identity)['processing_receipt']['native_completion']
+        self.assertEqual(proof['finance_publication']['applicable_weeks'],[])
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_native_unicode_nm_scope_is_retained_and_marker_drift_rejected(self):
+        import hashlib
+        from datetime import date
+        from apps.wb_finance_weekly_cost_cutover_smoke import _row
+        for nm in ('\u00a01\u00a0','\u20031\u2003','\t1\n',1,'1'):
+            for changed in (False,True):
+                case=NativeCompletionTests();case.setUp()
+                try:
+                    case.old_tail()
+                    row=_row(1,'2026-09-08',nm_id=1);row['nmId']=nm
+                    native=case.finance.ingest_week(date(2026,9,7),date(2026,9,13),[row])
+                    self.assertIn(native['status'],('loaded_preliminary','completed'))
+                    original=FfPoolDocumentService._finalize_posted;injected=[]
+                    def finalize(service,*args,**kwargs):
+                        if changed:
+                            with sqlite3.connect(case.runtime.db_path) as conn:
+                                operation=json.loads(conn.execute('SELECT raw_json FROM wb_finance_weekly_raw_rows LIMIT 1').fetchone()[0])
+                                operation['quantity']=2
+                                payload=json.dumps(operation,ensure_ascii=False,sort_keys=True,separators=(',',':'))
+                                conn.execute('UPDATE wb_finance_weekly_raw_rows SET raw_json=?,row_hash=?',(payload,hashlib.sha256(payload.encode()).hexdigest()))
+                            injected.append(True)
+                        return original(service,*args,**kwargs)
+                    with self.subTest(nm=nm,changed=changed),warehouse_functional_job_lock(case.root):
+                        args=case.proof_inputs()
+                        with patch.object(FfPoolDocumentService,'_finalize_posted',finalize):
+                            if changed:
+                                with self.assertRaises(ValueError):case.complete(*args)
+                            else:self.assertEqual(case.complete(*args)['processed_count'],1)
+                        receipt=operations.read_acceptance(case.runtime.db_path,case.identity)
+                        weeks=receipt['processing_receipt']['native_completion']['finance_publication']['applicable_weeks']
+                        self.assertEqual(weeks,[['canonical','2026-09-07','2026-09-13']])
+                        if changed:
+                            self.assertEqual(injected,[True])
+                            self.assertEqual(receipt['state'],'processing')
+                            self.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
+                            self.assertEqual(case.finance.plan_stale_cost_weeks()['stale_week_count'],1)
+                        else:self.assertEqual(case.native_terminal(case.identity),('complete','retained'))
+                    self.assertEqual(case.business_image(),case.before)
+                finally:case.doCleanups()
+
+    def test_native_plan_date_bounds_and_supported_operation_fallback(self):
+        import hashlib
+        from datetime import date
+        from apps.wb_finance_weekly_cost_cutover_smoke import _row
+        from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
+        for operation_day,start,end,applicable in (('2026-09-14',7,13,True),('',14,20,True),('',7,13,False)):
+            for changed in (False,True):
+                case=NativeCompletionTests();case.setUp()
+                try:
+                    case.open_book()
+                    for day in range(9,15):
+                        case.now=case.now.replace(day=day);case.publish(case.prepare())
+                    case.finance=WbFinanceWeeklyBlock(case.root,seller_id='canonical',now_factory=lambda:case.now)
+                    case.finance.ensure_schema()
+                    row=_row(1,operation_day,nm_id=1)
+                    native=case.finance.ingest_week(date(2026,9,start),date(2026,9,end),[row])
+                    preview=case.preview(scope='FBS',amount_rub='61425');case.identity=preview['request_id']
+                    case.surface.confirm_document(case.identity);case.drain()
+                    with warehouse_functional_job_lock(case.root):
+                        block,plan=case.functional_plan()
+                        case.functional=block.apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'],backup_dir=case.root/'backups')
+                    case.publish(case.prepare());before=case.business_image()
+                    original=FfPoolDocumentService._finalize_posted;injected=[]
+                    def finalize(service,*args,**kwargs):
+                        if changed:
+                            with sqlite3.connect(case.runtime.db_path) as conn:
+                                operation=json.loads(conn.execute('SELECT raw_json FROM wb_finance_weekly_raw_rows LIMIT 1').fetchone()[0]);operation['quantity']=2
+                                payload=json.dumps(operation,ensure_ascii=False,sort_keys=True,separators=(',',':'))
+                                conn.execute('UPDATE wb_finance_weekly_raw_rows SET raw_json=?,row_hash=?',(payload,hashlib.sha256(payload.encode()).hexdigest()))
+                            injected.append(True)
+                        return original(service,*args,**kwargs)
+                    with self.subTest(operation_day=operation_day,start=start,changed=changed),warehouse_functional_job_lock(case.root):
+                        args=case.proof_inputs()
+                        self.assertEqual(case.finance.shared_cost_snapshot.effective_date,'2026-09-08')
+                        with patch.object(FfPoolDocumentService,'_finalize_posted',finalize):
+                            if changed:
+                                with self.assertRaises(ValueError):case.complete(*args)
+                            else:self.assertEqual(case.complete(*args)['processed_count'],1)
+                        receipt=operations.read_acceptance(case.runtime.db_path,case.identity)
+                        expected=[['canonical',f'2026-09-{start:02}',f'2026-09-{end:02}']] if applicable else []
+                        self.assertEqual(receipt['processing_receipt']['native_completion']['finance_publication']['applicable_weeks'],expected)
+                        if changed:
+                            self.assertEqual(injected,[True]);self.assertEqual(receipt['state'],'processing')
+                            self.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
+                        else:self.assertEqual(case.native_terminal(case.identity),('complete','retained'))
+                    self.assertEqual(case.business_image(),before)
+                finally:case.doCleanups()
+
+    def test_false_foreign_economics_and_finance_never_ack_or_retain(self):
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            for field,value in [('post_verify_stale_week_count',None),('post_verify_stale_week_count',True),('post_verify_stale_week_count',1),('source_advanced_after_apply',True),('fingerprint','sha256:foreign'),('accounting_version','foreign'),('accounting_version_unchanged',False),('target_image_digest','sha256:foreign'),('post_source_dependency',{})]:
+                c,f,e=deepcopy(args);f[field]=value
+                with self.subTest(field=field,value=value),self.assertRaises(ValueError):self.complete(c,f,e)
+            c,f,e=deepcopy(args);e['accounting_publication']['ready_digest']='sha256:foreign'
+            with self.assertRaises(ValueError):self.complete(c,f,e)
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_queue_exact_revision_nm_date_and_recovery_binding(self):
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            for column,value in [('source_revision','sha256:foreign'),('affected_nm_ids_json','[1,2]'),('effective_date','2026-09-07')]:
+                with sqlite3.connect(self.runtime.db_path) as conn:
+                    old=conn.execute(f'SELECT {column} FROM {TARGETED_RECALC_QUEUE_TABLE}').fetchone()[0]
+                    conn.execute(f'UPDATE {TARGETED_RECALC_QUEUE_TABLE} SET {column}=?',(value,))
+                with self.subTest(column=column),self.assertRaises(ValueError):operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+                with sqlite3.connect(self.runtime.db_path) as conn:conn.execute(f'UPDATE {TARGETED_RECALC_QUEUE_TABLE} SET {column}=?',(old,))
+            with sqlite3.connect(self.runtime.db_path) as conn:
+                conn.row_factory=sqlite3.Row;queue=dict(conn.execute(f'SELECT * FROM {TARGETED_RECALC_QUEUE_TABLE}').fetchone())
+                queue.update(queue_id='foreign',source_revision='foreign')
+                conn.execute(f'INSERT INTO {TARGETED_RECALC_QUEUE_TABLE}({",".join(queue)}) VALUES({",".join("?" for _ in queue)})',list(queue.values()))
+            with self.assertRaises(ValueError):operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+            with sqlite3.connect(self.runtime.db_path) as conn:
+                conn.execute(f"DELETE FROM {TARGETED_RECALC_QUEUE_TABLE} WHERE queue_id='foreign'")
+                conn.execute("UPDATE sheet_vitrina_v1_recovery_operations SET source_digest='foreign'")
+            with self.assertRaises(ValueError):operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+
+    def test_same_path_manifest_drift_after_finance_rejects(self):
+        from dataclasses import replace
+        from packages.application.storage_registry import atomic_write_manifest,manifest_payload,parse_manifest,_sha256
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs();m=self.finance.store_registry.load();changed=replace(m,rollback_generation_id='foreign')
+            payload=manifest_payload(changed,include_digest=False);payload['manifest_sha256']=_sha256(payload)
+            atomic_write_manifest(self.finance.store_registry.manifest_path,parse_manifest(payload))
+            with self.assertRaises(ValueError):self.complete(*args)
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+
+    def test_actual_separate_connection_commit_during_native_readback_rejected(self):
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs();original=self.finance._finance_source_dependency_fingerprint;injected=[]
+            def dependency(*a,**kw):
+                result=original(*a,**kw)
+                if not injected:
+                    injected.append(True)
+                    with sqlite3.connect(self.runtime.db_path) as conn:conn.execute("UPDATE wb_finance_weekly_aggregates SET classifier_version='stale'")
+                return result
+            with patch.object(self.finance,'_finance_source_dependency_fingerprint',side_effect=dependency),self.assertRaises(ValueError):self.complete(*args)
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_retention_lost_reply_next_native_pass_does_not_post(self):
+        from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
+        self.old_tail();original=WarehouseRecoveryRegistry.retain
+        def lost(registry,*a,**kw):original(registry,*a,**kw);raise RuntimeError('lost retain reply')
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            with patch.object(WarehouseRecoveryRegistry,'retain',lost),self.assertRaises(RuntimeError):self.complete(*args)
+            self.assertEqual(self.native_terminal(self.identity),('replay','retained'))
+            with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate')):
+                self.assertEqual(self.complete(*self.proof_inputs())['processed_count'],1)
+        self.assertEqual(self.business_image(),self.before)
+        self.assertEqual(self.native_terminal(self.identity),('complete','retained'))
+
+    def test_actual_after_marker_drift_cannot_finalize_or_bypass_cycle_proof(self):
+        from dataclasses import replace
+        from packages.application.storage_registry import atomic_write_manifest,manifest_payload,parse_manifest,_sha256
+        original=FfPoolDocumentService._finalize_posted
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs();manifest=self.finance.store_registry.load()
+            def changed(service,*a,**kw):
+                payload=manifest_payload(replace(manifest,rollback_generation_id='after-marker'),include_digest=False)
+                payload['manifest_sha256']=_sha256(payload)
+                atomic_write_manifest(self.finance.store_registry.manifest_path,parse_manifest(payload))
+                return original(service,*a,**kw)
+            with patch.object(FfPoolDocumentService,'_finalize_posted',changed),self.assertRaises(ValueError):self.complete(*args)
+            self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+            self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'processing')
+            # Durable queue flags do not let constructor/resume skip the saved proof.
+            self.service._finalize_posted(self.identity)
+            self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+            self.assertEqual(self.business_image(),self.before)
+            if manifest.implicit:self.finance.store_registry.manifest_path.unlink()
+            else:atomic_write_manifest(self.finance.store_registry.manifest_path,manifest)
+            self.assertEqual(self.complete(*self.proof_inputs())['processed_count'],1)
+
+    def test_native_book_pointer_and_finance_target_races_after_marker_refuse(self):
+        from contextlib import closing
+        from packages.application.fbs_accounting_runtime import pack
+        original=FfPoolDocumentService._finalize_posted
+        for mutation in ('book','finance','new_raw_week'):
+            case=NativeCompletionTests();case.setUp()
+            try:
+                case.old_tail()
+                with warehouse_functional_job_lock(case.root):
+                    args=case.proof_inputs()
+                    def changed(service,*a,**kw):
+                        if mutation=='book':
+                            book,version=accounting.load(case.root)
+                            book=deepcopy(book);book['publication_error']='synthetic concurrent book authority'
+                            from packages.application.fbs_snapshot_cost import fingerprint
+                            next_version=fingerprint(book)
+                            with closing(sqlite3.connect(accounting.path(case.root))) as c,c:
+                                c.execute('INSERT INTO accounting_revisions VALUES(?,?,?,?)',(next_version,'foreign-book',pack(c,book),version))
+                                c.execute('UPDATE accounting_current SET version=?',(next_version,))
+                        elif mutation=='finance':
+                            with sqlite3.connect(case.runtime.db_path) as c:c.execute("UPDATE wb_finance_weekly_aggregates SET metrics_json='{}'")
+                        else:
+                            with sqlite3.connect(case.runtime.db_path) as c:
+                                # New real native raw cohort, not a fake projection flag.
+                                c.execute("UPDATE wb_finance_weekly_raw_rows SET week_start='2026-09-14',week_end='2026-09-20'")
+                        return original(service,*a,**kw)
+                    with patch.object(FfPoolDocumentService,'_finalize_posted',changed),case.assertRaises(ValueError):case.complete(*args)
+                    case.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
+                    case.assertEqual(operations.read_acceptance(case.runtime.db_path,case.identity)['state'],'processing')
+            finally:case.doCleanups()
+
+    def test_missing_native_recovery_is_not_recreated(self):
+        self.old_tail()
+        with sqlite3.connect(self.runtime.db_path) as c:c.execute('DELETE FROM sheet_vitrina_v1_recovery_operations')
+        with warehouse_functional_job_lock(self.root),self.assertRaises(ValueError):operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+        with sqlite3.connect(self.runtime.db_path) as c:self.assertEqual(c.execute('SELECT count(*) FROM sheet_vitrina_v1_recovery_operations').fetchone()[0],0)
+        self.assertEqual(self.business_image(),self.before)
+
+
+    def split_finance_raw(self):
+        from contextlib import closing
+        from packages.application.storage_registry import atomic_write_manifest,build_manifest
+        raw=self.root/'native-raw.sqlite3'
+        with closing(sqlite3.connect(self.runtime.db_path)) as src,closing(sqlite3.connect(raw)) as dest:src.backup(dest)
+        for path,table,logical,revision,generation in (
+                (self.runtime.db_path,'finance_operational_schema_meta','operational','operational_v1','native-op'),
+                (raw,'finance_raw_schema_meta','finance_raw','finance_raw_v1','native-raw')):
+            with closing(sqlite3.connect(path)) as conn,conn:
+                conn.execute('PRAGMA journal_mode=WAL')
+                conn.execute(f'CREATE TABLE IF NOT EXISTS {table}(singleton INTEGER PRIMARY KEY,schema_revision TEXT,logical_store TEXT,generation_id TEXT,generation_epoch TEXT,source_fingerprint TEXT,created_at TEXT)')
+                conn.execute(f'INSERT OR REPLACE INTO {table} VALUES(1,?,?,?,?,?,?)',(revision,logical,generation,'fixture','sha256:'+'a'*64,self.stamp()))
+                if path==raw:conn.execute('ALTER TABLE wb_finance_weekly_raw_rows RENAME TO finance_raw_current_rows')
+        manifest=build_manifest(state='cutover',canonical_source='split',generation_epoch='fixture',raw_generation_id='native-raw',raw_relative_path=raw.name,raw_watermark='1',operational_generation_id='native-op',operational_relative_path=self.runtime.db_path.name,operational_watermark='1',rollback_generation_id='original',source_fingerprint='sha256:'+'a'*64)
+        atomic_write_manifest(self.finance.store_registry.manifest_path,manifest)
+        return raw
+
+    def test_actual_split_raw_normal_completion_and_attached_raw_race(self):
+        original=FfPoolDocumentService._finalize_posted
+        for drift in (False,True):
+            case=NativeCompletionTests();case.setUp()
+            try:
+                case.old_tail();raw=case.split_finance_raw()
+                with warehouse_functional_job_lock(case.root):
+                    args=case.proof_inputs()
+                    def changed(service,*a,**kw):
+                        if drift:
+                            with sqlite3.connect(raw) as c:c.execute("UPDATE finance_raw_current_rows SET row_hash='foreign-row'")
+                        return original(service,*a,**kw)
+                    with patch.object(FfPoolDocumentService,'_finalize_posted',changed):
+                        if drift:
+                            with case.assertRaises(ValueError):case.complete(*args)
+                            case.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
+                        else:
+                            case.assertEqual(case.complete(*args)['processed_count'],1)
+                            case.assertEqual(case.native_terminal(case.identity),('complete','retained'))
+                    case.assertEqual(case.business_image(),case.before)
+            finally:case.doCleanups()
+
+    def insert_split_week(self,raw):
+        with sqlite3.connect(raw) as conn:
+            conn.row_factory=sqlite3.Row
+            row=dict(conn.execute('SELECT * FROM finance_raw_current_rows LIMIT 1').fetchone())
+            row.update(week_start='2026-09-14',week_end='2026-09-20',rrd_id=str(int(row['rrd_id'])+1000),row_hash='synthetic-new-applicable-week')
+            conn.execute('INSERT INTO finance_raw_current_rows('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',list(row.values()))
+
+    def test_split_scope_insert_final_receipt_before_token_is_rejected(self):
+        import inspect
+        self.old_tail();raw=self.split_finance_raw();injected=[]
+        original=operations._completion_split_tokens
+        def token(observer,identity):
+            frame=next((f.frame for f in inspect.stack() if f.function=='guard' and f.filename.endswith('operator_ff_overhead.py')),None)
+            conn=frame.f_locals.get('conn') if frame else None
+            if conn is not None and not injected:
+                state=conn.execute(f'SELECT state FROM {operations.TABLE} WHERE request_id=?',(self.identity,)).fetchone()[0]
+                if state=='completed':self.insert_split_week(raw);injected.append(True)
+            return original(observer,identity)
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            with patch.object(operations,'_completion_split_tokens',side_effect=token),self.assertRaises(ValueError):self.complete(*args)
+            self.assertEqual(injected,[True])
+            self.assertEqual(self.finance.plan_stale_cost_weeks()['stale_week_count'],1)
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'processing')
+        proof=operations.read_acceptance(self.runtime.db_path,self.identity)['processing_receipt']['native_completion']
+        with warehouse_functional_job_lock(self.root):
+            operations.drain(self.runtime.db_path,self.root,timestamp_factory=self.stamp)
+            self.assertEqual(operations.reconcile(self.runtime,now=self.now)['processed_count'],0)
+            acceptance=operations.read_acceptance(self.runtime.db_path,self.identity)
+            self.assertEqual(acceptance['processing_receipt']['native_completion'],proof)
+            with self.assertRaises(ValueError):operations._finalize_confirmed(self.runtime,acceptance)
+            # Restore the intentionally malformed foreign-row fixture. Native Finance
+            # refuses that un-ingested week; never promote it with an invented proof.
+            with sqlite3.connect(raw) as conn:conn.execute("DELETE FROM finance_raw_current_rows WHERE week_start='2026-09-14'")
+            with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate')):
+                self.assertEqual(self.complete(*self.proof_inputs())['processed_count'],1)
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_split_raw_foreign_commit_outside_nm_scope_keeps_original_token(self):
+        self.old_tail();raw=self.split_finance_raw();injected=[]
+        original=FfPoolDocumentService._finalize_posted
+        def finalize(service,*args,**kwargs):
+            with sqlite3.connect(raw) as conn:
+                conn.row_factory=sqlite3.Row
+                row=dict(conn.execute('SELECT * FROM finance_raw_current_rows LIMIT 1').fetchone())
+                operation=json.loads(row['raw_json']);operation['nmId']=999
+                row.update(week_start='2026-09-14',week_end='2026-09-20',rrd_id=str(int(row['rrd_id'])+1000),row_hash='synthetic-foreign-nm',raw_json=json.dumps(operation))
+                conn.execute('INSERT INTO finance_raw_current_rows('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',list(row.values()))
+            injected.append(True)
+            return original(service,*args,**kwargs)
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            with patch.object(FfPoolDocumentService,'_finalize_posted',finalize),self.assertRaises(ValueError):self.complete(*args)
+        self.assertEqual(injected,[True])
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'processing')
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_split_scope_insert_during_post_own_commit_seal_is_rejected(self):
+        self.old_tail();raw=self.split_finance_raw();calls=[]
+        original=operations._CompletionReadset.seal
+        def seal(reads):
+            result=original(reads);calls.append(True)
+            if len(calls)==3:self.insert_split_week(raw) # After ack, after scope read, before after-token.
+            return result
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            with patch.object(operations._CompletionReadset,'seal',seal),self.assertRaises(ValueError):self.complete(*args)
+        self.assertEqual(len(calls),3)
+        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_two_payment_native_document_parity_and_shared_finance_readset(self):
+        from time import monotonic
+        from packages.application import fbs_snapshot_cost_sources
+        self.payment()
+        second=self.preview(request_id='second-native-payment',scope='FBS',amount_rub='125')
+        self.surface.confirm_document(second['request_id']);self.drain()
+        with warehouse_functional_job_lock(self.root):
+            block,plan=self.functional_plan();self.functional=block.apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'],backup_dir=self.root/'backups')
+        self.publish(self.prepare());before=self.business_image()
+        with operations.readonly(self.runtime.db_path) as conn:
+            documents=fbs_snapshot_cost_sources._documents(conn)
+            self.assertEqual(len(documents),2)
+            for document in documents:
+                self.assertEqual(fbs_snapshot_cost_sources._documents(conn,document_id=document['document_id']),[document])
+        active=set();heavy=[];holds=[];scans=[];raw_under_writer=[]
+        original_connect=sqlite3.connect
+        def connect(*args,**kwargs):
+            conn=original_connect(*args,**kwargs);started=[None]
+            def trace(sql):
+                upper=sql.lstrip().upper()
+                if upper.startswith('BEGIN IMMEDIATE'):active.add(id(conn));started[0]=monotonic()
+                if active and upper.startswith('SELECT') and any(t in sql for t in ('wb_finance_weekly_raw_rows','wb_finance_weekly_aggregates','wb_finance_weekly_sku_aggregates')):raw_under_writer.append(sql)
+                if upper.startswith(('COMMIT','ROLLBACK')):
+                    active.discard(id(conn))
+                    if started[0] is not None:holds.append(monotonic()-started[0]);started[0]=None
+            conn.set_trace_callback(trace);return conn
+        source=self.finance._finance_source_dependency_fingerprint
+        def fingerprint(*args,**kwargs):
+            heavy.append(dict(inside_writer=bool(active),keys=sorted(kwargs['target_keys'])))
+            return source(*args,**kwargs)
+        seal=operations._CompletionReadset.seal
+        def stream(reads):
+            self.assertFalse(active)
+            result=seal(reads);scans.append(result);return result
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            with patch.object(sqlite3,'connect',connect),patch.object(self.finance,'_finance_source_dependency_fingerprint',side_effect=fingerprint),patch.object(operations._CompletionReadset,'seal',stream):
+                self.assertEqual(self.complete(*args)['processed_count'],2)
+        self.assertEqual(len(heavy),3) # Once native zero-stale plan, scoped cohort, actual applied receipt; independent of payment count.
+        self.assertFalse(any(c['inside_writer'] for c in heavy));self.assertEqual(raw_under_writer,[])
+        self.assertEqual(self.business_image(),before)
+        self.assertEqual(self.native_terminal(second['request_id']),('complete','retained'))
+        print('cohort_query_work',json.dumps(dict(payments=2,full_dependency_calls=len(heavy),stream_scans=len(scans),stream_rows=sum(s['rows'] for s in scans),max_writer_seconds=max(holds),raw_image_reads_under_writer=len(raw_under_writer))))
+
+    def test_large_native_pdf_completion_guards_never_select_source_blob(self):
+        pdf=_render_pdf(_fixture('wb_bank_0401060.txt'),title='large-native-source',x_offset=0)+b'\n%'+b'padding'*(300000)+b'\n'
+        self.old_tail(pdf=pdf)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f'SELECT length(source_file_blob) FROM {REQUESTS_TABLE} WHERE request_id=?',(self.identity,)).fetchone()[0],len(pdf))
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            self.assertEqual(self.complete(*args)['processed_count'],1)
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_completion_soft_budget_keeps_remainder_durable_then_resumes_without_repost(self):
+        import time,inspect
+        self.payment();second=self.preview(request_id='second-budget-payment',scope='FBS',amount_rub='125')
+        self.surface.confirm_document(second['request_id']);self.drain()
+        with warehouse_functional_job_lock(self.root):
+            block,plan=self.functional_plan();self.functional=block.apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'],backup_dir=self.root/'backups')
+        self.publish(self.prepare());before=self.business_image()
+        actual=time.monotonic;started=[]
+        def clock():
+            caller=inspect.currentframe().f_back.f_code.co_name
+            if caller in {'complete_current_cycle','_complete_cohort'}:
+                started.append(True);return 0 if len(started)==1 else 31
+            return actual()
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            with patch.object(time,'monotonic',clock):result=self.complete(*args)
+            self.assertEqual(result,dict(processed_count=1,pending_count=1))
+            self.assertEqual(self.native_terminal(args[0]['sources'][1]['request_id']),('posted','mutation_running'))
+            with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate')):
+                self.assertEqual(self.complete(*self.proof_inputs()),dict(processed_count=1,pending_count=0))
+        self.assertEqual(self.business_image(),before)
+
+    def test_writer_requires_pre_dml_fence_and_fresh_transaction_nonce(self):
+        from contextlib import closing
+        self.old_tail();original=operations._finalize_confirmed;checked=[]
+        def finalize(runtime,acceptance,*,prepare_guard,finish):
+            def prepare():
+                guard=prepare_guard();guard()
+                with closing(sqlite3.connect(self.runtime.db_path)) as conn:
+                    conn.row_factory=sqlite3.Row
+                    changes=conn.total_changes;conn.execute('BEGIN IMMEDIATE')
+                    conn.execute(f'UPDATE {operations.TABLE} SET actor=actor WHERE request_id=?',(self.identity,))
+                    with self.assertRaises(ValueError):guard(conn,begin=True,initial_changes=changes)
+                    conn.rollback()
+                    changes=conn.total_changes;conn.execute('BEGIN IMMEDIATE')
+                    first=guard(conn,begin=True,initial_changes=changes);conn.rollback()
+                    changes=conn.total_changes;conn.execute('BEGIN IMMEDIATE')
+                    second=guard(conn,begin=True,initial_changes=changes)
+                    self.assertIsNot(first,second)
+                    with self.assertRaises(ValueError):guard(conn,transaction=first)
+                    conn.rollback();checked.append(True)
+                return guard
+            return original(runtime,acceptance,prepare_guard=prepare,finish=finish)
+        with warehouse_functional_job_lock(self.root):
+            args=self.proof_inputs()
+            with patch.object(operations,'_finalize_confirmed',finalize):self.assertEqual(self.complete(*args)['processed_count'],1)
+        self.assertEqual(checked,[True]);self.assertEqual(self.business_image(),self.before)
+
+
+
 if __name__=='__main__':
     unittest.main()
