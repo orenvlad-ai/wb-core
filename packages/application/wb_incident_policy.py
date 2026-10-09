@@ -390,6 +390,8 @@ def save_policy_revision(
     warehouse_options: Sequence[Mapping[str, Any]],
     timestamp: str | None = None,
     seller_id: str | None = None,
+    dry_run: bool = False,
+    operator_command: Any = None,
 ) -> dict[str, Any]:
     owner = seller_id or canonical_seller_id()
     active = _bool(payload.get("active"))
@@ -577,7 +579,7 @@ def save_policy_revision(
         _legacy_policy(runtime, seller_id=owner, snapshot_date=revision_effective_from) or {}
     ).get("legacy_payloads") or []
     created_at = timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    saved = runtime.append_wb_incident_policy_revision(
+    native_arguments = dict(
         seller_id=owner,
         active=active,
         warehouse_ids=warehouse_ids,
@@ -593,6 +595,9 @@ def save_policy_revision(
         legacy_payloads=legacy_payloads,
         expected_revision=int(base_revision) if base_revision is not None else None,
     )
+    if dry_run:
+        return {"idempotency_status":"planned","changed_from":revision_effective_from,"native_arguments":native_arguments}
+    saved = runtime.append_wb_incident_policy_revision(**native_arguments,operator_command=operator_command)
     if saved.get("status") == "conflict":
         raise WbIncidentPolicyError("WB incident policy revision conflict")
     result = get_latest_policy_state(

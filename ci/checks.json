@@ -814,6 +814,53 @@
         "playwright==1.58.0"
       ]
     },
+    "operator_policy": {
+      "patterns": [
+        "packages/application/operator_policy.py",
+        "packages/application/operator_policy_history.py",
+        "packages/application/operator_operations.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/application/calculation_parameters.py",
+        "packages/application/calculation_parameters_v4.py",
+        "packages/application/wb_incident_policy.py",
+        "packages/adapters/templates/sheet_vitrina_v1_operator_policy.js",
+        "packages/adapters/templates/sheet_vitrina_v1_settings.html",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/owned_history*.py",
+        "packages/application/historical_dated_inputs.py",
+        "apps/web_vitrina*history*.py",
+        "packages/application/sku_management.py",
+        "packages/application/warehouse_functional_economics_backfill.py",
+        "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/operator_policy_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_policy_history_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_policy_http_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_policy_journal_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_policy_browser_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "playwright==1.58.0"
+      ]
+    },
     "supplier_release_scope": {
       "patterns": [
         "packages/adapters/registry_upload_http_entrypoint.py",
@@ -822,6 +869,10 @@
         "packages/application/operator_operations.py",
         "packages/application/operator_supplier_journal.py",
         "packages/application/operator_supplier*.py",
+        "packages/application/operator_policy*.py",
+        "packages/adapters/templates/sheet_vitrina_v1_operator_policy.js",
+        "packages/adapters/templates/sheet_vitrina_v1_settings.html",
+        "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html",
         "packages/application/historical_dated_inputs.py",
         "packages/application/owned_history*.py",
         "apps/web_vitrina*history*.py",

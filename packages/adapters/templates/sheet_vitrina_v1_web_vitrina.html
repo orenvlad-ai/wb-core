@@ -5865,6 +5865,7 @@
     @media(max-width: 650px) { .table-heading-row, .table-heading-row.is-history { grid-template-columns: minmax(0, 1fr); } .table-heading-right { margin-left: 0; width: 100%; justify-content: flex-start; }  }
   </style>
 <!-- FACILITY_ACCEPTANCE_ASSET -->
+<!-- OPERATOR_POLICY_ASSET -->
 </head>
 <body>
   <main class="page" data-web-vitrina-page="web_vitrina_page_composition">
@@ -7475,6 +7476,10 @@
     const wbIncidentHistory = document.querySelector("[data-wb-incident-history]");
     const wbIncidentApply = document.querySelector("[data-wb-incident-apply]");
     const wbIncidentResult = document.querySelector("[data-wb-incident-result]");
+    const incidentAcceptance=document.createElement('div');incidentAcceptance.hidden=true;
+    if(wbIncidentResult)wbIncidentResult.after(incidentAcceptance);
+    const incidentOperator=OperatorPolicy.create(WEB_VITRINA_CONFIG,incidentAcceptance,['wb_incident_policy']);
+    incidentOperator.restore();
     const summaryGridNode = document.querySelector("[data-summary-grid]");
     const pageMetaNode = document.querySelector("[data-page-meta]");
     const globalProgressNode = document.querySelector("[data-global-progress]");
@@ -11167,46 +11172,8 @@
       wbIncidentApply.textContent = "Применяем…";
       if (wbIncidentResult) wbIncidentResult.hidden = true;
       try {
-        const response = await fetch(String(WEB_VITRINA_CONFIG.wb_incident_policy_settings_path || ""), {
-          method: "POST",
-          headers: {"Content-Type": "application/json", Accept: "application/json"},
-          body: JSON.stringify(payload)
-        });
-        const result = await response.json().catch(function() { return {}; });
-        if (!response.ok) throw new Error(String(result.error || ("HTTP " + response.status)));
-        state.warehouses.incidentPolicy = result;
-        state.warehouses.incidentDraft = wbIncidentDraftFromPolicy(result);
-        renderWbIncidentPolicy();
-        if (wbIncidentResult) {
-          const rematerialization = result && typeof result.rematerialization === "object"
-            ? result.rematerialization
-            : {};
-          const rematerializationStatus = String(rematerialization.status || "");
-          const applyStatus = String(result.policy_apply_status || "");
-          if (applyStatus === "failed_reverted_to_last_good") {
-            const recovery = result && typeof result.last_good_recovery === "object"
-              ? result.last_good_recovery
-              : {};
-            wbIncidentResult.textContent = "Новая политика не активирована: зависимый пересчёт завершился ошибкой. " +
-              "Сохранена последняя успешная revision " + String(recovery.recovery_revision || result.revision || 0) +
-              "; причина: " + String(rematerialization.error || "неизвестная ошибка") + ".";
-            wbIncidentResult.setAttribute("data-tone", "error");
-          } else if (rematerializationStatus === "failed") {
-            wbIncidentResult.textContent = "Политика revision " + String(result.revision || 0) +
-              " сохранена, но bounded rematerialization витрины не завершена: " +
-              String(rematerialization.error || "неизвестная ошибка") + ".";
-            wbIncidentResult.setAttribute("data-tone", "error");
-          } else {
-            const changedCells = Number(rematerialization.changed_cells || 0);
-            const snapshotCount = Number(rematerialization.snapshot_count || 0);
-            wbIncidentResult.textContent = "Политика revision " + String(result.revision || 0) +
-              " применена. Затронутые ready-даты витрины обработаны автоматически: " +
-              String(snapshotCount) + " снимк., " + String(changedCells) +
-              " ячеек; Supply и SKU Management сохраняют строгую проверку полноты.";
-            wbIncidentResult.setAttribute("data-tone", "success");
-          }
-          wbIncidentResult.hidden = false;
-        }
+        await incidentOperator.submit('wb_incident_policy',String(WEB_VITRINA_CONFIG.wb_incident_policy_settings_path||''),payload);
+        if(wbIncidentResult){wbIncidentResult.textContent='Документ сохранён. Применение и публикация ожидают обработки.';wbIncidentResult.setAttribute('data-tone','success');wbIncidentResult.hidden=false;}
       } catch (error) {
         if (wbIncidentResult) {
           wbIncidentResult.textContent = String(error && error.message ? error.message : error);

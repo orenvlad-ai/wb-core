@@ -238,8 +238,10 @@
       .recovery-steps { grid-template-columns: 1fr; }
     }
   </style>
+<!-- OPERATOR_POLICY_ASSET -->
 </head>
 <body class="__SHEET_VITRINA_V1_SETTINGS_BODY_CLASS__">
+  <div id="policyAcceptance" hidden></div>
   <main>
     <div id="nomenclatureAcceptance" hidden></div>
     <div class="shell">
@@ -887,6 +889,8 @@
       let pendingDocumentType = "";
       let editingContractId = "";
       let users = [];
+      const policyOperator=OperatorPolicy.create(config,document.getElementById('policyAcceptance'),['legacy_proxy','proxy_v4_tax']);
+      policyOperator.restore();
       let calculationPreviewFingerprint = "";
       let proxyV4PreviewFingerprint = "";
       let autoUpdatesState = null;
@@ -3985,13 +3989,9 @@
         try {
           const body = calculationPayload();
           body.preview_fingerprint = calculationPreviewFingerprint;
-          await fetchJson(calculationParametersPath, {
-            method: "POST",
-            headers: { Accept: "application/json", "Content-Type": "application/json; charset=utf-8" },
-            body: JSON.stringify(body)
-          });
-          await loadCalculationParameters();
-          calculationMessage.textContent = "Новая версия сохранена; Proxy targeted recalculation поставлен в очередь.";
+          await policyOperator.submit('legacy_proxy',calculationParametersPath,body);
+          calculationPreviewFingerprint='';saveCalculationButton.disabled=true;
+          calculationMessage.textContent = "Документ сохранён. Применение и публикация ожидают обработки.";
           calculationMessage.className = "message success";
         } catch (error) {
           calculationMessage.textContent = error.message;
@@ -4116,13 +4116,9 @@
         try {
           const body = proxyV4TaxPayload();
           body.preview_fingerprint = proxyV4PreviewFingerprint;
-          const payload = await fetchJson(proxyV4ParametersPath, {
-            method: "POST",
-            headers: {Accept: "application/json", "Content-Type": "application/json; charset=utf-8"},
-            body: JSON.stringify(body)
-          });
-          renderProxyV4(payload);
-          proxyV4Message.textContent = "Новая V4 tax version сохранена; свежая Витрина применит её только с назначенной business date.";
+          await policyOperator.submit('proxy_v4_tax',proxyV4ParametersPath,body);
+          proxyV4PreviewFingerprint='';saveProxyV4TaxButton.disabled=true;
+          proxyV4Message.textContent = "Документ сохранён. Налог и публикация ожидают обработки.";
           proxyV4Message.className = "message success";
         } catch (error) {
           proxyV4Message.textContent = error.message;

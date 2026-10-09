@@ -22,6 +22,7 @@ from packages.application.calculation_parameters_v4 import (
     aggregate_proxy_4,
     calculate_proxy_4,
     load_proxy_v4_parameters_for_date,
+    _parameter_fingerprint as proxy_v4_parameter_fingerprint,
 )
 from packages.application.canonical_wb_cost_resolver import CANONICAL_COST_POLICY_DATE
 from packages.application.inventory_cost_blend import (
@@ -621,6 +622,10 @@ def build_functional_economics_backfill_plan(
         "cutover_at": str(cutover["cutover_at"]),
         "business_date": operation_business_date,
         "source_fingerprint": source_fingerprint,
+        "parameter_dependencies": {day:{"proxy3_version":item.version_id,"proxy3_fingerprint":item.fingerprint,
+            "proxy4_version":proxy_v4_parameter_by_date[day].version_id if proxy_v4_parameter_by_date.get(day) else None,
+            "proxy4_fingerprint":proxy_v4_parameter_fingerprint(proxy_v4_parameter_by_date[day]) if proxy_v4_parameter_by_date.get(day) else None}
+            for day,item in parameter_by_date.items()},
         "snapshot_count": len(snapshots),
         "date_from": dates[0] if dates else None,
         "date_to": dates[-1] if dates else None,

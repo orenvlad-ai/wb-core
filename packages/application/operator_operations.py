@@ -11,6 +11,7 @@ from packages.application import operator_supplier_contracts as contracts
 from packages.application import operator_facility_mappings as facilities
 from packages.application import operator_compat_uploads as compat_uploads
 from packages.application import operator_nomenclature as nomenclature
+from packages.application import operator_policy as policy
 from packages.application import operator_external_operations as external
 from packages.application import operator_feedback_operations as feedback
 from packages.application import operator_business_settings as business_settings
@@ -36,6 +37,7 @@ DOMAIN_LABELS[complaint_runs.DOMAIN]="Ручные запуски авто-жа�
 DOMAIN_LABELS[trade.DOMAIN] = 'Библиотека инвойсов и договоров'
 DOMAIN_LABELS[contracts.DOMAIN]='Договоры поставщика'
 DOMAIN_LABELS[facilities.DOMAIN] = "Склады и связи FBS"
+DOMAIN_LABELS.update(policy.KINDS)
 DOMAIN_LABELS[business_settings.DOMAIN]='Бизнес-настройки'
 DOMAIN_LABELS[cleaner.DOMAIN]=cleaner.LABEL
 DOMAIN_LABELS[balance_jobs.DOMAIN]=balance_jobs.LABEL
@@ -47,6 +49,7 @@ DOMAIN_SECTIONS.update({name: 'supply' for name in supplier_journal.LABELS})
 DOMAIN_SECTIONS[trade.DOMAIN] = 'settings'
 DOMAIN_SECTIONS[contracts.DOMAIN] = 'supply'
 DOMAIN_SECTIONS[facilities.DOMAIN] = 'supply'
+DOMAIN_SECTIONS.update({name: 'supply' if name == 'wb_incident_policy' else 'settings' for name in policy.KINDS})
 
 
 def _allowed(allowed_domains, allowed_sections):
@@ -124,6 +127,11 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
         if balance_source:sources.append(balance_source)
         if actor and nomenclature.DOMAIN in selected and nomenclature.exists(conn):
             sources.append((nomenclature.TABLE, 'operation_id', '*', 'actor=?', (actor,), nomenclature.public))
+        policies = tuple(sorted(selected.intersection(policy.KINDS)))
+        if actor and policies and policy.exists(conn):
+            sources.append((policy.TABLE, 'operation_id', '*',
+                'actor=? AND kind IN (' + ','.join('?' for _ in policies) + ')',
+                (actor, *policies), policy.public))
         if 'ff_pool_document' in selected:
             if overhead._exists(conn):
                 sources.append((overhead.TABLE, 'request_id', '*', '1', (), _overhead_public))
@@ -263,6 +271,12 @@ def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections
             row = conn.execute(f'SELECT * FROM {nomenclature.TABLE} WHERE operation_id=? AND actor=?', (identity, actor)).fetchone()
             if row is not None:
                 return _common(nomenclature.public(conn, row))
+        policies = tuple(sorted(allowed.intersection(policy.KINDS)))
+        if actor and policies and policy.exists(conn):
+            row = conn.execute(f"SELECT * FROM {policy.TABLE} WHERE operation_id=? AND actor=? AND kind IN ({','.join('?' for _ in policies)})",
+                (identity, actor, *policies)).fetchone()
+            if row is not None:
+                return _common(policy.public(conn, row))
         if fulfillment.DOMAIN in allowed and fulfillment._exists(conn, fulfillment.TABLE):
             row = conn.execute(f'SELECT * FROM {fulfillment.TABLE} WHERE operation_id=?', (identity,)).fetchone()
             if row:

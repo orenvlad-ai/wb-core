@@ -166,6 +166,7 @@ class _OwnedHistoryWorker:
         self._source_dates = self._backfill_dates = None
         self._target = self._closed_binding = self._closed_proof = None
         self._historical_binding = self._historical_proof = self._historical_receipt = None
+        self._policy_binding = self._policy_proof = self._policy_receipt = None
         self._supplier_binding = self._supplier_proof = self._supplier_receipt = None
         self._source_binding = source_binding(runtime.runtime_dir)
         self._contract_digest = file_digest(config.runtime_contract)
@@ -202,7 +203,7 @@ class _OwnedHistoryWorker:
         self._portion_used = True  # Before Popen; even ambiguous startup is consumed.
         return self._invoke("portion", anchor["now"], anchor)
 
-    def complete(self, now, *, backfill_dates=(), closed_receipt=None, historical_receipt=None, supplier_receipt=None, source_range=None,
+    def complete(self, now, *, backfill_dates=(), closed_receipt=None, historical_receipt=None, policy_receipt=None, supplier_receipt=None, source_range=None,
                  total_seconds=HISTORY_TOTAL_SECONDS, max_portions=HISTORY_MAX_PORTIONS):
         """One frozen target; only verified strict dated progress permits more work."""
         from packages.business_time import current_business_date_iso
@@ -213,12 +214,12 @@ class _OwnedHistoryWorker:
         if (not 0 < total_seconds <= HISTORY_TOTAL_SECONDS or type(max_portions) is not int or not 1 <= max_portions <= HISTORY_MAX_PORTIONS
                 or type(backfill_dates) is not tuple or tuple(sorted(set(backfill_dates))) != backfill_dates):
             raise HistoryDelegationError("history_completion_limits_invalid")
-        if sum(receipt is not None for receipt in (historical_receipt, supplier_receipt)) > 1:
+        if sum(receipt is not None for receipt in (historical_receipt, policy_receipt, supplier_receipt)) > 1:
             raise HistoryDelegationError("history_multiple_source_authorities")
         today = current_business_date_iso(now)
         first = (datetime.fromisoformat(today) - timedelta(days=13)).date().isoformat()
         if self.operation == "cycle":
-            if source_range is not None or (historical_receipt is None and supplier_receipt is None and len(backfill_dates) > 2) or any(day >= (datetime.fromisoformat(today) - timedelta(days=1)).date().isoformat() for day in backfill_dates):
+            if source_range is not None or (historical_receipt is None and policy_receipt is None and supplier_receipt is None and len(backfill_dates) > 2) or any(day >= (datetime.fromisoformat(today) - timedelta(days=1)).date().isoformat() for day in backfill_dates):
                 raise HistoryDelegationError("history_cycle_backfill_scope_invalid")
             for day in backfill_dates:
                 datetime.strptime(day, "%Y-%m-%d")
@@ -234,7 +235,7 @@ class _OwnedHistoryWorker:
             if (type(closed_receipt) is not ClosedBacklog or closed_receipt.runtime is not self.runtime
                     or len(closed_receipt.publication_dates()) > 2
                     or not set(closed_receipt.publication_dates()) <= set(backfill_dates)
-                    or (historical_receipt is None and supplier_receipt is None
+                    or (historical_receipt is None and policy_receipt is None and supplier_receipt is None
                         and closed_receipt.publication_dates() != backfill_dates)):
                 raise HistoryDelegationError("history_closed_receipt_context_changed")
             from packages.application.owned_history_native_ack import closed_receipt_digest
@@ -251,8 +252,18 @@ class _OwnedHistoryWorker:
             historical_receipt.validate_sources_readonly(now=now)
             self._historical_binding=historical_receipt.binding()
             self._historical_receipt=historical_receipt
-        elif self.operation == "cycle" and backfill_dates and closed_receipt is None and supplier_receipt is None:
+        elif self.operation == "cycle" and backfill_dates and closed_receipt is None and policy_receipt is None and supplier_receipt is None:
             raise HistoryDelegationError("history_closed_receipt_required")
+        if policy_receipt is not None:
+            from packages.application.operator_policy_history import PolicyHistory
+            if type(policy_receipt) is not PolicyHistory or policy_receipt.runtime is not self.runtime or self.operation!='cycle':
+                raise HistoryDelegationError('policy_history_context_changed')
+            selected=tuple(d for d in policy_receipt.publication_dates() if d < (datetime.fromisoformat(today)-timedelta(days=1)).date().isoformat())
+            expected=tuple(sorted(set(selected)|set((self._closed_binding or {}).get('dates',[]))))
+            if backfill_dates!=expected:
+                raise HistoryDelegationError('policy_history_scope_changed')
+            policy_receipt.validate_sources_readonly(now=now)
+            self._policy_binding=policy_receipt.binding();self._policy_receipt=policy_receipt
         if supplier_receipt is not None:
             from packages.application.operator_supplier_history import SupplierHistory
             if type(supplier_receipt) is not SupplierHistory or supplier_receipt.runtime is not self.runtime or self.operation!='cycle':
@@ -333,6 +344,14 @@ class _OwnedHistoryWorker:
             self._historical_proof=_VerifiedHistoricalHistory(self,observed['invocation'],historical['receipt_digest'],
                 tuple(self._historical_binding['dates']),observed['current'],historical['native'],observed['source_stamp'])
             self._historical_receipt._acknowledge_verified_native(self._historical_proof)
+        if self._policy_receipt is not None:
+            from packages.application.owned_history_native_ack import _VerifiedPolicyHistory
+            policy=observed.get('policy')
+            if not policy or policy['receipt_digest']!=self._policy_binding['digest']:
+                raise HistoryDelegationError('policy_history_terminal_unproven')
+            self._policy_proof=_VerifiedPolicyHistory(self,observed['invocation'],policy['receipt_digest'],
+                tuple(self._policy_binding['dates']),observed['current'],policy['native'],observed['source_stamp'])
+            self._policy_receipt._acknowledge_verified_native(self._policy_proof)
         if self._supplier_receipt is not None:
             from packages.application.owned_history_native_ack import _VerifiedSupplierHistory
             supplier=observed.get('supplier')
@@ -346,7 +365,7 @@ class _OwnedHistoryWorker:
                 "window_from": self._anchor["window_from"], "window_to": self._anchor["window_to"],
                 "portions": portions, "completed": len(observed["completed"]),
                 "backfill_count": len(self._backfill_dates), "closed_ack": closed_receipt is not None,
-                "historical_ack": self._historical_receipt is not None, "supplier_ack": self._supplier_receipt is not None}
+                "historical_ack": self._historical_receipt is not None, "policy_ack": self._policy_receipt is not None, "supplier_ack": self._supplier_receipt is not None}
 
     def _invoke(self, mode, now, anchor):
         try:
@@ -387,7 +406,7 @@ class _OwnedHistoryWorker:
                 "runtime_contract_digest": file_digest(config.runtime_contract), "source": binding,
                 "cycle_owner": self.cycle_owner, "owner_kind": self.operation, "locks": locks, "now": now,
                 "source_dates": self._source_dates, "backfill_dates": self._backfill_dates,
-                "target": self._target, "closed_receipt": self._closed_binding, "historical_receipt": self._historical_binding, "supplier_receipt": self._supplier_binding,
+                "target": self._target, "closed_receipt": self._closed_binding, "historical_receipt": self._historical_binding, "policy_receipt": self._policy_binding, "supplier_receipt": self._supplier_binding,
                 "formula_epoch": config.formula_epoch,
                 "inner_seconds": min(float(config.budget_seconds), seconds - PARENT_GRACE_SECONDS),
                 "max_recomputes": config.max_recomputes, "anchor": anchor}

@@ -11,6 +11,7 @@ import time
 from unittest.mock import patch
 import unittest
 from uuid import uuid4
+from urllib.parse import urlsplit
 
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
@@ -20,7 +21,7 @@ from packages.application import operator_spp_jobs as operator
 from packages.application.wb_spp_tester import WbSppTesterError
 from packages.application.operator_operations import journal, read_acceptance
 from packages.application.change_registry import ATTEMPT_EVENTS_TABLE
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 
 def body(prices=(810,),identity=None):
@@ -32,6 +33,69 @@ def scope(server,actor='native-a',human='principal-a'):
 
 
 def file_digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _spp_tab_metadata(page):
+    """Passive bounded metadata only; never read a response or request body."""
+    metadata={'network':[],'pageerrors':[],'listener_errors':[]}
+    def network(kind,event):
+        try:
+            if len(metadata['network'])>=100:return
+            request=event.request if kind=='response' else event
+            url=urlsplit(request.url)
+            metadata['network'].append(dict(monotonic=time.monotonic(),kind=kind,
+                method=request.method,path=url.path[:200],has_query=bool(url.query),
+                status=event.status if kind=='response' else None,
+                failure=(request.failure or '')[:200] if kind=='requestfailed' else None))
+        except Exception as error:
+            if len(metadata['listener_errors'])<10:metadata['listener_errors'].append(str(error)[:200])
+    def pageerror(error):
+        if len(metadata['pageerrors'])<20:metadata['pageerrors'].append(str(error)[:500])
+    page.on('request',lambda request:network('request',request))
+    page.on('response',lambda response:network('response',response))
+    page.on('requestfailed',lambda request:network('requestfailed',request))
+    page.on('pageerror',pageerror)
+    return metadata
+
+
+def _spp_start_timeout_diagnostic(page,tab_number,metadata):
+    # This is a post-timeout observation, not proof of an earlier UI state.
+    diagnostic=dict(phase='POST_TIMEOUT',tab_number=tab_number,
+        recorded_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),metadata=metadata)
+    try:
+        diagnostic['snapshot']=page.evaluate('''() => {
+            const node=document.querySelector('[data-spp-test-start]');
+            const s=typeof state==='undefined'?null:state.prices.sppTest;
+            const buyer=s?.buyerSession||{};
+            const parsed=collectSppTestPrices();
+            const quarantinePlan=sppQuarantinePlan();
+            const job=s?.job||{},activeJob=s?.activeJob||{};
+            const active=!!activeJob.job_id || ['preflight','measuring','cooldown','restoring','running'].indexOf(String(job.status||''))!==-1;
+            return {phase:'POST_TIMEOUT',timestamp_ms:Date.now(),performance_ms:performance.now(),
+                visibility:document.visibilityState,hasFocus:document.hasFocus(),
+                disabled:node?.disabled,selected_nm:document.querySelector('[data-spp-test-nm]')?.value,
+                prices:Array.from(document.querySelectorAll('[data-spp-test-price-index]')).slice(0,6)
+                    .map(n=>({index:n.dataset.sppTestPriceIndex,value:n.value,connected:n.isConnected})),
+                reason:document.querySelector('[data-spp-test-start-reason]')?.innerText.slice(0,500),
+                buyer_label:document.querySelector('[data-wb-buyer-session-state]')?.innerText.slice(0,500),
+                error:document.querySelector('[data-spp-test-error]')?.innerText.slice(0,500),
+                operands:s?{prices:s.prices.slice(0,6),selected_nm:s.selectedNmId,pending:s.pending,
+                    operator_scope_present:!!s.operatorScope,write_enabled:!!state.prices.writeEnabled,
+                    active_job_present:!!s.activeJob?.job_id,job_status:s.job?.status,
+                    active:active,parsed_valid:parsed.valid,parsed_reason:String(parsed.reason||'').slice(0,500),
+                    quarantine_valid:quarantinePlan.valid,quarantine_reason:String(quarantinePlan.reason||'').slice(0,500),
+                    quarantine_risk_count:(quarantinePlan.risks||[]).length,
+                    start_loading:s.startLoading,status_loading:s.statusLoading,
+                    buyer_loading:s.buyerSessionLoading,buyer_valid:buyer.valid===true,
+                    buyer_capability_valid:buyer.capability_valid===true}:null};
+        }''')
+    except Exception as error:
+        diagnostic['snapshot_error']=dict(type=type(error).__name__,message=str(error)[:500])
+    try:
+        print('spp_start_timeout_diagnostic: '+json.dumps(diagnostic,ensure_ascii=False),file=sys.stderr,flush=True)
+    except Exception:
+        # Even an unavailable diagnostic sink must retain the original timeout.
+        pass
 
 
 @contextmanager
@@ -248,6 +312,7 @@ class Native(unittest.TestCase):
     def test_chromium_unknown400_failed_get_two_tabs_closed_tab(self):
         with fixture() as f,sync_playwright() as pw:
             browser=pw.chromium.launch();context=browser.new_context(viewport={'width':1440,'height':940});pages=[context.new_page(),context.new_page()]
+            tab_metadata=[_spp_tab_metadata(page) for page in pages]
             posts=[];saved=[];get_fail=[True]
             def intercept(route):
                 request=route.request
@@ -260,7 +325,15 @@ class Native(unittest.TestCase):
             context.route('**/*',intercept)
             for page in pages:
                 _open_manual_panel(page,f.base_url);page.locator('[data-spp-test-price-index="0"]').fill('810')
-                page.wait_for_function('() => document.querySelector("[data-spp-test-start]").disabled === false')
+                try:
+                    page.wait_for_function('() => document.querySelector("[data-spp-test-start]").disabled === false')
+                except PlaywrightTimeoutError:
+                    try:
+                        _spp_start_timeout_diagnostic(page,pages.index(page)+1,tab_metadata[pages.index(page)])
+                    except Exception as diagnostic_error:
+                        try:print('spp_start_timeout_diagnostic_error: '+str(diagnostic_error)[:500],file=sys.stderr,flush=True)
+                        except Exception:pass
+                    raise
             # Dispatch both true click events before either async admission reply.
             for page in pages:page.locator('[data-spp-test-start]').evaluate('(node)=>node.click()')
             pages[0].wait_for_function('() => document.querySelector("[data-spp-test-error]").innerText.includes("повторная отправка")',timeout=10000)

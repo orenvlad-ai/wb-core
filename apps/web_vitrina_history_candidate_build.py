@@ -302,7 +302,7 @@ def _run_admitted(args):
 
 
 def build_owned_cycle_history(*, runtime, config, cycle_owner, now,
-                              backfill_dates=(), closed_receipt=None, historical_receipt=None, supplier_receipt=None):
+                              backfill_dates=(), closed_receipt=None, historical_receipt=None, policy_receipt=None, supplier_receipt=None):
     """Complete one frozen rolling14∪fixed old-date target, no source replay.
 
     The actual cycle retains SH/heavy and both domain descriptors across all
@@ -315,6 +315,7 @@ def build_owned_cycle_history(*, runtime, config, cycle_owner, now,
     from packages.application.owned_history_worker import owned_history_worker
     with owned_history_worker(runtime=runtime, config=config, cycle_owner=cycle_owner) as worker:
         return worker.complete(now, backfill_dates=backfill_dates, closed_receipt=closed_receipt, historical_receipt=historical_receipt,
+            **({"policy_receipt": policy_receipt} if policy_receipt is not None else {}),
             **({"supplier_receipt": supplier_receipt} if supplier_receipt is not None else {}))
 
 

@@ -64,6 +64,7 @@
 - [Рейтинг карточки по отзывам](61_MODULE__CARD_RATING.md)
 - [Баланс запасов SKU](53_MODULE__SKU_INVENTORY_BALANCE.md)
 - [Финансовая ликвидность](60_MODULE__FINANCE_LIQUIDITY.md)
+- [Принятие параметров и политики оператором](operator_policy_acceptance.md)
 
 ## Реестр изменений и здоровье
 

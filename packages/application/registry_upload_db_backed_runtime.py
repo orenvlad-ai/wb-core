@@ -2104,6 +2104,7 @@ class RegistryUploadDbBackedRuntime:
         source: str,
         legacy_payloads: Iterable[Mapping[str, Any]] = (),
         expected_revision: int | None = None,
+        operator_command: Any = None,
     ) -> dict[str, Any]:
         """Append an immutable seller-level policy revision with optimistic locking."""
 
@@ -2132,6 +2133,9 @@ class RegistryUploadDbBackedRuntime:
             current_revision = int(current["revision"]) if current is not None else 0
             if expected_revision is not None and current_revision != int(expected_revision):
                 return {"status": "conflict", "current_revision": current_revision}
+            if operator_command is not None:
+                from packages.application.operator_policy import before_native
+                before_native(conn,operator_command)
             next_revision = current_revision + 1
             conn.execute(
                 """
@@ -2170,6 +2174,9 @@ class RegistryUploadDbBackedRuntime:
                     json.dumps(legacy, ensure_ascii=False, sort_keys=True),
                 ),
             )
+            if operator_command is not None:
+                from packages.application.operator_policy import bind_native
+                bind_native(conn,operator_command,identity=str(next_revision),effective_date=normalized_from)
             conn.commit()
         return self.load_latest_wb_incident_policy(seller_id=normalized_seller_id)
 

@@ -754,81 +754,10 @@ class SkuManagementBlock:
         recovery: dict[str, Any] = {}
         policy_apply_status = "applied"
         if str(rematerialization.get("status") or "") == "failed":
-            prior = (
-                dict(previous_record)
-                if isinstance(previous_record, Mapping)
-                and previous_record.get("status") == "ok"
-                else dict(previous_policy)
-            )
-            prior_entries = list(
-                prior.get("warehouse_entries")
-                or previous_policy.get("configured_warehouse_entries")
-                or []
-            )
-            prior_ids = sorted(
-                {
-                    int(item.get("warehouse_id") or 0)
-                    for item in prior_entries
-                    if int(item.get("warehouse_id") or 0) > 0
-                    and not str(item.get("effective_to_exclusive") or "")
-                }
-            )
-            prior_identities = list(prior.get("warehouse_identities") or [])
-            if not prior_identities and prior_ids:
-                option_by_id = {
-                    int(item.get("warehouse_id") or 0): dict(item)
-                    for item in options_contract.get("options") or []
-                }
-                prior_identities = [
-                    {
-                        "warehouse_id": warehouse_id,
-                        "warehouse_name": str(
-                            option_by_id.get(warehouse_id, {}).get("warehouse_name")
-                            or ""
-                        ),
-                        "effective_from": next(
-                            str(item.get("effective_from") or "")
-                            for item in prior_entries
-                            if int(item.get("warehouse_id") or 0) == warehouse_id
-                            and not str(item.get("effective_to_exclusive") or "")
-                        ),
-                    }
-                    for warehouse_id in prior_ids
-                ]
-            restored = self.runtime.append_wb_incident_policy_revision(
-                seller_id=seller_id,
-                active=bool(
-                    prior.get("active")
-                    if previous_record.get("status") == "ok"
-                    else previous_policy.get("configured_active")
-                    if "configured_active" in previous_policy
-                    else previous_policy.get("active")
-                ),
-                warehouse_ids=prior_ids,
-                warehouse_identities=prior_identities,
-                warehouse_entries=prior_entries,
-                reason=str(prior.get("reason") or ""),
-                effective_from=changed_from or snapshot_date,
-                effective_to=str(prior.get("effective_to") or ""),
-                policy_status=str(prior.get("policy_status") or "disabled"),
-                actor="system:incident-policy-last-good-recovery",
-                created_at=self.timestamp_factory(),
-                source="incident_policy_v2_last_good_recovery",
-                legacy_payloads=list(prior.get("legacy_payloads") or []),
-                expected_revision=int(saved_policy.get("revision") or 0),
-            )
-            if restored.get("status") == "conflict":
-                raise SkuManagementError(
-                    "Incident policy replay failed and last-good recovery revision conflicted",
-                    http_status=500,
-                )
-            policy_apply_status = "failed_reverted_to_last_good"
-            recovery = {
-                "status": "last_good_restored",
-                "attempted_revision": int(saved_policy.get("revision") or 0),
-                "recovery_revision": int(restored.get("revision") or 0),
-                "changed_from": changed_from,
-            }
+            recovery=self._restore_incident_last_good(previous_record=previous_record,previous_policy=previous_policy,
+                warehouse_options=list(options_contract.get("options") or []),changed_from=changed_from,
+                snapshot_date=snapshot_date,saved_policy=saved_policy)
+            policy_apply_status="failed_reverted_to_last_good"
         return {
             **self.get_warehouse_exclusion_settings(user_key=user_key),
             "idempotency_status": (
@@ -860,6 +789,77 @@ class SkuManagementBlock:
                 "warehouse_wac_mutated": False,
             },
         }
+
+    def _restore_incident_last_good(self,*,previous_record,previous_policy,warehouse_options,changed_from,snapshot_date,saved_policy,operator_command=None):
+        seller_id=canonical_seller_id()
+        prior = (
+            dict(previous_record)
+            if isinstance(previous_record, Mapping)
+            and previous_record.get("status") == "ok"
+            else dict(previous_policy)
+        )
+        prior_entries = list(
+            prior.get("warehouse_entries")
+            or previous_policy.get("configured_warehouse_entries")
+            or []
+        )
+        prior_ids = sorted(
+            {
+                int(item.get("warehouse_id") or 0)
+                for item in prior_entries
+                if int(item.get("warehouse_id") or 0) > 0
+                and not str(item.get("effective_to_exclusive") or "")
+            }
+        )
+        prior_identities = list(prior.get("warehouse_identities") or [])
+        if not prior_identities and prior_ids:
+            option_by_id = {
+                int(item.get("warehouse_id") or 0): dict(item)
+                for item in warehouse_options
+            }
+            prior_identities = [
+                {
+                    "warehouse_id": warehouse_id,
+                    "warehouse_name": str(
+                        option_by_id.get(warehouse_id, {}).get("warehouse_name")
+                        or ""
+                    ),
+                    "effective_from": next(
+                        str(item.get("effective_from") or "")
+                        for item in prior_entries
+                        if int(item.get("warehouse_id") or 0) == warehouse_id
+                        and not str(item.get("effective_to_exclusive") or "")
+                    ),
+                }
+                for warehouse_id in prior_ids
+            ]
+        restored = self.runtime.append_wb_incident_policy_revision(
+            seller_id=seller_id,
+            active=bool(
+                prior.get("active")
+                if previous_record.get("status") == "ok"
+                else previous_policy.get("configured_active")
+                if "configured_active" in previous_policy
+                else previous_policy.get("active")
+            ),
+            warehouse_ids=prior_ids,
+            warehouse_identities=prior_identities,
+            warehouse_entries=prior_entries,
+            reason=str(prior.get("reason") or ""),
+            effective_from=changed_from or snapshot_date,
+            effective_to=str(prior.get("effective_to") or ""),
+            policy_status=str(prior.get("policy_status") or "disabled"),
+            actor="system:incident-policy-last-good-recovery",
+            created_at=self.timestamp_factory(),
+            operator_command=operator_command,
+            source="incident_policy_v2_last_good_recovery",
+            legacy_payloads=list(prior.get("legacy_payloads") or []),
+            expected_revision=int(saved_policy.get("revision") or 0),
+        )
+        if restored.get("status") == "conflict":
+            raise SkuManagementError("Incident policy replay failed and last-good recovery revision conflicted",http_status=500)
+        return {"status":"last_good_restored","attempted_revision":int(saved_policy.get("revision") or 0),
+            "recovery_revision":int(restored.get("revision") or 0),"changed_from":changed_from}
 
     def _rematerialize_incident_policy_ready_dates(
         self,
