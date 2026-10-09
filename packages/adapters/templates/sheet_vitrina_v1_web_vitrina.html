@@ -6843,6 +6843,11 @@
               <span class="research-result-note" data-spp-test-start-reason></span>
             </div>
             <p class="research-error" data-spp-test-error></p>
+            <div data-spp-test-acceptance aria-live="polite"></div>
+            <div class="spp-test-actions">
+              <button class="button" type="button" data-spp-test-read hidden>Проверить сохранённое задание</button>
+              <button class="button" type="button" data-spp-test-new hidden>Новая проверка</button>
+            </div>
           </section>
           <div class="spp-test-main">
             <div class="spp-test-main-head">
@@ -7774,6 +7779,9 @@
     const sppTestRestoreButton = document.querySelector("[data-spp-test-restore]");
     const sppTestStartReasonNode = document.querySelector("[data-spp-test-start-reason]");
     const sppTestErrorNode = document.querySelector("[data-spp-test-error]");
+    const sppTestAcceptanceNode = document.querySelector("[data-spp-test-acceptance]");
+    const sppTestReadButton = document.querySelector("[data-spp-test-read]");
+    const sppTestNewButton = document.querySelector("[data-spp-test-new]");
     const sppTestMeasurementsNode = document.querySelector("[data-spp-test-measurements]");
     const sppTestStateNode = document.querySelector("[data-spp-test-state]");
     const sppTestLogNode = document.querySelector("[data-spp-test-log]");
@@ -8509,6 +8517,7 @@
         commitResult: null,
         statusPollSequence: 0,
         sppTest: {
+          operatorScope: "", acceptance: null, pending: false,
           selectedNmId: "",
           priceCount: 1,
           prices: [""],
@@ -8564,6 +8573,7 @@
         historyLimit: 50
       },
       inventoryBalance: {
+        operatorScope: "",
         activeSubtab: "inventory-balance",
         loading: false,
         calculating: false,
@@ -26003,6 +26013,8 @@
         loadWbBuyerSession({force: true});
         return;
       }
+      if (event.target.closest("[data-spp-test-read]")) { loadSppTestStatus(); return; }
+      if (event.target.closest("[data-spp-test-new]")) { newSppTest(); return; }
       if (event.target.closest("[data-spp-test-start]")) {
         startSppTest();
         return;
@@ -26239,30 +26251,109 @@
         + "% (порог от 33,3%, включительно).";
     }
 
+    function sppRequestKey() {
+      const scope=state.prices.sppTest.operatorScope;
+      return scope ? "operator-spp-start:"+scope+":"+WEB_VITRINA_CONFIG.prices_spp_test_start_path : "";
+    }
+
+    function sppRequestRecord() {
+      const key=sppRequestKey();
+      if(!key)return null;
+      const raw=localStorage.getItem(key);
+      if(!raw)return null;
+      const record=JSON.parse(raw);
+      if(!record||!/^spp-start:[A-Za-z0-9_-]{16,80}$/.test(record.identity)||!record.body||!record.digest||record.scope!==state.prices.sppTest.operatorScope)
+        throw new Error("Сохранённая ссылка задания повреждена. Повторная отправка не выполняется.");
+      return record;
+    }
+
+    function sppRequestMatches(payload,record) {
+      const receipt=payload&&payload.acceptance;
+      return !!(OperatorAcceptance.acceptedOperation(receipt)&&receipt.domain==="spp_test_jobs"&&receipt.operation_id===record.identity
+        &&receipt.source_ref.request_digest===record.digest&&payload.job&&payload.job.job_id===receipt.source_ref.entity_id);
+    }
+
+    function useSppRequestResult(payload) {
+      state.prices.sppTest.job=payload.job;
+      state.prices.sppTest.acceptance=payload.acceptance||null;
+      state.prices.sppTest.error=payload.job&&payload.job.error||"";
+      if(Array.isArray(payload.log_events))state.prices.sppTest.logEvents=payload.log_events.slice(-10);
+      state.prices.sppTest.activeJob=["preflight","measuring","cooldown","restoring","running","manual_restore_required"].includes(String(payload.job.status))?payload.job:null;
+    }
+
+    async function readSppRequest(record) {
+      const url=new URL(WEB_VITRINA_CONFIG.prices_spp_test_status_path,window.location.origin);
+      url.searchParams.set("request_id",record.identity);
+      try {
+      const response=await fetch(url,{credentials:"same-origin",headers:{"Accept":"application/json"}});
+      const payload=await readJsonResponse(response,"non-json SPP recovery response");
+      if(!response.ok||!sppRequestMatches(payload,record))
+        throw new Error("Принятие задания пока не подтверждено. Читаем тот же запрос; повторная отправка не выполняется.");
+      useSppRequestResult(payload);
+      return payload;
+      } catch (_) {
+        throw new Error("Принятие задания пока не подтверждено. Читаем тот же запрос; повторная отправка не выполняется.");
+      }
+    }
+
     async function loadSppTestStatus(options) {
       if (!WEB_VITRINA_CONFIG.prices_spp_test_status_path || state.prices.sppTest.statusLoading) return;
       state.prices.sppTest.statusLoading = true;
       try {
-        const previous = state.prices.sppTest.job || {};
-        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_status_path, {credentials: "same-origin"});
-        const payload = await readJsonResponse(response, "non-json response from SPP status");
-        if (!response.ok) throw new Error(payload && payload.error ? payload.error : "статус проверки вернул " + response.status);
-        state.prices.sppTest.activeJob = payload.active_job || null;
-        state.prices.sppTest.job = payload.job || state.prices.sppTest.job;
-        state.prices.sppTest.logEvents = Array.isArray(payload.log_events) ? payload.log_events.slice(-10) : [];
-        const current = state.prices.sppTest.job || {};
-        if (current.job_id && (current.job_id !== previous.job_id || current.status !== previous.status)
-            && ["complete", "interrupted_restored", "manual_restore_required", "failed"].indexOf(String(current.status || "")) !== -1) {
-          loadSppHistory({reset: true});
+        const previous=state.prices.sppTest.job||{};
+        if(!state.prices.sppTest.operatorScope){
+          const response=await fetch(WEB_VITRINA_CONFIG.prices_spp_test_status_path,{credentials:"same-origin"});
+          const payload=await readJsonResponse(response,"non-json SPP status response");
+          if(!response.ok)throw new Error(payload.error||"Статус задания недоступен.");
+          state.prices.sppTest.operatorScope=payload.operator_scope||"";
+          if(!sppRequestRecord()){
+            state.prices.sppTest.activeJob=payload.active_job||null;
+            state.prices.sppTest.job=payload.job||null;
+            state.prices.sppTest.acceptance=payload.acceptance||null;
+            state.prices.sppTest.logEvents=payload.log_events||[];
+          }
         }
+        const record=sppRequestRecord();
+        state.prices.sppTest.pending=!!record;
+        if(record)await readSppRequest(record);
+        else {
+          const response=await fetch(WEB_VITRINA_CONFIG.prices_spp_test_status_path,{credentials:"same-origin"});
+          const payload=await readJsonResponse(response,"non-json SPP status response");
+          if(!response.ok)throw new Error(payload.error||"Статус задания недоступен.");
+          state.prices.sppTest.activeJob=payload.active_job||null;
+          state.prices.sppTest.job=payload.job||null;
+          state.prices.sppTest.acceptance=payload.acceptance||null;
+          state.prices.sppTest.logEvents=payload.log_events||[];
+        }
+        const current=state.prices.sppTest.job||{};
+        if(current.job_id&&(current.job_id!==previous.job_id||current.status!==previous.status)&&["complete","interrupted_restored","manual_restore_required","failed","preflight_rejected"].includes(current.status))loadSppHistory({reset:true});
         pollSppTestIfActive();
-      } catch (error) {
-        if (!options || !options.silent) state.prices.sppTest.error = String(error && error.message ? error.message : error);
+      } catch(error) {
+        state.prices.sppTest.pending=true;
+        state.prices.sppTest.error=String(error&&error.message?error.message:error);
       } finally {
-        state.prices.sppTest.statusLoading = false;
+        state.prices.sppTest.statusLoading=false;
         renderSppTest();
       }
     }
+
+    async function newSppTest() {
+      const key=sppRequestKey();if(!key||!navigator.locks)return;
+      await navigator.locks.request(key,async function(){
+        try{
+          const record=sppRequestRecord();if(!record)return;
+          const payload=await readSppRequest(record),job=payload.job;
+          const terminal=payload.acceptance.interrupted_before_write===true||job.status==="preflight_rejected"||["complete","failed","interrupted_restored"].includes(job.status)&&payload.acceptance.restoration_confirmed===true;
+          if(!terminal)throw new Error("Дождитесь подтверждённого восстановления цены.");
+          if(sppRequestRecord()?.identity===record.identity)localStorage.removeItem(key);
+          state.prices.sppTest.pending=false;state.prices.sppTest.error="";state.prices.sppTest.acceptance=null;
+        }catch(error){state.prices.sppTest.error=String(error.message||error);}finally{renderSppTest();}
+      });
+    }
+
+    window.addEventListener("storage",function(event){
+      if(event.key&&event.key===sppRequestKey())loadSppTestStatus({silent:true});
+    });
 
     async function loadSppHistory(options) {
       if (!WEB_VITRINA_CONFIG.prices_spp_test_history_path || state.prices.sppTest.historyLoading) return;
@@ -26301,7 +26392,7 @@
             const target = pricesMoney(row.target_price, "RUB");
             const buyer = row.buyer_price === null || row.buyer_price === undefined ? "—" : pricesMoney(row.buyer_price, "RUB");
             const spp = row.spp === null || row.spp === undefined ? "—" : formatNumber(Number(row.spp) * 100, 2, true) + "%";
-            return target + " → " + buyer + " · СПП " + spp + " · " + sppPointStatusLabel(row.status);
+            return target + " → " + buyer + " · СПП " + spp + " · " + (row.registry_confirmed===false&&row.status==="ok"?"Ожидает подтверждения WB":sppPointStatusLabel(row.status));
           });
           if (allResults.length > results.length) {
             results.push("ещё: " + String(allResults.length - results.length));
@@ -26309,7 +26400,7 @@
           return '<div class="spp-test-history-row"><span>'
             + escapeHtml(formatTimestampDisplay(item.finished_at || item.created_at, {timezone: "Asia/Yekaterinburg", suppressTimezone: true, noSeconds: true}) || "—")
             + '</span><span>nmID ' + escapeHtml(valueOrDash(item.nmID)) + '</span><span class="prices-badge '
-            + sppStatusTone(item.status) + '">' + escapeHtml(sppStatusLabel(item.status)) + '</span><span>'
+            + (item.operator_verified_complete===false&&item.status==="complete"?"is-warning":sppStatusTone(item.status)) + '">' + escapeHtml(item.operator_verified_complete===false&&item.status==="complete"?"Результат требует внимания":sppStatusLabel(item.status)) + '</span><span>'
             + escapeHtml(results.join("; ") || "без результатов") + "</span></div>";
         }).join("");
       }
@@ -26322,52 +26413,39 @@
     }
 
     async function startSppTest() {
-      if (!WEB_VITRINA_CONFIG.prices_spp_test_start_path || state.prices.sppTest.startLoading) return;
-      const parsed = collectSppTestPrices();
-      const quarantinePlan = sppQuarantinePlan();
-      if (!state.prices.sppTest.selectedNmId || !parsed.valid || !quarantinePlan.valid || quarantinePlan.risks.length) {
-        state.prices.sppTest.error = !state.prices.sppTest.selectedNmId ? "Выберите товар."
-          : !parsed.valid ? parsed.reason
-          : !quarantinePlan.valid ? quarantinePlan.reason
-          : sppQuarantineWarning(quarantinePlan.risks[0]);
-        renderSppTest();
-        return;
-      }
-      state.prices.sppTest.startLoading = true;
-      state.prices.sppTest.error = "";
-      state.prices.sppTest.buyerSessionNote = "Свежая проверка бота перед стартом…";
-      renderSppTest();
-      const session = await loadWbBuyerSession();
-      if (!(session && session.valid === true && session.capability_valid === true)) {
-        state.prices.sppTest.buyerSessionNote = "Бот не готов; сервер подтверждает zero-write отказ…";
-        renderSppTest();
-      }
-      try {
-        const response = await fetch(WEB_VITRINA_CONFIG.prices_spp_test_start_path, {
-          method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({
-            nmID: Number(state.prices.sppTest.selectedNmId),
-            price_count: parsed.prices.length,
-            prices: parsed.prices,
-            confirm_live_price_change: true,
-            restore_baseline: true
-          })
+      if(!WEB_VITRINA_CONFIG.prices_spp_test_start_path||state.prices.sppTest.startLoading)return;
+      const key=sppRequestKey();
+      if(!key||!navigator.locks||!crypto.randomUUID||!crypto.subtle){state.prices.sppTest.error="Не удалось сохранить ссылку задания. Запрос не отправлен.";renderSppTest();return;}
+      const parsed=collectSppTestPrices(),plan=sppQuarantinePlan();
+      if(!state.prices.sppTest.selectedNmId||!parsed.valid||!plan.valid||plan.risks.length){state.prices.sppTest.error=!parsed.valid?parsed.reason:plan.risks.length?sppQuarantineWarning(plan.risks[0]):"Проверьте выбранный товар и цены.";renderSppTest();return;}
+      const body={confirm_live_price_change:true,nmID:Number(state.prices.sppTest.selectedNmId),price_count:parsed.prices.length,prices:parsed.prices.slice(),restore_baseline:true};
+      state.prices.sppTest.startLoading=true;state.prices.sppTest.error="";renderSppTest();
+      try{
+        await navigator.locks.request(key,async function(){
+          let record=sppRequestRecord();
+          if(record){state.prices.sppTest.pending=true;await readSppRequest(record);return;}
+          // Persist the click-time immutable command before buyer preflight/POST.
+          const bytes=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(body)));
+          record={identity:"spp-start:"+crypto.randomUUID(),scope:state.prices.sppTest.operatorScope,body:body,digest:Array.from(new Uint8Array(bytes)).map(n=>n.toString(16).padStart(2,"0")).join("")};
+          localStorage.setItem(key,JSON.stringify(record));state.prices.sppTest.pending=true;
+          state.prices.sppTest.buyerSessionNote="Свежая проверка бота перед стартом…";renderSppTest();
+          await loadWbBuyerSession();
+          let result=null;
+          try{
+            const response=await fetch(WEB_VITRINA_CONFIG.prices_spp_test_start_path,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({},record.body,{request_id:record.identity}))});
+            const payload=await readJsonResponse(response,"non-json SPP start response");
+            if(sppRequestMatches(payload,record))result=payload;
+            else if(!response.ok&&(["spp_start_command_invalid","spp_start_scope_required","spp_start_capacity_exceeded","spp_start_precommit_rejected"].includes(payload.code)||response.status===423&&payload.code==="business_data_maintenance")){
+              if(sppRequestRecord()?.identity===record.identity)localStorage.removeItem(key);
+              state.prices.sppTest.pending=false;
+              throw Object.assign(new Error(payload.error||"Задание не принято."),{definite:true});
+            }
+          }catch(error){if(error.definite)throw error;}
+          if(result)useSppRequestResult(result);else await readSppRequest(record);
+          pollSppTestIfActive();
         });
-        const payload = await readJsonResponse(response, "non-json response from SPP start");
-        if (!response.ok) {
-          state.prices.sppTest.logEvents = Array.isArray(payload.log_events) ? payload.log_events.slice(-10) : [];
-          throw new Error(payload && payload.error ? payload.error : "старт проверки вернул " + response.status);
-        }
-        state.prices.sppTest.job = payload.job || null;
-        state.prices.sppTest.activeJob = payload.job || null;
-        state.prices.sppTest.logEvents = Array.isArray(payload.log_events) ? payload.log_events.slice(-10) : [];
-        pollSppTestIfActive();
-      } catch (error) {
-        state.prices.sppTest.error = String(error && error.message ? error.message : error);
-      } finally {
-        state.prices.sppTest.startLoading = false;
-        renderSppTest();
-      }
+      }catch(error){state.prices.sppTest.error=String(error&&error.message?error.message:error);}
+      finally{state.prices.sppTest.startLoading=false;renderSppTest();}
     }
 
     async function restoreSppTestBaseline() {
@@ -26387,8 +26465,10 @@
         state.prices.sppTest.activeJob = payload.active_job || null;
         state.prices.sppTest.logEvents = Array.isArray(payload.log_events) ? payload.log_events.slice(-10) : [];
         loadSppHistory({reset: true});
+        await loadSppTestStatus();
       } catch (error) {
-        state.prices.sppTest.error = String(error && error.message ? error.message : error);
+        state.prices.sppTest.error = "Результат восстановления пока не подтверждён. Читаем то же задание; повторная отправка не выполняется.";
+        await loadSppTestStatus({silent:true});
       } finally {
         state.prices.sppTest.restoring = false;
         renderSppTest();
@@ -26417,7 +26497,7 @@
       const activeJob = state.prices.sppTest.activeJob || {};
       const active = !!activeJob.job_id || ["preflight", "measuring", "cooldown", "restoring", "running"].indexOf(String(job.status || "")) !== -1;
       const canStart = !!state.prices.sppTest.selectedNmId && parsed.valid && quarantinePlan.valid && !quarantineRisk && sppBuyerSessionValid()
-        && !!state.prices.writeEnabled && !active && !state.prices.sppTest.startLoading;
+        && !!state.prices.writeEnabled && !active && !state.prices.sppTest.pending && !!state.prices.sppTest.operatorScope && !state.prices.sppTest.startLoading;
       if (sppTestCurrentPriceNode) {
         sppTestCurrentPriceNode.innerHTML = selectedPriceRow ? [
           sppTestFact("Текущая цена со скидкой", pricesMoney(selectedPriceRow.discountedPrice, selectedPriceRow.currencyIsoCode4217 || "RUB")),
@@ -26434,7 +26514,7 @@
         sppTestStartButton.textContent = state.prices.sppTest.startLoading ? "Проверяем бота…" : "Старт проверки";
       }
       if (sppTestStartReasonNode) {
-        sppTestStartReasonNode.textContent = active ? "Дождитесь восстановления исходной цены."
+        sppTestStartReasonNode.textContent = state.prices.sppTest.pending ? "Сохранена ссылка этого задания. Восстановление читает тот же запрос." : active ? "Дождитесь восстановления исходной цены."
           : !state.prices.writeEnabled ? "Изменение цен выключено на сервере."
           : !sppBuyerSessionValid() ? "Бот покупателя должен быть готов."
           : !state.prices.sppTest.selectedNmId ? "Выберите товар."
@@ -26444,8 +26524,8 @@
           : "Будут проверены только эти цены, строго по порядку.";
       }
       if (sppTestStateNode) {
-        sppTestStateNode.textContent = job.job_id ? sppStatusLabel(job.status) : "нет запуска";
-        sppTestStateNode.className = "prices-badge " + sppStatusTone(job.status);
+        sppTestStateNode.textContent = job.job_id ? (state.prices.sppTest.acceptance&&state.prices.sppTest.acceptance.state!=="completed"&&job.status==="complete"?"Результат требует внимания":sppStatusLabel(job.status)) : "нет запуска";
+        sppTestStateNode.className = "prices-badge " + (state.prices.sppTest.acceptance&&state.prices.sppTest.acceptance.state!=="completed"&&job.status==="complete"?"is-warning":sppStatusTone(job.status));
       }
       const rows = Array.isArray(job.measurements) ? job.measurements : [];
       if (sppTestMeasurementsNode) {
@@ -26454,11 +26534,11 @@
             + escapeHtml(row.seller_discounted_price === null || row.seller_discounted_price === undefined ? "—" : pricesMoney(row.seller_discounted_price, "RUB"))
             + "</td><td>" + escapeHtml(row.buyer_price === null || row.buyer_price === undefined ? "—" : pricesMoney(row.buyer_price, "RUB"))
             + "</td><td>" + escapeHtml(row.spp === null || row.spp === undefined ? "—" : formatNumber(Number(row.spp) * 100, 2, true) + "%")
-            + '</td><td><span class="prices-badge ' + sppPointTone(row.status) + '">' + escapeHtml(sppPointStatusLabel(row.status)) + "</span></td></tr>";
+            + '</td><td><span class="prices-badge ' + (row.registry_confirmed===false&&row.status==="ok"?"is-warning":sppPointTone(row.status)) + '">' + escapeHtml(row.registry_confirmed===false&&row.status==="ok"?"Ожидает подтверждения WB":sppPointStatusLabel(row.status)) + "</span></td></tr>";
         }).join("") : '<tr><td colspan="5">Результатов пока нет.</td></tr>';
       }
       if (sppTestRestoreButton) {
-        sppTestRestoreButton.hidden = !job.manual_restore_required;
+        sppTestRestoreButton.hidden = !(job.manual_restore_required||state.prices.sppTest.acceptance?.recovery_restore_available===true);
         sppTestRestoreButton.disabled = state.prices.sppTest.restoring;
       }
       if (sppTestLogNode) {
@@ -26470,6 +26550,9 @@
         }).join("") : '<p class="research-result-note" style="padding:12px">Лог пока пуст.</p>';
       }
       if (sppTestErrorNode) sppTestErrorNode.textContent = state.prices.sppTest.error || "";
+      if(sppTestAcceptanceNode){sppTestAcceptanceNode.replaceChildren();if(state.prices.sppTest.acceptance)OperatorAcceptance.renderReceipt(sppTestAcceptanceNode,state.prices.sppTest.acceptance);}
+      if(sppTestReadButton){sppTestReadButton.hidden=!state.prices.sppTest.pending;sppTestReadButton.disabled=state.prices.sppTest.statusLoading||state.prices.sppTest.startLoading;}
+      if(sppTestNewButton){const receipt=state.prices.sppTest.acceptance;const terminal=receipt?.interrupted_before_write===true||job.status==="preflight_rejected"||["complete","failed","interrupted_restored"].includes(job.status)&&receipt?.restoration_confirmed===true;sppTestNewButton.hidden=!(state.prices.sppTest.pending&&receipt&&terminal);sppTestNewButton.disabled=state.prices.sppTest.statusLoading||state.prices.sppTest.startLoading;}
     }
 
     function sppTestFact(label, value) {
@@ -27764,6 +27847,7 @@
         syncInventoryBalanceInputs();
       }catch(error){if(requestToken===state.inventoryBalance.loadRequestToken)state.inventoryBalance.error="Не удалось загрузить последний сохранённый расчёт. Можно запустить новый расчёт; его terminal result появится без перезагрузки.";}finally{if(requestToken===state.inventoryBalance.loadRequestToken){state.inventoryBalance.loading=false;renderInventoryBalance();}}
       if(operationToWatch)watchInventoryBalanceOperation(operationToWatch);
+      if(state.inventoryBalance.calculation&&state.inventoryBalance.operatorScope){try{const recovered=await onceInventoryBalanceApply({calculation_id:state.inventoryBalance.calculation.calculation_id},true);if(recovered)state.inventoryBalance.applyJob=recovered;}catch(error){state.inventoryBalance.error=String(error.message||error);renderInventoryBalance();}}
       // Opening the section restores the compact job indicator, not a modal.
       if(inventoryBalanceApplyActive(state.inventoryBalance.applyJob))watchInventoryBalanceApplyJob(state.inventoryBalance.applyJob);
     }
@@ -27952,7 +28036,21 @@
 
     function inventoryBalanceQualityPresentation(row){const quality=String((row&&row.quality)||"").toLowerCase();const badge=quality==="complete"?"точное":quality==="partial"?"частичное":"недостаточно";const tone=quality==="complete"?"exact":quality==="partial"?"partial":"insufficient";const warning=String(((row&&row.quality_warnings)||[])[0]||"");let reason="";if(/aggregate|агрегат/i.test(warning))reason="Данные WB доступны только общим итогом по SKU, без раскладки по складам.";else if(/eligible exact|постав/i.test(warning))reason="Нет точной подходящей поставки для расчёта.";else if(/elastic|эластич/i.test(warning))reason="Недостаточно данных о реакции продаж на изменение ставки.";else if(/duplicate|дубл/i.test(warning))reason="Часть данных исключена как дубли.";else if(warning)reason="Есть ограничения исходных данных.";return {badge:badge,tone:tone,reason:reason};}
 
-    function inventoryBalanceLastApply(nmId){const job=state.inventoryBalance.applyJob;if(!job)return "";const item=(job.sku_states||[]).find(function(candidate){return Number(candidate.nm_id)===Number(nmId);});if(!item)return "";const labels={succeeded:"применено",failed:"частично",running:"в работе",pending:"ожидает"};return '<span class="inventory-balance-last-apply '+escapeHtml(item.state||"pending")+'">'+escapeHtml(labels[item.state]||item.state||"ожидает")+'</span>';}
+    function inventoryBalanceLastApply(nmId){
+      const job=state.inventoryBalance.applyJob;if(!job)return "";
+      const item=(job.sku_states||[]).find(candidate=>Number(candidate.nm_id)===Number(nmId));if(!item)return "";
+      let outcome=item.state||"pending",label;
+      if(job.acceptance){
+        const targets=(job.items||[]).filter(target=>Number(target.nm_id)===Number(nmId));
+        const proven=new Set((job.acceptance.children||[]).filter(child=>child.external_confirmed===true).map(child=>child.target_key));
+        const confirmed=targets.filter(target=>proven.has(target.target_key)).length;
+        if(targets.length&&confirmed===targets.length){outcome="succeeded";label="применено";}
+        else if(confirmed){outcome="failed";label="частично подтверждено";}
+        else if(inventoryBalanceApplyActive(job)){outcome="running";label="в работе";}
+        else{outcome="failed";label="не подтверждено";}
+      }else{const labels={succeeded:"применено",failed:"частично",running:"в работе",pending:"ожидает"};label=labels[outcome]||outcome;}
+      return '<span class="inventory-balance-last-apply '+escapeHtml(outcome)+'">'+escapeHtml(label)+'</span>';
+    }
 
     function inventoryBalanceCell(id,row){const td=function(value,className,attrs){return '<td'+(className?' class="'+className+'"':'')+(attrs?' '+attrs:'')+'>'+value+'</td>';};if(id==="select"){const presentation=inventoryBalanceRowSelectionPresentation(row);const disabled=presentation.state!=="ready";const intended=state.inventoryBalance.selectionIntentNmIds.has(Number(row.nm_id));const selected=state.inventoryBalance.selectedNmIds.has(Number(row.nm_id));return td('<input type="checkbox" data-inventory-balance-select="'+escapeHtml(row.nm_id)+'" '+(selected||intended?'checked ':'')+(disabled?'disabled ':'')+'aria-label="Выбрать SKU '+escapeHtml(row.nm_id)+'" aria-describedby="inventory-balance-select-status-'+escapeHtml(row.nm_id)+'"><span id="inventory-balance-select-status-'+escapeHtml(row.nm_id)+'" class="inventory-balance-selection-status '+escapeHtml(presentation.state)+'" title="'+escapeHtml(presentation.reason)+'">'+escapeHtml(presentation.label)+'</span>',"inventory-balance-select-column",'data-inventory-balance-select-cell="'+escapeHtml(row.nm_id)+'" title="'+escapeHtml(presentation.reason)+'"');}if(id==="product")return td('<div class="inventory-balance-two-line"><strong class="inventory-balance-line" title="'+escapeHtml(row.name||"SKU")+'">'+escapeHtml(row.name||"SKU")+'</strong><span class="inventory-balance-line panel-meta">nmID '+escapeHtml(row.nm_id)+' '+inventoryBalanceLastApply(row.nm_id)+'</span></div>',"sku-product-column inventory-balance-product-column");if(id==="status")return td('<span class="inventory-balance-line">'+escapeHtml(row.status||"—")+'</span>');if(id==="known_stock_units"){const evidence=row.wb_stock_evidence||{};const aggregateNote=evidence.mode==="aggregate_per_sku_total"?'<span class="inventory-balance-line panel-meta">WB общим итогом × '+escapeHtml(row.wb_confidence_coefficient)+'</span>':"";return td('<div class="inventory-balance-two-line"><span class="inventory-balance-line">'+escapeHtml(row[id]==null?"—":formatNumber(Number(row[id]),2,true))+'</span>'+aggregateNote+'</div>',"sku-cell-number");}if(id==="current_daily_sales"||id==="target_daily_sales"||id==="days_cover")return td(escapeHtml(row[id]==null?"—":formatNumber(Number(row[id]),2,true)),"sku-cell-number");if(id==="pace_change_pct")return td(escapeHtml(row[id]==null?"—":formatNumber(Number(row[id]),2,true)+"%"),"sku-cell-number");if(id==="bottleneck_date")return td(escapeHtml(formatSkuInboundDate(row[id])||"—"));if(id==="next_inbound"||id==="subsequent_inbound"){const item=row[id]||{};return td(item.date?'<span class="inventory-balance-line">'+escapeHtml(formatSkuInboundDate(item.date)+" · "+formatNumber(Number(item.quantity||0),0,true)+" шт.")+'</span>':"—");}if(id==="new_cpc_campaigns"||id==="old_cpm_campaigns")return td(inventoryBalanceCampaignHtml(row[id],row),"wrap inventory-balance-campaign-cell");if(id==="new_cpc_status"||id==="old_cpm_status")return td(inventoryBalanceCampaignHtml(row[id==="new_cpc_status"?"new_cpc_campaigns":"old_cpm_campaigns"],row,true),"wrap inventory-balance-status-cell");if(id==="quality"){const presentation=inventoryBalanceQualityPresentation(row);return td('<span class="inventory-balance-quality '+presentation.tone+'">'+escapeHtml(presentation.badge)+'</span>'+(presentation.reason?'<span class="inventory-balance-warning-icon" tabindex="0" aria-label="'+escapeHtml(presentation.reason)+'" title="'+escapeHtml(presentation.reason)+'">!</span>':""),"wrap");}return td("—");}
 
@@ -28128,20 +28226,71 @@
 
     function inventoryBalanceApplyActive(job){return !!job&&["pending","running","delayed"].includes(String(job.state||""));}
 
-    async function startInventoryBalanceApply(){const calculation=state.inventoryBalance.calculation;if(!calculation||state.inventoryBalance.applyRunning)return;const targets=selectedInventoryBalanceTargets();const stateActions=selectedInventoryBalanceStateActions();if(!targets.length&&!stateActions.length)return;state.inventoryBalance.applyRunning=true;state.inventoryBalance.confirmPhase="running";state.inventoryBalance.error="";if(inventoryBalanceConfirmStartButton)inventoryBalanceConfirmStartButton.disabled=true;renderInventoryBalance();try{const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_apply_jobs_path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({calculation_id:calculation.calculation_id,nm_ids:[],target_keys:targets.map(function(item){return item.target_key;}),state_actions:stateActions.map(function(item){return {nm_id:item.nm_id,advert_id:item.advert_id,action:item.action};}),mode:"live_wb",confirmed:true})});const job=await readJsonResponse(response,"non-json apply job response");if(!response.ok)throw new Error((job&&job.error)||("apply job route returned "+response.status));state.inventoryBalance.applyJob=job;state.inventoryBalance.dismissedApplyJobId="";renderInventoryBalance();await watchInventoryBalanceApplyJob(job);state.inventoryBalance.confirmPhase=inventoryBalanceApplyActive(state.inventoryBalance.applyJob)?"running":"result";}catch(error){state.inventoryBalance.confirmPhase="preview";state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.applyRunning=false;if(inventoryBalanceConfirmStartButton)inventoryBalanceConfirmStartButton.disabled=false;renderInventoryBalance();}}
+    function balanceRequestJson(value){if(Array.isArray(value))return "["+value.map(balanceRequestJson).join(",")+"]";if(value&&typeof value==="object")return "{"+Object.keys(value).sort().map(function(k){return JSON.stringify(k)+":"+balanceRequestJson(value[k]);}).join(",")+"}";return JSON.stringify(value);}
+    function balanceJobMatches(job,record){const receipt=job&&job.acceptance;return !!(receipt&&OperatorAcceptance.acceptedOperation(receipt)&&receipt.domain==="inventory_balance_jobs"&&receipt.operation_id===record.identity&&job.client_request_id===record.identity&&job.job_id===receipt.source_ref.entity_id&&job.calculation_id===record.body.calculation_id&&receipt.source_ref.apply_source_revision===record.body.apply_source_revision&&job.apply_manifest_digest===receipt.source_ref.apply_manifest_digest&&balanceRequestJson(job.request)===balanceRequestJson(record.body));}
+    function balanceDisplayedOperandsMatch(shown,fresh,body){
+      if(!shown||!fresh||shown.calculation_id!==fresh.calculation_id||balanceRequestJson((shown.apply_capability||{}).owner_confirmation_policy)!==balanceRequestJson((fresh.apply_capability||{}).owner_confirmation_policy))return false;
+      const before=(shown.rows||[]).flatMap(r=>r.campaign_recommendations||[]),after=(fresh.rows||[]).flatMap(r=>r.campaign_recommendations||[]);
+      function same(a,b,keys){return !!(a&&b&&keys.every(k=>balanceRequestJson(a[k]===undefined?null:a[k])===balanceRequestJson(b[k]===undefined?null:b[k])));}
+      for(const key of body.target_keys){if(!same(before.find(t=>t.target_key===key),after.find(t=>t.target_key===key),["target_key","nm_id","advert_id","placement","payment_type","identity_valid","can_apply","current_bid_minor","final_target_bid_minor","override_generation","override_updated_at","override_updated_by","recommendation_item_id"]))return false;}
+      for(const action of body.state_actions){const find=list=>list.find(t=>Number(t.nm_id)===action.nm_id&&Number(t.advert_id)===action.advert_id);if(!same(find(before),find(after),["nm_id","advert_id","campaign_state","campaign_status","state_action","state_action_available","campaign_state_recommendation_item_id"]))return false;}
+      return true;
+    }
+    async function onceInventoryBalanceApply(body,recoveryOnly,displayedCalculation){
+      // Capture the authorized values before waiting for the lock or GET.
+      // Closing the modal permits later native override saves to mutate the
+      // live calculation; those edits must not replace confirmed operands.
+      body=JSON.parse(JSON.stringify(body));
+      displayedCalculation=displayedCalculation?JSON.parse(JSON.stringify(displayedCalculation)):null;
+      const scope=state.inventoryBalance.operatorScope,path=WEB_VITRINA_CONFIG.sku_inventory_balance_apply_jobs_path;
+      if(!scope||!body.calculation_id)throw new Error("Не получена точная ссылка расчёта. Обновите раздел.");
+      const key="operator-balance-apply:"+scope+":"+body.calculation_id;
+      if(!navigator.locks||typeof navigator.locks.request!=="function")throw new Error("Не удалось защитить запрос между вкладками. Задание не отправлено.");
+      return navigator.locks.request(key,async function(){
+        let record,send=false;
+        function clearOwn(){const retained=JSON.parse(localStorage.getItem(key)||"null");if(retained&&retained.identity===record.identity)localStorage.removeItem(key);}
+        try{record=JSON.parse(localStorage.getItem(key)||"null");}catch(_){throw new Error("Не удалось прочитать ссылку задания. Запрос не отправлен.");}
+        if(!record&&!recoveryOnly){
+          // Native override responses merge one target to preserve sibling
+          // edits. Revalidate the exact displayed selection before a NEW ID;
+          // never refresh/rebuild operands when a retained request exists.
+          if(displayedCalculation){const response=await fetch(WEB_VITRINA_CONFIG.sku_inventory_balance_calculations_path+"/"+encodeURIComponent(body.calculation_id),{headers:{"Accept":"application/json"}});const fresh=await readJsonResponse(response,"non-json Balance calculation proof");if(!response.ok||!balanceDisplayedOperandsMatch(displayedCalculation,fresh,body))throw new Error("Выбранные изменения уже отличаются от показанных. Обновите расчёт и проверьте их; задание не отправлено.");body=Object.assign({},body,{apply_source_revision:fresh.apply_source_revision});}
+          try{record={identity:"balance-apply:"+crypto.randomUUID(),body:body};localStorage.setItem(key,JSON.stringify(record));send=true;}catch(_){throw new Error("Не удалось сохранить ссылку задания. Запрос не отправлен.");}
+        }
+        if(!record)return null;
+        let result=null;
+        if(send){try{const response=await fetch(path,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify(Object.assign({},record.body,{request_id:record.identity}))});const payload=await readJsonResponse(response,"non-json Balance job response");
+          if(!response.ok){const codes=["balance_apply_precommit_rejected","balance_apply_command_invalid","balance_apply_scope_required","balance_apply_revision_required","balance_apply_revision_stale","balance_apply_identity_conflict","balance_apply_manifest_already_retained","balance_apply_capacity_exceeded"];
+            if(codes.includes(payload.code)||response.status===423&&payload.code==="business_data_maintenance"){clearOwn();throw Object.assign(new Error(payload.error||"Задание не принято."),{definite:true});}
+          }else if(balanceJobMatches(payload,record))result=payload;
+        }catch(error){if(error.definite)throw error;}}
+        if(!result){try{const response=await fetch(path+"?request_id="+encodeURIComponent(record.identity),{headers:{"Accept":"application/json"}});const payload=await readJsonResponse(response,"non-json Balance recovery response");if(response.ok&&balanceJobMatches(payload,record))result=payload;}catch(_){}}
+        if(!result)throw new Error("Принятие задания пока не подтверждено. Читаем тот же запрос; повторная отправка не выполняется.");
+        clearOwn();return result;
+      });
+    }
+
+    async function startInventoryBalanceApply(){
+      const calculation=state.inventoryBalance.calculation;if(!calculation||state.inventoryBalance.applyRunning)return;
+      const targets=selectedInventoryBalanceTargets(),actions=selectedInventoryBalanceStateActions();if(!targets.length&&!actions.length)return;
+      state.inventoryBalance.applyRunning=true;state.inventoryBalance.confirmPhase="running";state.inventoryBalance.error="";renderInventoryBalance();
+      try{const job=await onceInventoryBalanceApply({calculation_id:calculation.calculation_id,apply_source_revision:calculation.apply_source_revision,nm_ids:[],target_keys:targets.map(function(t){return t.target_key;}).sort(),state_actions:actions.map(function(t){return {nm_id:t.nm_id,advert_id:t.advert_id,action:t.action};}).sort(function(a,b){return a.nm_id-b.nm_id||a.advert_id-b.advert_id;}),mode:"live_wb",confirmed:true},false,calculation);
+        state.inventoryBalance.applyJob=job;state.inventoryBalance.dismissedApplyJobId="";renderInventoryBalance();await watchInventoryBalanceApplyJob(job);state.inventoryBalance.confirmPhase=inventoryBalanceApplyActive(state.inventoryBalance.applyJob)?"running":"result";
+      }catch(error){state.inventoryBalance.confirmPhase="preview";state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.applyRunning=false;renderInventoryBalance();}
+    }
 
     function applyInventoryBalanceJobObservations(job){
       const calculation=state.inventoryBalance.calculation;if(!calculation)return;
       for(const item of (job.items||[])){
-        const result=item.result||{};const preflight=result.preflight||{};
+        const result=item.result||{};const preflight=result.preflight||{};const proven=!job.acceptance||(job.acceptance.children||[]).some(c=>c.target_key===item.target_key&&c.external_confirmed===true);
         for(const row of (calculation.rows||[]))for(const target of (row.campaign_recommendations||[])){
           if(Number(target.nm_id)!==Number(item.nm_id)||Number(target.advert_id)!==Number(item.advert_id))continue;
           const observedAt=item.updated_at||job.updated_at||"";const existingEvidence=item.action_type==="campaign_state"?target.current_state_evidence:target.current_bid_evidence;
           if(!observedAt||Date.parse(observedAt)<Date.parse(calculation.created_at)||Date.parse(observedAt)<Date.parse((existingEvidence||{}).observed_at||0))continue;
           if(item.action_type==="campaign_state"){
-            const observed=item.state==="succeeded"&&result.readback_status==="matching"?result.confirmed_campaign_state:preflight.error_code==="stale_campaign_state"?preflight.observed_campaign_state:null;
+            const observed=proven&&item.state==="succeeded"&&result.readback_status==="matching"?result.confirmed_campaign_state:preflight.error_code==="stale_campaign_state"?preflight.observed_campaign_state:null;
             if(observed){target.campaign_state=observed;target.campaign_status={active:9,paused:11,ready:4}[observed];target.state_action=observed==="active"?"pause":"start";target.state_action_label=observed==="active"?"остановить":"возобновить";target.requested_campaign_state=observed==="active"?"paused":"active";target.current_state_evidence={observed_at:item.updated_at||job.updated_at,source:item.state==="succeeded"?"confirmed_apply_readback":"preflight_observation_no_submit"};const draftKey=inventoryBalanceStateActionKey(target);if(String(state.inventoryBalance.stateActionDraftUpdatedAt.get(draftKey)||"")<=String(job.created_at||"")){state.inventoryBalance.stateActionDrafts.delete(draftKey);state.inventoryBalance.stateActionDraftUpdatedAt.delete(draftKey);}}
-          }else if(String(target.target_key)===String(item.target_key)&&item.state==="succeeded"&&result.readback_status==="matching"&&result.confirmed_bid_minor!=null){
+          }else if(String(target.target_key)===String(item.target_key)&&proven&&item.state==="succeeded"&&result.readback_status==="matching"&&result.confirmed_bid_minor!=null){
             target.current_bid_rub=Number(result.confirmed_bid_minor)/100;
             target.current_bid_evidence={observed_at:item.updated_at||job.updated_at,source:"confirmed_apply_readback"};
             if(!state.inventoryBalance.overrideDrafts.has(String(target.target_key))&&Number(target.manual_target_bid_rub)===Number(item.final_target_bid_rub)&&String(target.override_updated_at||"")<=String(job.created_at||job.updated_at||"")){
@@ -28157,17 +28306,17 @@
 
     async function resumeLoadedInventoryBalanceApply(){const job=state.inventoryBalance.applyJob;if(!job||state.inventoryBalance.applyRunning)return;state.inventoryBalance.applyRunning=true;state.inventoryBalance.error="";renderInventoryBalance();try{if(String(job.state||"")==="stalled"){const resumePath=WEB_VITRINA_CONFIG.sku_inventory_balance_apply_jobs_path+"/"+encodeURIComponent(job.job_id)+"/resume";const response=await fetch(resumePath,{method:"POST",headers:{"Accept":"application/json","Content-Type":"application/json"},body:JSON.stringify({limit:1})});const resumed=await readJsonResponse(response,"non-json apply resume response");if(!response.ok)throw new Error((resumed&&resumed.error)||("apply resume returned "+response.status));await watchInventoryBalanceApplyJob(resumed);}else await watchInventoryBalanceApplyJob(job);}catch(error){state.inventoryBalance.error=String(error&&error.message?error.message:error);}finally{state.inventoryBalance.applyRunning=false;renderInventoryBalance();}}
 
-    function inventoryBalanceApplySummary(job){const stateName=String((job&&job.state)||"unknown");const progress=(job&&job.progress)||{};const applied=Number(progress.applied||0);const total=Number(progress.total||0);if(stateName==="stalled")return "Процесс приостановлен";if(!inventoryBalanceApplyActive(job)){if(applied===total&&total>0)return "Все изменения применены";if(applied===0)return "Ничего не применено";return "Изменения применены частично";}return "Применяем изменения";}
+    function inventoryBalanceApplySummary(job){const stateName=String((job&&job.state)||"unknown");const progress=(job&&job.progress)||{};const applied=Number(progress.applied||0);const total=Number(progress.total||0);if(stateName==="stalled")return "Процесс приостановлен";if(!inventoryBalanceApplyActive(job)){if(job&&job.acceptance&&job.acceptance.external_confirmed===true)return "Все изменения подтверждены WB";if(job&&job.acceptance&&applied===total&&total>0)return "Ожидается точное подтверждение WB";if(applied===total&&total>0)return "Все изменения применены";if(applied===0)return "Ничего не применено";return "Изменения применены частично";}return job&&job.acceptance?"Принято. Проверяем изменения WB":"Применяем изменения";}
 
-    function inventoryBalanceProgressCounts(job){const progress=(job&&job.progress)||{};return Number(progress.applied||0)+" применено · "+Number(progress.verifying||0)+" проверяется · "+Number(progress.waiting||0)+" ожидает · "+Number(progress.failed||0)+" не применено · "+Number(progress.needs_check||0)+" требует проверки";}
+    function inventoryBalanceProgressCounts(job){const progress=(job&&job.progress)||{},proof=job&&job.acceptance,unproven=proof?Math.max(0,Number(progress.applied||0)-Number(proof.confirmed_count||0)):0;return Number(proof?proof.confirmed_count:progress.applied||0)+" применено · "+Number(progress.verifying||0)+" проверяется · "+Number(progress.waiting||0)+" ожидает · "+Number(progress.failed||0)+" не применено · "+Number(Number(progress.needs_check||0)+unproven)+" требует проверки";}
 
     function inventoryBalanceHumanApplyError(item){const preflight=(item.result||{}).preflight||{};if(preflight.error_code==="stale_campaign_state"){const observed={active:"активна",paused:"на паузе",ready:"готова к запуску"}[preflight.observed_campaign_state]||preflight.observed_campaign_state;return "При проверке WB кампания уже была в состоянии «"+observed+"». Действие не отправлено; состояние в исходном расчёте устарело.";}const raw=String(item.error||"");const warnings=(item.safety_warnings||((item.result||{}).preflight||{}).safety_warnings||[]);if(String(item.error_code||"")==="safety_guard"||/absolute increase threshold|percent increase threshold|absolute safety threshold/i.test(raw)){const calculated=inventoryBalanceSafetyWarnings(item);if(calculated.length)return calculated.join(" ")+" Ставка в WB не отправлялась.";if(warnings.length)return warnings.map(function(warning){return String(warning.message||warning.code||"");}).join(" ")+" Ставка в WB не отправлялась.";}return raw||String(item.phase||"")||"Причина не указана.";}
 
-    function inventoryBalanceProgressRows(job){const labels={pending:"Ожидает",preflighting:"Проверяем",ready:"Готово",submitting:"Отправляем",submitted:"Отправлено",verifying:"Проверяем в WB",delayed:"WB задерживает подтверждение",succeeded:"Применено",failed:"Не применено",skipped:"Не отправлено",ambiguous:"Требуется проверка"};return (job.items||[]).map(function(item){const stateLabel=labels[item.state]||item.phase||item.state;const human=(item.state==="failed"||item.state==="skipped"||item.state==="ambiguous")?inventoryBalanceHumanApplyError(item):"";const isState=String(item.action_type||"")==="campaign_state";const value=isState?(({ready:"готова к запуску",active:"активна",paused:"на паузе"}[item.current_campaign_state]||item.current_campaign_state)+" → "+({active:"активна",paused:"на паузе"}[item.requested_campaign_state]||item.requested_campaign_state)):inventoryBalanceMoney(item.current_bid_rub)+' → '+inventoryBalanceMoney(item.final_target_bid_rub)+' '+inventoryBalanceRateUnit(item);const technical='<details><summary>Технические данные</summary><span class="panel-meta">advert_id '+escapeHtml(item.advert_id)+' · '+escapeHtml(isState?'campaign_state':(item.placement||"—"))+(item.error_code?' · '+escapeHtml(item.error_code):"")+'</span></details>';return '<tr><td>'+escapeHtml(item.nm_id)+'</td><td>'+escapeHtml(item.campaign_name||"Кампания")+(isState?'<br><span class="panel-meta">Состояние кампании</span>':'')+'</td><td>'+escapeHtml(value)+'</td><td><strong>'+escapeHtml(stateLabel)+'</strong>'+(human?'<br><span>'+escapeHtml(human)+'</span>':"")+'</td><td>'+technical+'</td></tr>';}).join("");}
+    function inventoryBalanceProgressRows(job){const labels={pending:"Ожидает",preflighting:"Проверяем",ready:"Готово",submitting:"Отправляем",submitted:"Отправлено",verifying:"Проверяем в WB",delayed:"WB задерживает подтверждение",succeeded:"Применено",failed:"Не применено",skipped:"Не отправлено",ambiguous:"Требуется проверка"};return (job.items||[]).map(function(item){const unproven=job.acceptance&&item.state==="succeeded"&&!(job.acceptance.children||[]).some(c=>c.target_key===item.target_key&&c.external_confirmed===true);const stateLabel=unproven?"Требуется проверка":labels[item.state]||item.phase||item.state;const human=(item.state==="failed"||item.state==="skipped"||item.state==="ambiguous")?inventoryBalanceHumanApplyError(item):"";const isState=String(item.action_type||"")==="campaign_state";const value=isState?(({ready:"готова к запуску",active:"активна",paused:"на паузе"}[item.current_campaign_state]||item.current_campaign_state)+" → "+({active:"активна",paused:"на паузе"}[item.requested_campaign_state]||item.requested_campaign_state)):inventoryBalanceMoney(item.current_bid_rub)+' → '+inventoryBalanceMoney(item.final_target_bid_rub)+' '+inventoryBalanceRateUnit(item);const technical='<details><summary>Технические данные</summary><span class="panel-meta">advert_id '+escapeHtml(item.advert_id)+' · '+escapeHtml(isState?'campaign_state':(item.placement||"—"))+(item.error_code?' · '+escapeHtml(item.error_code):"")+'</span></details>';return '<tr><td>'+escapeHtml(item.nm_id)+'</td><td>'+escapeHtml(item.campaign_name||"Кампания")+(isState?'<br><span class="panel-meta">Состояние кампании</span>':'')+'</td><td>'+escapeHtml(value)+'</td><td><strong>'+escapeHtml(stateLabel)+'</strong>'+(human?'<br><span>'+escapeHtml(human)+'</span>':"")+'</td><td>'+technical+'</td></tr>';}).join("");}
 
     function renderInventoryBalanceProgress(){if(!inventoryBalanceProgressNode)return;const job=state.inventoryBalance.applyJob;inventoryBalanceProgressNode.hidden=!job;if(!job)return;const stateName=String(job.state||"unknown");const progress=job.progress||{};const percent=Math.min(100,Math.max(0,Number(progress.percent)||0));const summary=inventoryBalanceApplySummary(job);inventoryBalanceProgressNode.setAttribute("data-state",stateName);if(inventoryBalanceProgressSummaryNode)inventoryBalanceProgressSummaryNode.textContent=summary+" · "+inventoryBalanceProgressCounts(job);if(inventoryBalanceProgressMeterNode){inventoryBalanceProgressMeterNode.setAttribute("aria-valuenow",String(percent));inventoryBalanceProgressMeterNode.setAttribute("aria-valuetext",summary+" "+percent+"%");}if(inventoryBalanceProgressFillNode)inventoryBalanceProgressFillNode.style.width=percent+"%";if(inventoryBalanceProgressResumeButton){inventoryBalanceProgressResumeButton.hidden=stateName!=="stalled";inventoryBalanceProgressResumeButton.disabled=state.inventoryBalance.applyRunning;}}
 
-    function renderInventoryBalanceConfirmationProgress(){if(!inventoryBalanceConfirmNode||inventoryBalanceConfirmNode.hidden||state.inventoryBalance.confirmPhase==="preview")return;const job=state.inventoryBalance.applyJob;if(!job){if(inventoryBalanceConfirmBodyNode)inventoryBalanceConfirmBodyNode.innerHTML='<div class="inventory-balance-modal-progress"><span class="inventory-balance-progress-spinner" aria-hidden="true"></span> Создаём защищённую операцию…</div>';return;}const summary=inventoryBalanceApplySummary(job);const progress=job.progress||{};const percent=Math.min(100,Math.max(0,Number(progress.percent)||0));if(inventoryBalanceConfirmTitleNode)inventoryBalanceConfirmTitleNode.textContent=summary;if(inventoryBalanceConfirmBodyNode)inventoryBalanceConfirmBodyNode.innerHTML='<p><strong>'+escapeHtml(summary)+'</strong> · '+escapeHtml(inventoryBalanceProgressCounts(job))+'</p><div class="inventory-balance-progress-meter"><span class="inventory-balance-progress-spinner" aria-hidden="true" '+(inventoryBalanceApplyActive(job)?'':'hidden')+'></span><div class="inventory-balance-progress-track"><div class="inventory-balance-progress-fill" style="width:'+escapeHtml(percent)+'%"></div></div></div><div class="table-scroll"><table class="prices-preview-table"><thead><tr><th>nmID</th><th>Кампания</th><th>Текущее → целевое</th><th>Результат</th><th>Подробнее</th></tr></thead><tbody>'+inventoryBalanceProgressRows(job)+'</tbody></table></div>';if(inventoryBalanceConfirmStartButton)inventoryBalanceConfirmStartButton.hidden=true;if(inventoryBalanceConfirmCancelButton){inventoryBalanceConfirmCancelButton.hidden=false;inventoryBalanceConfirmCancelButton.textContent=inventoryBalanceApplyActive(job)?"Свернуть":"Закрыть";}}
+    function renderInventoryBalanceConfirmationProgress(){if(!inventoryBalanceConfirmNode||inventoryBalanceConfirmNode.hidden||state.inventoryBalance.confirmPhase==="preview")return;const job=state.inventoryBalance.applyJob;if(!job){if(inventoryBalanceConfirmBodyNode)inventoryBalanceConfirmBodyNode.innerHTML='<div class="inventory-balance-modal-progress"><span class="inventory-balance-progress-spinner" aria-hidden="true"></span> Создаём защищённую операцию…</div>';return;}const summary=inventoryBalanceApplySummary(job);const progress=job.progress||{};const percent=Math.min(100,Math.max(0,Number(progress.percent)||0));if(inventoryBalanceConfirmTitleNode)inventoryBalanceConfirmTitleNode.textContent=summary;if(inventoryBalanceConfirmBodyNode)inventoryBalanceConfirmBodyNode.innerHTML='<p><strong>'+escapeHtml(summary)+'</strong> · '+escapeHtml(inventoryBalanceProgressCounts(job))+'</p>'+(job.acceptance?'<p>'+escapeHtml(job.acceptance.reason_ru)+' <a href="'+escapeHtml(job.acceptance.journal_path)+'">Журнал операций</a></p>':'')+'<div class="inventory-balance-progress-meter"><span class="inventory-balance-progress-spinner" aria-hidden="true" '+(inventoryBalanceApplyActive(job)?'':'hidden')+'></span><div class="inventory-balance-progress-track"><div class="inventory-balance-progress-fill" style="width:'+escapeHtml(percent)+'%"></div></div></div><div class="table-scroll"><table class="prices-preview-table"><thead><tr><th>nmID</th><th>Кампания</th><th>Текущее → целевое</th><th>Результат</th><th>Подробнее</th></tr></thead><tbody>'+inventoryBalanceProgressRows(job)+'</tbody></table></div>';if(inventoryBalanceConfirmStartButton)inventoryBalanceConfirmStartButton.hidden=true;if(inventoryBalanceConfirmCancelButton){inventoryBalanceConfirmCancelButton.hidden=false;inventoryBalanceConfirmCancelButton.textContent=inventoryBalanceApplyActive(job)?"Свернуть":"Закрыть";}}
 
     function downloadInventoryBalanceXlsx(){const calculation=state.inventoryBalance.calculation;if(!calculation)return;window.location.assign(WEB_VITRINA_CONFIG.sku_inventory_balance_calculations_path+"/"+encodeURIComponent(calculation.calculation_id)+"/xlsx");}
 

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from playwright.sync_api import expect, sync_playwright
 
 from apps.search_cluster_cleaner_web_fixture import PASSWORD, running_fixture
+from apps.operator_cleaner_operations_fixture import retained_fixture_outcome
 from packages.adapters.search_cluster_cleaner_http import PREFIX
 from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource
 from packages.contracts.search_cluster_cleaner import Target
@@ -118,7 +119,7 @@ def run(output: Path):
                                            definitively_not_accepted=True,
                                            request_id=posts[0]['request_id'], retry_after_ms=1000))
                 else:
-                    reply(route, 202, dict(batch_id='rollback-recovered', state='queued', selected_count=1))
+                    reply(route, 202, retained_fixture_outcome(fixture,route,dict(batch_id='rollback-recovered', state='queued', selected_count=1)))
 
             def read(route):
                 reads.append(route.request.url.rsplit('/', 1)[-1])
@@ -133,7 +134,7 @@ def run(output: Path):
             expect(page.locator('[data-kc-recover]')).to_be_hidden(timeout=8000)
             assert len(posts) == 2 and posts[0] == posts[1]
             assert reads == [posts[0]['request_id']]
-            assert fixture.count('cleaner_requests') == before
+            assert fixture.count('cleaner_requests') == before + 1
             checks.append('proven_rollback_retries_identical_intent_after_404')
             page.close()
 
@@ -147,12 +148,13 @@ def run(output: Path):
 
             def post(route):
                 posts.append(route.request.post_data_json)
+                saved['outcome']=retained_fixture_outcome(fixture,route,dict(batch_id='late-accepted', state='queued', selected_count=1))
                 reply(route, 500, dict(error='uncertain'))
 
             def read(route):
                 reads.append(route.request.url.rsplit('/', 1)[-1])
                 if saved['available']:
-                    reply(route, 200, dict(batch_id='late-accepted', state='queued', selected_count=1))
+                    reply(route, 200, saved['outcome'])
                 else:
                     reply(route, 404, dict(error='not_found'))
 
@@ -173,7 +175,7 @@ def run(output: Path):
             page.locator('[data-kc-batch-recover]').click()
             expect(page.locator('[data-kc-recover]')).to_be_hidden()
             expect(page.locator('[data-kc-batch-recover]')).to_be_hidden()
-            assert len(posts) == 1 and fixture.count('cleaner_requests') == before
+            assert len(posts) == 1 and fixture.count('cleaner_requests') == before + 1
             checks.append('unknown_500_and_404_never_repost_reload_recovers_same_id')
             page.close()
 

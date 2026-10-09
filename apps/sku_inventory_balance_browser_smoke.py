@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.operator_business_settings_fixture import BusinessSettingsFixture
+from apps.operator_balance_jobs_fixture import BalanceJobsFixture
 
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     _render_sheet_vitrina_web_vitrina_ui,
@@ -72,7 +73,7 @@ def main() -> None:
     operation_status_reads = [0]
     apply_status_reads = [0]
 
-    with BusinessSettingsFixture() as settings_source,sync_playwright() as playwright:
+    with BusinessSettingsFixture() as settings_source,BalanceJobsFixture(native_actor="fixture-config-user") as balance_source,sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1366, "height": 900})
         page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
@@ -107,6 +108,9 @@ def main() -> None:
             if path == base:
                 latest_get_count[0] += 1
                 current_calculation[0]["apply_capability"]["live_wb_available"] = live_available[0]
+                current_calculation[0]=balance_source.project(current_calculation[0])
+                if latest_operation[0] and latest_operation[0].get('state')=='succeeded' and (latest_operation[0].get('result') or {}).get('calculation_id')==current_calculation[0]['calculation_id']:
+                    latest_operation[0]['result']=current_calculation[0]
                 route.fulfill(
                     status=200,
                     content_type="application/json",
@@ -193,18 +197,21 @@ def main() -> None:
                 )
                 group_key = "new_cpc_campaigns" if target["campaign_group"] == "new_cpc" else "old_cpm_campaigns"
                 row[group_key] = [item for item in row["campaign_recommendations"] if item["campaign_group"] == target["campaign_group"]]
+                current_calculation[0]=balance_source.project(current_calculation[0])
+                if latest_operation[0] and latest_operation[0].get('state')=='succeeded' and (latest_operation[0].get('result') or {}).get('calculation_id')==current_calculation[0]['calculation_id']:
+                    latest_operation[0]['result']=current_calculation[0]
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(current_calculation[0]))
                 return
+            if path == base + "/calculations/" + current_calculation[0]['calculation_id']:
+                route.fulfill(status=200,content_type="application/json",body=json.dumps(balance_source.block.get_calculation(current_calculation[0]['calculation_id'])))
+                return
             if path == base + "/apply-jobs":
-                latest_job[0] = _job("pending", 0)
+                latest_job[0] = balance_source.start(body)
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(latest_job[0]))
                 return
-            if path == base + "/apply-jobs/ibj_browser":
+            if path.startswith(base + "/apply-jobs/") and balance_source.job and path.endswith('/'+balance_source.job['job_id']):
                 apply_status_reads[0] += 1
-                latest_job[0] = _job(
-                    "running" if apply_status_reads[0] == 1 else "completed",
-                    0 if apply_status_reads[0] == 1 else 3,
-                )
+                latest_job[0] = balance_source.next()
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(latest_job[0]))
                 return
             if path.endswith("/resume"):
@@ -772,8 +779,8 @@ def main() -> None:
             "document.querySelector('[data-inventory-balance-progress]').getAttribute('data-state') === 'running'"
         )
         assert page.locator("[data-inventory-balance-confirm]").is_visible()
-        assert "Применяем изменения" in page.locator("[data-inventory-balance-confirm-title]").inner_text()
-        assert "Применяем изменения" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
+        assert "Принято. Проверяем изменения WB" in page.locator("[data-inventory-balance-confirm-title]").inner_text()
+        assert "Принято. Проверяем изменения WB" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
         page.reload()
         page.locator('[data-sku-management-subtab="inventory-balance"]').click(force=True)
         assert page.locator("[data-inventory-balance-confirm]").is_hidden()
@@ -788,7 +795,7 @@ def main() -> None:
         assert page.locator("[data-inventory-balance-progress-fill]").get_attribute("style") == "width: 100%;"
         assert page.locator("[data-inventory-balance-progress-spinner]").is_hidden()
         assert "применено" in page.locator('[data-inventory-balance-nm-id="101"]').inner_text()
-        assert "Все изменения применены" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
+        assert "Все изменения подтверждены WB" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
         page.locator("[data-inventory-balance-confirm-cancel]").click()
         assert page.locator("[data-inventory-balance-confirm]").is_hidden()
         page.locator("[data-inventory-balance-progress-open]").click()
@@ -851,6 +858,8 @@ def main() -> None:
 
         page.evaluate("""() => {
           const target=inventoryBalanceTargetByKey('101:8001:search');
+          // Isolate this legacy ordering example from newer genuine native fixture readback.
+          delete target.current_bid_evidence;
           const job={job_id:'test-proof',created_at:'2026-09-01T00:00:00Z',updated_at:'2026-09-01T00:01:00Z',items:[{target_key:target.target_key,nm_id:101,advert_id:8001,action_type:'bid_change',state:'succeeded',final_target_bid_rub:725.25,result:{readback_status:'matching',confirmed_bid_minor:72525}}]};
           target.manual_target_bid_rub=725.25;target.override_updated_at='2026-08-31T00:00:00Z';
           applyInventoryBalanceJobObservations(job);

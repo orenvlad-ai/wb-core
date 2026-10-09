@@ -18,6 +18,9 @@ from packages.application import operator_autoanswers_settings as ai_settings
 from packages.application import operator_feedback_analysis_settings as analysis_settings
 from packages.application import operator_feedback_complaint_schedules as complaint_schedules
 from packages.application import operator_complaint_runs as complaint_runs
+from packages.application import operator_cleaner_operations as cleaner
+from packages.application import operator_balance_jobs as balance_jobs
+from packages.application import operator_spp_jobs as spp_jobs
 
 DOMAIN_LABELS = {nomenclature.DOMAIN: 'Справочник SKU', 'registry_bundle_upload': 'Справочники через API', 'cost_price_upload': 'Себестоимость через API', 'ff_pool_document': 'Складские документы', fulfillment.DOMAIN: 'Услуги фулфилмента',
     'plan_report_baseline': 'Исходные данные отчётов',
@@ -34,6 +37,9 @@ DOMAIN_LABELS[trade.DOMAIN] = 'Библиотека инвойсов и дого
 DOMAIN_LABELS[contracts.DOMAIN]='Договоры поставщика'
 DOMAIN_LABELS[facilities.DOMAIN] = "Склады и связи FBS"
 DOMAIN_LABELS[business_settings.DOMAIN]='Бизнес-настройки'
+DOMAIN_LABELS[cleaner.DOMAIN]=cleaner.LABEL
+DOMAIN_LABELS[balance_jobs.DOMAIN]=balance_jobs.LABEL
+DOMAIN_LABELS[spp_jobs.DOMAIN]=spp_jobs.LABEL
 DEFAULT_DOMAINS = frozenset({'ff_pool_document', fulfillment.DOMAIN})
 DOMAIN_SECTIONS = {nomenclature.DOMAIN: 'settings', 'ff_pool_document': 'supply', fulfillment.DOMAIN: 'supply',
     'plan_report_baseline': 'reports', 'factory_order_dataset': 'supply', partner_report.DOMAIN: 'reports'}
@@ -85,7 +91,7 @@ def _contract_sources(conn, *, selected, request_scope, supplier_safe):
         lambda connection, row: contracts._public(connection, row)['acceptance'])]
 
 
-def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections=None, domain='all', search='', request_scope='', supplier_safe=False, runtime_dir=None, actor='', external_scope=None, feedback_scope=None, settings_scope=None, ai_settings_scope=None, analysis_settings_scope=None, complaint_schedules_scope=None, complaint_runs_scope=None):
+def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections=None, domain='all', search='', request_scope='', supplier_safe=False, runtime_dir=None, actor='', external_scope=None, feedback_scope=None, settings_scope=None, ai_settings_scope=None, analysis_settings_scope=None, complaint_schedules_scope=None, complaint_runs_scope=None, cleaner_scope=None, balance_scope=None, spp_scope=None):
     if type(page) is not int or type(limit) is not int or not 1<=page<=100000 or not 1<=limit<=100:
         raise ValueError('invalid_operation_journal_page')
     allowed = _allowed(allowed_domains, allowed_sections)
@@ -105,12 +111,17 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
         file_items.extend(analysis_settings.items(selected=selected,scope=analysis_settings_scope))
         file_items.extend(complaint_schedules.items(selected=selected,scope=complaint_schedules_scope))
         file_items.extend(complaint_runs.items(selected=selected,scope=complaint_runs_scope))
+        file_items.extend(spp_jobs.items(selected=selected,scope=spp_scope,db_path=db_path))
         external_source=external.source(conn,selected=selected,scope=external_scope,db_path=db_path)
         if external_source:sources.append(external_source)
         settings_source=business_settings.source(conn,selected=selected,scope=settings_scope)
         if settings_source:sources.append(settings_source)
         ai_source=ai_settings.source(conn,selected=selected,scope=ai_settings_scope)
         if ai_source:sources.append(ai_source)
+        cleaner_source=cleaner.source(conn,selected=selected,scope=cleaner_scope,db_path=db_path)
+        if cleaner_source:sources.append(cleaner_source)
+        balance_source=balance_jobs.source(conn,selected=selected,scope=balance_scope,db_path=db_path)
+        if balance_source:sources.append(balance_source)
         if actor and nomenclature.DOMAIN in selected and nomenclature.exists(conn):
             sources.append((nomenclature.TABLE, 'operation_id', '*', 'actor=?', (actor,), nomenclature.public))
         if 'ff_pool_document' in selected:
@@ -139,6 +150,7 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
             search_columns[ai_settings.TABLE] = "event_id || ' ' || json_extract(details_json,'$.saved_settings.mode')"
             search_columns[trade.TABLE] = "coalesce(json_extract(source_json,'$.document.number'),'') || ' ' || coalesce(json_extract(source_json,'$.document.file_original_name'),'') || ' ' || action"
             search_columns[business_settings.TABLE] = "operation_id || ' ' || config_key"
+            search_columns[cleaner.TABLE] = "request_id || ' ' || route"
             search_columns[CONTRACT_SOURCE] = "shipment_id || ' ' || action || ' ' || coalesce(json_extract(order_json,'$.header.invoice_no'),'')"
             financial = supplier_journal.financial
             search_columns[financial.REQUESTS] = ("shipment_id || ' ' || action || ' ' || coalesce((SELECT group_concat(child.subject_id,' ') FROM "
@@ -150,13 +162,14 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
                 search_columns[supplier_journal.shipments.TABLE] = (
                     "coalesce(json_extract(source_json,'$.header.invoice_no'),'') || ' ' || "
                     "coalesce(json_extract(source_json,'$.header.shipment_date'),'')")
+            search_columns[balance_jobs.TABLE] = "client_request_id || ' ' || calculation_id || ' ' || job_id"
             sources = [(table, key, columns, where + " AND lower(" + search_columns.get(table, 'source_json') + ") LIKE lower(?) ESCAPE '\\'",
                         (*params, value), reader) for table, key, columns, where, params, reader in sources]
         total = sum(conn.execute(f'SELECT count(*) FROM {table} WHERE {where}', params).fetchone()[0]
                     for table, _, _, where, params, _ in sources)+len(file_items)
         # Distinct action families may share one native table. Keep the
         # exact scoped reader paired with its own UNION arm.
-        sql = ' UNION ALL '.join(f"SELECT {identity} AS operation_id,{'created_at' if table==external.TABLE else 'accepted_at'} AS accepted_at,'{index}' source_table FROM {table} WHERE {where}"
+        sql = ' UNION ALL '.join(f"SELECT {identity} AS operation_id,{'created_at' if table in (external.TABLE,balance_jobs.TABLE) else 'accepted_at'} AS accepted_at,'{index}' source_table FROM {table} WHERE {where}"
             for index, (table, identity, _, where, _, _) in enumerate(sources))
         params = tuple(value for _, _, _, _, values, _ in sources for value in values)
         offset=(page-1)*limit
@@ -185,12 +198,14 @@ def json_search(item):
     return ' '.join(str(value or '') for value in values)
 
 
-def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections=None, domain='', request_scope='', supplier_safe=False, runtime_dir=None, actor='', external_scope=None, feedback_scope=None, settings_scope=None, ai_settings_scope=None, analysis_settings_scope=None, complaint_schedules_scope=None, complaint_runs_scope=None):
+def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections=None, domain='', request_scope='', supplier_safe=False, runtime_dir=None, actor='', external_scope=None, feedback_scope=None, settings_scope=None, ai_settings_scope=None, analysis_settings_scope=None, complaint_schedules_scope=None, complaint_runs_scope=None, cleaner_scope=None, balance_scope=None, spp_scope=None):
     allowed = _allowed(allowed_domains, allowed_sections)
     if domain:
         if domain not in DOMAIN_LABELS:
             raise ValueError('invalid_operation_domain')
         allowed.intersection_update({domain})
+    spp_receipt=spp_jobs.read(identity=identity,selected=allowed,scope=spp_scope,db_path=db_path)
+    if spp_receipt:return _common(spp_receipt)
     with closing(overhead.readonly(db_path)) as conn:
         for item in analysis_settings.items(selected=allowed,scope=analysis_settings_scope):
             if item['operation_id']==identity:return _common(item)
@@ -198,6 +213,11 @@ def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections
             result = facilities.read(db_path, request_scope=request_scope, operation_id=identity)
             if result.get('status') == 'accepted' and result.get('acceptance'):
                 return _common(result['acceptance'])
+        spec=balance_jobs.source(conn,selected=allowed,scope=balance_scope,db_path=db_path)
+        if spec:
+            table,key,columns,where,values,reader=spec
+            row=conn.execute(f'SELECT {columns} FROM {table} WHERE {key}=? AND ({where})',(identity,*values)).fetchone()
+            if row:return _common(reader(conn,row))
         if request_scope and not supplier_safe and runtime_dir is not None:
             for family in sorted(allowed.intersection(supplier_journal.FINANCIAL_DOMAINS)):
                 value = supplier_journal.financial_acceptance(conn, runtime_dir, db_path, identity,
@@ -210,6 +230,11 @@ def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections
             if row is not None:
                 value=reader(conn,row)
                 return _common(value) if value else None
+        spec=cleaner.source(conn,selected=allowed,scope=cleaner_scope,db_path=db_path)
+        if spec:
+            table,key,columns,where,values,reader=spec
+            row=conn.execute(f'SELECT {columns} FROM {table} WHERE {key}=? AND ({where})',(identity,*values)).fetchone()
+            if row:return _common(reader(conn,row))
         for table,key,columns,where,values,reader in feedback.sources(conn,selected=allowed,scope=feedback_scope):
             row=conn.execute(f'SELECT {columns} FROM {table} WHERE {key}=? AND ({where})',(identity,*values)).fetchone()
             if row:return _common(reader(conn,row))

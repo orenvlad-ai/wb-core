@@ -2352,10 +2352,20 @@ class RegistryUploadHttpEntrypoint:
     def handle_sheet_prices_quarantine_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return self.prices_block.get_quarantine_goods(params or {})
 
-    def handle_sheet_prices_spp_test_start_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
-        return self.spp_tester_block.start(payload, actor=actor)
+    def _spp_operator_scope(self, *, actor, operator_actor):
+        from packages.application.operator_spp_jobs import SppScope
+        return SppScope.from_entrypoint(self, native_actor=actor, actor=operator_actor)
 
-    def handle_sheet_prices_spp_test_status_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def handle_sheet_prices_spp_test_start_request(self, payload: Mapping[str, Any], *, actor: str = "", operator_actor: str = "") -> dict[str, Any]:
+        scope = self._spp_operator_scope(actor=actor, operator_actor=operator_actor)
+        return self.spp_tester_block.start(payload, actor=actor, operator_scope=scope)
+
+    def handle_sheet_prices_spp_test_status_request(self, params: Mapping[str, Any] | None = None, *, actor: str = "", operator_actor: str = "") -> dict[str, Any]:
+        scope = self._spp_operator_scope(actor=actor, operator_actor=operator_actor)
+        # Browser recovery is always read-only, including during maintenance.
+        # Native orphan reconciliation remains under the next explicit Start lock.
+        if scope or "request_id" in (params or {}):
+            return self.spp_tester_block.status(params or {}, reconcile=False, operator_scope=scope)
         from packages.application.business_data_procedure_admission import admitted_status
         return admitted_status(
             self.runtime.runtime_dir,
@@ -2363,11 +2373,13 @@ class RegistryUploadHttpEntrypoint:
             cached_reader=lambda: self.spp_tester_block.status(params or {}, reconcile=False),
         )
 
-    def handle_sheet_prices_spp_test_restore_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
-        return self.spp_tester_block.restore(payload, actor=actor)
+    def handle_sheet_prices_spp_test_restore_request(self, payload: Mapping[str, Any], *, actor: str = "", operator_actor: str = "") -> dict[str, Any]:
+        scope = self._spp_operator_scope(actor=actor, operator_actor=operator_actor)
+        return self.spp_tester_block.restore(payload, actor=actor, operator_scope=scope)
 
-    def handle_sheet_prices_spp_test_history_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        return self.spp_tester_block.history(params or {})
+    def handle_sheet_prices_spp_test_history_request(self, params: Mapping[str, Any] | None = None, *, actor: str = "", operator_actor: str = "") -> dict[str, Any]:
+        scope = self._spp_operator_scope(actor=actor, operator_actor=operator_actor)
+        return self.spp_tester_block.history(params or {}, operator_scope=scope)
 
     def handle_wb_buyer_session_check_request(self) -> dict[str, Any]:
         payload = self.buyer_price_block.check_spp_capability()
@@ -2576,8 +2588,9 @@ class RegistryUploadHttpEntrypoint:
         self,
         *,
         limit: int = 20,
+        user_key: str = "",
     ) -> dict[str, Any]:
-        return self.sku_inventory_balance_block.list_registry(limit=limit)
+        return self.sku_inventory_balance_block.list_registry(limit=limit,user_key=user_key)
 
     def handle_sku_inventory_balance_override_request(
         self,
@@ -2603,8 +2616,14 @@ class RegistryUploadHttpEntrypoint:
         payload: Mapping[str, Any],
         *,
         actor: str,
+        operator_actor: str = '',
     ) -> dict[str, Any]:
-        return self.sku_inventory_balance_block.start_apply(payload, actor=actor)
+        if 'request_id' in payload:
+            from packages.application.operator_balance_jobs import BalanceScope
+            if BalanceScope.from_entrypoint(self,native_actor=actor,actor=operator_actor or actor) is None:
+                from packages.application.sku_inventory_balance import SkuInventoryBalanceError
+                raise SkuInventoryBalanceError('Native Balance account is not configured',http_status=409,payload={'code':'balance_apply_scope_required'})
+        return self.sku_inventory_balance_block.start_apply(payload, actor=actor,operator_actor=operator_actor)
 
     def handle_sku_inventory_balance_manual_pending_request(
         self,
@@ -2616,8 +2635,11 @@ class RegistryUploadHttpEntrypoint:
             payload, actor=actor
         )
 
-    def handle_sku_inventory_balance_apply_job_request(self, job_id: str) -> dict[str, Any]:
-        return self.sku_inventory_balance_block.get_apply_job(job_id)
+    def handle_sku_inventory_balance_apply_job_request(self, job_id: str = '', *, actor: str = '', operator_actor: str = '', request_id: str = '') -> dict[str, Any]:
+        if actor:
+            from packages.application.operator_balance_jobs import BalanceScope
+            BalanceScope.from_entrypoint(self,native_actor=actor,actor=operator_actor or actor)
+        return self.sku_inventory_balance_block.get_apply_job(job_id,actor=actor,operator_actor=operator_actor,request_id=request_id)
 
     def handle_sku_inventory_balance_apply_resume_request(
         self,
@@ -2625,7 +2647,9 @@ class RegistryUploadHttpEntrypoint:
         payload: Mapping[str, Any],
         *,
         actor: str,
+        operator_actor: str = '',
     ) -> dict[str, Any]:
+        self.handle_sku_inventory_balance_apply_job_request(job_id,actor=actor,operator_actor=operator_actor)
         return self.sku_inventory_balance_block.resume_apply(
             job_id,
             actor=actor,

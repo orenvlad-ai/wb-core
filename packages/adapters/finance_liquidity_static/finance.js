@@ -27,6 +27,7 @@
   }
   async function request(path, { method = "GET", body, operation, timeoutMs = 0 } = {}) {
     const headers = { Accept: "application/json" };
+    if(operation && /^\/(documents|transfers|cash-reconciliations)(\/|$)/.test(path)) operation.cashReceipt=true;
     if (body !== undefined) {
       state.inFlight.set(operation.id, operation);
       headers["Content-Type"] = "application/json";
@@ -55,8 +56,74 @@
     }
     state.inFlight.delete(operation?.id);
     if (!response.ok) throw Object.assign(new Error(escapeError(payload)), { status: response.status, code: payload?.error?.code, payload });
+    if (operation?.cashReceipt && payload.data?.operation_id) {
+      showCashNativeReceipt(payload.data.operation_id);
+    }
     return payload.data;
   }
+  let cashReceiptSequence=0,cashJournalPage=1,cashJournalSequence=0;
+  let cashScopeKey=null,cashScopeEpoch=0;
+  function cashAuthenticatedScope() {
+    const caps=state.capabilities;
+    if(!canRead() || caps?.read_enabled===false || caps?.store_mode!=='isolated_test' || !caps?.store_id || !state.csrf)return null;
+    // The native CSRF token binds the authenticated actor. Compare values, not
+    // refreshed capability object identity; never expose this key in the UI.
+    return JSON.stringify([caps.store_id,caps.store_mode,state.csrf,
+      [...(caps.capabilities || [])].sort(),[...(caps.grants || [])].sort(),
+      has('finance'),has('finance_operate'),has('finance_admin')]);
+  }
+  function syncCashScope() {
+    const key=cashAuthenticatedScope();
+    if(key!==cashScopeKey) {
+      cashScopeKey=key;cashScopeEpoch++;cashReceiptSequence++;cashJournalSequence++;cashJournalPage=1;
+      clear($('[data-cash-operator-receipt]'));clear($('[data-cash-operator-rows]'));
+      setText($('[data-cash-operator-total]'),'');
+      $('[data-cash-operator-prev]').disabled=true;$('[data-cash-operator-next]').disabled=true;
+    }
+    show($('[data-cash-operator-journal]'),key!==null);
+    return key===null ? null : {key,epoch:cashScopeEpoch,storeId:state.capabilities.store_id};
+  }
+  function cashScopeCurrent(scope) {
+    const current=syncCashScope();
+    return current!==null && current.key===scope.key && current.epoch===scope.epoch;
+  }
+  async function showCashNativeReceipt(identity) {
+    const scope=syncCashScope();if(!scope)return;
+    const sequence=++cashReceiptSequence;
+    try {
+      const result=await request('/operator-operations/'+encodeURIComponent(identity),{timeoutMs:operationReadbackDeadlineMs});
+      const receipt=result.operation;
+      if(!cashScopeCurrent(scope) || sequence!==cashReceiptSequence || receipt?.operation_id!==identity || receipt?.source_ref?.store_id!==scope.storeId || receipt?.domain!=='finance_cash_test')return;
+      const container=$('[data-cash-operator-receipt]'),detached=document.createElement('div');
+      OperatorAcceptance.renderReceipt(detached,receipt,{onClose:()=>clear(container),onJournal:()=>{const journal=document.getElementById('operator-journal');journal.open=true;journal.scrollIntoView();}});
+      container.replaceChildren(...detached.childNodes);
+      loadCashOperatorJournal();
+    } catch (_) { /* Native command/readback result remains authoritative. No resend. */ }
+  }
+  async function loadCashOperatorJournal() {
+    const scope=syncCashScope();if(!scope)return;
+    const panel=$('[data-cash-operator-journal]');if(!panel.open)return;
+    const sequence=++cashJournalSequence;
+    const search=new FormData($('[data-cash-operator-search]')).get('search') || '';
+    try {
+      const result=await request('/operator-operations?page='+cashJournalPage+'&limit=25&search='+encodeURIComponent(search),{timeoutMs:operationReadbackDeadlineMs});
+      if(!cashScopeCurrent(scope) || sequence!==cashJournalSequence)return;
+      const rows=$('[data-cash-operator-rows]');clear(rows);
+      for(const receipt of result.items || []) {
+        if(receipt.domain!=='finance_cash_test' || receipt.source_ref?.store_id!==scope.storeId)continue;
+        const row=element('article','history-row');OperatorAcceptance.renderReceipt(row,receipt);rows.appendChild(row);
+      }
+      setText($('[data-cash-operator-total]'),'Операций: '+result.total);
+      $('[data-cash-operator-prev]').disabled=cashJournalPage<=1;$('[data-cash-operator-next]').disabled=!result.has_more;
+    } catch (_) {
+      if(!cashScopeCurrent(scope) || sequence!==cashJournalSequence)return;
+      setText($('[data-cash-operator-total]'),'Журнал пока недоступен. Сохранённые операции не отправляются повторно.');clear($('[data-cash-operator-rows]'));
+    }
+  }
+  $('[data-cash-operator-search]').addEventListener('submit',event=>{event.preventDefault();cashJournalPage=1;loadCashOperatorJournal();});
+  $('[data-cash-operator-prev]').addEventListener('click',()=>{if(cashJournalPage>1){cashJournalPage--;loadCashOperatorJournal();}});
+  $('[data-cash-operator-next]').addEventListener('click',()=>{cashJournalPage++;loadCashOperatorJournal();});
+  $('[data-cash-operator-journal]').addEventListener('toggle',()=>{if($('[data-cash-operator-journal]').open)loadCashOperatorJournal();});
   function dataList(data, key) { return Array.isArray(data) ? data : (data?.[key] || []); }
   function accountBalance(account) { return account.balance ?? account.current_balance ?? account.balance_amount ?? null; }
   function accountState(account) { return account.balance_state || account.initialization_state || "unknown"; }
@@ -215,7 +282,7 @@
       ui.audit.append(row);
     }
   }
-  async function loadAll() { error(); notice(); ui.session.textContent = "Обновляем данные…"; try { const caps = await request("/capabilities"); state.capabilities = caps; state.csrf = caps.csrf_token || ""; if (!canRead()) { ui.session.textContent = "Нет доступа к финансам"; error("Доступ к разделу не выдан. Обратитесь к администратору."); renderActionAccess(); return; }
+  async function loadAll() { error(); notice(); ui.session.textContent = "Обновляем данные…"; try { let caps; try { caps = await request("/capabilities"); } catch (caught) { state.capabilities=null;state.csrf="";syncCashScope();throw caught; } state.capabilities = caps; state.csrf = caps.csrf_token || ""; loadCashOperatorJournal(); if (!canRead()) { ui.session.textContent = "Нет доступа к финансам"; error("Доступ к разделу не выдан. Обратитесь к администратору."); renderActionAccess(); return; }
       const [accounts, categories, groups, counterparties, docs, reconciliations, audit] = await Promise.all([request("/accounts"), request("/categories"), request("/category-groups"), request("/counterparties"), request("/documents"), request("/cash-reconciliations"), canAdmin() ? request("/audit?scope=directories") : Promise.resolve({events:[]})]); state.accounts = dataList(accounts, "accounts").map(normalizeAccount); state.categories = dataList(categories, "categories").map(normalizeCategory); state.categoryGroups = dataList(groups, "groups"); state.categoryGroupsEnabled = Boolean(groups.enabled); state.counterparties = dataList(counterparties, "counterparties").map(normalizeCounterparty); state.documents = dataList(docs, "documents").map(normalizeDocument); state.reconciliations = dataList(reconciliations, "reconciliations").map(normalizeReconciliation); state.auditEvents = dataList(audit, "events"); ui.session.textContent = canOperate() ? "Операции доступны" : "Только просмотр"; renderAccounts(); renderHistory(); renderReconciliations(); renderAttention(); renderSettings(); }
     catch (caught) { ui.session.textContent = "Данные недоступны"; error(caught.code === "finance_capability_denied" ? "Доступ к разделу не выдан." : caught.message); renderActionAccess(); }
   }
@@ -350,7 +417,7 @@
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const result = await request(`/operations/${encodeURIComponent(op.id)}`, {timeoutMs:operationReadbackDeadlineMs});
-        if (result) { state.inFlight.delete(op.id); await loadAll(); if (result.action_required || result.status === "action_required") notice("Запрос сохранён и требует вашего решения. Деньги пока не изменены."); else notice("Результат операции подтверждён."); return true; }
+        if (result) { if(op.cashReceipt && result.operation_id)showCashNativeReceipt(result.operation_id); state.inFlight.delete(op.id); await loadAll(); if (result.action_required || result.status === "action_required") notice("Запрос сохранён и требует вашего решения. Деньги пока не изменены."); else notice("Результат операции подтверждён."); return true; }
       } catch (caught) { if (caught.status && caught.status !== 404) break; }
       await new Promise(resolve => window.setTimeout(resolve, 500));
     }

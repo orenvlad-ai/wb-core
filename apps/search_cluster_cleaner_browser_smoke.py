@@ -13,6 +13,9 @@ from apps.search_cluster_cleaner_web_fixture import running_fixture, PASSWORD, O
 from packages.adapters.search_cluster_cleaner_http import PREFIX
 
 
+from apps.operator_cleaner_operations_fixture import retained_fixture_outcome
+
+
 def browser_login(page,f,username='owner'):
     response=page.request.post(f.base_url+'/login',form={'username':username,'password':PASSWORD,'next':f.url.split(f.base_url)[1]})
     assert response.status==200
@@ -191,7 +194,7 @@ def run(output:Path):
                 page.route('**/keyword-cleaner/runs/synthetic-write',write_detail)
                 def recheck(route):
                     rechecks.append(route.request.post_data_json)
-                    route.fulfill(status=202,content_type='application/json',body=json.dumps(dict(job_id=route.request.url.split('/')[-2],state='ambiguous',stage='write_apply_claimed')))
+                    route.fulfill(status=202,content_type='application/json',body=json.dumps(retained_fixture_outcome(f,route,dict(job_id=route.request.url.split('/')[-2],state='ambiguous',stage='write_apply_claimed'))))
                 page.route('**/keyword-cleaner/manual-clean/*/recheck',recheck)
                 page.locator('[data-kc-manual-advert]').select_option('10101');page.locator('[data-kc-manual-nm]').select_option('101');page.locator('[data-kc-run]').click()
                 expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
@@ -272,7 +275,7 @@ def run(output:Path):
                 route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False))
             def batch_post(route):
                 posts.append(route.request.post_data_json)
-                route.fulfill(status=202,content_type='application/json',body=json.dumps(dict(batch_id='synthetic-batch',state='queued',selected_count=len(posts[-1]['targets']),created_at='2026-09-25T13:00:00Z')))
+                route.fulfill(status=202,content_type='application/json',body=json.dumps(retained_fixture_outcome(f,route,dict(batch_id='synthetic-batch',state='queued',selected_count=len(posts[-1]['targets']),created_at='2026-09-25T13:00:00Z'))))
             def batch_status(route):
                 polls.append(1);selected=[next(item for item in candidates if item['advert_id']==row['advert_id'] and item['nm_id']==row['nm_id']) for row in posts[0]['targets']]
                 terminal=state['rechecked'];phase='partial' if terminal else 'running' if len(polls)==1 else 'attention_required'
@@ -300,7 +303,7 @@ def run(output:Path):
                 route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False))
             def batch_recheck(route):
                 rechecks.append(route.request.post_data_json);state['rechecked']=True
-                route.fulfill(status=202,content_type='application/json',body=json.dumps(dict(job_id='child-1',state='ambiguous',stage='write_apply_claimed')))
+                route.fulfill(status=202,content_type='application/json',body=json.dumps(retained_fixture_outcome(f,route,dict(job_id='child-1',state='ambiguous',stage='write_apply_claimed'))))
             page.route('**/keyword-cleaner/manual-batches/eligibility*',eligibility)
             page.route('**/keyword-cleaner/manual-batches/synthetic-batch/items/*',batch_detail)
             page.route('**/keyword-cleaner/manual-batches/synthetic-batch',batch_status)
@@ -389,7 +392,11 @@ def run(output:Path):
             only=dict(advert_id=10101,nm_id=101,campaign_name='Тестовая кампания 10101',product_title='Стекло iPhone 16 Pro Max',status='active',status_code=9,eligible=True,reason=None,payment_type='cpm')
             eligible=dict(items=[only],loading=False,error=None,counts=dict(total=1,eligible=1,profile_required=0,ineligible=0,unknown=0,selectable_active=1,selectable_paused=0),categories={status:dict(selectable=status in ('active','paused'),reason='unsupported_campaign_status' if status in ('completed','archive') else None) for status in ('active','paused','completed','archive')})
             page.route('**/keyword-cleaner/manual-batches/eligibility*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(eligible,ensure_ascii=False)))
-            def lost_batch_post(route):posts.append(route.request.post_data_json);route.abort('failed')
+            lost_source=[]
+            def lost_batch_post(route):
+                posts.append(route.request.post_data_json)
+                lost_source.append(retained_fixture_outcome(f,route,dict(batch_id='lost-batch',state='complete',selected_count=1,created_at='2026-09-25T14:00:00Z')))
+                route.abort('failed')
             page.route('**/keyword-cleaner/manual-batches',lost_batch_post)
             def accepted_summary(route):
                 payload=route.fetch().json()
@@ -402,7 +409,7 @@ def run(output:Path):
             expect(page.locator('[data-kc-recover]')).to_be_visible(timeout=18000);check('batch_lost_reply_keeps_one_durable_request',len(posts)==1)
             page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-batch-result]')).to_contain_text('Предыдущая массовая чистка · Выполнено',timeout=8000)
             page.unroute('**/keyword-cleaner/requests/*')
-            page.route('**/keyword-cleaner/requests/*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(batch_id='lost-batch',state='complete',selected_count=1,created_at='2026-09-25T14:00:00Z'))))
+            page.route('**/keyword-cleaner/requests/*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(lost_source[0])))
             page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden()
             check('batch_lost_reply_recovered_by_get_without_repost',len(posts)==1 and posts[0]['targets']==[dict(advert_id=10101,nm_id=101)])
             page.unroute_all(behavior='wait');page.close()
@@ -447,7 +454,7 @@ def run(output:Path):
             page.route('**/keyword-cleaner/manual-batches/eligibility*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False)))
             def large_post(route):
                 posts.append(route.request.post_data_json)
-                route.fulfill(status=202,content_type='application/json',body=json.dumps(dict(batch_id='synthetic-large',state='queued',selected_count=130,created_at='2026-09-26T00:00:00Z')))
+                route.fulfill(status=202,content_type='application/json',body=json.dumps(retained_fixture_outcome(f,route,dict(batch_id='synthetic-large',state='queued',selected_count=130,created_at='2026-09-26T00:00:00Z'))))
             page.route('**/keyword-cleaner/manual-batches',large_post)
             page.route('**/keyword-cleaner/manual-batches/synthetic-large',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(batch_id='synthetic-large',state='complete',selected_count=130,done_count=130,confirmed_count=0,no_change_count=130,partial_count=0,failed_count=0,skipped_count=0,updated_at='2026-09-26T00:01:00Z',items=[]))))
             browser_login(page,f);before=f.count('cleaner_requests');page.locator('[data-kc-batch-open]').click()
@@ -455,7 +462,7 @@ def run(output:Path):
             expect(page.locator('[data-kc-batch-start]')).to_be_enabled()
             page.locator('[data-kc-batch-start]').click()
             expect(page.locator('[data-kc-batch-stage]')).to_be_visible()
-            check('batch_large_selection_one_explicit_intent_no_ui_cap',len(posts)==1 and len(posts[0]['targets'])==130 and bool(posts[0]['request_id']) and f.count('cleaner_requests')==before)
+            check('batch_large_selection_one_explicit_intent_no_ui_cap',len(posts)==1 and len(posts[0]['targets'])==130 and bool(posts[0]['request_id']) and f.count('cleaner_requests')==before+1)
             page.close()
         with running_fixture() as f:
             page=browser.new_page();calls=[];retries=[]

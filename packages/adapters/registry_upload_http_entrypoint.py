@@ -1728,6 +1728,7 @@ def _build_handler(
                         result = entrypoint.handle_sku_inventory_balance_apply_start_request(
                             body,
                             actor=actor,
+                            operator_actor=_current_web_user_actor(self),
                         )
                     elif parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_MANUAL_PENDING_PATH:
                         result = entrypoint.handle_sku_inventory_balance_manual_pending_request(
@@ -1755,6 +1756,7 @@ def _build_handler(
                             job_id,
                             body,
                             actor=actor,
+                            operator_actor=_current_web_user_actor(self),
                         )
                 except SkuManagementError as exc:
                     response_payload = {"error": str(exc)}
@@ -1910,6 +1912,7 @@ def _build_handler(
                     result = entrypoint.handle_sheet_prices_spp_test_start_request(
                         payload,
                         actor=_current_web_user_config_key(self),
+                        operator_actor=_current_web_user_actor(self),
                     )
                 except WbSppTesterError as exc:
                     response_payload = {"error": str(exc)}
@@ -1936,6 +1939,7 @@ def _build_handler(
                     result = entrypoint.handle_sheet_prices_spp_test_restore_request(
                         payload,
                         actor=_current_web_user_config_key(self),
+                        operator_actor=_current_web_user_actor(self),
                     )
                 except WbSppTesterError as exc:
                     response_payload = {"error": str(exc)}
@@ -3836,7 +3840,7 @@ def _build_handler(
                 try:
                     params = urllib_parse.parse_qs(parsed.query)
                     limit = int((params.get("limit") or [20])[0])
-                    payload = entrypoint.handle_sku_inventory_balance_registry_request(limit=limit)
+                    payload = entrypoint.handle_sku_inventory_balance_registry_request(limit=limit,user_key=_current_web_user_config_key(self))
                 except (SkuManagementError, TypeError, ValueError) as exc:
                     status = HTTPStatus(exc.http_status) if isinstance(exc, SkuManagementError) else HTTPStatus.BAD_REQUEST
                     _write_json_response(self, status, {"error": str(exc)})
@@ -3914,12 +3918,18 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
-            if parsed.path.startswith(DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH + "/"):
+            if parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH or parsed.path.startswith(DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH + "/"):
                 job_id = parsed.path[len(DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH) + 1 :].strip("/")
                 try:
-                    if not job_id or "/" in job_id:
+                    request_id = ''
+                    if parsed.path == DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH:
+                        query = urllib_parse.parse_qs(parsed.query,keep_blank_values=True)
+                        if set(query) != {'request_id'} or len(query['request_id']) != 1:
+                            raise SkuManagementError('one exact Balance request_id is required')
+                        request_id = query['request_id'][0]
+                    elif not job_id or "/" in job_id or parsed.query:
                         raise SkuManagementError("invalid inventory balance apply-job path")
-                    payload = entrypoint.handle_sku_inventory_balance_apply_job_request(job_id)
+                    payload = entrypoint.handle_sku_inventory_balance_apply_job_request(job_id,actor=_current_web_user_config_key(self),operator_actor=_current_web_user_actor(self),request_id=request_id)
                 except SkuManagementError as exc:
                     response_payload = {"error": str(exc)}
                     response_payload.update(exc.payload)
@@ -4052,7 +4062,10 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SHEET_PRICES_SPP_TEST_STATUS_PATH:
                 try:
-                    payload = entrypoint.handle_sheet_prices_spp_test_status_request(_flatten_query_params(parsed.query))
+                    raw = urllib_parse.parse_qs(parsed.query, keep_blank_values=True)
+                    if "request_id" in raw and (set(raw) != {"request_id"} or len(raw["request_id"]) != 1):
+                        raise WbSppTesterError("one_exact_spp_request_id_required", http_status=422)
+                    payload = entrypoint.handle_sheet_prices_spp_test_status_request(_flatten_query_params(parsed.query), actor=_current_web_user_config_key(self), operator_actor=_current_web_user_actor(self))
                 except WbSppTesterError as exc:
                     response_payload = {"error": str(exc)}
                     response_payload.update(exc.payload)
@@ -4176,7 +4189,7 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SHEET_PRICES_SPP_TEST_HISTORY_PATH:
                 try:
-                    payload = entrypoint.handle_sheet_prices_spp_test_history_request(_flatten_query_params(parsed.query))
+                    payload = entrypoint.handle_sheet_prices_spp_test_history_request(_flatten_query_params(parsed.query), actor=_current_web_user_config_key(self), operator_actor=_current_web_user_actor(self))
                 except WbSppTesterError as exc:
                     response_payload = {"error": str(exc)}
                     response_payload.update(exc.payload)
@@ -5273,7 +5286,9 @@ def _build_handler(
                         allowed_domains = _operator_domains_for_user(_authenticated_web_user(self, auth_config) or {})
                     else:
                         from packages.application.operator_operations import DOMAIN_LABELS
-                        allowed_domains = frozenset(DOMAIN_LABELS) - {'buyer_support'}
+                        allowed_domains = frozenset(DOMAIN_LABELS) - {'keyword_cleaner','buyer_support','cleaner_operations'}
+                    from packages.application.operator_cleaner_operations import CleanerScope
+                    cleaner_scope=CleanerScope.from_entrypoint(entrypoint,actor=_current_web_user_actor(self)) if auth_config['enabled'] and 'cleaner_operations' in allowed_domains else None
                     from packages.application.operator_business_settings import SettingsScope,NATIVE_PATHS
                     from packages.application.wb_incident_policy import canonical_seller_id
                     settings_user=_authenticated_web_user(self,auth_config) or {}
@@ -5289,6 +5304,10 @@ def _build_handler(
                     complaint_schedules_scope=ScheduleScope.from_entrypoint(entrypoint,actor=_current_web_user_actor(self)) if "feedback_complaint_schedules" in allowed_domains and entrypoint.change_registry_read_surface is not None else None
                     from packages.application.operator_complaint_runs import RunScope
                     complaint_runs_scope=RunScope.from_entrypoint(entrypoint,actor=_current_web_user_actor(self)) if "feedback_complaint_run" in allowed_domains and entrypoint.change_registry_read_surface is not None else None
+                    from packages.application.operator_balance_jobs import BalanceScope
+                    balance_scope=BalanceScope.from_entrypoint(entrypoint,native_actor=_current_web_user_config_key(self),actor=_current_web_user_actor(self)) if "inventory_balance_jobs" in allowed_domains else None
+                    from packages.application.operator_spp_jobs import SppScope
+                    spp_scope=SppScope.from_entrypoint(entrypoint,native_actor=_current_web_user_config_key(self),actor=_current_web_user_actor(self)) if "spp_test_jobs" in allowed_domains else None
                     prefix = "/v1/sheet-vitrina-v1/operations"
                     if parsed.path == prefix+'/feedback':
                         from packages.application.operator_feedback_operations import read_native
@@ -5316,11 +5335,11 @@ def _build_handler(
                         params = {key: values[-1] for key, values in urllib_parse.parse_qs(parsed.query).items()}
                         payload = journal(entrypoint.runtime.db_path, page=int(params.get("page") or 1), limit=int(params.get("limit") or 25),
                             allowed_domains=allowed_domains, domain=params.get('domain') or 'all', search=params.get('search') or '',
-                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self), external_scope=entrypoint.change_registry_read_surface, feedback_scope=feedback_scope, settings_scope=settings_scope, ai_settings_scope=ai_settings_scope, analysis_settings_scope=analysis_settings_scope, complaint_schedules_scope=complaint_schedules_scope, complaint_runs_scope=complaint_runs_scope)
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self), external_scope=entrypoint.change_registry_read_surface, feedback_scope=feedback_scope, settings_scope=settings_scope, ai_settings_scope=ai_settings_scope, analysis_settings_scope=analysis_settings_scope, complaint_schedules_scope=complaint_schedules_scope, complaint_runs_scope=complaint_runs_scope, cleaner_scope=cleaner_scope, balance_scope=balance_scope, spp_scope=spp_scope)
                     else:
                         identity = urllib_parse.unquote(parsed.path[len(prefix) + 1:])
                         acceptance = read_acceptance(entrypoint.runtime.db_path, identity, allowed_domains=allowed_domains,
-                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self), external_scope=entrypoint.change_registry_read_surface, feedback_scope=feedback_scope, settings_scope=settings_scope, ai_settings_scope=ai_settings_scope, analysis_settings_scope=analysis_settings_scope, complaint_schedules_scope=complaint_schedules_scope, complaint_runs_scope=complaint_runs_scope)
+                            request_scope=_current_web_user_config_key(self), supplier_safe=_current_web_user_is_supplier(self), runtime_dir=entrypoint.runtime.runtime_dir, actor=_current_web_user_actor(self), external_scope=entrypoint.change_registry_read_surface, feedback_scope=feedback_scope, settings_scope=settings_scope, ai_settings_scope=ai_settings_scope, analysis_settings_scope=analysis_settings_scope, complaint_schedules_scope=complaint_schedules_scope, complaint_runs_scope=complaint_runs_scope, cleaner_scope=cleaner_scope, balance_scope=balance_scope, spp_scope=spp_scope)
                         if acceptance is None:
                             _write_json_response(self, HTTPStatus.NOT_FOUND, {"code": "operation_not_found"})
                             return
@@ -11008,11 +11027,14 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
         if _user_has_section_access(user,WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW):domains.add('feedback_reply')
         if _user_has_section_access(user,WEB_AUTH_PERMISSION_FEEDBACKS_AUTOANSWERS_ADMIN):domains.add('autoanswers_settings')
 
+    if _user_has_section_access(user,WEB_AUTH_SECTION_ADS):domains.add('cleaner_operations')
     from packages.application.operator_business_settings import DOMAIN,NATIVE_PATHS
     if any(_user_can_access_path(user,path) for path in NATIVE_PATHS.values()):domains.add(DOMAIN)
     if _user_can_access_path(user,DEFAULT_SHEET_FEEDBACKS_AI_PROMPT_PATH):domains.add('feedback_analysis_settings')
     if _user_can_access_path(user,DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH):domains.add('feedback_complaint_schedules')
     if _user_can_access_path(user,DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH):domains.add('feedback_complaint_run')
+    if _user_can_access_path(user,DEFAULT_SKU_INVENTORY_BALANCE_APPLY_JOBS_PATH):domains.add('inventory_balance_jobs')
+    if _user_can_access_path(user,DEFAULT_SHEET_PRICES_SPP_TEST_STATUS_PATH):domains.add('spp_test_jobs')
     return frozenset(domains)
 
 

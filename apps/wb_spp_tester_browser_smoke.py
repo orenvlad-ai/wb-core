@@ -46,7 +46,8 @@ from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHtt
 
 def _open_manual_panel(page, base_url: str) -> None:
     page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
-    page.locator('[data-unified-tab-button="prices"]').click()
+    page.locator('[data-unified-tab-button="sku-management"]').click()
+    page.locator('[data-sku-management-subtab="prices"]').click()
     page.locator('[data-prices-subtab="spp-test"]').click()
     page.wait_for_function(
         "() => document.querySelector('[data-wb-buyer-session-state]')?.innerText.includes('Готов')",
@@ -192,7 +193,7 @@ def _assert_progressive_run(page, server: "_LocalSppUiServer") -> None:
         raise AssertionError("history pagination button must remain hidden when there is no next page")
     if not page.locator("[data-spp-test-restore]").is_hidden():
         raise AssertionError("emergency restore must be hidden after exact restore proof")
-    final = server.spp_block.status({})["job"]
+    final = page.request.get(server.base_url + "/v1/sheet-vitrina-v1/prices/spp-test/status").json()["job"]
     proof = final["restore"]
     if not (
         final["status"] == "complete"
@@ -337,6 +338,15 @@ class _LocalSppUiServer:
             spp_tester_block=self.spp_block,
             buyer_session_block=self.buyer_source,  # type: ignore[arg-type]
         )
+        # Typed operator commands use the real native registry with synthetic WB.
+        from packages.application.change_registry_writer import InternalWriterRegistry
+        from packages.application.change_registry_observer import ChangeRegistryReadSurface
+        self.spp_block.writer_registry = InternalWriterRegistry(runtime_dir=runtime_dir,
+            seller_id="synthetic-spp-seller",account_scope="seller-portal-primary",timestamp_factory=clock.timestamp)
+        entrypoint.change_registry_read_surface = ChangeRegistryReadSurface(runtime_dir,
+            seller_id="synthetic-spp-seller",account_scope="seller-portal-primary")
+        self.entrypoint = entrypoint
+        self.runtime = runtime
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
             port=_reserve_free_port(),

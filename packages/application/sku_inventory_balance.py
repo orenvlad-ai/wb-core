@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import closing, nullcontext
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from hashlib import sha256
@@ -39,6 +40,7 @@ from packages.application.change_registry_writer import (
 from packages.adapters.wb_promotion import WbPromotionApiError
 from packages.business_time import current_business_date_iso
 from packages.application.wb_incident_policy import canonical_seller_id
+from packages.application import operator_balance_jobs as operator_jobs
 
 
 CALCULATION_CONTRACT = "sheet_vitrina_v1_sku_inventory_balance/v2"
@@ -471,6 +473,12 @@ class SkuInventoryBalanceBlock:
                 ).fetchall()
             }
             for name, declaration in (
+                ("client_request_id", "TEXT"),
+                ("operator_actor", "TEXT NOT NULL DEFAULT ''"),
+                ("operator_seller_id", "TEXT NOT NULL DEFAULT ''"),
+                ("operator_account_scope", "TEXT NOT NULL DEFAULT ''"),
+                ("operator_proof_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("operator_proof_digest", "TEXT NOT NULL DEFAULT ''"),
                 ("phase", "TEXT NOT NULL DEFAULT 'queued'"),
                 ("worker_token", "TEXT NOT NULL DEFAULT ''"),
                 ("lease_expires_at", "TEXT NOT NULL DEFAULT ''"),
@@ -484,6 +492,36 @@ class SkuInventoryBalanceBlock:
                         "ALTER TABLE sheet_vitrina_v1_inventory_balance_apply_jobs "
                         f"ADD COLUMN {name} {declaration}"
                     )
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS inventory_balance_client_request ON sheet_vitrina_v1_inventory_balance_apply_jobs(client_request_id) WHERE client_request_id IS NOT NULL")
+            conn.executescript("""
+                CREATE TRIGGER IF NOT EXISTS inventory_balance_typed_job_immutable
+                BEFORE UPDATE ON sheet_vitrina_v1_inventory_balance_apply_jobs
+                WHEN (OLD.client_request_id IS NOT NULL OR NEW.client_request_id IS NOT NULL) AND (
+                    NEW.client_request_id IS NOT OLD.client_request_id OR NEW.job_id IS NOT OLD.job_id OR
+                    NEW.calculation_id IS NOT OLD.calculation_id OR NEW.mode IS NOT OLD.mode OR
+                    NEW.created_at IS NOT OLD.created_at OR NEW.created_by IS NOT OLD.created_by OR
+                    NEW.idempotency_key IS NOT OLD.idempotency_key OR NEW.apply_manifest_digest IS NOT OLD.apply_manifest_digest OR
+                    NEW.apply_manifest_json IS NOT OLD.apply_manifest_json OR NEW.selection_json IS NOT OLD.selection_json OR
+                    NEW.operator_actor IS NOT OLD.operator_actor OR NEW.operator_seller_id IS NOT OLD.operator_seller_id OR
+                    NEW.operator_account_scope IS NOT OLD.operator_account_scope OR NEW.operator_proof_json IS NOT OLD.operator_proof_json OR
+                    NEW.operator_proof_digest IS NOT OLD.operator_proof_digest)
+                BEGIN SELECT RAISE(ABORT,'Balance typed source is immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS inventory_balance_typed_job_no_delete
+                BEFORE DELETE ON sheet_vitrina_v1_inventory_balance_apply_jobs WHEN OLD.client_request_id IS NOT NULL
+                BEGIN SELECT RAISE(ABORT,'Balance request is retained'); END;
+                CREATE TRIGGER IF NOT EXISTS inventory_balance_typed_target_immutable
+                BEFORE UPDATE ON sheet_vitrina_v1_inventory_balance_apply_items
+                WHEN EXISTS(SELECT 1 FROM sheet_vitrina_v1_inventory_balance_apply_jobs WHERE job_id=OLD.job_id AND client_request_id IS NOT NULL)
+                    AND (NEW.job_id IS NOT OLD.job_id OR NEW.target_key IS NOT OLD.target_key OR NEW.nm_id IS NOT OLD.nm_id OR NEW.target_json IS NOT OLD.target_json)
+                BEGIN SELECT RAISE(ABORT,'Balance typed target is immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS inventory_balance_typed_target_no_delete
+                BEFORE DELETE ON sheet_vitrina_v1_inventory_balance_apply_items
+                WHEN EXISTS(SELECT 1 FROM sheet_vitrina_v1_inventory_balance_apply_jobs WHERE job_id=OLD.job_id AND client_request_id IS NOT NULL)
+                BEGIN SELECT RAISE(ABORT,'Balance typed target is retained'); END;
+            """)
+            override_columns = {r[1] for r in conn.execute('PRAGMA table_info(sheet_vitrina_v1_inventory_balance_overrides)')}
+            if 'source_generation' not in override_columns:
+                conn.execute('ALTER TABLE sheet_vitrina_v1_inventory_balance_overrides ADD COLUMN source_generation TEXT')
             item_columns = {
                 str(row[1])
                 for row in conn.execute(
@@ -946,7 +984,7 @@ class SkuInventoryBalanceBlock:
             "calculation_operation": self.latest_calculation_operation(user_key=user_key),
         }
 
-    def list_registry(self, *, limit: int = 20) -> dict[str, Any]:
+    def list_registry(self, *, limit: int = 20, user_key: str = '') -> dict[str, Any]:
         normalized_limit = min(max(int(limit), 1), 100)
         with self._connect() as conn:
             calculations = conn.execute(
@@ -963,10 +1001,10 @@ class SkuInventoryBalanceBlock:
                               SUM(CASE WHEN i.state IN ('succeeded','failed','skipped','ambiguous') THEN 1 ELSE 0 END) AS terminal_count
                        FROM sheet_vitrina_v1_inventory_balance_apply_jobs j
                        LEFT JOIN sheet_vitrina_v1_inventory_balance_apply_items i ON i.job_id=j.job_id
-                       WHERE j.calculation_id=?
+                       WHERE j.calculation_id=? AND (?='' OR j.created_by=?)
                        GROUP BY j.job_id
                        ORDER BY j.created_at DESC,j.job_id DESC""",
-                    (str(calculation["calculation_id"]),),
+                    (str(calculation["calculation_id"]),user_key,user_key),
                 ).fetchall()
                 immutable = json.loads(str(calculation["payload_json"]))
                 items.append(
@@ -1228,14 +1266,14 @@ class SkuInventoryBalanceBlock:
         return self.get_calculation(calculation_id)
 
     def get_calculation(self, calculation_id: str) -> dict[str, Any]:
-        with self._connect() as conn:
+        with closing(operator_jobs.readonly(self.runtime.db_path)) as conn:
             row = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_inventory_balance_calculations WHERE calculation_id=?",
                 (str(calculation_id),),
             ).fetchone()
-        if row is None:
-            raise SkuInventoryBalanceError("inventory balance calculation not found", http_status=404)
-        return self._calculation_payload(row)
+            if row is None:
+                raise SkuInventoryBalanceError("inventory balance calculation not found", http_status=404)
+            return self._calculation_payload(row,conn=conn)
 
     def save_override(
         self,
@@ -1261,11 +1299,11 @@ class SkuInventoryBalanceBlock:
             conn.execute(
                 """INSERT INTO sheet_vitrina_v1_inventory_balance_overrides(
                        calculation_id,target_key,nm_id,advert_id,placement,
-                       calculated_target_bid_rub,manual_target_bid_rub,updated_at,updated_by
-                   ) VALUES(?,?,?,?,?,?,?,?,?)
+                       calculated_target_bid_rub,manual_target_bid_rub,updated_at,updated_by,source_generation
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(calculation_id,target_key) DO UPDATE SET
                        manual_target_bid_rub=excluded.manual_target_bid_rub,
-                       updated_at=excluded.updated_at,updated_by=excluded.updated_by""",
+                       updated_at=excluded.updated_at,updated_by=excluded.updated_by,source_generation=excluded.source_generation""",
                 (
                     calculation_id,
                     target_key,
@@ -1276,12 +1314,37 @@ class SkuInventoryBalanceBlock:
                     None if manual is None else str(manual),
                     now,
                     actor,
+                    uuid4().hex,
                 ),
             )
             conn.commit()
         return self.get_calculation(calculation_id)
 
-    def start_apply(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+    def start_apply(self, payload: Mapping[str, Any], *, actor: str, operator_actor: str = "") -> dict[str, Any]:
+        boundary = {'committed':False}
+        try:
+            return self._start_apply(payload,actor=actor,operator_actor=operator_actor,boundary=boundary)
+        except SkuInventoryBalanceError as exc:
+            if 'request_id' in payload and not boundary['committed']:
+                exc.payload.setdefault('code','balance_apply_precommit_rejected')
+            raise
+        except operator_jobs.Rejected as exc:
+            if boundary['committed']:
+                raise
+            raise SkuInventoryBalanceError(str(exc),http_status=409,payload={'code':exc.code}) from exc
+
+    def _start_apply(self, payload: Mapping[str, Any], *, actor: str, operator_actor: str, boundary) -> dict[str, Any]:
+        cmd = None
+        if 'request_id' in payload:
+            try:
+                cmd = operator_jobs.command(payload,native_actor=actor,actor=operator_actor or actor,
+                                            seller_id=self.seller_id,account_scope=self.account_scope)
+                scope = operator_jobs.BalanceScope(Path(self.runtime.db_path).resolve(),actor,cmd['actor'],self.seller_id,self.account_scope)
+                retained = operator_jobs.read(self.runtime.db_path,scope=scope,request_id=cmd['request_id'],expected_command=cmd,builder=self._apply_job_payload)
+                if retained is not None:
+                    return retained  # Exact retry is read-only, never worker admission.
+            except operator_jobs.Rejected as exc:
+                raise SkuInventoryBalanceError(str(exc),http_status=409,payload={'code':exc.code}) from exc
         calculation_id = str(payload.get("calculation_id") or "").strip()
         if not calculation_id:
             raise SkuInventoryBalanceError("calculation_id is required")
@@ -1301,6 +1364,8 @@ class SkuInventoryBalanceBlock:
                 "live WB inventory-balance apply is unavailable", http_status=503
             )
         calculation = self.get_calculation(calculation_id)
+        if cmd and calculation['apply_source_revision'] != cmd['request']['apply_source_revision']:
+            raise SkuInventoryBalanceError('Balance source changed; review calculation again',http_status=409,payload={'code':'balance_apply_revision_stale'})
         selected_nm_ids = {
             int(item) for item in (payload.get("nm_ids") or []) if _optional_int(item)
         }
@@ -1430,6 +1495,11 @@ class SkuInventoryBalanceBlock:
         targets = [
             {**item, "action_type": "bid_change"} for item in bid_targets
         ] + state_targets
+        if cmd:
+            actual_keys = {str(t['target_key']) for t in bid_targets}
+            actual_nm = {int(t['nm_id']) for t in bid_targets}
+            if not selected_target_keys.issubset(actual_keys) or not selected_nm_ids.issubset(actual_nm):
+                raise SkuInventoryBalanceError('Some selected targets are no longer applicable',http_status=409,payload={'code':'balance_apply_revision_stale'})
         if not targets:
             raise SkuInventoryBalanceError(
                 "selection has no valid bid or campaign state changes",
@@ -1537,12 +1607,32 @@ class SkuInventoryBalanceBlock:
             ),
             "external_writes": requested_mode == LIVE_MODE,
         }
+        # Encode/size/hash the immutable candidate before the short source CAS.
+        retained_proof = operator_jobs.proof(cmd,job_id=job_id,created_at=now,manifest=apply_manifest,selection=selection,targets=job_targets) if cmd else None
+        retained_proof_json = _json(retained_proof) if cmd else '{}'
+        retained_proof_digest = operator_jobs.digest(retained_proof) if cmd else ''
         with self._connect() as conn:
+            if cmd:
+                conn.execute('BEGIN IMMEDIATE')
+                existing_request = conn.execute('SELECT * FROM sheet_vitrina_v1_inventory_balance_apply_jobs WHERE client_request_id=?',(cmd['request_id'],)).fetchone()
+                if existing_request is not None:
+                    if (existing_request['created_by'],existing_request['operator_actor'],existing_request['operator_seller_id'],existing_request['operator_account_scope']) != (actor,cmd['actor'],self.seller_id,self.account_scope):
+                        raise SkuInventoryBalanceError('Balance request identity conflict',http_status=409,payload={'code':'balance_apply_identity_conflict'})
+                    value, _ = operator_jobs.verify(conn,existing_request)
+                    if value['command'] != cmd:
+                        raise SkuInventoryBalanceError('Balance request identity conflict',http_status=409,payload={'code':'balance_apply_identity_conflict'})
+                    conn.rollback()
+                    return operator_jobs.read(self.runtime.db_path,scope=scope,request_id=cmd['request_id'],expected_command=cmd,builder=self._apply_job_payload)
+                calculation_row = conn.execute('SELECT * FROM sheet_vitrina_v1_inventory_balance_calculations WHERE calculation_id=?',(calculation_id,)).fetchone()
+                if calculation_row is None or self._calculation_payload(calculation_row,conn=conn)['apply_source_revision'] != cmd['request']['apply_source_revision']:
+                    raise SkuInventoryBalanceError('Balance source changed; review calculation again',http_status=409,payload={'code':'balance_apply_revision_stale'})
             existing = conn.execute(
                 "SELECT job_id FROM sheet_vitrina_v1_inventory_balance_apply_jobs WHERE idempotency_key=?",
                 (idempotency_key,),
             ).fetchone()
             if existing is not None:
+                if cmd:
+                    raise SkuInventoryBalanceError('This native manifest already belongs to another request; read its original job',http_status=409,payload={'code':'balance_apply_manifest_already_retained'})
                 existing_job_id = str(existing["job_id"])
                 if requested_mode == LIVE_MODE:
                     self._start_apply_worker_if_needed()
@@ -1551,8 +1641,9 @@ class SkuInventoryBalanceBlock:
                 """INSERT INTO sheet_vitrina_v1_inventory_balance_apply_jobs(
                        job_id,calculation_id,mode,state,idempotency_key,
                        apply_manifest_digest,apply_manifest_json,selection_json,
-                       summary_json,created_at,created_by,updated_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       summary_json,created_at,created_by,updated_at,
+                       client_request_id,operator_actor,operator_seller_id,operator_account_scope,operator_proof_json,operator_proof_digest
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     job_id,
                     calculation_id,
@@ -1566,6 +1657,12 @@ class SkuInventoryBalanceBlock:
                     now,
                     actor,
                     now,
+                    cmd['request_id'] if cmd else None,
+                    cmd['actor'] if cmd else '',
+                    cmd['seller_id'] if cmd else '',
+                    cmd['account_scope'] if cmd else '',
+                    retained_proof_json,
+                    retained_proof_digest,
                 ),
             )
             for target in job_targets:
@@ -1582,9 +1679,14 @@ class SkuInventoryBalanceBlock:
                         now,
                     ),
                 )
+            # After this point an error is not a negative acknowledgment. An
+            # uncertain commit/worker/readback response retains the same ID.
+            boundary['committed'] = True
             conn.commit()
         if requested_mode == LIVE_MODE:
             self._start_apply_worker_if_needed()
+        if cmd:
+            return operator_jobs.read(self.runtime.db_path,scope=scope,request_id=cmd['request_id'],expected_command=cmd,builder=self._apply_job_payload)
         return self.get_apply_job(job_id)
 
     def start_manual_pending(
@@ -2808,19 +2910,35 @@ class SkuInventoryBalanceBlock:
             )
             conn.commit()
 
-    def get_apply_job(self, job_id: str) -> dict[str, Any]:
-        with self._connect() as conn:
+    def get_apply_job(self, job_id: str, *, actor: str = '', operator_actor: str = '', request_id: str = '') -> dict[str, Any]:
+        if request_id:
+            if not operator_jobs.IDENTITY.fullmatch(request_id):
+                raise SkuInventoryBalanceError('invalid Balance request identity',http_status=422)
+            result = operator_jobs.read(self.runtime.db_path,scope=operator_jobs.BalanceScope(Path(self.runtime.db_path).resolve(),actor,operator_actor or actor,self.seller_id,self.account_scope),request_id=request_id,builder=self._apply_job_payload)
+            if result is None:
+                raise SkuInventoryBalanceError('inventory balance apply job not found',http_status=404)
+            return result
+        with closing(operator_jobs.readonly(self.runtime.db_path)) as conn:
             job = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_inventory_balance_apply_jobs WHERE job_id=?",
                 (job_id,),
             ).fetchone()
-            if job is None:
+            if job is None or actor and job['created_by'] != actor:
                 raise SkuInventoryBalanceError("inventory balance apply job not found", http_status=404)
+            if job['client_request_id']:
+                scope = operator_jobs.BalanceScope(Path(self.runtime.db_path).resolve(),actor or job['created_by'],operator_actor or actor or job['operator_actor'],self.seller_id,self.account_scope)
+                result = operator_jobs.read(self.runtime.db_path,scope=scope,job_id=job_id,builder=self._apply_job_payload)
+                if result is None:
+                    raise SkuInventoryBalanceError('inventory balance apply job not found',http_status=404)
+                return result
             items = conn.execute(
                 """SELECT * FROM sheet_vitrina_v1_inventory_balance_apply_items
                    WHERE job_id=? ORDER BY nm_id,target_key""",
                 (job_id,),
             ).fetchall()
+        return self._apply_job_payload(job,items)
+
+    def _apply_job_payload(self, job, items):
         states = {
             state: 0
             for state in (
@@ -3097,38 +3215,51 @@ class SkuInventoryBalanceBlock:
         filename = f"Баланс_запасов_{calculation_id}.xlsx"
         return body, filename
 
-    def _calculation_payload(self, row: sqlite3.Row) -> dict[str, Any]:
+    def _calculation_payload(self, row: sqlite3.Row, *, conn=None) -> dict[str, Any]:
         payload = json.loads(str(row["payload_json"]))
-        with self._connect() as conn:
+        with (nullcontext(conn) if conn is not None else closing(operator_jobs.readonly(self.runtime.db_path))) as conn:
             overrides = conn.execute(
                 """SELECT * FROM sheet_vitrina_v1_inventory_balance_overrides
                    WHERE calculation_id=?""",
                 (str(row["calculation_id"]),),
             ).fetchall()
             observations = conn.execute(
-                """SELECT i.target_key,i.target_json,i.result_json,i.state,i.updated_at,j.job_id,j.created_at
+                """SELECT i.target_key,i.target_json,i.result_json,i.state,i.updated_at,i.registry_operation_id,i.registry_receipt_reference,j.job_id,j.created_at,j.client_request_id
                    FROM sheet_vitrina_v1_inventory_balance_apply_items i
                    JOIN sheet_vitrina_v1_inventory_balance_apply_jobs j ON j.job_id=i.job_id
                    WHERE i.updated_at>=? ORDER BY i.updated_at,j.job_id""",
                 (str(row["created_at"]),),
             ).fetchall()
-        current_bids = {}
-        current_states = {}
-        for observed in observations:
-            item = json.loads(observed["target_json"])
-            result = json.loads(observed["result_json"])
-            identity = (int(item["nm_id"]), int(item["advert_id"]))
-            proof = {"job_id": observed["job_id"], "observed_at": observed["updated_at"],
-                     "source": "confirmed_apply_readback", "job_created_at": observed["created_at"]}
-            if observed["state"] == "succeeded" and result.get("readback_status") == "matching":
-                if item.get("action_type") == "campaign_state" and result.get("confirmed_campaign_state"):
-                    current_states[identity] = {**proof, "state": result["confirmed_campaign_state"]}
-                elif result.get("confirmed_bid_minor") is not None:
-                    current_bids[str(observed["target_key"])] = {**proof, "bid_rub": int(result["confirmed_bid_minor"])/100,
-                        "applied_bid_rub": item.get("final_target_bid_rub"), "override_updated_at": item.get("override_updated_at", "")}
-            preflight = result.get("preflight") or {}
-            if preflight.get("error_code") == "stale_campaign_state" and preflight.get("observed_campaign_state"):
-                current_states[identity] = {**proof, "source": "preflight_observation_no_submit", "state": preflight["observed_campaign_state"]}
+            current_bids = {}
+            current_states = {}
+            verified_jobs = {}
+            for observed in observations:
+                item = json.loads(observed["target_json"])
+                result = json.loads(observed["result_json"])
+                confirmed = observed['state'] == 'succeeded' and result.get('readback_status') == 'matching'
+                if observed['client_request_id'] and confirmed:
+                    if observed['job_id'] not in verified_jobs:
+                        native_job = conn.execute('SELECT * FROM sheet_vitrina_v1_inventory_balance_apply_jobs WHERE job_id=?',(observed['job_id'],)).fetchone()
+                        operator_jobs.verify(conn,native_job)
+                        verified_jobs[observed['job_id']] = native_job
+                    confirmed = operator_jobs.external_child(conn,verified_jobs[observed['job_id']],item,observed)['external_confirmed']
+                    if confirmed:
+                        # Confirmed registry after-value is the immutable requested
+                        # operand. Mutable result flags/numbers cannot change it.
+                        result = {**result, 'confirmed_bid_minor':item.get('final_target_bid_minor'),
+                                  'confirmed_campaign_state':item.get('requested_campaign_state')}
+                identity = (int(item["nm_id"]), int(item["advert_id"]))
+                proof = {"job_id": observed["job_id"], "observed_at": observed["updated_at"],
+                         "source": "confirmed_apply_readback", "job_created_at": observed["created_at"]}
+                if confirmed:
+                    if item.get("action_type") == "campaign_state" and result.get("confirmed_campaign_state"):
+                        current_states[identity] = {**proof, "state": result["confirmed_campaign_state"]}
+                    elif result.get("confirmed_bid_minor") is not None:
+                        current_bids[str(observed["target_key"])] = {**proof, "bid_rub": int(result["confirmed_bid_minor"])/100,
+                            "applied_bid_rub": item.get("final_target_bid_rub"), "override_updated_at": item.get("override_updated_at", "")}
+                preflight = result.get("preflight") or {}
+                if preflight.get("error_code") == "stale_campaign_state" and preflight.get("observed_campaign_state"):
+                    current_states[identity] = {**proof, "source": "preflight_observation_no_submit", "state": preflight["observed_campaign_state"]}
         by_key = {str(item["target_key"]): item for item in overrides}
         payload = deepcopy(payload)
         recommendation_ids: list[str] = []
@@ -3169,6 +3300,7 @@ class SkuInventoryBalanceBlock:
                 )
                 target["override_updated_at"] = str(override["updated_at"]) if override else ""
                 target["override_updated_by"] = str(override["updated_by"]) if override else ""
+                target["override_generation"] = str(override['source_generation'] or 'legacy') if override else ''
                 target["can_apply"] = bool(
                     target.get("identity_valid")
                     and target.get("manual_override_allowed")
@@ -3282,6 +3414,7 @@ class SkuInventoryBalanceBlock:
             "expiration_hours": 24,
             "external_writes": False,
         }
+        payload['apply_source_revision'] = operator_jobs.revision(payload)
         return payload
 
     def _terminalize_stale_running_items(self, job_id: str) -> None:
