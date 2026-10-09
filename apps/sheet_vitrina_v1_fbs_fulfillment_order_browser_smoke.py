@@ -408,6 +408,10 @@ def main() -> int:
                 page.evaluate("key => {const ids=JSON.parse(localStorage.getItem(key));ids.push(999999999);localStorage.setItem(key,JSON.stringify(ids));localStorage.setItem('wbc.stock-monitor.hidden-skus.v1',JSON.stringify([123]));}", "wbc.fbs-fulfillment.excluded-skus.v1")
                 page.reload(wait_until="domcontentloaded")
                 expect(page.locator("#fbsSkuSelectionSummary")).to_have_text(f"SKU к заказу ({len(active_nm_ids)-1}/{len(active_nm_ids)})", timeout=15000)
+                # Catalog rendering precedes the persisted selection's scoped
+                # readiness GET. Finish that bootstrap before arming a held
+                # metadata response, so it belongs to the explicit activation.
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
                 page.locator("#fbsSkuSelectionSummary").click()
                 first_sku = page.locator(f'[data-fbs-sku="{first_id}"]')
                 expect(first_sku).not_to_be_checked()
