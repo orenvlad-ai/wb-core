@@ -11,6 +11,8 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 from urllib import error, request as urllib_request
+from urllib.parse import urlencode
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -126,6 +128,9 @@ def main() -> int:
             assert status_code == 200, status
             assert status["wb_stock_used"] is False
             assert status["defaults"]["inbound_scope"] == "selected_facility"
+            assert status["defaults"]["excluded_nm_ids"] == []
+            assert [item["nm_id"] for item in status["sku_catalog"]] == active_nm_ids
+            assert all(set(item) == {"nm_id", "name", "category"} for item in status["sku_catalog"])
             facilities = {item["facility_id"]: item for item in status["facilities"]}
             assert facilities[MOSCOW_ID]["calculation_enabled"] is True
             assert facilities["ff-orenburg"]["calculation_enabled"] is True
@@ -169,6 +174,7 @@ def main() -> int:
             assert result["target_facility_id"] == MOSCOW_ID
             assert result["settings"]["inbound_scope"] == "selected_facility"
             assert result["inbound_coverage"]["total_quantity"] == 35
+            assert result["settings"]["excluded_nm_ids"] == []
 
             all_code, all_result = _post_json(
                 base + DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH,
@@ -201,6 +207,42 @@ def main() -> int:
             ]
             assert export_rows[-3][3] == all_result["summary"]["total_qty"]
             assert all_result["inbound_coverage"]["scope"] == "all_active"
+
+            selected_code, selected = _post_json(base + DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH,
+                {"target_facility_id": MOSCOW_ID, "excluded_nm_ids": [active_nm_ids[0]]})
+            assert selected_code == 200, selected
+            assert selected["settings"]["excluded_nm_ids"] == [active_nm_ids[0]]
+            assert [row["nm_id"] for row in selected["rows"]] == active_nm_ids[1:]
+            for excluded in ([True], [str(active_nm_ids[0])], [999999999999], active_nm_ids):
+                code, invalid = _post_json(base + DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH,
+                    {"target_facility_id": MOSCOW_ID, "excluded_nm_ids": excluded})
+                assert code == 422, (code, invalid)
+            _, selected_status = _get_json(base + DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH)
+            assert selected_status["last_result"]["calculation_id"] == selected["calculation_id"]
+            assert [item["nm_id"] for item in selected_status["sku_catalog"]] == active_nm_ids
+            _, selected_export, _ = _get_bytes(base + DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH)
+            assert [row[0] for row in read_first_sheet_rows(selected_export)[1:-3] if row] == [str(nm) for nm in active_nm_ids[1:]]
+
+            other_code, other = _post_json(base + DEFAULT_FBS_FULFILLMENT_ORDER_CALCULATE_PATH, {"target_facility_id": MOSCOW_ID})
+            assert other_code == 200 and other["calculation_id"] != selected["calculation_id"]
+            code, pinned_export, _ = _get_bytes(base + DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH + "?" + urlencode({"calculation_id": selected["calculation_id"]}))
+            assert code == 200
+            assert [row[0] for row in read_first_sheet_rows(pinned_export)[1:-3] if row] == [str(nm) for nm in active_nm_ids[1:]]
+            for query in ("calculation_id=", "calculation_id=invalid", "calculation_id=" + "f" * 32, "unexpected=1"):
+                assert _get_json(base + DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH + "?" + query)[0] == 422
+            for excluded in (None, [True], [str(active_nm_ids[0])], [999999999999], active_nm_ids):
+                assert _get_json(base + DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH + "?" + urlencode({"excluded_nm_ids": json.dumps(excluded)}))[0] == 422
+            assert _get_json(base + DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH + "?excluded_nm_ids=[]&excluded_nm_ids=[]")[0] == 422
+            block = entrypoint.fbs_fulfillment_order_block
+            eligible = block._load_active_skus()
+            new_id = 999999999999
+            with patch.object(block, "_load_active_skus", return_value=eligible + [(new_id, "New uncollected SKU")]):
+                code, blocked = _get_json(base + DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH)
+                assert code == 200 and not next(f for f in blocked["facilities"] if f["facility_id"] == MOSCOW_ID)["calculation_enabled"]
+                code, scoped = _get_json(base + DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH + "?" + urlencode({"excluded_nm_ids": json.dumps([new_id])}))
+                assert code == 200 and next(f for f in scoped["facilities"] if f["facility_id"] == MOSCOW_ID)["calculation_enabled"]
+                assert scoped["readiness_scope"] == {"excluded_nm_ids": [new_id], "included_nm_ids": active_nm_ids}
+                assert [item["nm_id"] for item in scoped["sku_catalog"]] == active_nm_ids + [new_id]
 
             legacy_code, legacy = _get_json(base + DEFAULT_FACTORY_ORDER_STATUS_PATH)
             assert legacy_code == 200

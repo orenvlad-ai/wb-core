@@ -4561,7 +4561,16 @@ class RegistryUploadHttpEntrypoint:
         self,
         _query: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return asdict(self.fbs_fulfillment_order_block.build_status())
+        query = dict(_query or {})
+        if set(query) - {"excluded_nm_ids"}:
+            raise ValueError("Неизвестные параметры готовности FBS-расчёта")
+        try:
+            excluded = json.loads(query["excluded_nm_ids"]) if "excluded_nm_ids" in query else []
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Исключённые SKU должны быть JSON-списком nmId") from exc
+        if not isinstance(excluded, list):
+            raise ValueError("Исключённые SKU должны быть JSON-списком nmId")
+        return asdict(self.fbs_fulfillment_order_block.build_status(excluded_nm_ids=excluded))
 
     def handle_fbs_fulfillment_order_calculate_request(
         self,
@@ -4573,8 +4582,9 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_fbs_fulfillment_order_recommendation_request(
         self,
+        *, calculation_id: str | None = None,
     ) -> tuple[bytes, str]:
-        return self.fbs_fulfillment_order_block.download_recommendation()
+        return self.fbs_fulfillment_order_block.download_recommendation(calculation_id=calculation_id)
 
     def handle_wb_regional_status_request(self) -> dict[str, Any]:
         return asdict(self.wb_regional_supply_block.build_status())

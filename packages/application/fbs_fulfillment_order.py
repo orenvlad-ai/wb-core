@@ -6,6 +6,7 @@ from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import math
+import re
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -52,6 +53,7 @@ DEFAULTS = {
     "order_batch_qty": 250,
     "sales_history_mode": SALES_HISTORY_MODE_LAST_N_DAYS,
     "sales_avg_period_days": DEFAULT_SALES_HISTORY_DAYS,
+    "excluded_nm_ids": [],
 }
 NATIONAL_DEMAND_SCOPE = "facility_fbs_orders"
 WB_STOCK_USED = False
@@ -85,8 +87,10 @@ class FbsFulfillmentOrderBlock:
         return load_daily_fbs_demand(self.observer_db_path, report_date=report_date,
             nm_ids=[nm for nm, _ in active_skus], warehouse_facility_map=mappings)
 
-    def build_status(self) -> FbsFulfillmentOrderStatus:
-        active_skus = self._load_active_skus()
+    def build_status(self, *, excluded_nm_ids: list[int] | None = None) -> FbsFulfillmentOrderStatus:
+        excluded = _parse_excluded_nm_ids([] if excluded_nm_ids is None else excluded_nm_ids)
+        eligible_skus = self._load_active_skus()
+        active_skus = _selected_skus(eligible_skus, excluded)
         planning = current_official_fbs_facilities(
             self.runtime.db_path, requested_nm_ids=[nm_id for nm_id, _ in active_skus],
             now=self.now_factory(), planning_max_age_seconds=72 * 3600,
@@ -116,7 +120,7 @@ class FbsFulfillmentOrderBlock:
                 if facilities
                 else "unavailable"
             ),
-            active_sku_count=len(active_skus),
+            active_sku_count=len(eligible_skus),
             national_demand_scope=NATIONAL_DEMAND_SCOPE,
             wb_stock_used=WB_STOCK_USED,
             facilities=tuple(facilities),
@@ -126,6 +130,8 @@ class FbsFulfillmentOrderBlock:
             },
             defaults=dict(DEFAULTS),
             last_result=last_result,
+            sku_catalog=tuple(self._sku_catalog(eligible_skus)),
+            readiness_scope={"excluded_nm_ids": list(excluded), "included_nm_ids": [nm for nm, _ in active_skus]},
         )
 
     def calculate(self, payload: Mapping[str, Any]) -> FbsFulfillmentOrderResult:
@@ -144,6 +150,7 @@ class FbsFulfillmentOrderBlock:
         active_skus = self._load_active_skus()
         if not active_skus:
             raise ValueError("Нет active SKU для расчёта")
+        active_skus = _selected_skus(active_skus, settings.excluded_nm_ids)
         planning = current_official_fbs_facilities(
             self.runtime.db_path, requested_nm_ids=[nm_id for nm_id, _ in active_skus],
             now=self.now_factory(), planning_max_age_seconds=72 * 3600,
@@ -330,11 +337,17 @@ class FbsFulfillmentOrderBlock:
         )
         return result
 
-    def download_recommendation(self) -> tuple[bytes, str]:
-        result = self.runtime.load_fbs_fulfillment_order_result_state()
-        if not result:
-            raise ValueError("Результат FBS-расчёта ещё не подготовлен")
-        calculation_id = str(result.get("calculation_id") or "")
+    def download_recommendation(self, *, calculation_id: str | None = None) -> tuple[bytes, str]:
+        if calculation_id is None:
+            result = self.runtime.load_fbs_fulfillment_order_result_state()
+            if not result:
+                raise ValueError("Результат FBS-расчёта ещё не подготовлен")
+            calculation_id = str(result.get("calculation_id") or "")
+        elif not isinstance(calculation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", calculation_id):
+            raise ValueError("Некорректный ID FBS-расчёта")
+        record = self.runtime.load_supply_calculation_registry_record(calculation_id)
+        if not record or record.get("calculation_type") != "fbs_fulfillment_order" or not record.get("download_available"):
+            raise ValueError("Excel указанного FBS-расчёта недоступен")
         body, filename, _ = self.runtime.load_supply_calculation_registry_export(
             calculation_id
         )
@@ -389,7 +402,8 @@ class FbsFulfillmentOrderBlock:
                     "city": str(raw.get("city") or ""),
                     "active": True,
                     "stock_source": dict(raw.get("stock_source") or {}),
-                    "available": raw.get("available"),
+                    "source_blocker": str(raw.get("source_blocker") or ""),
+                    "available": sum(int(item["available"]) for item in sku_values) if not missing_nm_ids and not inapplicable_nm_ids and not raw.get("source_blocker") else None,
                     "sku_values": sku_values,
                     "missing_official_stock_nm_ids": missing_nm_ids,
                     "inapplicable_nm_ids": inapplicable_nm_ids,
@@ -521,6 +535,30 @@ class FbsFulfillmentOrderBlock:
         )
         return [(int(item.nm_id), str(item.display_name)) for item in enabled]
 
+    def _sku_catalog(self, active_skus: list[tuple[int, str]]) -> list[dict[str, Any]]:
+        """Metadata never expands the existing recommendation eligibility scope."""
+        labels = {}
+        for group in self.runtime.list_sku_groups():
+            label = str(group.get("label") or group["group_key"])
+            for alias in [group["group_key"], label, *(group.get("aliases") or [])]:
+                labels[str(alias).casefold()] = label
+        nomenclature = {}
+        eligible = {nm_id for nm_id, _ in active_skus}
+        for item in self.runtime.list_nomenclature_items():
+            if type(item.get("nm_id")) is int and item["nm_id"] in eligible:
+                nomenclature.setdefault(item["nm_id"], []).append(item)
+        config = {int(item.nm_id): item for item in self.runtime.load_current_state().config_v2 if item.enabled}
+        result = []
+        for nm_id, name in active_skus:
+            candidates = nomenclature.get(nm_id, [])
+            current = [item for item in candidates if item.get("is_active") and not item.get("is_hidden")]
+            candidates = current or candidates
+            # Category enrichment must not pick an arbitrary duplicate identity.
+            canonical_category = candidates[0].get("product_type") if len(candidates) == 1 else None
+            category = str(canonical_category or getattr(config.get(nm_id), "group", "") or "Без категории")
+            result.append({"nm_id": nm_id, "name": name, "category": labels.get(category.casefold(), category)})
+        return result
+
     def _build_export(
         self,
         result: FbsFulfillmentOrderResult,
@@ -602,7 +640,24 @@ def _parse_settings(payload: Mapping[str, Any]) -> FbsFulfillmentOrderSettings:
             payload.get("report_date_override"),
             "Дата расчёта",
         ),
+        excluded_nm_ids=_parse_excluded_nm_ids(payload.get("excluded_nm_ids", [])),
     )
+
+
+def _parse_excluded_nm_ids(value: Any) -> tuple[int, ...]:
+    if not isinstance(value, list) or any(type(nm_id) is not int or nm_id <= 0 for nm_id in value):
+        raise ValueError("Исключённые SKU должны быть списком положительных целых nmId")
+    return tuple(sorted(set(value)))
+
+
+def _selected_skus(active_skus: list[tuple[int, str]], excluded: tuple[int, ...]) -> list[tuple[int, str]]:
+    unknown = set(excluded) - {nm_id for nm_id, _ in active_skus}
+    if unknown:
+        raise ValueError("Исключённые SKU отсутствуют в доступном каталоге: " + ", ".join(map(str, sorted(unknown))))
+    selected = [(nm, name) for nm, name in active_skus if nm not in excluded]
+    if active_skus and not selected:
+        raise ValueError("Выберите хотя бы один SKU для расчёта")
+    return selected
 
 
 def _inbound_scope(value: Any) -> str:

@@ -5918,8 +5918,11 @@ def _build_handler(
 
             if parsed.path == DEFAULT_FBS_FULFILLMENT_ORDER_STATUS_PATH:
                 try:
+                    query = urllib_parse.parse_qs(parsed.query, keep_blank_values=True)
+                    if any(len(values) != 1 for values in query.values()):
+                        raise ValueError("Повторяющиеся параметры готовности FBS-расчёта")
                     payload = entrypoint.handle_fbs_fulfillment_order_status_request(
-                        dict(urllib_parse.parse_qsl(parsed.query)),
+                        {key: values[0] for key, values in query.items()},
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})
@@ -6042,8 +6045,12 @@ def _build_handler(
 
             if parsed.path == DEFAULT_FBS_FULFILLMENT_ORDER_RECOMMENDATION_PATH:
                 try:
+                    query = urllib_parse.parse_qs(parsed.query, keep_blank_values=True)
+                    if set(query) - {"calculation_id"} or any(len(values) != 1 for values in query.values()):
+                        raise ValueError("Некорректные параметры Excel FBS-расчёта")
                     workbook_bytes, filename = (
-                        entrypoint.handle_fbs_fulfillment_order_recommendation_request()
+                        entrypoint.handle_fbs_fulfillment_order_recommendation_request(
+                            calculation_id=query["calculation_id"][0] if "calculation_id" in query else None)
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)})

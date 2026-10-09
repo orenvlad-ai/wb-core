@@ -37,6 +37,7 @@ class FbsFulfillmentOrderSettings:
     sales_date_from: str | None
     sales_date_to: str | None
     report_date_override: str | None
+    excluded_nm_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,3 +113,5 @@ class FbsFulfillmentOrderStatus:
     sales_history_coverage: dict[str, Any]
     defaults: dict[str, Any]
     last_result: dict[str, Any] | None
+    sku_catalog: tuple[dict[str, Any], ...] = ()
+    readiness_scope: dict[str, Any] | None = None
