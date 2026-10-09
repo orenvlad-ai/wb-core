@@ -803,9 +803,10 @@ class SourceAndAdmissionTests(unittest.TestCase):
 class BoundWarehouseTests(unittest.TestCase):
     def test_owned_handler_runs_all_tails_once_and_checks_exact_journal(self):
         from packages.application.warehouse_update_journal import WarehouseUpdateJournal, PHASES
+        from packages.application.storage_registry import StoreRegistry
         from unittest.mock import Mock
         with TemporaryDirectory() as temp:
-            root=Path(temp);db=root/'operational.sqlite3'
+            root=Path(temp);db=StoreRegistry(root).resolve('operational')
             with sqlite3.connect(db) as conn:
                 conn.execute('CREATE TABLE sheet_vitrina_v1_warehouse_functional_active(slot INTEGER,version_id TEXT)')
                 conn.execute('CREATE TABLE sheet_vitrina_v1_warehouse_wb_snapshots(snapshot_id TEXT,version_id TEXT,pagination_complete INTEGER,raw_rows_digest TEXT)')
