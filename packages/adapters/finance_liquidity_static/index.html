@@ -14,6 +14,17 @@
       .reconciliation-row { display:grid; gap:5px; padding:11px 0; border-bottom:1px solid var(--border); }
       .reconciliation-row.has-difference strong { color:var(--warn); }
       .reconciliation-amounts { display:flex; flex-wrap:wrap; gap:5px 14px; color:var(--muted); font-size:12px; }
+      .ff-operation-receipt { padding:14px; border:1px solid var(--border); border-radius:10px; margin:12px 0; overflow-wrap:anywhere; }
+      .ff-operation-check { color:#7dd3a2; font-size:24px; }
+      .ff-operation-status { display:inline-block; padding:4px 8px; border-radius:8px; background:var(--surface-2); }
+      .ff-operation-status[data-state="processed"] { color:#7dd3a2; }
+      .ff-operation-status[data-state="needs_attention"],.ff-operation-status[data-state="draft"] { color:var(--warn); }
+      .ff-operation-summary { margin:12px 0; }
+      .ff-operation-summary div { display:flex; gap:12px; flex-wrap:wrap; }
+      .ff-operation-summary dt { color:var(--muted); }
+      .ff-operation-summary dd { margin:0; }
+      .ff-operation-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:12px; }
+      .ff-operation-link { color:var(--accent); }
     </style>
   </head>
   <body>
@@ -57,6 +68,15 @@
           <button class="button" type="button" data-action="reconcile" disabled>Сверка</button>
         </nav>
       </section>
+
+      <details class="panel is-hidden" id="operator-journal" data-cash-operator-journal>
+        <summary>Журнал операций · TEST</summary>
+        <form data-cash-operator-search><label>Номер операции<input name="search" maxlength="200"></label><button class="button">Найти</button></form>
+        <p data-cash-operator-total></p><div data-cash-operator-rows style="max-height:300px;overflow:auto"></div>
+        <button class="button" data-cash-operator-prev type="button">Назад</button>
+        <button class="button" data-cash-operator-next type="button">Далее</button>
+      </details>
+      <section data-cash-operator-receipt aria-live="polite"></section>
 
       <section class="workspace-grid">
         <section class="panel history-panel" aria-labelledby="history-title">
@@ -103,6 +123,7 @@
         <div class="dialog-actions"><button class="button quiet" value="cancel">Отмена</button><button class="button" type="button" data-dialog-save-draft>Сохранить черновик</button><button class="button primary" value="default" data-dialog-submit>Провести</button></div>
       </form>
     </dialog>
+    <script src="./operator-acceptance.js" defer></script>
     <script src="./finance.js" defer></script>
   </body>
 </html>

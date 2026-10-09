@@ -24,6 +24,15 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
     def respond(status, payload):
         write_json(handler, HTTPStatus(status), payload, extra_headers={"Cache-Control": "private, no-store"})
 
+    def saved_response(result,request_id):
+        from packages.application.operator_cleaner_operations import receipt
+        try:acceptance=receipt(web,principal,request_id)
+        except (ValueError,TypeError) as exc:
+            # Source may already be committed: a failed projection is unknown,
+            # never a client precommit rejection that permits another command.
+            raise CleanerError('receipt_unavailable','Квитанция пока недоступна. Читаем ту же команду.',503) from exc
+        return dict(result,acceptance=acceptance) if acceptance else dict(result)
+
     path = parsed.path[len(PREFIX):]
     payload = {}
     try:
@@ -61,17 +70,17 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
                 result = batch_item_detail(web.require_service(),match[1],int(match[2]),principal)
             elif match := re.fullmatch(r"/manual-batches/([A-Za-z0-9_.:-]{8,120})", path):
                 from packages.application.search_cluster_cleaner_batch import batch_status
-                result = batch_status(web.require_service(),match[1],principal)
+                result = saved_response(batch_status(web.require_service(),match[1],principal),match[1])
             elif path == "/reviews":
                 result = web.reviews(principal, cursor=query.get("cursor", [""])[0], limit=int(query.get("limit", [50])[0]))
             elif path == "/history":
                 result = web.history(principal, cursor=int(query.get("cursor", [0])[0]), limit=int(query.get("limit", [50])[0]))
             elif match := re.fullmatch(r"/requests/([A-Za-z0-9_.:-]{8,120})", path):
-                result = web.require_service().get_request(match[1], principal)
+                result = saved_response(web.require_service().get_request(match[1], principal),match[1])
             elif match := re.fullmatch(r"/runs/([A-Za-z0-9-]{1,120})", path):
                 result = web.require_service().run_detail(match[1], principal)
             elif match := re.fullmatch(r"/manual-clean/([A-Za-z0-9_.:-]{8,120})", path):
-                result = web.require_service().manual_job(match[1], principal)
+                result = saved_response(web.require_service().manual_job(match[1], principal),match[1])
             elif match := re.fullmatch(r"/profiles/([1-9][0-9]{0,15})", path):
                 result = web.require_service().get_profile(int(match[1]), principal)
             else:
@@ -135,7 +144,7 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
             settings = cleaner.summary(principal)["settings"]
             if not settings["baseline_ready"] or settings["restore_hold"]:
                 raise CleanerError("not_ready", "Включение доступно после сверки исходной базы и восстановления", 409)
-        respond(202, operation())
+        respond(202, saved_response(operation(),payload['request_id']))
     except CleanerError as exc:
         response={"code": exc.code, "error": str(exc)}
         request_id=payload.get('request_id') if isinstance(payload,dict) else None

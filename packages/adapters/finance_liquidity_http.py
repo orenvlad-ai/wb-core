@@ -241,6 +241,19 @@ def build_finance_http_server(
             suffix = path[len(FINANCE_CASH_API_PREFIX) :] or "/"
             if not mutation:
                 need("finance")
+                if suffix == "/operator-operations" or suffix.startswith("/operator-operations/"):
+                    from packages.application.operator_cash_operations import read
+                    allowed_query = {'page', 'limit', 'search'} if suffix == '/operator-operations' else set()
+                    if set(query)-allowed_query or any(len(v)!=1 for v in query.values()):
+                        raise FinanceCashError('invalid_request', 'Exact native projection query required')
+                    from urllib.parse import unquote
+                    self._ok(read(app.service, actor=actor, is_admin='finance_admin' in caps,
+                        store_id=app.store_id, store_mode=app.store_mode,
+                        permitted_balance=getattr(self, '_can_view_vlad_balance', False),
+                        identity=unquote(suffix[len('/operator-operations/'):]) if suffix.startswith('/operator-operations/') else None,
+                        page=int((query.get('page') or ['1'])[0]),limit=int((query.get('limit') or ['25'])[0]),
+                        search=(query.get('search') or [''])[0]))
+                    return
                 if suffix == "/capabilities":
                     self._ok(
                         {
@@ -484,7 +497,8 @@ def build_finance_http_server(
             if "/" in relative or ".." in relative:
                 self._fail(404, "not_found", "Static path not found")
                 return
-            file = app.static_dir / relative
+            file = (Path(__file__).parent / 'templates' / 'sheet_vitrina_v1_operator_acceptance.js'
+                    if relative == 'operator-acceptance.js' else app.static_dir / relative)
             if not file.is_file():
                 self._fail(404, "not_found", "Static path not found")
                 return

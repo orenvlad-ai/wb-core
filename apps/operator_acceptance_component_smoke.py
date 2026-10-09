@@ -83,6 +83,20 @@ def checks(page) -> None:
     assert page.evaluate("OperatorAcceptance.acceptedOperation(null)") is False
     assert page.evaluate("OperatorAcceptance.acceptedOperation([])") is False
 
+    # Financial batch children are source receipts, not WB commands. External
+    # command/job children may show provider confirmation only when proven.
+    children = [{"label_ru": "Операция 1", "external_confirmed": True},
+                {"label_ru": "Операция 2", "outcome": "ambiguous"}]
+    for effect in ["source_saved", "external_command", "external_job"]:
+        page.evaluate("o => render('first', {...receipt,...o})",
+                      {"primary_effect": effect, "children": children})
+        if effect == "source_saved":
+            assert first.locator('.ff-operation-children').count() == 0
+            assert first.get_by_text('Подтверждено WB', exact=False).count() == 0
+        else:
+            assert first.locator('.ff-operation-children li').all_text_contents() == [
+                'Операция 1 — Подтверждено WB', 'Операция 2 — Результат неизвестен']
+
     readback = page.evaluate("""async () => {
       const api = OperatorAcceptance;
       let reads = 0;

@@ -149,7 +149,8 @@ class WbSppTesterBlock:
         self._thread_lock = threading.RLock()
         self._state_lock = threading.RLock()
 
-    def history(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def history(self, params: Mapping[str, Any] | None = None, *, operator_scope: Any = None) -> dict[str, Any]:
+        from packages.application import operator_spp_jobs as operator
         params = params or {}
         limit = _bounded_int(
             _single_param(params.get("limit")),
@@ -159,8 +160,9 @@ class WbSppTesterBlock:
         )
         cursor = _decode_history_cursor(str(_single_param(params.get("cursor")) or ""))
         keyed_rows = [
-            (_history_sort_key(job), self._history_summary(job))
+            (_history_sort_key(job), self._history_operator_summary(job, operator_scope))
             for job in self._load_history_jobs()
+            if not job.get("operator_acceptance") or operator.visible(job, operator_scope)
         ]
         keyed_rows.sort(key=lambda item: item[0], reverse=True)
         if cursor is not None:
@@ -186,22 +188,40 @@ class WbSppTesterBlock:
         *,
         actor: str = "",
         run_async: bool | None = None,
+        operator_scope: Any = None,
     ) -> dict[str, Any]:
+        from packages.application import operator_spp_jobs as operator
+        cmd = None
+        if "request_id" in payload:
+            try:
+                cmd = operator.command(payload, scope=operator_scope)
+            except operator.Rejected as exc:
+                raise WbSppTesterError(str(exc), http_status=422, payload={"code": str(exc)}) from exc
+            retained = operator.read_job(operator_scope, cmd["request_id"])
+            if retained:
+                if retained["operator_acceptance"]["command"] != cmd:
+                    raise WbSppTesterError("spp_start_identity_conflict", http_status=409,
+                        payload={"code": "spp_start_identity_conflict"})
+                return operator.response(retained, scope=operator_scope, recovered=True)
         if not self.safety.spp_test_enabled:
             raise WbSppTesterError(
                 "WB SPP test writes are disabled; set WB_SPP_TEST_ENABLED=true",
-                http_status=403,
+                http_status=403, payload={"code":"spp_start_precommit_rejected"},
             )
         if not self.safety.prices_write_enabled:
             raise WbSppTesterError(
                 "WB price writes are disabled; set WB_PRICES_WRITE_ENABLED=true",
-                http_status=403,
+                http_status=403, payload={"code":"spp_start_precommit_rejected"},
             )
         if not _coerce_bool(payload.get("confirm_live_price_change")):
             raise WbSppTesterError("confirm_live_price_change=true is required", http_status=400)
         if not _coerce_bool(payload.get("restore_baseline")):
             raise WbSppTesterError("restore_baseline=true is required in MVP", http_status=422)
-        nm_id, target_prices = self._parse_start_input(payload)
+        try:
+            nm_id, target_prices = self._parse_start_input(payload)
+        except WbSppTesterError as exc:
+            if cmd:exc.payload["code"] = "spp_start_command_invalid"
+            raise
         execution_lock = self._acquire_execution_lock(
             owner=f"manual:{actor or 'unknown'}",
             blocking=False,
@@ -210,18 +230,46 @@ class WbSppTesterBlock:
             raise WbSppTesterError(
                 "another SPP test runner holds the execution lock",
                 http_status=409,
-                payload={"reason": "execution_lock_busy", "active_job": self._current_job_summary(reconcile=False)},
+                payload={"reason": "execution_lock_busy", "active_job": None if cmd else self._visible_job_summary(self._current_job_summary(reconcile=False), operator_scope)},
             )
-        job_id = uuid4().hex
+        job_id = operator.job_id(cmd["request_id"], operator_scope) if cmd else uuid4().hex
         lock_transferred = False
+        accepted_job = None
         try:
+            # Race winner may have committed before this caller acquired the native lock.
+            if cmd:
+                retained = operator.read_job(operator_scope, cmd["request_id"])
+                if retained:
+                    if retained["operator_acceptance"]["command"] != cmd:
+                        raise WbSppTesterError("spp_start_identity_conflict", http_status=409,
+                            payload={"code": "spp_start_identity_conflict"})
+                    return operator.response(retained, scope=operator_scope, recovered=True)
             blocking = self._blocking_current_job(reconcile=True, caller_holds_execution_lock=True)
             if blocking is not None:
                 raise WbSppTesterError(
                     "another SPP test job is active or requires restore",
                     http_status=409,
-                    payload={"reason": "active_or_unrestored_job", "active_job": blocking},
+                    payload={"reason": "active_or_unrestored_job", "active_job": None if cmd else self._visible_job_summary(blocking, operator_scope)},
                 )
+            if cmd:
+                if sum(1 for path in self._jobs_dir.glob("*.json") if JOB_ID_RE.fullmatch(path.stem)) >= operator.MAX_JOBS:
+                    raise WbSppTesterError("spp_start_capacity_exceeded", http_status=422,
+                        payload={"code": "spp_start_capacity_exceeded"})
+                now_text = self.timestamp_factory()
+                accepted_job = {
+                    "job_id": job_id, "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_job",
+                    "created_at": now_text, "updated_at": now_text, "finished_at": "",
+                    "actor": actor, "trigger_source": "manual", "status": "preflight",
+                    "result_status": "", "nmID": nm_id,
+                    "input": {"target_prices": [_decimal_to_float(v) for v in target_prices],
+                              "price_count": len(target_prices), "restore_baseline": True},
+                    "baseline": {}, "measurements": [], "timeline": [],
+                    "restore": {"required": True, "restored": False, "proof": None, "steps": []},
+                    "manual_restore_required": False, "warnings": [], "error": "",
+                    "operator_acceptance": operator.proof(cmd, job_id=job_id, accepted_at=now_text),
+                }
+                self._save_job(accepted_job)
+                self._write_current_job(accepted_job)
             self._append_audit(job_id, "start_preflight", {"nmID": nm_id, "price_count": len(target_prices)})
             try:
                 buyer_session = self._require_buyer_session()
@@ -270,7 +318,7 @@ class WbSppTesterBlock:
                         "log_events": self._load_log_events(job_id=job_id),
                     },
                 )
-            now_text = self.timestamp_factory()
+            now_text = accepted_job["created_at"] if accepted_job else self.timestamp_factory()
             job = {
                 "job_id": job_id,
                 "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_job",
@@ -305,6 +353,8 @@ class WbSppTesterBlock:
                 "warnings": [],
                 "error": "",
             }
+            if accepted_job:
+                job["operator_acceptance"] = accepted_job["operator_acceptance"]
             self._append_timeline(job, "preflight", "baseline_and_buyer_capability_confirmed")
             self._save_job(job)
             self._write_current_job(job)
@@ -323,35 +373,76 @@ class WbSppTesterBlock:
                 lock_transferred = True
             else:
                 self._run_job(job_id)
+        except Exception as exc:
+            # Only this preparation phase has no baseline in the retained job.
+            # Once the baseline exists, the unchanged native worker owns restore.
+            saved = self._load_job(job_id) if accepted_job else None
+            if saved and not saved.get("baseline"):
+                saved.update(status="preflight_rejected", result_status="not_started",
+                    finished_at=self.timestamp_factory(), updated_at=self.timestamp_factory(),
+                    error=str(exc)[:500])
+                self._save_job(saved)
+                self._clear_current_job_pointer(job_id)
+                if isinstance(exc, WbSppTesterError):
+                    exc.payload.update(operator.response(saved, scope=operator_scope, recovered=False))
+                    exc.payload["log_events"] = self._load_log_events(job_id=job_id)
+            raise
         finally:
             if not lock_transferred:
                 self._release_execution_lock(execution_lock, job_id=job_id)
         current = self._load_job(job_id)
+        if cmd:
+            result = operator.response(current, scope=operator_scope, recovered=False)
+            result["log_events"] = self._load_log_events(job_id=job_id)
+            return result
         return {
             "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_start",
             "job": self._job_public_payload(current),
             "log_events": self._load_log_events(job_id=job_id),
         }
 
-    def status(self, params: Mapping[str, Any] | None = None, *, reconcile: bool = True) -> dict[str, Any]:
+    def status(self, params: Mapping[str, Any] | None = None, *, reconcile: bool = True, operator_scope: Any = None) -> dict[str, Any]:
         params = params or {}
+        from packages.application import operator_spp_jobs as operator
+        if "request_id" in params:
+            raw_request_id = params.get("request_id")
+            request_id = _single_param(raw_request_id)
+            if set(params) != {"request_id"} or isinstance(raw_request_id, (list, tuple)) and len(raw_request_id) != 1 or not isinstance(request_id, str) or not operator.IDENTITY.fullmatch(request_id):
+                raise WbSppTesterError("one_exact_spp_request_id_required", http_status=422)
+            job = operator.read_job(operator_scope, request_id)
+            if not job:
+                raise WbSppTesterError("spp_request_not_found", http_status=404)
+            result = operator.response(job, scope=operator_scope, recovered=True)
+            result["log_events"] = self._load_log_events(job_id=str(job["job_id"]))
+            return result
         requested_job_id = str(_single_param(params.get("job_id") or params.get("jobID")) or "").strip()
+        current_source = self._load_current_job_payload()
+        if current_source and current_source.get("operator_acceptance"):
+            reconcile = False  # Typed GET never reconciles even through a legacy caller.
         active_job = self._current_job_summary(reconcile=reconcile)
         if requested_job_id:
             job = self._load_job(requested_job_id)
         else:
             job = self._load_current_job_payload() or self._load_latest_job_payload()
+        if job and job.get("operator_acceptance") and not operator.visible(job, operator_scope):
+            job = None
+        if active_job:
+            active_native = self._load_job(str(active_job.get("job_id") or ""))
+            if active_native and active_native.get("operator_acceptance") and not operator.visible(active_native, operator_scope):
+                active_job = None
         return {
+            **({"acceptance": operator.public(job, scope=operator_scope)} if job and job.get("operator_acceptance") else {}),
             "contract_name": f"{SPP_TEST_CONTRACT_PREFIX}_status",
+            "operator_scope": operator.scope_key(operator_scope),
             "generated_at": self.timestamp_factory(),
             "active_job": active_job,
-            "job": self._job_public_payload(job) if job else None,
+            "job": operator.response(job,scope=operator_scope,recovered=True)["job"] if job and job.get("operator_acceptance") else self._job_public_payload(job) if job else None,
             "log_events": self._load_log_events(
                 job_id=str(job.get("job_id") or "") if isinstance(job, Mapping) else ""
-            ),
+            ) if job else [],
         }
 
-    def restore(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
+    def restore(self, payload: Mapping[str, Any], *, actor: str = "", operator_scope: Any = None) -> dict[str, Any]:
         if not self.safety.spp_test_enabled:
             raise WbSppTesterError(
                 "WB SPP test restore is disabled; set WB_SPP_TEST_ENABLED=true",
@@ -366,8 +457,11 @@ class WbSppTesterBlock:
             raise WbSppTesterError("confirm_restore=true is required", http_status=400)
         job_id = str(payload.get("job_id") or payload.get("jobID") or "").strip()
         job = self._load_job(job_id) if job_id else self._load_current_job_payload()
-        if not job:
+        from packages.application import operator_spp_jobs as operator
+        if not job or job.get("operator_acceptance") and not operator.visible(job, operator_scope):
             raise WbSppTesterError("SPP test job was not found", http_status=404)
+        if job.get("operator_acceptance"):
+            operator.verify(job)  # Validate retained baseline before any restore provider call.
         if not job.get("baseline"):
             raise WbSppTesterError("job has no captured baseline", http_status=409)
         execution_lock = self._acquire_execution_lock(owner=f"manual_restore:{actor or 'unknown'}", blocking=False)
@@ -1200,6 +1294,7 @@ class WbSppTesterBlock:
                 self._save_job(job)
                 return False
             step["prewrite_guard"] = {
+                "current": {key:fresh_current.get(key) for key in ("price","discount","discountedPrice")},
                 "quarantine_absent": not fresh_quarantine.get("is_quarantined"),
                 "quarantine_transition": fresh_transition,
             }
@@ -1576,6 +1671,14 @@ class WbSppTesterBlock:
             return self._job_summary(job)
         return None
 
+    def _visible_job_summary(self, summary: dict[str, Any] | None, scope: Any) -> dict[str, Any] | None:
+        if summary:
+            from packages.application import operator_spp_jobs as operator
+            job = self._load_job(str(summary.get("job_id") or ""))
+            if job and job.get("operator_acceptance") and not operator.visible(job, scope):
+                return None
+        return summary
+
     def _current_job_summary(
         self,
         *,
@@ -1603,6 +1706,14 @@ class WbSppTesterBlock:
         restore = job.get("restore") if isinstance(job.get("restore"), Mapping) else {}
         baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else {}
         if not baseline:
+            if job.get("operator_acceptance") and caller_holds_execution_lock:
+                mutable = dict(job)
+                mutable.update(status="preflight_rejected", result_status="not_started",
+                    finished_at=self.timestamp_factory(), updated_at=self.timestamp_factory(),
+                    error="Проверка до изменения цен была прервана. Повторный запуск автоматически не выполняется.")
+                self._save_job(mutable)
+                self._clear_current_job_pointer(str(job["job_id"]))
+                return mutable
             return job
         if not caller_holds_execution_lock and self._execution_lock_is_held():
             lifecycle = job.get("lifecycle_diagnostics") if isinstance(job.get("lifecycle_diagnostics"), Mapping) else {}
@@ -1696,7 +1807,8 @@ class WbSppTesterBlock:
             else "",
         }
 
-    def _job_public_payload(self, job: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    @staticmethod
+    def _job_public_payload(job: Mapping[str, Any] | None) -> dict[str, Any] | None:
         if not job:
             return None
         baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else {}
@@ -1751,6 +1863,16 @@ class WbSppTesterBlock:
     def _load_latest_job_payload(self) -> dict[str, Any] | None:
         jobs = self._load_history_jobs()
         return max(jobs, key=_history_sort_key) if jobs else None
+
+    def _history_operator_summary(self, job: Mapping[str, Any], scope: Any) -> dict[str, Any]:
+        result = self._history_summary(job)
+        if job.get("operator_acceptance"):
+            from packages.application import operator_spp_jobs as operator
+            receipt = operator.public(job,scope=scope)
+            result["operator_verified_complete"] = receipt["state"] == "completed"
+            for row in result["results"]:
+                row["registry_confirmed"] = receipt["external_confirmed"]
+        return result
 
     def _history_summary(self, job: Mapping[str, Any]) -> dict[str, Any]:
         baseline = job.get("baseline") if isinstance(job.get("baseline"), Mapping) else {}
@@ -1943,6 +2065,15 @@ class WbSppTesterBlock:
         if not JOB_ID_RE.fullmatch(job_id):
             raise WbSppTesterError("job_id is missing", http_status=500)
         with self._state_lock:
+            from packages.application import operator_spp_jobs as operator
+            if job.get("operator_acceptance"):
+                if job.get("baseline") and not job.get("operator_preflight"):
+                    job["operator_preflight"] = operator.preflight_proof(job)
+                operator.verify(job)
+            previous = self._load_job(job_id)
+            if previous and (previous.get("operator_acceptance") != job.get("operator_acceptance") or
+                             previous.get("operator_preflight") and previous["operator_preflight"] != job.get("operator_preflight")):
+                raise WbSppTesterError("spp_retained_identity_is_immutable", http_status=500)
             _atomic_write_json(self._job_path(job_id), job)
 
     def _load_job(self, job_id: str) -> dict[str, Any] | None:
@@ -2033,11 +2164,16 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
-        temporary.write_text(
-            json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if temporary.exists():
             temporary.unlink()

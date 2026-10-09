@@ -630,7 +630,6 @@ def command_dependency_checks():
     assert "apsw==3.53.4.0" not in unrelated_browser["pip"], unrelated_browser
 
     for paths, file_exists in (
-        (["apps/sku_inventory_balance_smoke.py"], lambda *_: True),
         (["apps/sheet_vitrina_v1_reports_ready_snapshot_browser_smoke.py"], lambda *_: True),
         (["ci/checks.json", "ci/select_checks.py", "ci/select_checks_smoke.py"], lambda *_: True),
         ([scripts[1]], lambda *_: False),
@@ -640,6 +639,16 @@ def command_dependency_checks():
         verify_plan(non_browser)
         assert install not in non_browser["commands"], non_browser
         assert "playwright==1.58.0" not in non_browser["pip"], non_browser
+    # The native Balance source now selects its combined native/HTTP/Chromium
+    # recovery boundary; direct selection must install the same pinned browser.
+    for paths in (["packages/application/sku_inventory_balance.py"],
+                  ["apps/operator_balance_job_recovery_smoke.py"]):
+        balance = build_plan_from_paths(pull_request=34, base=BASE, head=HEAD,
+            paths=paths, file_exists=lambda *_: True)
+        verify_plan(balance)
+        assert ["python3", "apps/operator_balance_job_recovery_smoke.py"] in balance["commands"], balance
+        assert install in balance["commands"], balance
+        assert {"apsw==3.53.4.0", "openpyxl==3.1.5", "playwright==1.58.0"} <= set(balance["pip"]), balance
     # These operator leaves arrive after this trusted prerequisite. Direct new
     # smoke selection must install its own imports, even without a broad group.
     next_backend = ['apps/operator_supplier_release_scope_smoke.py', 'apps/operator_nomenclature_smoke.py', 'apps/operator_nomenclature_journal_smoke.py', 'apps/operator_compat_uploads_smoke.py', 'apps/operator_supplier_shipments_smoke.py', 'apps/operator_supplier_shipments_http_smoke.py', 'apps/operator_supplier_factual_dates_smoke.py', 'apps/fbs_accounting_historical_revision_smoke.py', 'apps/fbs_accounting_historical_revision_writer_smoke.py', 'apps/fbs_accounting_historical_cohort_smoke.py', 'apps/fbs_accounting_historical_stages_smoke.py', 'apps/fbs_accounting_historical_publication_smoke.py', 'apps/fbs_accounting_historical_history_smoke.py', 'apps/business_data_formula_resume_smoke.py', 'apps/operator_supplier_processing_smoke.py', 'apps/operator_supplier_processing_cohort_smoke.py', 'apps/operator_supplier_journal_http_smoke.py', 'apps/operator_policy_smoke.py', 'apps/operator_policy_http_smoke.py', 'apps/operator_policy_history_smoke.py', 'apps/operator_external_operations_smoke.py', 'apps/operator_policy_journal_smoke.py', 'apps/operator_supplier_financial_journal_smoke.py', 'apps/operator_supplier_financial_http_smoke.py', 'apps/operator_supplier_financial_native_smoke.py', 'apps/operator_supplier_financial_processing_smoke.py', 'apps/operator_cny_documents_smoke.py', 'apps/operator_cny_documents_processing_smoke.py', 'apps/operator_cny_documents_http_smoke.py', 'apps/operator_cny_journal_smoke.py']
@@ -1127,6 +1136,8 @@ def main() -> None:
     settings_command=["python3", "apps/operator_business_settings_smoke.py"]
     assert settings_command in backend["commands"]
     assert backend["commands"].index(install) < backend["commands"].index(settings_command)
+    assert backend["commands"].index(install) < backend["commands"].index(
+        ["python3", "apps/operator_balance_job_recovery_smoke.py"])
     assert "playwright==1.58.0" not in finance["pip"]
     assert install not in docs["commands"]
 
