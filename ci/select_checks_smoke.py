@@ -228,6 +228,18 @@ def boundary_checks():
             paths=[path], file_exists=lambda _, p: (root / p).is_file())
         assert plan['commands'] == [['python3', 'apps/web_vitrina_history_activation_smoke.py']], plan
         assert plan['pip'] == ['openpyxl==3.1.5'], plan
+    # Every newly pinned policy formula input must select the existing guard.
+    pinned_policy = ("packages/application/historical_dated_inputs.py",
+        "packages/application/operator_policy_history.py",
+        "packages/application/vitrina_incident_rematerialization.py",
+        "packages/application/wb_incident_policy.py")
+    for path in pinned_policy:
+        plan = build_plan_from_paths(pull_request=20, base=BASE, head=HEAD,
+            paths=[path], file_exists=lambda _, p: (root / p).is_file())
+        verify_plan(plan)
+        assert "web_vitrina_history_activation" in plan["groups"], (path, plan)
+        assert ["python3", "apps/web_vitrina_history_activation_smoke.py"] in plan["commands"], (path, plan)
+        assert "openpyxl==3.1.5" in plan["pip"], (path, plan)
     expected = {}
     for smoke, paths in BOUNDARIES.items():
         for path in paths:
