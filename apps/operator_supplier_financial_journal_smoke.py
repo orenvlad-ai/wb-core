@@ -1,13 +1,16 @@
 """Actual saved financial parents/children in the scoped, query-only common journal."""
 from pathlib import Path
+from contextlib import closing
 import hashlib
 import json
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from apps.operator_supplier_financial_native_smoke import setup, document
+from apps.operator_cny_journal_smoke import source_snapshot, get_only_connect
 from apps.operator_supplier_shipments_http_smoke import server_for, stop, request, PATH
 from packages.application import operator_supplier_financial as financial, operator_operations as journal
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
@@ -45,9 +48,18 @@ def main():
             authenticated.return_value = user
             scope = http._current_web_user_config_key(None)
             server, thread, base = server_for(entry)
+            # setup() uses the WAL concurrency fixture; finish its physical
+            # checkpoint before the GET-only witness, preserving committed data.
+            with closing(sqlite3.connect(runtime.db_path)) as conn:
+                assert conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone() == (0, 0, 0)
+            logical_before = source_snapshot(runtime.db_path)
             before = hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
+            wal = Path(str(runtime.db_path) + '-wal')
+            wal_before = wal.read_bytes() if wal.exists() else b''
+            connect = sqlite3.connect
             try:
-                with patch.object(financial, 'ensure_schema', side_effect=AssertionError('GET creates schema')):
+                with patch.object(financial, 'ensure_schema', side_effect=AssertionError('GET creates schema')), \
+                        patch.object(sqlite3, 'connect', side_effect=lambda *args, **kwargs: get_only_connect(connect, *args, **kwargs)):
                     args = dict(allowed_domains={financial.DOMAIN}, request_scope=scope, runtime_dir=runtime.runtime_dir)
                     one = journal.journal(runtime.db_path, limit=1, **args)
                     two = journal.journal(runtime.db_path, limit=1, page=2, **args)
@@ -80,6 +92,8 @@ def main():
             finally:
                 stop(server, thread)
             assert hashlib.sha256(runtime.db_path.read_bytes()).hexdigest() == before
+            assert (wal.read_bytes() if wal.exists() else b'') == wal_before
+            assert source_snapshot(runtime.db_path) == logical_before
     print('financial common journal: native scope before count/search/page/detail, parent-only partial batches, no preview/refusal entries, exact child links, query-only and no balance disclosure: PASS')
 
 

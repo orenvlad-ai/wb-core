@@ -2,10 +2,12 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from contextlib import closing
-import json,sys
+from unittest.mock import patch
+import json,sys,sqlite3
 from playwright.sync_api import sync_playwright,expect
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from apps.operator_supplier_financial_http_smoke import fixture,preview
+from apps.operator_cny_journal_smoke import source_snapshot, get_only_connect
 from apps.operator_supplier_shipments_http_smoke import server_for,stop,request,PATH
 from packages.adapters import registry_upload_http_entrypoint as http
 from packages.application import operator_supplier_financial as financial,operator_supplier_shipments as source
@@ -62,21 +64,31 @@ def main():
                     assert conn.execute(f'SELECT count(*) FROM {financial.CHILDREN}').fetchone()[0]==2
                 from packages.application.business_data_write_barrier import acquire_barrier
                 acquire_barrier(rt.runtime_dir,window_id='financial-smoke-maintenance',window_kind='snapshot',plan_fingerprint='sha256:'+'a'*64,approval_reference='synthetic-fixture',actor='fixture',reason='synthetic maintenance regression')
+                # Normalize the disposable WAL before blocked maintenance/recovery reads.
+                with closing(sqlite3.connect(rt.db_path)) as conn:
+                    assert conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone() == (0, 0, 0)
+                logical_before = source_snapshot(rt.db_path)
+                wal = Path(str(rt.db_path) + '-wal')
+                wal_before = wal.read_bytes() if wal.exists() else b''
                 before=rt.db_path.read_bytes()
-                refused=submit('maintenance-fixture-token')
-                assert refused.get('error') and not page.evaluate('testLocked')
-                expect(page.locator('#financial-test .ff-operation-check')).to_have_count(0)
-                expect(page.locator('#financial-test')).to_contain_text('обслуживания')
-                assert rt.db_path.read_bytes()==before
-                assert request(base,PATH+'/source/financial-documents?request_id='+writes[-1])[1]['status']=='unknown'
-                lose_maintenance=True
-                ambiguous=submit('maintenance-lost-token')
-                assert ambiguous.get('error') and page.evaluate('testLocked')
-                expect(page.locator('#financial-test')).to_contain_text('Проверяем сохранение')
-                before_attempts=len(writes);page.close();page=context.new_page();page.goto(base+http.DEFAULT_SHEET_SUPPLIER_UI_PATH)
-                expect(page.locator('#supplierSourceAcceptance')).to_contain_text('Проверяем сохранение')
-                expect(page.locator('#supplierSourceAcceptance .ff-operation-check')).to_have_count(0)
-                assert len(writes)==before_attempts and rt.db_path.read_bytes()==before
+                connect = sqlite3.connect
+                with patch.object(sqlite3, 'connect', side_effect=lambda *args, **kwargs: get_only_connect(connect, *args, **kwargs)):
+                    refused=submit('maintenance-fixture-token')
+                    assert refused.get('error') and not page.evaluate('testLocked')
+                    expect(page.locator('#financial-test .ff-operation-check')).to_have_count(0)
+                    expect(page.locator('#financial-test')).to_contain_text('обслуживания')
+                    assert rt.db_path.read_bytes()==before
+                    assert request(base,PATH+'/source/financial-documents?request_id='+writes[-1])[1]['status']=='unknown'
+                    lose_maintenance=True
+                    ambiguous=submit('maintenance-lost-token')
+                    assert ambiguous.get('error') and page.evaluate('testLocked')
+                    expect(page.locator('#financial-test')).to_contain_text('Проверяем сохранение')
+                    before_attempts=len(writes);page.close();page=context.new_page();page.goto(base+http.DEFAULT_SHEET_SUPPLIER_UI_PATH)
+                    expect(page.locator('#supplierSourceAcceptance')).to_contain_text('Проверяем сохранение')
+                    expect(page.locator('#supplierSourceAcceptance .ff-operation-check')).to_have_count(0)
+                    assert len(writes)==before_attempts and rt.db_path.read_bytes()==before
+                assert (wal.read_bytes() if wal.exists() else b'') == wal_before
+                assert source_snapshot(rt.db_path) == logical_before
                 context.close();browser.close()
         finally:stop(server,thread)
     print('Actual Chromium/native financial one-shot lost reply; foreign identity non-green; close-tab actor localStorage GET-only recovery; exact refusal unlock; corrected new identity no duplicate: OK')

@@ -4,21 +4,26 @@ All files are disposable. No mocked publisher or synthetic downstream proof tabl
 """
 from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import json
 import sqlite3
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from apps.fulfillment_recalc_intents_smoke import fixture, queue
+from apps.operator_cny_journal_smoke import source_snapshot, get_only_connect
 from apps.sheet_vitrina_v1_fulfillment_services_smoke import _build_workbook, _valid_row, _storage_row, NOW
 from apps.warehouse_targeted_replay_smoke import _seed_functional
 from apps.wb_finance_weekly_cost_cutover_smoke import _row
 from apps.ready_publication_smoke import make_plan, save
 from packages.application.registry_upload_db_backed_runtime import _connect
+from packages.application.storage_registry import StoreRegistry
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.warehouse_functional import WarehouseFunctionalBlock
 from packages.application import fbs_accounting_runtime as accounting, operator_fulfillment_services as receipt
@@ -213,9 +218,44 @@ def main():
             with receipt.readonly(rt.db_path) as conn:
                 assert conn.execute('SELECT count(*) FROM '+receipt.COMPLETIONS+' WHERE operation_id=?',(op,)).fetchone()[0]==0
         print('full native supply authority: qty/accepted quantity/add/remove SKU drift rejected; proof-to-CAS commit fenced')
+        # Normalize only the disposable WAL fixture before the existing RO interval.
+        with closing(sqlite3.connect(rt.db_path)) as conn:
+            assert conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone() == (0, 0, 0)
+        source_paths = (rt.db_path, accounting.path(rt.runtime_dir))
+        logical_before = tuple(source_snapshot(path) for path in source_paths)
+        wal_paths = tuple(Path(str(path) + '-wal') for path in source_paths)
+        wal_before = tuple(path.read_bytes() if path.exists() else b'' for path in wal_paths)
         before_read = (rt.db_path.read_bytes(),accounting.path(rt.runtime_dir).read_bytes())
-        proof = read_native_proof(rt,op,now=MOMENT)
+        connect = sqlite3.connect
+        registry_connect = StoreRegistry.connect
+        observed, guarded = set(), set()
+        def get_connect(*args, **kwargs):
+            if kwargs.get('factory') is None:
+                return get_only_connect(connect, *args, **kwargs)
+            # The native observed factory configures its attributes after opening.
+            # Admit only RO here; install the same SQL guard after native setup.
+            database = args[0] if args else kwargs['database']
+            assert kwargs.get('uri') is True and parse_qs(urlparse(str(database)).query).get('mode') == ['ro'], 'proof opens a source writer'
+            conn = connect(*args, **kwargs); observed.add(id(conn))
+            return conn
+        def get_registry(registry, *args, **kwargs):
+            assert kwargs['mode'] == 'ro', 'proof opens a registry writer'
+            conn = registry_connect(registry, *args, **kwargs)
+            database = Path(conn.execute('PRAGMA database_list').fetchone()[2]).resolve().as_uri() + '?mode=ro'
+            def set_authorizer(authorize):
+                # Finance's existing source-version fence reads database_list.
+                # Add only that no-argument introspection to the approved guard.
+                conn.set_authorizer(lambda action, one, two, db, trigger: sqlite3.SQLITE_OK
+                    if action == sqlite3.SQLITE_PRAGMA and one == 'database_list' and two is None
+                    else authorize(action, one, two, db, trigger))
+            get_only_connect(lambda *a, **k: SimpleNamespace(execute=conn.execute, set_authorizer=set_authorizer), database, uri=True)
+            guarded.add(id(conn)); return conn
+        with patch.object(sqlite3, 'connect', side_effect=get_connect), patch.object(StoreRegistry, 'connect', new=get_registry):
+            proof = read_native_proof(rt,op,now=MOMENT)
+        assert observed <= guarded, 'unprotected observed proof connection'
         assert before_read==(rt.db_path.read_bytes(),accounting.path(rt.runtime_dir).read_bytes())
+        assert tuple(path.read_bytes() if path.exists() else b'' for path in wal_paths) == wal_before
+        assert tuple(source_snapshot(path) for path in source_paths) == logical_before
         assert proof['finance']['target_weeks']==[['canonical','2026-07-06','2026-07-12']]
         # Earlier warehouse work must continue through the newer coalesced book.
         earlier_proof = read_native_proof(rt,other['acceptance']['operation_id'],now=MOMENT)
