@@ -256,74 +256,126 @@ def _after_native_proof():
     """Inert production seam for deterministic inter-connection test commits."""
 
 
+COMPLETION_COHORT_LIMIT = 8
+COMPLETION_COHORT_MAX_BYTES = 8 * 1024**2
+
+
+def _prepare_completion(runtime, operation_id, *, seller_id, now, stack, finance_cohort=None):
+    from packages.application.operator_supplier_cost_proof import read_native_proof
+    observer = stack.enter_context(closing(source.readonly(runtime.db_path)))
+    op = operation(observer, operation_id)
+    if not current(observer, op):
+        raise ValueError("supplier_completion_source_changed")
+    saved = public_completion(observer, operation_id)
+    if saved and saved["complete"]:
+        return {"saved": saved}
+    observer.commit();observer.execute("BEGIN")
+    handoff = []
+    proof = read_native_proof(runtime, operation_id, seller_id=seller_id, now=now, connection=observer, handoff=handoff, stack=stack, finance_cohort=finance_cohort)
+    _after_native_proof()
+    return {'proof': proof, 'handoff': handoff, 'bytes': len(source._json(proof).encode())}
+
+
+def _validate_completion(conn, operation_id, proof, handoff):
+    # All source/main observer reads must precede the first receipt DML in a
+    # cohort. Writer source CAS remains authoritative after that boundary.
+    op = operation(conn, operation_id)
+    if not current(conn, op) or ref(op) != proof["source_ref"]:
+        raise ValueError("supplier_completion_source_changed")
+    if any(observe(live) != token for live, observe, token in handoff):
+        raise ValueError("supplier_completion_handoff_changed")
+    evaluated = proof.get("native_cost_evaluation")
+    if evaluated:
+        from packages.application import ready_publication as ready, operator_supplier_history_candidate as candidate
+        if evaluated["code_authority"] != candidate.code_authority():
+            raise ValueError("supplier_history_formula_changed")
+        from packages.application.fbs_accounting_historical_stages import check_query_fence
+        check_query_fence(conn, evaluated["source_inputs"])
+        check_query_fence(conn, evaluated["query_fence"])
+        refs = evaluated["cohort_refs"]
+        if ref(op) not in refs or any(ref(operation(conn, member["operation_id"])) != member
+                or not current(conn, operation(conn, member["operation_id"])) for member in refs):
+            raise ValueError("supplier_history_cohort_source_changed")
+        own = evaluated["member_evaluation"].get(operation_id)
+        if not own or (proof.get("effect") == "derived_no_change" and
+                (not own["current_no_change"] or any(value["before"] != value["after"] for value in own["dated"].values()))):
+            raise ValueError("supplier_history_own_effect_proof_changed")
+        observed = evaluated["current_evaluation"]
+        if (source.digest(candidate.business_image(balance_rows(conn, observed["before_version"], evaluated["queue_ref"]["affected_nm_ids"]))) != observed["before_digest"]
+                or source.digest(candidate.business_image(balance_rows(conn, observed["after_version"], evaluated["queue_ref"]["affected_nm_ids"]))) != observed["after_digest"]):
+            raise ValueError("supplier_history_native_cost_evaluation_changed")
+    if proof.get('supplier_history'):
+        from packages.application.operator_supplier_history import completed_proof
+        historical=completed_proof(conn,ref(op));expected=proof['supplier_history']
+        if not historical or historical['manifest']['manifest_digest']!=expected['manifest_digest'] or historical['ack']['native']!=expected['native_history'] or historical['manifest']['candidate']['effect_dates']!=expected['dates']:
+            raise ValueError('supplier_history_completion_changed')
+    queue = queue_for(conn, op)
+    functional = proof["functional"]
+    retained = conn.execute(f"SELECT proof_digest FROM {FUNCTIONAL} WHERE operation_id=? AND version_id=?", (operation_id, functional["version_id"])).fetchone()
+    if not retained or retained[0] != source.digest(functional) or queue_ref(queue) != functional["queue_ref"]:
+        raise ValueError("supplier_completion_native_identity_changed")
+    publication = proof["publication"]
+    published = conn.execute("SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?", (publication["operation_id"], publication["attempt_id"])).fetchone()
+    ready = conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?", (publication["bundle_version"], publication["ready_as_of_date"])).fetchone()
+    from packages.application.ready_publication import digest as ready_digest
+    pointer = handoff[-1][0].execute("SELECT version FROM accounting_current WHERE singleton=1").fetchone()
+    if (not published or published["state"] != "complete" or published["book_version"] != publication["book_version"]
+            or published["after_digest"] != publication["after_digest"] or not ready or ready_digest(ready[0]) != publication["after_digest"]
+            or not pointer or pointer[0] != publication["book_version"]):
+        raise ValueError("supplier_completion_publication_changed")
+    if any(observe(live) != token for live, observe, token in handoff):
+        raise ValueError("supplier_completion_handoff_changed")
+
+
+def _check_independent_handoff(runtime, handoff):
+    """Never read an operational observer after DML/cache spill in its writer."""
+    from pathlib import Path
+    operational = Path(runtime.db_path).resolve()
+    for live, observe, expected in handoff:
+        owner = getattr(observe, '__self__', None)
+        if owner is not None and hasattr(owner, 'check_independent'):
+            owner.check_independent()
+            continue
+        paths = {str(row[1]): Path(row[2]).resolve() for row in live.execute('PRAGMA database_list') if row[1]!='temp'}
+        if isinstance(expected, dict):
+            for schema, path in paths.items():
+                if path != operational and live.execute('PRAGMA '+schema+'.data_version').fetchone()[0] != expected[schema]:
+                    raise ValueError('supplier_completion_handoff_changed')
+        elif paths.get('main') != operational and observe(live) != expected:
+            raise ValueError('supplier_completion_handoff_changed')
+
+
+def _insert_completion(conn, operation_id, proof):
+    conn.execute(f"INSERT OR IGNORE INTO {COMPLETIONS} VALUES(?,?,?,?)", (operation_id, source._json(proof), source.digest(proof), datetime.now(timezone.utc).isoformat()))
+
+
 def record_completion(runtime, operation_id, *, seller_id="canonical", now=None):
     from packages.application.business_data_heavy_admission import require_heavy_owner
     from packages.application.warehouse_functional_lock import require_warehouse_job_owner, warehouse_functional_write_lock
-    from packages.application.operator_supplier_cost_proof import read_native_proof
     require_heavy_owner(runtime.runtime_dir);require_warehouse_job_owner(runtime.runtime_dir)
     with ExitStack() as stack:
-        observer = stack.enter_context(closing(source.readonly(runtime.db_path)))
-        op = operation(observer, operation_id)
-        if not current(observer, op):
-            raise ValueError("supplier_completion_source_changed")
-        saved = public_completion(observer, operation_id)
-        if saved and saved["complete"]:
-            return saved
-        observer.commit();observer.execute("BEGIN")
-        handoff = []
-        proof = read_native_proof(runtime, operation_id, seller_id=seller_id, now=now, connection=observer, handoff=handoff, stack=stack)
-        _after_native_proof()
+        prepared = _prepare_completion(runtime, operation_id, seller_id=seller_id, now=now, stack=stack)
+        if 'saved' in prepared:return prepared['saved']
         with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(sqlite3.connect(runtime.db_path, timeout=2)) as conn:
-            conn.row_factory = sqlite3.Row;conn.execute("BEGIN IMMEDIATE")
-            op = operation(conn, operation_id)
-            if not current(conn, op) or ref(op) != proof["source_ref"]:
-                raise ValueError("supplier_completion_source_changed")
-            if any(observe(live) != token for live, observe, token in handoff):
-                raise ValueError("supplier_completion_handoff_changed")
-            evaluated = proof.get("native_cost_evaluation")
-            if evaluated:
-                from packages.application import ready_publication as ready, operator_supplier_history_candidate as candidate
-                if evaluated["code_authority"] != candidate.code_authority():
-                    raise ValueError("supplier_history_formula_changed")
-                from packages.application.fbs_accounting_historical_stages import check_query_fence
-                check_query_fence(conn, evaluated["source_inputs"])
-                check_query_fence(conn, evaluated["query_fence"])
-                refs = evaluated["cohort_refs"]
-                if ref(op) not in refs or any(ref(operation(conn, member["operation_id"])) != member
-                        or not current(conn, operation(conn, member["operation_id"])) for member in refs):
-                    raise ValueError("supplier_history_cohort_source_changed")
-                own = evaluated["member_evaluation"].get(operation_id)
-                if not own or (proof.get("effect") == "derived_no_change" and
-                        (not own["current_no_change"] or any(value["before"] != value["after"] for value in own["dated"].values()))):
-                    raise ValueError("supplier_history_own_effect_proof_changed")
-                observed = evaluated["current_evaluation"]
-                if (source.digest(candidate.business_image(balance_rows(conn, observed["before_version"], evaluated["queue_ref"]["affected_nm_ids"]))) != observed["before_digest"]
-                        or source.digest(candidate.business_image(balance_rows(conn, observed["after_version"], evaluated["queue_ref"]["affected_nm_ids"]))) != observed["after_digest"]):
-                    raise ValueError("supplier_history_native_cost_evaluation_changed")
-            if proof.get('supplier_history'):
-                from packages.application.operator_supplier_history import completed_proof
-                historical=completed_proof(conn,ref(op));expected=proof['supplier_history']
-                if not historical or historical['manifest']['manifest_digest']!=expected['manifest_digest'] or historical['ack']['native']!=expected['native_history'] or historical['manifest']['candidate']['effect_dates']!=expected['dates']:
-                    raise ValueError('supplier_history_completion_changed')
-            queue = queue_for(conn, op)
-            functional = proof["functional"]
-            retained = conn.execute(f"SELECT proof_digest FROM {FUNCTIONAL} WHERE operation_id=? AND version_id=?", (operation_id, functional["version_id"])).fetchone()
-            if not retained or retained[0] != source.digest(functional) or queue_ref(queue) != functional["queue_ref"]:
-                raise ValueError("supplier_completion_native_identity_changed")
-            publication = proof["publication"]
-            published = conn.execute("SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?", (publication["operation_id"], publication["attempt_id"])).fetchone()
-            ready = conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?", (publication["bundle_version"], publication["ready_as_of_date"])).fetchone()
-            from packages.application.ready_publication import digest as ready_digest
-            pointer = handoff[-1][0].execute("SELECT version FROM accounting_current WHERE singleton=1").fetchone()
-            if (not published or published["state"] != "complete" or published["book_version"] != publication["book_version"]
-                    or published["after_digest"] != publication["after_digest"] or not ready or ready_digest(ready[0]) != publication["after_digest"]
-                    or not pointer or pointer[0] != publication["book_version"]):
-                raise ValueError("supplier_completion_publication_changed")
-            if any(observe(live) != token for live, observe, token in handoff):
-                raise ValueError("supplier_completion_handoff_changed")
-            conn.execute(f"INSERT OR IGNORE INTO {COMPLETIONS} VALUES(?,?,?,?)", (operation_id, source._json(proof), source.digest(proof), datetime.now(timezone.utc).isoformat()))
+            conn.row_factory = sqlite3.Row;conn.execute('BEGIN IMMEDIATE')
+            _validate_completion(conn, operation_id, prepared['proof'], prepared['handoff'])
+            _insert_completion(conn, operation_id, prepared['proof'])
+            _check_independent_handoff(runtime, prepared['handoff'])
             conn.commit()
-    return {"state": "completed", "complete": True}
+    return {'state': 'completed', 'complete': True}
+
+
+def _record_attempt(conn, identity, exc):
+    reason = str(exc).split(':')[0]
+    state = 'processing' if reason.endswith(('_pending', '_changed', '_missing')) else 'needs_attention'
+    if not conn.execute(f'SELECT 1 FROM {COMPLETIONS} WHERE operation_id=?', (identity,)).fetchone():
+        try:retired = superseded(conn, operation(conn, identity))
+        except ValueError:retired = False
+        if retired:state, reason = 'needs_attention', SUPERSEDED
+        prior = conn.execute(f'SELECT reason FROM {ATTEMPTS} WHERE operation_id=?', (identity,)).fetchone()
+        if not prior or prior[0] != SUPERSEDED:
+            conn.execute(f'INSERT OR REPLACE INTO {ATTEMPTS} VALUES(?,?,?,?)', (identity, state, reason, datetime.now(timezone.utc).isoformat()))
+    return {'state': state, 'complete': False, 'reason_code': reason, 'terminal': reason == SUPERSEDED}
 
 
 def reconcile(runtime, *, seller_id="canonical", now=None):
@@ -339,30 +391,71 @@ def reconcile(runtime, *, seller_id="canonical", now=None):
     if not identities:
         return {"status": "no_op", "operations": []}
     require_heavy_owner(runtime.runtime_dir);require_warehouse_job_owner(runtime.runtime_dir)
-    results = []
-    for identity in identities:
-        try:
-            value = record_completion(runtime, identity, seller_id=seller_id, now=now)
-        except (ValueError, sqlite3.OperationalError) as exc:
-            reason = str(exc).split(":")[0]
-            state = "processing" if reason.endswith(("_pending", "_changed", "_missing")) else "needs_attention"
-            with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(sqlite3.connect(runtime.db_path, timeout=2)) as conn:
-                conn.row_factory = sqlite3.Row
-                conn.execute("BEGIN IMMEDIATE")
-                if not conn.execute(f"SELECT 1 FROM {COMPLETIONS} WHERE operation_id=?", (identity,)).fetchone():
-                    # A random source/readback/handoff change is retryable.
-                    # Retire only an exact immutable action whose native newer
-                    # source is proven AGAIN under this source writer.
-                    try:
-                        retired = superseded(conn, operation(conn, identity))
-                    except ValueError:
-                        retired = False
-                    if retired:
-                        state, reason = "needs_attention", SUPERSEDED
-                    prior = conn.execute(f"SELECT reason FROM {ATTEMPTS} WHERE operation_id=?", (identity,)).fetchone()
-                    if not prior or prior[0] != SUPERSEDED:
-                        conn.execute(f"INSERT OR REPLACE INTO {ATTEMPTS} VALUES(?,?,?,?)", (identity, state, reason, datetime.now(timezone.utc).isoformat()))
-                conn.commit()
-            value = {"state": state, "complete": False, "reason_code": reason, "terminal": reason == SUPERSEDED}
-        results.append({"operation_id": identity, **value})
-    return {"status": "pending" if any(not value["complete"] for value in results) else "ok", "operations": results}
+    from packages.application.operator_supplier_cost_proof import FinanceProofCohort
+    results = [];position = 0
+    while position < len(identities):
+        prepared, failures, order, oversized = {}, {}, [], None
+        with ExitStack() as stack:
+            finance = FinanceProofCohort(runtime, seller_id=seller_id, stack=stack)
+            size = 0
+            while position < len(identities) and len(order) < COMPLETION_COHORT_LIMIT:
+                identity = identities[position]
+                try:
+                    item = _prepare_completion(runtime, identity, seller_id=seller_id, now=now, stack=stack, finance_cohort=finance)
+                    if item.get('bytes', 0) + size > COMPLETION_COHORT_MAX_BYTES:
+                        oversized = identity
+                        break
+                    prepared[identity] = item;size += item.get('bytes', 0)
+                except (ValueError, sqlite3.OperationalError) as exc:
+                    failures[identity] = exc
+                order.append(identity);position += 1
+            try:finance.seal()
+            except (ValueError, sqlite3.OperationalError) as exc:
+                for identity, item in list(prepared.items()):
+                    if 'saved' not in item:failures[identity] = exc;del prepared[identity]
+            if order:
+                values = {}
+                try:
+                    with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(sqlite3.connect(runtime.db_path, timeout=2)) as conn:
+                        conn.row_factory = sqlite3.Row;conn.execute('BEGIN IMMEDIATE')
+                        # Validate every main observer before any receipt/attempt
+                        # DML. One invalid source must not starve valid siblings.
+                        for identity in order:
+                            item = prepared.get(identity)
+                            if item is None:continue
+                            if 'saved' in item:values[identity] = item['saved'];continue
+                            try:_validate_completion(conn, identity, item['proof'], item['handoff'])
+                            except (ValueError, sqlite3.OperationalError) as exc:failures[identity] = exc
+                        for identity in order:
+                            item = prepared.get(identity)
+                            if identity in failures:
+                                values[identity] = _record_attempt(conn, identity, failures[identity])
+                            elif 'saved' not in item:
+                                _check_independent_handoff(runtime, item['handoff'])
+                                _insert_completion(conn, identity, item['proof'])
+                                values[identity] = {'state':'completed', 'complete':True}
+                        for identity in order:
+                            item = prepared.get(identity)
+                            if item and 'saved' not in item and identity not in failures:
+                                _check_independent_handoff(runtime, item['handoff'])
+                        conn.commit()
+                except (ValueError, sqlite3.OperationalError) as exc:
+                    # Independent raw/book drift invalidates this uncommitted
+                    # cohort; persist retry outcomes after its rollback.
+                    with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(sqlite3.connect(runtime.db_path, timeout=2)) as conn:
+                        conn.row_factory = sqlite3.Row;conn.execute('BEGIN IMMEDIATE')
+                        for identity in order:
+                            item = prepared.get(identity)
+                            values[identity] = item['saved'] if item and 'saved' in item else _record_attempt(conn, identity, failures.get(identity, exc))
+                        conn.commit()
+                results.extend({'operation_id':identity, **values[identity]} for identity in order)
+        if oversized is not None:
+            # A large valid source retains its existing single-operation path.
+            # No shared observer/cache survives the preceding writer commit.
+            try:value = record_completion(runtime, oversized, seller_id=seller_id, now=now)
+            except (ValueError, sqlite3.OperationalError) as exc:
+                with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(sqlite3.connect(runtime.db_path, timeout=2)) as conn:
+                    conn.row_factory = sqlite3.Row;conn.execute('BEGIN IMMEDIATE')
+                    value = _record_attempt(conn, oversized, exc);conn.commit()
+            results.append({'operation_id':oversized, **value});position += 1
+    return {'status':'pending' if any(not value['complete'] for value in results) else 'ok', 'operations':results}

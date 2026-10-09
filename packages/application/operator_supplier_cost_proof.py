@@ -200,67 +200,154 @@ def _finance_retained_stamp_no_change(current, expected, *, shared_version):
     return differences
 
 
-def _finance(runtime, *, seller_id, queue_ref, shared_version, handoff=None, stack=None):
-    from packages.application.wb_finance_weekly import (
-        WbFinanceWeeklyBlock, _nomenclature_identity_index, _resolve_finance_nm_id, _operation_date,
-    )
+def _finance_snapshot(block, conn, *, seller_id, queue_ref, shared_version, projections=None):
+    from packages.application.wb_finance_weekly import _nomenclature_identity_index, _resolve_finance_nm_id, _operation_date
+    aliases, ambiguous, _, _ = _nomenclature_identity_index(conn)
+    targets = set()
+    scope_ids = {str(nm) for nm in queue_ref["affected_nm_ids"]}
+    effective = date.fromisoformat(queue_ref["effective_date"])
+    rows = conn.execute("SELECT week_start,week_end,raw_json FROM wb_finance_weekly_raw_rows "
+                        "WHERE seller_id=? AND week_end>=? ORDER BY week_start,rrd_id",
+                        (seller_id, effective.isoformat()))
+    for row in rows:
+        operation = json.loads(row["raw_json"])
+        nm, _, problem = _resolve_finance_nm_id(operation, alias_to_nm=aliases, ambiguous_aliases=ambiguous)
+        if (problem and str(operation.get("docTypeName") or "").casefold() in {"продажа", "возврат"}
+                and Decimal(str(operation.get("quantity") or 0)) != 0):
+            raise ValueError("supplier_finance_scope_unknown")
+        if problem or str(nm) not in scope_ids:
+            continue
+        day, day_source = _operation_date(operation, date.fromisoformat(row["week_start"]))
+        if day_source == "week_start_fallback":
+            raise ValueError("supplier_finance_operation_date_unknown")
+        if day >= effective:
+            targets.add((seller_id, row["week_start"], row["week_end"]))
+    if shared_version and (block.shared_cost_snapshot is None
+            or block.shared_cost_snapshot.metadata()["version_id"] != shared_version):
+        raise ValueError("supplier_finance_accounting_version_mismatch")
+    dependency = block._finance_source_dependency_fingerprint(conn, target_keys=targets, force_reload=True)
+    current = block._finance_target_images(conn, targets)
+    expected = {}
+    for _, start, end in sorted(targets):
+        key = (shared_version, start, end)
+        projection = projections.get(key) if projections is not None else None
+        if projection is None:
+            projection = block._build_week_target_projection(conn, week_start=date.fromisoformat(start), week_end=date.fromisoformat(end))
+            if projections is not None:projections[key] = projection
+        if projection["coverage"]["unmatched_units"]:
+            raise ValueError("supplier_finance_cost_incomplete")
+        for table, image in projection["images"].items():
+            expected.setdefault(table, {"columns": image["columns"], "rows": []})["rows"].extend(image["rows"])
+    expected = block._canonicalize_finance_target_images(conn, expected)
+    current_image = _finance_business_image(current)
+    expected_image = _finance_business_image(expected)
+    stamp_differences = []
+    if current_image != expected_image:
+        stamp_differences = _finance_retained_stamp_no_change(current_image, expected_image, shared_version=shared_version)
+    result = {"status": "verified" if targets else "not_applicable", "seller_id": seller_id,
+            "target_weeks": [list(key) for key in sorted(targets)],
+            "source_dependency": dependency, "target_digest": source.digest(current_image),
+            "non_target_digest": block._finance_state_digest(conn, target_keys=targets, target_only=False)}
+    if stamp_differences:
+        result.update(projection_outcome='derived_no_change', retained_global_stamp_differences=stamp_differences,
+                      current_native_expected_target_digest=source.digest(expected_image))
+    return result
+
+
+class FinanceProofCohort:
+    """One bounded reconcile preparation; never reuse across receipt commits."""
+    def __init__(self, runtime, *, seller_id, stack):
+        self.runtime, self.seller_id, self.stack = runtime, seller_id, stack
+        self.block = self.conn = None
+        self.results, self.projections = {}, {}
+        self.sealed = False
+        self.open_error = None
+
+    def _path_identity(self):
+        try:
+            return tuple((str(path), path.stat().st_dev, path.stat().st_ino) for path in self.paths)
+        except OSError as exc:
+            raise ValueError('supplier_finance_cohort_authority_changed') from exc
+
+    def _authority(self):
+        return self.block.store_registry.load(), self._path_identity()
+
+    def _observe(self, conn):
+        return self.block._sqlite_data_version_token(conn), self._authority()
+
+    def _open(self):
+        from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
+        self.block = WbFinanceWeeklyBlock(self.runtime.runtime_dir, seller_id=self.seller_id)
+        manifest = self.block.store_registry.load()
+        from pathlib import Path
+        if self.block.store_registry.resolve('operational', manifest=manifest) != Path(self.runtime.db_path).resolve():
+            raise ValueError('supplier_finance_cohort_authority_changed')
+        self.paths = sorted({self.block.store_registry.resolve(role, manifest=manifest) for role in ('operational', 'finance_raw')})
+        identity = self._path_identity()
+        authority = []
+        self.conn = self.stack.enter_context(closing(self.block._connect_stale_cost_plan(storage_authority=authority)))
+        self.block._assert_readonly_plan_connection(self.conn)
+        if authority != [manifest] or self._authority() != (manifest, identity):
+            raise ValueError('supplier_finance_cohort_authority_changed')
+        self.expected = self._observe(self.conn)
+        self.conn.execute('BEGIN')
+
+    def read(self, *, queue_ref, shared_version, handoff):
+        if self.sealed:raise ValueError('supplier_finance_cohort_already_sealed')
+        if self.open_error is not None:raise self.open_error
+        if self.conn is None:
+            try:self._open()
+            except ValueError as exc:
+                self.open_error = exc
+                raise
+        # The full native connection, including its capitalization cache, is
+        # pinned for this preparation. A scope key never crosses a commit.
+        key = (tuple(sorted({str(nm) for nm in queue_ref['affected_nm_ids']})), queue_ref['effective_date'], shared_version)
+        if key not in self.results:
+            self.results[key] = _finance_snapshot(self.block, self.conn, seller_id=self.seller_id,
+                queue_ref=queue_ref, shared_version=shared_version, projections=self.projections)
+        if handoff is not None:handoff.append((self.conn, self._observe, self.expected))
+        return deepcopy(self.results[key])
+
+    def check_independent(self):
+        # The main operational store is now locked by its own writer. Do not
+        # read that other main observer after receipt DML/cache spill.
+        from pathlib import Path
+        operational = Path(self.runtime.db_path).resolve()
+        if self._authority() != self.expected[1]:
+            raise ValueError('supplier_finance_cohort_authority_changed')
+        for row in self.conn.execute('PRAGMA database_list'):
+            schema = str(row[1])
+            if schema != 'temp' and Path(row[2]).resolve() != operational:
+                if self.conn.execute('PRAGMA '+schema+'.data_version').fetchone()[0] != self.expected[0][schema]:
+                    raise ValueError('supplier_completion_handoff_changed')
+
+    def seal(self):
+        if self.open_error is not None:raise self.open_error
+        if self.conn is not None:
+            self.conn.commit()
+            if self._observe(self.conn) != self.expected:
+                raise ValueError('supplier_finance_read_snapshot_changed')
+        self.sealed = True
+
+
+def _finance(runtime, *, seller_id, queue_ref, shared_version, handoff=None, stack=None, cohort=None):
+    if cohort is not None:
+        return cohort.read(queue_ref=queue_ref, shared_version=shared_version, handoff=handoff)
+    from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
     block = WbFinanceWeeklyBlock(runtime.runtime_dir, seller_id=seller_id)
     owner = stack.enter_context(closing(block._connect_stale_cost_plan())) if stack is not None else None
     with nullcontext(owner) if owner is not None else closing(block._connect_stale_cost_plan()) as conn:
         block._assert_readonly_plan_connection(conn)
         before = block._sqlite_data_version_token(conn)
-        conn.execute("BEGIN")
-        aliases, ambiguous, _, _ = _nomenclature_identity_index(conn)
-        targets = set()
-        scope_ids = {str(nm) for nm in queue_ref["affected_nm_ids"]}
-        effective = date.fromisoformat(queue_ref["effective_date"])
-        rows = conn.execute("SELECT week_start,week_end,raw_json FROM wb_finance_weekly_raw_rows "
-                            "WHERE seller_id=? AND week_end>=? ORDER BY week_start,rrd_id",
-                            (seller_id, effective.isoformat()))
-        for row in rows:
-            operation = json.loads(row["raw_json"])
-            nm, _, problem = _resolve_finance_nm_id(operation, alias_to_nm=aliases, ambiguous_aliases=ambiguous)
-            if (problem and str(operation.get("docTypeName") or "").casefold() in {"продажа", "возврат"}
-                    and Decimal(str(operation.get("quantity") or 0)) != 0):
-                raise ValueError("supplier_finance_scope_unknown")
-            if problem or str(nm) not in scope_ids:
-                continue
-            day, day_source = _operation_date(operation, date.fromisoformat(row["week_start"]))
-            if day_source == "week_start_fallback":
-                raise ValueError("supplier_finance_operation_date_unknown")
-            if day >= effective:
-                targets.add((seller_id, row["week_start"], row["week_end"]))
-        if shared_version and (block.shared_cost_snapshot is None
-                or block.shared_cost_snapshot.metadata()["version_id"] != shared_version):
-            raise ValueError("supplier_finance_accounting_version_mismatch")
-        dependency = block._finance_source_dependency_fingerprint(conn, target_keys=targets, force_reload=True)
-        current = block._finance_target_images(conn, targets)
-        expected = {}
-        for _, start, end in sorted(targets):
-            projection = block._build_week_target_projection(conn, week_start=date.fromisoformat(start), week_end=date.fromisoformat(end))
-            if projection["coverage"]["unmatched_units"]:
-                raise ValueError("supplier_finance_cost_incomplete")
-            for table, image in projection["images"].items():
-                expected.setdefault(table, {"columns": image["columns"], "rows": []})["rows"].extend(image["rows"])
-        expected = block._canonicalize_finance_target_images(conn, expected)
-        current_image = _finance_business_image(current)
-        expected_image = _finance_business_image(expected)
-        stamp_differences = []
-        if current_image != expected_image:
-            stamp_differences = _finance_retained_stamp_no_change(current_image, expected_image, shared_version=shared_version)
-        result = {"status": "verified" if targets else "not_applicable", "seller_id": seller_id,
-                "target_weeks": [list(key) for key in sorted(targets)],
-                "source_dependency": dependency, "target_digest": source.digest(current_image),
-                "non_target_digest": block._finance_state_digest(conn, target_keys=targets, target_only=False)}
-        if stamp_differences:
-            result.update(projection_outcome='derived_no_change', retained_global_stamp_differences=stamp_differences,
-                          current_native_expected_target_digest=source.digest(expected_image))
-        conn.commit()  # End the pinned snapshot before checking the same live observer.
+        conn.execute('BEGIN')
+        result = _finance_snapshot(block, conn, seller_id=seller_id, queue_ref=queue_ref, shared_version=shared_version)
+        conn.commit()
         if block._sqlite_data_version_token(conn) != before:
-            raise ValueError("supplier_finance_read_snapshot_changed")
-        if handoff is not None:
-            handoff.append((conn, block._sqlite_data_version_token, before))
+            raise ValueError('supplier_finance_read_snapshot_changed')
+        if handoff is not None:handoff.append((conn, block._sqlite_data_version_token, before))
         return result
+
 
 
 def read_correlated_native(conn, operation_id):
@@ -309,7 +396,7 @@ def read_correlated_native(conn, operation_id):
             "state": state, "allocation": allocation, "certification": certification}
 
 
-def read_native_proof(runtime, operation_id, *, seller_id="canonical", now=None, connection=None, handoff=None, stack=None):
+def read_native_proof(runtime, operation_id, *, seller_id="canonical", now=None, connection=None, handoff=None, stack=None, finance_cohort=None):
     from packages.application.shared_sku_cost_sources import capture_wb_component
     from packages.application import fbs_accounting_runtime as accounting, ready_publication
     owner = nullcontext(connection) if connection is not None else closing(source.readonly(runtime.db_path))
@@ -379,7 +466,7 @@ def read_native_proof(runtime, operation_id, *, seller_id="canonical", now=None,
         shared_version = accounting.ActiveSharedCostSnapshot(list(book["shared_days"].values()),
             effective_date=book["effective_date"]).metadata()["version_id"]
         finance = _finance(runtime, seller_id=seller_id, queue_ref=functional["queue_ref"], shared_version=shared_version,
-                           handoff=handoff, stack=stack)
+                           handoff=handoff, stack=stack, cohort=finance_cohort)
         if accounting.load(runtime.runtime_dir)[1] != book_version:
             raise ValueError("supplier_accounting_readback_changed")
         proof = {"status": "verified", "source_ref": processing.ref(op),
