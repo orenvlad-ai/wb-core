@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -61,6 +62,10 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
     from apps.sheet_vitrina_v1_feedbacks_ai_smoke import FakeAiProvider, NOW
     from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1FeedbacksAiBlock
     from packages.application import operator_feedback_analysis_settings as prompt_source
+    from packages.application import operator_feedback_complaint_schedules as schedule_source
+    from packages.application import operator_complaint_runs as run_source
+    from packages.application import operator_feedback_operations as feedback_source, sheet_vitrina_v1_feedbacks_complaints as complaint_source
+    from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import JsonFileFeedbacksAutoComplaintsStore, _normalize_run
     prompt_temp = TemporaryDirectory(prefix='feedback-prompt-browser-')
     prompt_owner = SheetVitrinaV1FeedbacksAiBlock(runtime_dir=Path(prompt_temp.name).resolve(), provider=FakeAiProvider(), now_factory=lambda: NOW)
     captured_urls: list[str] = []
@@ -75,9 +80,14 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
     automation_run_now_requests: list[dict[str, object]] = []
     automation_run_detail_requests: list[str] = []
     automation_run_requests: list[str] = []
+    automation_schedule_reads: list[str] = []
+    automation_schedule_receipts: list[dict[str, object]] = []
+    automation_run_receipt: dict[str, object] = {}
+    complaints_submit_receipt: dict[str, object] = {}
+    fixture_actor = ""
     automation_schedules_state: list[dict[str, object]] = [
         {
-            "id": "auto-noon",
+            "id": "canonical-auto-0",
             "enabled": False,
             "local_time_hhmm": "12:00",
             "timezone": "Asia/Yekaterinburg",
@@ -88,6 +98,9 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         }
     ]
     automation_runs_state: list[dict[str, object]] = []
+    schedule_store = JsonFileFeedbacksAutoComplaintsStore(Path(prompt_temp.name).resolve(), now_factory=lambda: NOW)
+    schedule_store.save_schedules(automation_schedules_state)
+    automation_schedules_state = schedule_store.read()["schedules"]
     failed_once: set[str] = set()
     large_feedbacks_mode = False
     prompt_saved = False
@@ -95,6 +108,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
     complaints_submit_completed = False
     selected_model = "gpt-5-mini"
     feedbacks_dark_layout: dict[str, object] = {}
+    history_reload_before_activation: dict[str, object] = {}
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -162,7 +176,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                                 "last_success": "2026-04-30T03:00:05Z",
                                 "next_run": "2026-04-30T07:00:00Z",
                                 "last_error": "",
-                                "runtime_schedule": {"enabled_ids": ["auto-noon"]},
+                                "runtime_schedule": {"enabled_ids": ["canonical-auto-0"]},
                                 "drift_status": "matched",
                                 "suspended_by_master": False,
                             }
@@ -315,6 +329,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             )
 
         def fulfill_complaints_submit(route: object) -> None:
+            nonlocal complaints_submit_receipt
             payload = json.loads(route.request.post_data or "{}")
             feedback_ids = payload.get("feedback_ids") if isinstance(payload, dict) else None
             if not isinstance(feedback_ids, list) or not feedback_ids:
@@ -325,42 +340,24 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             if max_submit < 1 or max_submit > 5:
                 raise AssertionError(f"submit-selected request must enforce max_submit <= 5, got {payload}")
             complaints_submit_requests.append(payload)
-            route.fulfill(
-                status=200,
-                headers={"Content-Type": "application/json; charset=utf-8"},
-                body=json.dumps(
-                    {
-                        "contract_name": "sheet_vitrina_v1_feedbacks_complaints_submit_job",
-                        "contract_version": "v1",
-                        "run_id": "complaints-submit-smoke-run",
-                        "kind": "feedbacks_complaints_submit_selected",
-                        "status": "queued",
-                        "created_at": "2026-05-06T05:00:00Z",
-                        "started_at": "",
-                        "finished_at": "",
-                        "selected_count": len(feedback_ids),
-                        "tested_count": 0,
-                        "submitted_count": 0,
-                        "skipped_count": 0,
-                        "error_count": 0,
-                        "events": [
-                            {
-                                "event": "job_started",
-                                "message": "Submit-selected smoke queued",
-                                "status": "queued",
-                                "timestamp": "2026-05-06T05:00:00Z",
-                            }
-                        ],
-                        "submitted_feedback_ids": [],
-                        "skipped": [],
-                        "attempts": [],
-                        "summary": {"selected_count": len(feedback_ids), "max_submit": max_submit},
-                        "poll_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH + "?run_id=complaints-submit-smoke-run",
-                        "complaints_url": DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_PATH,
-                    },
-                    ensure_ascii=False,
-                ),
-            )
+            # Seed a queued fixture manifest, then use the native RO receipt
+            # projection. The existing skipped layout report is not WB proof.
+            request = complaint_source._validate_submit_selected_payload({**payload, "account_id": "fixture"})
+            job = complaint_source._normalize_submit_job(dict(run_id="complaints-submit-smoke-run", status="queued",
+                created_at="2026-05-06T05:00:00Z", requested_by=fixture_actor, account_id="fixture",
+                selected_count=len(feedback_ids), selected_feedback_ids=feedback_ids, request_key=request["request_key"],
+                request_digest=complaint_source._submit_request_digest(request, fixture_actor),
+                request_payload=complaint_source._submit_request_operands(request)))
+            job_path = Path(prompt_temp.name) / complaint_source.DEFAULT_SUBMIT_JOB_DIRNAME / "jobs.json"
+            job_path.parent.mkdir(exist_ok=True)
+            job_path.write_text(json.dumps({"jobs": [job]}), encoding="utf-8")
+            scope = feedback_source.FeedbackSurface(Path(prompt_temp.name).resolve(), Path(prompt_temp.name) / "unused-autoanswers",
+                Path(prompt_temp.name) / "unused-buyer", "fixture", fixture_actor, "fixture")
+            complaints_submit_receipt = feedback_source.read_native(None, domain="feedback_complaint", native_id=request["request_key"],
+                allowed_domains={"feedback_complaint"}, scope=scope)
+            queued = complaint_source._public_submit_job(job, already_running=False)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(
+                {**queued, "acceptance": complaints_submit_receipt}, ensure_ascii=False))
 
         def fulfill_complaints_submit_job(route: object) -> None:
             nonlocal complaints_submit_completed
@@ -467,20 +464,15 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             if route.request.method == "POST":
                 payload = json.loads(route.request.post_data or "{}")
                 automation_schedule_requests.append(payload)
-                incoming = payload.get("schedules") if isinstance(payload, dict) else []
-                schedules = []
-                if isinstance(incoming, list):
-                    for index, item in enumerate(incoming):
-                        if not isinstance(item, dict):
-                            continue
-                        canonical = dict(item)
-                        canonical["id"] = f"canonical-auto-{index}"
-                        canonical["timezone_label"] = "Екатеринбург"
-                        canonical.setdefault("next_run_at", "2026-05-08T07:00:00Z")
-                        schedules.append(canonical)
-                automation_schedules_state = schedules
-            else:
-                schedules = automation_schedules_state
+                command = schedule_source.command(payload, actor=fixture_actor, account="fixture", account_scope="seller-portal-primary")
+                saved = schedule_store.save_schedules(payload["schedules"], operator_command=command)
+                automation_schedule_receipts.append(saved["acceptance"])
+                automation_schedules_state = schedule_store.read()["schedules"]
+                # A committed native source with a lost response must recover
+                # through the exact operation GET, without another POST.
+                route.abort("failed")
+                return
+            schedules = automation_schedules_state
             route.fulfill(
                 status=200,
                 headers={"Content-Type": "application/json; charset=utf-8"},
@@ -488,6 +480,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                     {
                         "contract_name": "sheet_vitrina_v1_feedbacks_auto_complaints_schedules",
                         "contract_version": "v1",
+                        "source_revision": schedule_source.revision(schedule_store.read()),
                         "schedules": schedules,
                         "recent_runs": automation_runs_state,
                     },
@@ -495,9 +488,22 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 ),
             )
 
+        def fulfill_automation_schedule_receipt(route: object) -> None:
+            if route.request.method != "GET":
+                raise AssertionError("schedule recovery must be GET-only")
+            automation_schedule_reads.append(route.request.url)
+            identity = unquote(urlparse(route.request.url).path.rsplit("/", 1)[-1])
+            receipts = [schedule_source.public(row) for row in schedule_source.records(schedule_store.read())
+                        if row["command"]["operation_id"] == identity and row["command"]["actor"] == fixture_actor
+                        and row["command"]["account"] == "fixture" and row["command"]["account_scope"] == "seller-portal-primary"]
+            route.fulfill(status=200 if receipts else 404, content_type="application/json",
+                          body=json.dumps({"operation": receipts[0] if receipts else None}, ensure_ascii=False))
+
         def fulfill_automation_run_now(route: object) -> None:
-            nonlocal automation_schedules_state, automation_runs_state
+            nonlocal automation_schedules_state, automation_runs_state, automation_run_receipt
             payload = json.loads(route.request.post_data or "{}")
+            if payload.get("expected_source_revision") != schedule_source.revision(schedule_store.read()):
+                raise AssertionError("run-now must bind the canonical saved schedule source revision")
             automation_run_now_requests.append(payload)
             run = {
                 "run_id": "auto-run-now-smoke",
@@ -539,28 +545,28 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 else schedule
                 for schedule in automation_schedules_state
             ]
-            route.fulfill(
-                status=202,
-                headers={"Content-Type": "application/json; charset=utf-8"},
-                body=json.dumps(
-                    {
-                        "contract_name": "sheet_vitrina_v1_feedbacks_auto_complaints_run",
-                        "contract_version": "v1",
-                        "run_id": run["run_id"],
-                        "status": run["status"],
-                        "reason": "",
-                        "summary": {"ai_candidates_count": 0, "submitted_count": 0, "skipped_count": 0},
-                        "run": run,
-                        "schedules": automation_schedules_state,
-                        "recent_runs": automation_runs_state,
-                    },
-                    ensure_ascii=False,
-                ),
-            )
+            # The old fixed-ID layout report is synthetic. A separate native
+            # command/receipt binds this exact form identity without claiming
+            # provider execution, native terminal proof or confirmation by WB.
+            scope = run_source.RunScope(Path(prompt_temp.name).resolve(), fixture_actor, "fixture", "seller-portal-primary")
+            command = run_source.command(payload, scope)
+            schedule = next(item for item in schedule_store.read()["schedules"] if item["id"] == payload["schedule_id"])
+            native_run = run_source.attach(_normalize_run({**run, "run_id": run_source.native_id(command)}), command, schedule)
+            schedule_store.add_run(native_run)
+            automation_run_receipt = run_source.read(payload["operation_id"], scope)["acceptance"]
+            route.abort("failed")
 
         def fulfill_automation_run_detail(route: object) -> None:
             automation_run_detail_requests.append(route.request.url)
             run = automation_runs_state[0] if automation_runs_state else {}
+            identity = parse_qs(urlparse(route.request.url).query).get("operation_id", [""])[0]
+            if identity:
+                if route.request.method != "GET":
+                    raise AssertionError("run recovery must be GET-only")
+                scope = run_source.RunScope(Path(prompt_temp.name).resolve(), fixture_actor, "fixture", "seller-portal-primary")
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(
+                    run_source.read(identity, scope), ensure_ascii=False))
+                return
             route.fulfill(
                 status=200,
                 headers={"Content-Type": "application/json; charset=utf-8"},
@@ -597,6 +603,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_SELECTED_PATH, fulfill_complaints_submit)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_COMPLAINTS_SUBMIT_JOB_PATH + "?**", fulfill_complaints_submit_job)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_SCHEDULES_PATH, fulfill_automation_schedules)
+        context.route("**/operations/complaint-schedules*", fulfill_automation_schedule_receipt)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_NOW_PATH, fulfill_automation_run_now)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUN_PATH + "?**", fulfill_automation_run_detail)
         context.route("**" + DEFAULT_SHEET_FEEDBACKS_AUTO_COMPLAINTS_RUNS_PATH, fulfill_automation_runs)
@@ -606,6 +613,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         context.route("**" + DEFAULT_AUTO_UPDATES_MONITORING_PATH, fulfill_auto_updates)
         try:
             page.goto(page_url, wait_until="domcontentloaded")
+            fixture_actor = page.evaluate("WEB_VITRINA_CONFIG.complaint_run_actor")
             page.wait_for_function(
                 """() => {
                     const label = document.querySelector("[data-history-label]");
@@ -651,6 +659,12 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError("automation schedule save must call backend route")
             if not page.locator("[data-feedbacks-auto-run-now]").is_enabled():
                 raise AssertionError("automation run-now must re-enable after canonical schedule save")
+            saved_receipt = automation_schedule_receipts[-1]
+            if len(automation_schedule_requests) != 1 or not automation_schedule_reads:
+                raise AssertionError("lost schedule response must recover the same receipt with one POST")
+            if saved_receipt["external_confirmed"] or saved_receipt["execution_required"] or saved_receipt["primary_effect"] != "source_saved":
+                raise AssertionError("schedule receipt must confirm only the native source save")
+            page.locator("#operator-complaint-schedule-receipt").get_by_role("button", name="Закрыть", exact=True).click()
             page.locator("[data-feedbacks-auto-run-now]").click()
             page.wait_for_function("() => document.querySelector('[data-feedbacks-auto-log-body]')?.textContent.includes('no_new_feedbacks')")
             if not automation_run_now_requests:
@@ -659,6 +673,15 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError(f"automation run-now must use canonical saved schedule id, got {automation_run_now_requests[-1]}")
             if not automation_run_detail_requests:
                 raise AssertionError("automation run-now flow must fetch run details for observable log")
+            if (len(automation_run_now_requests) != 1 or automation_run_receipt["external_confirmed"]
+                    or automation_run_receipt["resubmit_allowed"] or automation_run_receipt["processing"]["native_job_terminal"]):
+                raise AssertionError("run receipt recovery must not resend or claim WB confirmation")
+            run_command = run_source.command(automation_run_now_requests[-1],
+                run_source.RunScope(Path(prompt_temp.name).resolve(), fixture_actor, "fixture", "seller-portal-primary"))
+            if (automation_run_receipt["source_ref"]["entity_id"] != run_source.native_id(run_command)
+                    or automation_run_receipt["state"] != "needs_attention" or not automation_run_receipt["execution_required"]):
+                raise AssertionError("native run receipt must bind canonical job identity without terminal execution proof")
+            page.locator("#operator-complaint-run-receipt").get_by_role("button", name="Закрыть", exact=True).click()
             schedule_text_after_run = page.locator("[data-feedbacks-auto-schedules-body]").inner_text()
             if "no_new_feedbacks" not in schedule_text_after_run:
                 raise AssertionError(f"automation schedule summary must refresh after run-now, got {schedule_text_after_run!r}")
@@ -890,6 +913,13 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
             if after_width <= before_width:
                 raise AssertionError(f"feedbacks column resize must increase width, got {before_width} -> {after_width}")
             page.reload(wait_until="domcontentloaded")
+            history_reload_before_activation = page.evaluate("""() => ({
+                activeTab: document.querySelector('[data-unified-tab-button][aria-selected="true"]')?.getAttribute('data-unified-tab-button'),
+                historyLabel: document.querySelector('[data-history-label]')?.textContent
+            })""")
+            # Reload preserves the Feedbacks tab. The lazy Vitrina history is
+            # read only when its real tab is activated; keep its existing wait.
+            page.locator("[data-unified-tab-button='vitrina']").click()
             page.wait_for_function(
                 """() => {
                     const label = document.querySelector("[data-history-label]");
@@ -990,6 +1020,7 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
 
             large_feedbacks_mode = False
             page.reload(wait_until="domcontentloaded")
+            page.locator("[data-unified-tab-button='vitrina']").click()
             page.wait_for_function(
                 """() => {
                     const label = document.querySelector("[data-history-label]");
@@ -1032,9 +1063,38 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
                 raise AssertionError(f"submit-selected payload must include selected id only, got {complaints_submit_requests[-1]}")
             if not complaints_submit_job_polls:
                 raise AssertionError("submit-selected UI must poll job route")
+            if (complaints_submit_receipt["external_confirmed"] or complaints_submit_receipt["state"] != "processing"
+                    or not complaints_submit_receipt["source_ref"]["scope_proven"]
+                    or complaints_submit_receipt["source_ref"]["request_key"] != complaints_submit_requests[-1]["request_key"]):
+                raise AssertionError("queued complaint receipt must bind exact selection without confirming WB submission")
             selected_row_text = page.locator(f'[data-feedbacks-select-row="{selected_feedback_id}"]').locator("xpath=ancestor::tr").inner_text()
             if "Пропущена" not in selected_row_text:
                 raise AssertionError(f"selected skipped row must show attempt status instead of dash, got {selected_row_text!r}")
+            # Reload reads retained native schedule proof; no form POST repeats.
+            source_before_reload = schedule_store.path.read_bytes()
+            page.reload(wait_until="domcontentloaded")
+            recovered = page.evaluate("async record => {await loadFeedbacksAutomation();return await readComplaintScheduleReceipt(record);}",
+                {"identity": saved_receipt["operation_id"], "body": saved_receipt["request"]})
+            if recovered != saved_receipt or schedule_store.path.read_bytes() != source_before_reload:
+                raise AssertionError("reload must recover byte-unchanged native schedule receipt by exact identity")
+            if len(automation_schedule_requests) != 1 or len(automation_run_now_requests) != 1:
+                raise AssertionError("reload must not repeat schedule-save or run-now POST")
+            blocked = page.evaluate("async () => {state.feedbacks.automation.sourceRevision='';await saveFeedbacksAutomationSchedules();return state.feedbacks.automation.error;}")
+            if "Текущая версия расписания не подтверждена" not in blocked or len(automation_schedule_requests) != 1:
+                raise AssertionError("missing source revision must still refuse before schedule POST")
+            if schedule_store.path.read_bytes() != source_before_reload:
+                raise AssertionError("GET recovery and missing-version refusal must leave native source bytes unchanged")
+            matches = page.evaluate("""proof => {
+                const record={identity:proof.schedule.operation_id,body:proof.schedule.request};
+                return [complaintScheduleMatches(proof.schedule,record),
+                    complaintScheduleMatches({...proof.schedule,actor:'foreign'},record),
+                    complaintScheduleMatches({...proof.schedule,operation_id:'complaint-schedules:foreign_identity_0001'},record),
+                    complaintRunMatches(proof.run,{identity:proof.run.operation_id,digest:proof.run.request_digest}),
+                    complaintRunMatches(proof.run,{identity:proof.run.operation_id,digest:'foreign'}),
+                    complaintRunMatches({...proof.run,actor:'foreign'},{identity:proof.run.operation_id,digest:proof.run.request_digest})];
+            }""", {"schedule": saved_receipt, "run": automation_run_receipt})
+            if matches != [True, False, False, True, False, False]:
+                raise AssertionError("receipt matcher must reject foreign actor, operation identity and run digest")
         finally:
             browser.close()
             prompt_temp.cleanup()
@@ -1069,6 +1129,10 @@ def run_browser_checks(base_url: str, *, ignore_https_errors: bool) -> dict[str,
         "automation_run_requests": len(automation_run_requests),
         "feedbacks_dark_toolbar": True,
         "feedbacks_action_button_heights": feedbacks_dark_layout.get("buttonHeights", []),
+        "history_reload_before_activation": history_reload_before_activation,
+        "schedule_receipt_get_only_recovery": len(automation_schedule_reads),
+        "schedule_and_run_posts": [len(automation_schedule_requests), len(automation_run_now_requests)],
+        "run_receipt_native_state": automation_run_receipt["state"],
     }
 
 
