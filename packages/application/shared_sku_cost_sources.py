@@ -7,7 +7,7 @@ reader consumes saved WB valuations; it never rebuilds costs or reads FBS.
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import hashlib
 import json
 from pathlib import Path
@@ -224,11 +224,14 @@ def _operand(nm_id: int, parts: tuple[int, int, int], row: dict | None, source: 
             wac = _decimal(row["wac_rub"])
             if capital <= 0 or wac <= 0:
                 raise ValueError("positive_wb_quantity_without_cost")
-            # Published WB arithmetic uses Decimal precision 28. Preserve the
-            # saved capital exactly and only validate its WAC representation.
+            # The publisher serializes WAC = capital / quantity at precision
+            # 28. Repeating that division validates the canonical saved WAC;
+            # its rounded inverse product need not recover the exact capital.
+            # Retain the authoritative saved capital without recomputing it.
             with localcontext() as context:
                 context.prec = 28
-                if quantity * wac != capital:
+                context.rounding = ROUND_HALF_EVEN
+                if capital / quantity != wac:
                     raise ValueError("wb_published_wac_capital_mismatch")
             provenance = _object(row["provenance_json"])
             records = provenance.get("source_records")
