@@ -207,14 +207,26 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.provider.calls,[[101]])
         self.assertEqual(self.read(first)['state'],'processing')
         block.recalculate_stale_cost_weeks();self.assertEqual(self.read(first)['state'],'completed')
+    def test_finance_ack_exact_storage_authority_no_dml_on_drift(self):
+        for applied,seam in ((False,'ack'),(True,'readback'),(True,'ack')):
+            for drift in ('manifest_only','same_path_generation','successor'):
+                for after_open in ((False,True) if seam=='ack' else (False,)):
+                    with self.subTest(applied=applied,seam=seam,drift=drift,after_open=after_open):
+                        _finance_authority_case(applied,seam,drift,after_open)
+
+    def test_finance_ack_normal_split_authority(self):
+        for applied in (False,True):
+            with self.subTest(applied=applied):
+                _finance_authority_case(applied,'ack',None,False)
+
     def test_finance_no_change_handoff_race_never_acks_foreign_current_version(self):
         first=self.create();block=self.finance();plan=block.plan_stale_cost_weeks()
         native=block._connect
-        def raced():
+        def raced(**kwargs):
             with sqlite3.connect(self.runtime.db_path) as conn:
                 conn.execute("UPDATE sheet_vitrina_v1_nomenclature_items SET comment='foreign' WHERE item_id=?",(first['item']['item_id'],))
                 conn.commit()
-            return native()
+            return native(**kwargs)
         with patch.object(block,'_connect',side_effect=raced):
             with self.assertRaisesRegex(ValueError,'changed'):
                 block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'])
@@ -323,5 +335,95 @@ class Tests(unittest.TestCase):
         self.entry.handle_nomenclature_patch_request(identity,{'comment':'changed','_operator_request_id':self.identity()},actor='tester')
         with heavy_admitted(self.runtime.runtime_dir,operation='fixture'):op.drain_external(self.runtime,block=self.supplier)
         self.assertEqual(self.read(stale)['state'],'needs_attention');self.assertEqual(self.provider.calls,[])
+
+def _finance_authority_case(applied,seam,drift,after_open):
+    """Actual split native stores and pending exact SKU source; no provider IO."""
+    from contextlib import closing
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from apps.wb_finance_weekly_handoff_smoke import HandoffTests
+    from packages.application.storage_registry import atomic_write_manifest,manifest_payload,parse_manifest,_sha256
+    from packages.application.wb_finance_weekly import FinanceStaleCostHandoffError
+    case=Tests();case.setUp()
+    try:
+        saved=case.create(vendor_code='VC101',is_active=False);block=case.finance();origin=block.db_path
+        if applied:
+            seed=case.runtime.runtime_dir/'seed.sqlite3';_seed_canonical_cost(seed)
+            with closing(sqlite3.connect(origin)) as conn,closing(sqlite3.connect(seed)) as source,conn:
+                for table in ('sheet_vitrina_v1_warehouse_functional_cutovers','sheet_vitrina_v1_warehouse_wb_daily_cost'):
+                    sql=source.execute('SELECT sql FROM sqlite_master WHERE name=?',(table,)).fetchone()[0]
+                    conn.execute(sql.replace('CREATE TABLE ','CREATE TABLE IF NOT EXISTS ',1))
+                    rows=source.execute('SELECT * FROM '+table).fetchall()
+                    conn.executemany('INSERT INTO '+table+' VALUES ('+','.join('?' for _ in rows[0])+')',rows)
+            day=date(2026,9,28);row=dict(_rows(day)[0],nmId=0,vendorCode='VC101',sku='',saleDt='2026-07-01')
+            block.ingest_week(day,day+timedelta(days=6),[row]);block.recalculate_stale_cost_weeks()
+            saved=case.entry.handle_nomenclature_patch_request(saved['item']['item_id'],{'vendor_code':'VC999','_operator_request_id':case.identity()},actor='tester')
+        identity=saved['acceptance']['operation_id'];case.assertEqual(case.read(saved)['state'],'processing')
+        HandoffTests.split(SimpleNamespace(root=case.runtime.runtime_dir,block=block))
+        initial=block.store_registry.load();plan=block.plan_stale_cost_weeks()
+        case.assertEqual(plan['stale_week_count'],int(applied))
+        case.assertEqual([r['operation_id'] for r in plan['operator_nomenclature_sources']],[identity])
+        target_keys={(block.seller_id,w['week_start'],w['week_end']) for w in plan['weeks']}
+        with block._connect_stale_cost_plan() as conn:before_target=block._json_digest(block._finance_target_images(conn,target_keys))
+        successor=case.runtime.runtime_dir/'op-successor.sqlite3'
+        if drift=='successor':
+            with closing(sqlite3.connect(origin)) as source,closing(sqlite3.connect(successor)) as dest:source.backup(dest)
+            with closing(sqlite3.connect(successor)) as conn,conn:conn.execute("UPDATE finance_operational_schema_meta SET generation_id='op-successor' WHERE singleton=1")
+        native_reader,native_writer=block._connect_stale_cost_plan,block._connect
+        native_target,native_ack=block._replace_finance_target_images,op.acknowledge_finance
+        calls={'reader':0,'writer':0,'target_dml':0,'ack':0,'ack_dml':0,'drift':0};observers=[]
+        def change():
+            if not drift:return
+            calls['drift']+=1;case.assertEqual(calls['drift'],1)
+            before=block._sqlite_data_version_token(observers[-1]);current=block.store_registry.load()
+            if drift=='manifest_only':changed=replace(current,rollback_generation_id='changed-rollback')
+            elif drift=='same_path_generation':
+                with closing(sqlite3.connect(origin)) as meta,meta:meta.execute("UPDATE finance_operational_schema_meta SET generation_id='op-same-path' WHERE singleton=1")
+                changed=replace(current,operational=replace(current.operational,generation_id='op-same-path'))
+            else:changed=replace(current,operational=replace(current.operational,generation_id='op-successor',relative_path=successor.name))
+            payload=manifest_payload(changed,include_digest=False);payload['manifest_sha256']=_sha256(payload)
+            atomic_write_manifest(block.store_registry.manifest_path,parse_manifest(payload))
+            if drift=='same_path_generation':case.assertNotEqual(before,block._sqlite_data_version_token(observers[-1]))
+            else:case.assertEqual(before,block._sqlite_data_version_token(observers[-1])) # Manifest-only/successor drift does not commit to the observer store.
+            case.assertNotEqual(initial,block.store_registry.load())
+        def reader(**kwargs):
+            calls['reader']+=1
+            if seam=='readback' and calls['reader']==2:
+                with closing(native_reader()) as drift_observer:
+                    observers.append(drift_observer);change()
+            conn=native_reader(**kwargs);observers.append(conn);return conn
+        def writer(**kwargs):
+            calls['writer']+=1;is_ack=calls['writer']==(2 if applied else 1)
+            if seam=='ack' and is_ack and not after_open:change()
+            conn=native_writer(**kwargs)
+            if seam=='ack' and is_ack and after_open:change()
+            def trace(sql):
+                if sql.lstrip().upper().startswith('UPDATE '+op.TABLE.upper()):calls['ack_dml']+=1
+            conn.set_trace_callback(trace);return conn
+        def target(*args,**kwargs):calls['target_dml']+=1;return native_target(*args,**kwargs)
+        def ack(*args,**kwargs):calls['ack']+=1;return native_ack(*args,**kwargs)
+        with patch.object(block,'_connect_stale_cost_plan',side_effect=reader),patch.object(block,'_connect',side_effect=writer),patch.object(block,'_replace_finance_target_images',side_effect=target),patch.object(op,'acknowledge_finance',side_effect=ack):
+            if drift:
+                with case.assertRaises(FinanceStaleCostHandoffError) as rejected:block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'])
+                case.assertEqual(rejected.exception.reason,'finance_handoff_identity_changed')
+            else:
+                result=block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'])
+                case.assertIn(identity,result['operator_nomenclature_acks']);case.assertEqual(result['status'],'applied' if applied else 'already_current')
+        case.assertEqual(calls['target_dml'],int(applied)) # Once committed, never replay target replacement after ack failure.
+        case.assertEqual(calls['writer'],1 if not applied or seam=='readback' else 2)
+        case.assertEqual(calls['ack'],0 if drift else 1)
+        if drift:
+            case.assertEqual(calls['ack_dml'],0)
+            for path in ([origin,successor] if drift=='successor' else [origin]):
+                receipt=op.read(path,identity,actor='tester');case.assertEqual(receipt['state'],'processing');case.assertFalse(receipt['processing_receipt']['cost'])
+            # Original target commit is preserved; rejection does not roll back or retry that earlier transaction.
+            original_manifest=block.store_registry.load() if drift=='same_path_generation' else initial
+            with block.store_registry.connect('operational',mode='ro',operation='synthetic_original_target_proof',manifest=original_manifest) as conn:
+                after_target=block._json_digest(block._finance_target_images(conn,target_keys))
+            case.assertNotEqual(before_target,after_target) if applied else case.assertEqual(before_target,after_target)
+        else:
+            case.assertGreater(calls['ack_dml'],0)
+            receipt=case.read(saved);case.assertEqual(receipt['state'],'completed');case.assertTrue(receipt['processing_receipt']['cost']['exact_revision_acked'])
+    finally:case.doCleanups()
 
 if __name__=='__main__':unittest.main()

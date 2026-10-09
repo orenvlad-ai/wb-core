@@ -6128,14 +6128,21 @@ class WbFinanceWeeklyBlock:
                         'source_dependency':plan['source_dependency'],
                         'catalog_price_policy':'supplier_reference_not_historical_cost',
                         'non_target_preserved':True,'post_verify_stale_week_count':0}
-                    with self._connect() as operator_writer:
+                    ack_authority: list[GenerationManifest] = []
+                    with self._connect(storage_authority=ack_authority) as operator_writer:
                         operator_writer.execute('BEGIN IMMEDIATE')
                         try:
+                            if (ack_authority != original_authority
+                                    or self.store_registry.load() != original_authority[0]
+                                    or self._sqlite_persistent_identity(operator_writer) != self._sqlite_persistent_identity(plan_conn)):
+                                raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
+                                    phase='writer_handoff', classification='unclassified_commit', attempt=1,
+                                    before=operator_plan_token, after=self._sqlite_data_version_token(plan_conn))
                             if self._sqlite_data_version_token(plan_conn)!=operator_plan_token:
                                 raise ValueError('Finance operator source changed during acknowledgement handoff')
                             acknowledge_finance(operator_writer,selected=operator_sources,proof=proof)
                             operator_writer.commit()
-                        except Exception:
+                        except BaseException:
                             operator_writer.rollback()
                             raise
                 return {
@@ -6283,8 +6290,13 @@ class WbFinanceWeeklyBlock:
                 else:
                     break
 
-        with self._connect_stale_cost_plan() as conn:
+        readback_authority: list[GenerationManifest] = []
+        with self._connect_stale_cost_plan(storage_authority=readback_authority) as conn:
             self._assert_readonly_plan_connection(conn)
+            if operator_sources and (readback_authority != original_authority
+                    or self._sqlite_persistent_identity(conn) != observer_identity):
+                raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
+                    phase='writer_handoff', classification='unclassified_commit', attempt=1)
             operator_post_token=self._sqlite_data_version_token(conn)
             non_target_after = self._finance_state_digest(
                 conn, target_keys=target_keys, target_only=False
@@ -6317,14 +6329,21 @@ class WbFinanceWeeklyBlock:
                     'target_image_digest':target_image_digest,
                     'non_target_preserved':True,'post_verify_stale_week_count':0,
                     'catalog_price_policy':'supplier_reference_not_historical_cost'}
-                with self._connect() as operator_writer:
+                ack_authority: list[GenerationManifest] = []
+                with self._connect(storage_authority=ack_authority) as operator_writer:
                     operator_writer.execute('BEGIN IMMEDIATE')
                     try:
+                        if (ack_authority != readback_authority
+                                or self.store_registry.load() != readback_authority[0]
+                                or self._sqlite_persistent_identity(operator_writer) != self._sqlite_persistent_identity(conn)):
+                            raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
+                                phase='writer_handoff', classification='unclassified_commit', attempt=1,
+                                before=operator_post_token, after=self._sqlite_data_version_token(conn))
                         if self._sqlite_data_version_token(conn)!=operator_post_token:
                             raise ValueError('Finance operator source changed during post-readback acknowledgement')
                         acknowledge_finance(operator_writer,selected=operator_sources,proof=proof)
                         operator_writer.commit()
-                    except Exception:
+                    except BaseException:
                         operator_writer.rollback()
                         raise
                 operator_acks=[item['operation_id'] for item in operator_sources]
