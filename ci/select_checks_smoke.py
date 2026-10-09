@@ -2,6 +2,7 @@
 """Small deterministic smoke for the check selector."""
 
 from pathlib import Path
+from copy import deepcopy
 import subprocess
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -299,6 +300,69 @@ def boundary_checks():
         paths=[new_helper], file_exists=lambda _, p: p in {new_helper, sibling})
     assert plan["commands"] == [["python3", "-m", "py_compile", new_helper], ["python3", sibling]]
     print(f"boundary selection: {len(expected)} production paths and renames; unrelated/helper routes OK")
+
+
+def grouped_feedback_command_checks():
+    # A combined Feedback/settings diff uses the map from BEFORE both leaves.
+    # These non-sibling checks must already be bound in that trusted base.
+    required = (
+        ("python3", "apps/sheet_vitrina_v1_feedbacks_complaints_smoke.py"),
+        ("python3", "-m", "apps.wb_autoanswers_publication_test"),
+    )
+    mapping, _ = select_checks.load_map()
+    before = deepcopy(mapping)
+    before["groups"]["autoanswers"]["commands"] = [
+        command for command in before["groups"]["autoanswers"]["commands"]
+        if tuple(command) not in required
+    ]
+    before_sha = select_checks.digest(select_checks.canonical_bytes(before))
+    exists = lambda _, path: (select_checks.ROOT / path).is_file()
+
+    def plans(paths):
+        current = build_plan_from_paths(pull_request=137, base=BASE,
+            head=HEAD, paths=paths, file_exists=exists)
+        with patch.object(select_checks, "load_map", return_value=(before, before_sha)):
+            original = build_plan_from_paths(pull_request=137, base=BASE,
+                head=HEAD, paths=paths, file_exists=exists)
+        verify_plan(current)
+        verify_plan(original)
+        # Preserve every old argv and every compile operand, not just counts.
+        noncompile = lambda plan: {tuple(c) for c in plan["commands"]
+                                  if c[:3] != ["python3", "-m", "py_compile"]}
+        compile_commands = lambda plan: [c for c in plan["commands"]
+                                        if c[:3] == ["python3", "-m", "py_compile"]]
+        assert noncompile(original) <= noncompile(current), (paths, current)
+        assert noncompile(current) - noncompile(original) <= set(required), current
+        assert compile_commands(current) == compile_commands(original), (paths, current)
+        for key in ("groups", "pip", "changed_paths", "release_kind"):
+            assert current[key] == original[key], (paths, key, current)
+        return current, original
+
+    for paths in (
+        ["packages/application/wb_autoanswers_runtime.py"],
+        ["packages/application/wb_autoanswers_runtime.py",
+         "packages/application/sheet_vitrina_v1_feedbacks_complaints.py",
+         "packages/adapters/registry_upload_http_entrypoint.py",
+         "apps/sheet_vitrina_v1_feedbacks_complaints_smoke.py"],
+    ):
+        current, _ = plans(paths)
+        assert "autoanswers" in current["groups"], current
+        for command in required:
+            assert current["commands"].count(list(command)) == 1, current
+
+    for paths in (
+        ["packages/application/cny_ledger.py", "packages/application/supplier_shipments.py",
+         "packages/application/ff_pool_foundation.py"],
+        ["packages/application/historical_dated_inputs.py"],
+        ["packages/adapters/search_cluster_cleaner_http.py",
+         "packages/adapters/finance_liquidity_http.py",
+         "packages/application/sku_inventory_balance.py", "packages/application/wb_spp_tester.py"],
+        ["ci/checks.json", "ci/select_checks_smoke.py"],
+    ):
+        current, original = plans(paths)
+        assert "autoanswers" not in current["groups"], current
+        assert current["commands"] == original["commands"], (paths, current)
+    print("grouped feedback: retained exact checks/compile operands; unrelated plans unchanged")
 
 
 def rename_diff_check():
@@ -910,6 +974,7 @@ def main() -> None:
     assert 'echo "$check_venv/bin" >> "$GITHUB_PATH"' in workflow
     assert workflow.index('>> "$GITHUB_PATH"') < workflow.index('python3 trusted-base/ci/run_checks.py')
     boundary_checks()
+    grouped_feedback_command_checks()
     rename_diff_check()
     operator_warehouse_dependency_checks()
     operator_fulfillment_dependency_checks()
