@@ -623,10 +623,16 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
         aliases,ambiguous,_,_=_nomenclature_identity_index(reads)
         nm_ids=sorted({str(nm) for frozen in captured['sources'] for nm in frozen['affected_nm_ids']})
         earliest=min(frozen['effective_date'] for frozen in captured['sources'])
-        # Actual native raw nmId scope plus alias-routed rows. Whole selected weeks
-        # remain native aggregate operands, including other NMs in those weeks.
-        candidates=reads.execute("SELECT week_start,week_end,raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_end>=? AND (trim(CAST(json_extract(raw_json,'$.nmId') AS TEXT)) IN ("+
-            ','.join('?' for _ in nm_ids)+") OR coalesce(trim(CAST(json_extract(raw_json,'$.nmId') AS TEXT)),'') IN ('','0')) ORDER BY week_start,report_id,rrd_id",
+        # Exclude only canonical ASCII positive decimal IDs outside the source
+        # cohort. Native Python str(...).strip() also accepts Unicode whitespace;
+        # SQLite trim/casts must never decide that such rows are irrelevant.
+        # Noncanonical, absent and zero forms are a conservative superset,
+        # resolved below by the existing native resolver (including aliases).
+        # Whole selected weeks retain every native aggregate operand.
+        direct_nm="coalesce(CAST(json_extract(raw_json,'$.nmId') AS TEXT),'')"
+        canonical_nm=f"({direct_nm} GLOB '[1-9]*' AND {direct_nm} NOT GLOB '*[^0-9]*')"
+        candidates=reads.execute("SELECT week_start,week_end,raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_end>=? AND ("+direct_nm+" IN ("+
+            ','.join('?' for _ in nm_ids)+") OR NOT "+canonical_nm+") ORDER BY week_start,report_id,rrd_id",
             (finance_block.seller_id,earliest,*nm_ids))
         keys=set()
         for row in candidates:

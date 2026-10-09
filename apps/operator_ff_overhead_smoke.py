@@ -808,6 +808,46 @@ class NativeCompletionTests(unittest.TestCase):
         self.assertEqual(proof['finance_publication']['applicable_weeks'],[])
         self.assertEqual(self.business_image(),self.before)
 
+    def test_native_unicode_nm_scope_is_retained_and_marker_drift_rejected(self):
+        import hashlib
+        from datetime import date
+        from apps.wb_finance_weekly_cost_cutover_smoke import _row
+        for nm in ('\u00a01\u00a0','\u20031\u2003','\t1\n',1,'1'):
+            for changed in (False,True):
+                case=NativeCompletionTests();case.setUp()
+                try:
+                    case.old_tail()
+                    row=_row(1,'2026-09-08',nm_id=1);row['nmId']=nm
+                    native=case.finance.ingest_week(date(2026,9,7),date(2026,9,13),[row])
+                    self.assertIn(native['status'],('loaded_preliminary','completed'))
+                    original=FfPoolDocumentService._finalize_posted;injected=[]
+                    def finalize(service,*args,**kwargs):
+                        if changed:
+                            with sqlite3.connect(case.runtime.db_path) as conn:
+                                operation=json.loads(conn.execute('SELECT raw_json FROM wb_finance_weekly_raw_rows LIMIT 1').fetchone()[0])
+                                operation['quantity']=2
+                                payload=json.dumps(operation,ensure_ascii=False,sort_keys=True,separators=(',',':'))
+                                conn.execute('UPDATE wb_finance_weekly_raw_rows SET raw_json=?,row_hash=?',(payload,hashlib.sha256(payload.encode()).hexdigest()))
+                            injected.append(True)
+                        return original(service,*args,**kwargs)
+                    with self.subTest(nm=nm,changed=changed),warehouse_functional_job_lock(case.root):
+                        args=case.proof_inputs()
+                        with patch.object(FfPoolDocumentService,'_finalize_posted',finalize):
+                            if changed:
+                                with self.assertRaises(ValueError):case.complete(*args)
+                            else:self.assertEqual(case.complete(*args)['processed_count'],1)
+                        receipt=operations.read_acceptance(case.runtime.db_path,case.identity)
+                        weeks=receipt['processing_receipt']['native_completion']['finance_publication']['applicable_weeks']
+                        self.assertEqual(weeks,[['canonical','2026-09-07','2026-09-13']])
+                        if changed:
+                            self.assertEqual(injected,[True])
+                            self.assertEqual(receipt['state'],'processing')
+                            self.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
+                            self.assertEqual(case.finance.plan_stale_cost_weeks()['stale_week_count'],1)
+                        else:self.assertEqual(case.native_terminal(case.identity),('complete','retained'))
+                    self.assertEqual(case.business_image(),case.before)
+                finally:case.doCleanups()
+
     def test_false_foreign_economics_and_finance_never_ack_or_retain(self):
         self.old_tail()
         with warehouse_functional_job_lock(self.root):
