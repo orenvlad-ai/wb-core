@@ -1073,7 +1073,9 @@
         "packages/node/wb_autoanswers_v1_4_2/**"
       ],
       "commands": [
-        ["python3", "apps/wb_autoanswers_store_rollback_smoke.py"]
+        ["python3", "apps/wb_autoanswers_store_rollback_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_feedbacks_complaints_smoke.py"],
+        ["python3", "-m", "apps.wb_autoanswers_publication_test"]
       ],
       "pip": []
     },
