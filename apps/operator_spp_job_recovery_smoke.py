@@ -422,8 +422,15 @@ class Native(unittest.TestCase):
                 if route.request.method=='POST' and route.request.url.endswith('/spp-test/start'):
                     posts.append(route.request.post_data_json);reply=route.fetch();self.assertEqual(reply.status,200);saved.append(reply.json());route.abort()
                 else:route.continue_()
+            metadata=_spp_tab_metadata(page)
             context.route('**/*',intercept);_open_manual_panel(page,f.base_url)
-            page.locator('[data-spp-test-price-index="0"]').fill('810');page.wait_for_function('()=>document.querySelector("[data-spp-test-start]").disabled===false');page.locator('[data-spp-test-start]').click()
+            page.locator('[data-spp-test-price-index="0"]').fill('810')
+            try:
+                page.wait_for_function('()=>document.querySelector("[data-spp-test-start]").disabled===false')
+            except PlaywrightTimeoutError:
+                _spp_start_timeout_diagnostic(page, 'flags', metadata)
+                raise
+            page.locator('[data-spp-test-start]').click()
             page.wait_for_function('()=>document.querySelector("[data-spp-test-acceptance]").innerText.includes("Задание сохранено")')
             page.wait_for_function('()=>document.querySelector("[data-spp-test-state]").innerText.includes("готово")')
             self.assertEqual(len(posts),1)

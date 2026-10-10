@@ -94,9 +94,8 @@
       const result=await request('/operator-operations/'+encodeURIComponent(identity),{timeoutMs:operationReadbackDeadlineMs});
       const receipt=result.operation;
       if(!cashScopeCurrent(scope) || sequence!==cashReceiptSequence || receipt?.operation_id!==identity || receipt?.source_ref?.store_id!==scope.storeId || receipt?.domain!=='finance_cash_test')return;
-      const container=$('[data-cash-operator-receipt]'),detached=document.createElement('div');
-      OperatorAcceptance.renderReceipt(detached,receipt,{onClose:()=>clear(container),onJournal:()=>{const journal=document.getElementById('operator-journal');journal.open=true;journal.scrollIntoView();}});
-      container.replaceChildren(...detached.childNodes);
+      const container=$('[data-cash-operator-receipt]');
+      OperatorAcceptance.renderReceipt(container,receipt,{onClose:()=>clear(container),onJournal:()=>{const journal=document.getElementById('operator-journal');journal.open=true;journal.scrollIntoView();}});
       loadCashOperatorJournal();
     } catch (_) { /* Native command/readback result remains authoritative. No resend. */ }
   }
@@ -111,7 +110,7 @@
       const rows=$('[data-cash-operator-rows]');clear(rows);
       for(const receipt of result.items || []) {
         if(receipt.domain!=='finance_cash_test' || receipt.source_ref?.store_id!==scope.storeId)continue;
-        const row=element('article','history-row');OperatorAcceptance.renderReceipt(row,receipt);rows.appendChild(row);
+        const row=element('article','history-row');OperatorAcceptance.renderReceipt(row,receipt,{mode:'inline'});rows.appendChild(row);
       }
       setText($('[data-cash-operator-total]'),'Операций: '+result.total);
       $('[data-cash-operator-prev]').disabled=cashJournalPage<=1;$('[data-cash-operator-next]').disabled=!result.has_more;

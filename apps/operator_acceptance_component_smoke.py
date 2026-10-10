@@ -6,6 +6,7 @@ network request is used; the browser's fixture navigation is intercepted locally
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlparse
 import sys
 
 from playwright.sync_api import sync_playwright
@@ -28,6 +29,7 @@ def checks(page) -> None:
         document:null, title_ru:'Приёмка поставки', fields:[{label:'Поставка',value:'26 GN 999'}]};
       window.calls = [];
       window.render = (id, value) => OperatorAcceptance.renderReceipt(document.getElementById(id), value, {
+        mode:'inline',
         onClose:r => calls.push(['close',id,r.operation_id]),
         onJournal:r => calls.push(['journal',id,r.operation_id])
       });
@@ -190,6 +192,103 @@ def checks(page) -> None:
     assert page.locator("#second [data-ff-operation-receipt]").get_attribute("data-ff-operation-receipt") == "second-native"
 
 
+def modal_checks(browser) -> None:
+    page = browser.new_page(viewport={"width": 1000, "height": 800})
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    shell = '<body style="height:6000px"><button id="outside">Outside</button><iframe id="middle" src="/middle" style="height:5000px;width:900px"></iframe></body>'
+    middle = '<body style="height:5000px"><iframe id="supplier" src="/supplier" style="height:4000px;width:850px"></iframe></body>'
+    source = '<body style="height:4000px"><button id="confirm" style="margin-top:1600px">Confirm</button><div id="receipt"></div></body>'
+    page.route("http://operator.test/**", lambda route: route.fulfill(status=200,content_type="text/html",body={"/shell":shell,"/middle":middle,"/supplier":source}[urlparse(route.request.url).path]))
+    page.goto("http://operator.test/shell")
+    page.add_style_tag(path=str(ROOT / "packages/adapters/templates/sheet_vitrina_v1_ui_system.css"))
+    child = page.frame(url="http://operator.test/supplier")
+    assert child is not None
+    child.add_script_tag(path=str(ASSET))
+    child.evaluate("""() => {window.saved={durable_saved:true,operation_id:'modal-native',accepted_at:'2026-10-10T10:00:00Z',state:'accepted',title_ru:'Document',journal_path:'/journal'};
+      window.modalClosed=[];window.journals=[];window.show=value=>OperatorAcceptance.renderReceipt(document.getElementById('receipt'),value,{onClose:r=>modalClosed.push(r.operation_id),onJournal:r=>journals.push(r.operation_id)});
+      document.getElementById('confirm').onclick=()=>{document.getElementById('confirm').disabled=true;show(saved);document.getElementById('confirm').disabled=false;};
+      window.scrollTo(0,1400);document.getElementById('confirm').focus({preventScroll:true});}""")
+    page.evaluate("window.scrollTo(0,2200)")
+    scroll = page.evaluate("scrollY")
+    child_scroll = child.evaluate("scrollY")
+    child.evaluate("document.getElementById('confirm').click()")
+    dialog=page.locator('dialog.ff-operation-popup[open]')
+    assert dialog.count()==1 and child.locator('dialog').count()==0
+    assert child.evaluate("document.getElementById('receipt').parentNode.tagName")=='BODY'
+    assert child.evaluate("document.getElementById('receipt').ownerDocument===document") is True
+    box=dialog.bounding_box();assert box and abs(box['x']+box['width']/2-500)<2 and abs(box['y']+box['height']/2-400)<2,box
+    child.evaluate("""() => {const node=document.getElementById('receipt');const list=document.createElement('ul');list.textContent='child-document: saved';node.append(list);const link=document.createElement('a');link.href='/next';link.textContent='Следующая операция';node.append(link);node.querySelector('.ff-operation-status').textContent='Source complete';}""")
+    from playwright.sync_api import expect
+    expect(dialog).to_contain_text('child-document: saved')
+    expect(dialog).to_contain_text('Source complete')
+    expect(dialog.get_by_role('link',name='Следующая операция')).to_have_attribute('href','/next')
+    assert page.evaluate("scrollY")==scroll and child.evaluate("scrollY")==child_scroll
+    # Source lookup and exact-operation refresh remain possible while the host
+    # dialog is open; one active popup, no extra submit/read is introduced.
+    dialog.get_by_role('link',name='Журнал операций').focus()
+    child.evaluate("show({...saved,state:'processing'})")
+    expect(dialog).to_contain_text('Обрабатывается')
+    assert page.evaluate("document.activeElement.textContent")=='Журнал операций'
+    dialog.get_by_role('button',name='Закрыть').focus()
+    child.evaluate("show({...saved,state:'delayed'})")
+    expect(dialog).to_contain_text('Обработка задерживается')
+    assert page.evaluate("document.activeElement.textContent")=='Закрыть'
+    child.evaluate("const link=document.createElement('a');link.href='/next';link.textContent='Следующая операция';document.getElementById('receipt').append(link)")
+    dialog.get_by_role('link',name='Следующая операция').focus()
+    child.evaluate("document.getElementById('receipt').querySelector('.ff-operation-status').textContent='Refreshed status'")
+    expect(dialog).to_contain_text('Refreshed status')
+    assert page.evaluate("document.activeElement.getAttribute('href')")=='/next'
+    child.evaluate("show({...saved,state:'processing'});const link=document.createElement('a');link.href='/next';link.textContent='Следующая операция';document.getElementById('receipt').append(link)")
+    expect(dialog.get_by_role('link',name='Следующая операция')).to_be_focused()
+    dialog.locator('.ff-operation-receipt').focus()
+    assert dialog.count()==1
+    page.keyboard.press('Tab')
+    assert page.evaluate("document.activeElement.textContent")=='Закрыть'
+    page.keyboard.press('Tab')
+    assert page.evaluate("document.activeElement.textContent")=='Журнал операций'
+    page.keyboard.press('Tab')
+    assert page.evaluate("document.activeElement.closest('dialog')!==null") is True
+    page.keyboard.press('Escape')
+    expect(dialog).to_have_count(0)
+    assert child.evaluate("modalClosed")==['modal-native']
+    assert child.evaluate("document.activeElement.id")=='confirm'
+    assert page.evaluate("scrollY")==scroll and child.evaluate("scrollY")==child_scroll
+    child.evaluate("show({...saved,state:'completed'})")
+    assert dialog.count()==0  # polling the dismissed operation cannot reopen it
+    child.evaluate("show({...saved,operation_id:'journal-native'})")
+    dialog.get_by_role('link',name='Журнал операций').click()
+    assert dialog.count()==0 and child.evaluate("journals")==['journal-native']
+    assert child.evaluate("modalClosed")==['modal-native']
+    child.evaluate("show({...saved,operation_id:'journal-native',state:'completed'})")
+    assert dialog.count()==0 and child.locator('#receipt').is_hidden()
+    child.evaluate("show({...saved,operation_id:'dismissed-B'})")
+    dialog.get_by_role('button',name='Закрыть').click()
+    child.evaluate("show({...saved,operation_id:'modal-native',state:'completed'})")
+    assert dialog.count()==0
+    child.evaluate("show({...saved,operation_id:'invalid-native'})")
+    child.evaluate("show({...saved,durable_saved:false})")
+    assert dialog.count()==0 and page.locator('.ff-operation-check').count()==0
+    child.evaluate("show({...saved,operation_id:'removed-frame-native'})")
+    page.evaluate("document.getElementById('middle').remove()")
+    expect(dialog).to_have_count(0)
+    # Existing native modal remains its owner; the common renderer never nests
+    # a second dialog or steals its caller's .showModal()/.close() lifecycle.
+    page.add_script_tag(path=str(ASSET))
+    page.evaluate("""() => {const d=document.createElement('dialog');d.id='native';document.body.append(d);OperatorAcceptance.renderReceipt(d,{durable_saved:true,operation_id:'native-dialog',accepted_at:'now',state:'accepted'},{onClose:()=>d.close()});d.showModal();}""")
+    assert page.locator('dialog[open]').count()==1 and page.locator('.ff-operation-popup').count()==0
+    page.locator('#native').get_by_role('button',name='Закрыть').click()
+    assert page.locator('dialog[open]').count()==0 and not errors,errors
+    template=(ROOT/'packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html').read_text()
+    actions=template.split('<div class="shell-actions">',1)[1].split('</div>',1)[0]
+    page.set_content('<div class="shell-actions">'+actions+'</div>')
+    link=page.locator('[data-operator-journal-link]')
+    expect(link).to_be_visible()
+    assert link.inner_text()=='Журнал операций' and link.get_attribute('href')=='/sheet-vitrina-v1/operations'
+    assert page.locator('.ff-operation-check').count()==0
+    page.close()
+
+
 def main() -> None:
     errors = []
     requests = []
@@ -204,6 +303,7 @@ def main() -> None:
             page.goto("http://operator.test/forms")
             page.add_script_tag(path=str(ASSET))
             checks(page)
+            modal_checks(browser)
             assert not errors, errors
             assert requests == [("GET", "http://operator.test/forms")], requests
         finally:

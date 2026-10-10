@@ -5884,6 +5884,7 @@
       </nav>
       <div class="shell-actions">
         __SHEET_VITRINA_V1_FINANCE_NAVIGATION_LINK__
+        <a class="shell-logout-link" href="/sheet-vitrina-v1/operations" data-operator-journal-link>Журнал операций</a>
         <button class="shell-logout-link" type="button" data-unified-tab-button="instructions" hidden disabled aria-selected="false" aria-disabled="true">Инструкции</button>
         <button class="shell-logout-link" type="button" data-unified-tab-button="settings" hidden disabled aria-selected="false" aria-disabled="true">Настройки</button>
         <a class="shell-logout-link" data-logout-link href="/logout">Выйти</a>
@@ -26517,7 +26518,7 @@
         }).join("") : '<p class="research-result-note" style="padding:12px">Лог пока пуст.</p>';
       }
       if (sppTestErrorNode) sppTestErrorNode.textContent = state.prices.sppTest.error || "";
-      if(sppTestAcceptanceNode){sppTestAcceptanceNode.replaceChildren();if(state.prices.sppTest.acceptance)OperatorAcceptance.renderReceipt(sppTestAcceptanceNode,state.prices.sppTest.acceptance);}
+      if(sppTestAcceptanceNode){sppTestAcceptanceNode.replaceChildren();if(state.prices.sppTest.acceptance)OperatorAcceptance.renderReceipt(sppTestAcceptanceNode,state.prices.sppTest.acceptance,{mode:"inline"});}
       if(sppTestReadButton){sppTestReadButton.hidden=!state.prices.sppTest.pending;sppTestReadButton.disabled=state.prices.sppTest.statusLoading||state.prices.sppTest.startLoading;}
       if(sppTestNewButton){const receipt=state.prices.sppTest.acceptance;const terminal=receipt?.interrupted_before_write===true||job.status==="preflight_rejected"||["complete","failed","interrupted_restored"].includes(job.status)&&receipt?.restoration_confirmed===true;sppTestNewButton.hidden=!(state.prices.sppTest.pending&&receipt&&terminal);sppTestNewButton.disabled=state.prices.sppTest.statusLoading||state.prices.sppTest.startLoading;}
     }
@@ -27087,7 +27088,7 @@
     function renderExternalOperation(container,result,onClose) {
       if (!result || !window.OperatorAcceptance) return;
       const node=document.createElement("div");container.appendChild(node);
-      if (result.acceptance) OperatorAcceptance.renderReceipt(node,result.acceptance,{onClose:onClose});
+      if (result.acceptance) OperatorAcceptance.renderReceipt(node,result.acceptance,{mode:"inline",onClose:onClose});
       else OperatorAcceptance.renderState(node,result);
       if(result.native_rejection_reason){const reason=document.createElement("p");reason.className="ff-pool-note";reason.textContent=String(result.native_rejection_reason);node.appendChild(reason);}
     }
@@ -29690,7 +29691,7 @@
       const view = Object.assign({}, operation);
       if (!Array.isArray(view.fields)) view.fields=Array.from(operationSummary(view).children).map(function(row){return {label:row.querySelector("dt").textContent,value:row.querySelector("dd").textContent};});
       view.journal_path="/sheet-vitrina-v1/operations?operation_id="+encodeURIComponent(view.operation_id);
-      window.OperatorAcceptance.renderReceipt(nodes.workflow, view, {onClose:closeModal});
+      window.OperatorAcceptance.renderReceipt(nodes.workflow, view, {mode:"inline",onClose:closeModal});
     }
     function renderOverheadUnknown(id) {
       nodes.statusToolbar.hidden = true; clear(nodes.workflow); nodes.workflow.hidden = false;

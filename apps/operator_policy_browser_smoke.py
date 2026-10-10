@@ -4,10 +4,19 @@ import json,sys
 from urllib.parse import urlsplit
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect
 from apps.sheet_vitrina_v1_proxy_v4_settings_browser_smoke import _v3_payload,_v4_payload
 from packages.adapters.registry_upload_http_entrypoint import (_render_sheet_vitrina_settings_ui,_render_sheet_vitrina_web_vitrina_ui,DEFAULT_CALCULATION_PARAMETERS_PATH,DEFAULT_CALCULATION_PARAMETERS_PREVIEW_PATH,DEFAULT_PROXY_V4_PARAMETERS_PATH,DEFAULT_PROXY_V4_PARAMETERS_PREVIEW_PATH)
 BASE='http://127.0.0.1:8199'
 READ='/v1/sheet-vitrina-v1/settings/policy-operations/'
+
+def close_verified_policy_receipt(page,identity):
+    """Acknowledge only the recovered same-operation receipt before proceeding."""
+    popup=page.locator('dialog.ff-operation-popup[open]')
+    expect(popup.locator('#policyAcceptance [data-ff-operation-receipt]')).to_have_attribute('data-ff-operation-receipt',identity)
+    expect(popup.locator('.ff-operation-check')).to_be_visible()
+    popup.get_by_role('button',name='Закрыть',exact=True).click()
+    expect(popup).to_have_count(0)
 
 def main():
     with sync_playwright() as pw:
@@ -45,6 +54,7 @@ def main():
         assert page.locator('#proxyV4HistoryRows').inner_text().find('operator_tax')==-1
         first_id=posts[0][1]['_operator_request_id'];assert page.locator('#policyAcceptance .ff-operation-link').get_attribute('href')=='/sheet-vitrina-v1/operations?operation_id='+first_id;assert page.evaluate("JSON.parse(localStorage.getItem('wbc.policy.operations.actor-A.proxy_v4_tax'))")==[first_id]
         page.locator('#policyAcceptance button').filter(has_text='Закрыть').click();page.reload();page.wait_for_selector('#policyAcceptance .ff-operation-check');assert len(posts)==1
+        close_verified_policy_receipt(page,first_id)
         # Foreign explicit domain in POST and GET cannot paint green or permit a new POST.
         context.clear_cookies();page.evaluate('localStorage.clear()');mode.update(lose=False,foreign=True)
         page.goto(BASE+'/settings#user-directory');page.wait_for_function("document.documentElement.dataset.settingsReady==='true'")
@@ -52,10 +62,12 @@ def main():
         page.get_by_role('button',name='Проверить сохранение',exact=True).wait_for();assert page.locator('#policyAcceptance .ff-operation-check').count()==0
         page.locator('#saveProxyV4TaxButton').click();page.wait_for_timeout(50);assert len(posts)==2
         mode['foreign']=False;page.get_by_role('button',name='Проверить сохранение',exact=True).click();page.wait_for_selector('#policyAcceptance .ff-operation-check');assert len(posts)==2
+        close_verified_policy_receipt(page,posts[-1][1]['_operator_request_id'])
         # New host, URL routing hint, actor-bound GET only, and safe receipt text.
         second_id=posts[-1][1]['_operator_request_id'];page.evaluate('localStorage.clear()')
         page.goto(BASE+'/settings?policy_operation_id='+second_id+'&policy_kind=proxy_v4_tax#user-directory');page.wait_for_selector('#policyAcceptance .ff-operation-check');assert len(posts)==2
         assert page.locator('#policyAcceptance img').count()==0
+        close_verified_policy_receipt(page,second_id)
         # Component path also covers legacy numeric operands, unknown reload, rejected source, and incident family.
         page.evaluate("""() => { window.box=document.createElement('div');document.body.appendChild(box);window.leaf=OperatorPolicy.create({policy_operations_path:'/v1/sheet-vitrina-v1/settings/policy-operations/',operator_policy_actor_scope:'isolated'},box,['legacy_proxy','wb_incident_policy']); }""")
         mode.update(lose=True,unknown=True)
