@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import unquote
-import json,sqlite3,sys,unittest
+import json,sqlite3,sys,time,unittest
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application import operator_business_settings as source,operator_operations as journal
@@ -169,7 +169,9 @@ class SettingsTests(unittest.TestCase):
                 args=['sku_management',path,dict(base_revision=settings['revision'],forecast=settings['forecast'],table=settings['table']),settings['operator_scope']]
                 run='args=>{window.settingsOutcome=null;saveNativeBusinessSettings(...args).then(value=>window.settingsOutcome={ok:true,value},error=>window.settingsOutcome={error:error.message});}'
                 first.evaluate(run,args);first.wait_for_function('window.settingsOutcome===null')
-                first.wait_for_timeout(100)
+                # Wait for the native commit, not a fixed browser scheduling delay.
+                deadline=time.monotonic()+30
+                while not held and time.monotonic()<deadline:first.wait_for_timeout(25)
                 self.assertEqual(len(held),1);identity=posts[0]['operation_id']
                 second.evaluate(run,args);second.wait_for_timeout(100)
                 self.assertIsNone(second.evaluate('window.settingsOutcome'));self.assertEqual(len(posts),1)
