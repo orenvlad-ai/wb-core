@@ -26201,7 +26201,19 @@
     function renderSppTestPriceFields() {
       if (!sppTestPriceFieldsNode) return;
       const count = Math.max(1, Math.min(6, Number(state.prices.sppTest.priceCount || 1)));
+      const nmId = String(state.prices.sppTest.selectedNmId || "");
       if (sppTestPriceCountNode) sppTestPriceCountNode.value = String(count);
+      const fields = Array.from(sppTestPriceFieldsNode.querySelectorAll("[data-spp-test-price-index]"));
+      if (sppTestPriceFieldsNode.dataset.nmId === nmId && fields.length === count
+          && fields.every(function(field, index) { return field.getAttribute("data-spp-test-price-index") === String(index); })) {
+        // Buyer/status replies must retain the actual input and its browser selection.
+        fields.forEach(function(field, index) {
+          const value = String(state.prices.sppTest.prices[index] || "");
+          if (document.activeElement !== field && field.value !== value) field.value = value;
+        });
+        return;
+      }
+      sppTestPriceFieldsNode.dataset.nmId = nmId;
       sppTestPriceFieldsNode.innerHTML = Array.from({length: count}, function(_, index) {
         const value = String(state.prices.sppTest.prices[index] || "");
         return '<label class="spp-test-field">Цена ' + String(index + 1)
