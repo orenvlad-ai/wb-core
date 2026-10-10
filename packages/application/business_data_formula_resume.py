@@ -13,7 +13,10 @@ from pathlib import Path
 import re
 import shlex
 import stat
-from datetime import datetime
+import selectors
+import subprocess
+import time
+from datetime import datetime, timezone
 
 from packages.application import business_data_maintenance_pause as pause
 from packages.application import business_data_deploy_protection as deploy
@@ -33,6 +36,15 @@ EPOCH = r'wbc0069k16-reviewed-native-v1:[0-9a-f]{64}'
 PIN = re.compile(r'--formula-epoch (' + EPOCH + r')(?=\s|;|$)')
 CONFIG_PROPERTIES = ('FragmentPath', 'DropInPaths', 'ExecStart', 'Triggers', 'Persistent',
     'TimersCalendar', 'TimersMonotonic', 'AccuracyUSec', 'RandomizedDelayUSec', 'RemainAfterElapse')
+
+BUYER_UNIT = 'wb-core-buyer-authenticated-collect.service'
+# Reviewed installed base e47c7aa78b48a3cecb6f45506bab42ee46859d95.
+# Formula pins alone do not prove that this CLI is guarded before main().
+BUYER_GUARD_SOURCES = {
+    'apps/wb_buyer_authenticated_collect.py': '62b1cf880bcfb1ef1d027502fd8da3f605f9fa78c5aa65458a1cfbbfa2d4624a',
+    'packages/application/business_data_procedure_admission.py': '3048383340b37cbb56665f6cc06cb61de2b7ac390d2b929275eca394dbbd7af0',
+    'packages/application/business_data_write_barrier.py': 'f39e27d2c9f54812a565bc670fd79ea5132552caf8c82d9bc4360d2d408bb116',
+}
 
 
 def _validate_duration(value):
@@ -366,6 +378,226 @@ def _delta(baseline, current, app, unit_directory, epoch):
         old_unit_digest=pause.fingerprint(before), new_unit_digest=pause.fingerprint(after))
 
 
+def _buyer_native_read(command):
+    """One native read, bounded in bytes and elapsed time; never retry."""
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    data = bytearray()
+    deadline = time.monotonic() + 5
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise RuntimeError('formula resume buyer journal timeout')
+                part = os.read(process.stdout.fileno(), 4096)
+                if not part:
+                    break
+                data.extend(part)
+                if len(data) > 65536:
+                    raise RuntimeError('formula resume buyer journal exceeds bound')
+        if process.wait(timeout=max(0.001, deadline - time.monotonic())) != 0:
+            raise RuntimeError('formula resume buyer journal read failed')
+        return bytes(data)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=1)
+        process.stdout.close()
+
+
+def _buyer_journal(boot_id, start, stop):
+    return _buyer_native_read(['/usr/bin/journalctl', '--no-pager', '--output=json', '--all', '-n', '5',
+        '--boot=' + boot_id, '--unit=' + BUYER_UNIT,
+        '--since=@' + str(start), '--until=@' + str(stop + 1),
+        '--output-fields=MESSAGE,UNIT,_PID,_SYSTEMD_UNIT,_BOOT_ID,_SYSTEMD_INVOCATION_ID,__REALTIME_TIMESTAMP'])
+
+
+def _buyer_invocation():
+    result = _buyer_native_read(['/usr/bin/systemctl', 'show', BUYER_UNIT, '--property=InvocationID', '--no-pager'])
+    if not re.fullmatch(rb'InvocationID=[0-9a-f]{32}\n?', result):
+        raise RuntimeError('formula resume buyer invocation is unproven')
+    return result.decode().strip().split('=', 1)[1]
+
+
+def _buyer_reset_terminal():
+    """Independent native terminal identity when the ExecStart tail is fully reset."""
+    raw = _buyer_native_read(['/usr/bin/systemctl', 'show', BUYER_UNIT,
+        '--property=ExecMainPID,ExecMainStartTimestamp,ExecMainExitTimestamp,InvocationID', '--no-pager'])
+    try:
+        lines = raw.decode('ascii').splitlines()
+        fields = dict(line.split('=', 1) for line in lines)
+    except (UnicodeError, ValueError) as exc:
+        raise RuntimeError('formula resume buyer reset terminal is malformed') from exc
+    if (len(lines) != 4 or set(fields) != {'ExecMainPID', 'ExecMainStartTimestamp',
+            'ExecMainExitTimestamp', 'InvocationID'}
+            or re.fullmatch(r'[1-9][0-9]{0,9}', fields['ExecMainPID']) is None
+            or int(fields['ExecMainPID']) > 2147483647
+            or re.fullmatch(r'[0-9a-f]{32}', fields['InvocationID']) is None):
+        raise RuntimeError('formula resume buyer reset terminal identity differs')
+    for key in ('ExecMainStartTimestamp', 'ExecMainExitTimestamp'):
+        value = fields[key]
+        try:
+            parsed = datetime.strptime(value, '%a %Y-%m-%d %H:%M:%S UTC')
+            if parsed.strftime('%a %Y-%m-%d %H:%M:%S UTC') != value:
+                raise ValueError('noncanonical timestamp')
+        except ValueError as exc:
+            raise RuntimeError('formula resume buyer reset terminal timestamp differs') from exc
+    if fields['ExecMainExitTimestamp'][4:] < fields['ExecMainStartTimestamp'][4:]:
+        raise RuntimeError('formula resume buyer reset terminal order differs')
+    return fields
+
+
+def _buyer_guarded_completion(runtime, plan, old, current, systemd, activity_reader, proc_root):
+    """The sole semantic exception: a proven guarded buyer timer completion.
+
+    Preview/prepared never use it. The original failed pair is not restored;
+    the dated deviation is retained explicitly in the committed receipt.
+    """
+    state = load(runtime, plan['operation_id'])
+    held = barrier.barrier_status(runtime)
+    if (not state or state['plan'] != plan or state['phase'] not in {'restoring', 'committed'}
+            or not held.get('active') or held.get('phase') != 'restoring'
+            or not held.get('hold_confirmed') or held.get('window_kind') != 'maintenance_pause'
+            or held.get('window_id') != plan['window_id']
+            or held.get('plan_fingerprint') != plan['baseline_fingerprint']):
+        raise RuntimeError('formula resume buyer completion lacks original restoring authority')
+    original = old['hold_readback']['units'][BUYER_UNIT]
+    actual = current['units'][BUYER_UNIT]
+    props = actual['properties']
+    prior = original['properties']
+    if (plan['held_service_states'][BUYER_UNIT] != ['static', 'failed']
+            or prior.get('Result') != 'exit-code' or prior.get('ExecMainStatus') != '1'
+            or prior.get('ExecMainCode') != '1'
+            or [actual['is_enabled'], actual['is_active']] != ['static', 'inactive']
+            or any(props.get(k) != v for k, v in {
+                'ActiveState': 'inactive', 'SubState': 'dead', 'MainPID': '0',
+                'Result': 'success', 'ExecMainCode': '1', 'ExecMainStatus': '0'}.items())):
+        raise RuntimeError('formula resume buyer completion terminal state differs')
+    timer = BUYER_UNIT.removesuffix('.service') + '.timer'
+    for units in (plan['baseline']['units'], current['units']):
+        if [units[timer]['is_enabled'], units[timer]['is_active']] != ['enabled', 'active']:
+            raise RuntimeError('formula resume buyer original timer is not restored')
+    app, directory = Path(plan['app_dir']), Path(plan['unit_directory'])
+    if _bytes(directory / BUYER_UNIT) != _bytes(app / ('artifacts/registry_upload_http_entrypoint/systemd/' + BUYER_UNIT)):
+        raise RuntimeError('formula resume buyer fragment is not canonical')
+    for path, expected in BUYER_GUARD_SOURCES.items():
+        if _hash(_bytes(app / path, 16 * 1024 * 1024)) != expected:
+            raise RuntimeError('formula resume buyer admission source differs')
+    records = _loaded_records(props.get('ExecStart'), 'ExecStart')
+    if len(records) != 1 or records[0] != ('/usr/bin/python3',
+            '/usr/bin/python3 apps/wb_buyer_authenticated_collect.py --tick --runtime-dir ' + str(runtime), 'no'):
+        raise RuntimeError('formula resume buyer canonical command differs')
+    terminal = re.search(r' ; start_time=\[([^]]+)\] ; stop_time=\[([^]]+)\] ; pid=([1-9][0-9]*) ; code=exited ; status=0 \}$', props['ExecStart'])
+    reset_terminal = None
+    if terminal is None and props['ExecStart'].endswith(' ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }'):
+        reset_terminal = _buyer_reset_terminal()
+        terminal = (None, reset_terminal['ExecMainStartTimestamp'],
+            reset_terminal['ExecMainExitTimestamp'], reset_terminal['ExecMainPID'])
+    if terminal is None or props.get('ExecMainStartTimestamp') != terminal[1]:
+        raise RuntimeError('formula resume buyer terminal invocation differs')
+    parse = lambda value: datetime.strptime(value, '%a %Y-%m-%d %H:%M:%S UTC').replace(tzinfo=timezone.utc)
+    start, stop = int(parse(terminal[1]).timestamp()), int(parse(terminal[2]).timestamp())
+    if current['units'][timer]['properties'].get('LastTriggerUSec') != terminal[1]:
+        raise RuntimeError('formula resume buyer terminal timer trigger differs')
+    for key in ('started_at', 'confirmed_at'):
+        if datetime.fromisoformat(held[key].replace('Z', '+00:00')).timestamp() > start:
+            raise RuntimeError('formula resume buyer completion predates original barrier')
+    boot = _bytes(Path(proc_root) / 'sys/kernel/random/boot_id', 128).decode().strip()
+    if re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', boot) is None:
+        raise RuntimeError('formula resume buyer boot identity differs')
+    invocation = _buyer_invocation()
+    if reset_terminal is not None and reset_terminal['InvocationID'] != invocation:
+        raise RuntimeError('formula resume buyer reset invocation differs')
+    raw = _buyer_journal(boot.replace('-', ''), start, stop)
+    if not isinstance(raw, bytes) or len(raw) > 65536:
+        raise RuntimeError('formula resume buyer journal exceeds bound')
+    def unique_object(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError('duplicate journal key')
+            result[key] = value
+        return result
+    def reject_constant(value):
+        raise ValueError('non-JSON journal constant')
+    try:
+        events = [json.loads(line, object_pairs_hook=unique_object, parse_constant=reject_constant) for line in raw.splitlines()]
+    except (ValueError, UnicodeError) as exc:
+        raise RuntimeError('formula resume buyer journal is malformed') from exc
+    if len(events) != 4 or any(not isinstance(v, dict) for v in events):
+        raise RuntimeError('formula resume buyer complete unique journal invocation absent')
+    description = 'WB Core account-scoped buyer price observations'
+    messages = ['Starting ' + BUYER_UNIT + ' - ' + description + '...',
+        '{"status": "skipped_maintenance", "reason": "skipped_maintenance"}',
+        BUYER_UNIT + ': Deactivated successfully.', 'Finished ' + BUYER_UNIT + ' - ' + description + '.']
+    timestamps, monotonic, sequence = [], [], []
+    for index, event in enumerate(events):
+        service = index == 1
+        expected_keys = {'MESSAGE', '_BOOT_ID', '_PID', '_SYSTEMD_UNIT', '__REALTIME_TIMESTAMP',
+            '__CURSOR', '__MONOTONIC_TIMESTAMP', '__SEQNUM', '__SEQNUM_ID',
+            '_SYSTEMD_INVOCATION_ID' if service else 'UNIT'}
+        if set(event) != expected_keys or any(not isinstance(v, str) or len(v) > 2048 for v in event.values()):
+            raise RuntimeError('formula resume buyer journal selected shape differs')
+        cursor = re.fullmatch(r's=([0-9a-f]{32});i=([0-9a-f]{1,16});b=([0-9a-f]{32});m=([0-9a-f]{1,16});t=([0-9a-f]{1,16});x=([0-9a-f]{1,16})', event['__CURSOR'])
+        for key in ('__REALTIME_TIMESTAMP', '__MONOTONIC_TIMESTAMP', '__SEQNUM'):
+            if re.fullmatch('[0-9]{1,20}', event[key]) is None or int(event[key]) >= 1 << 64:
+                raise RuntimeError('formula resume buyer journal numeric identity differs')
+        if (cursor is None or cursor[1] != event['__SEQNUM_ID'] or cursor[3] != boot.replace('-', '')
+                or int(cursor[2], 16) != int(event['__SEQNUM'])
+                or int(cursor[4], 16) != int(event['__MONOTONIC_TIMESTAMP'])
+                or int(cursor[5], 16) != int(event['__REALTIME_TIMESTAMP'])):
+            raise RuntimeError('formula resume buyer journal cursor identity differs')
+        monotonic.append(int(event['__MONOTONIC_TIMESTAMP'])); sequence.append(int(event['__SEQNUM']))
+        timestamp = event.get('__REALTIME_TIMESTAMP')
+        if not isinstance(timestamp, str) or re.fullmatch('[0-9]{1,20}', timestamp) is None:
+            raise RuntimeError('formula resume buyer journal timestamp differs')
+        timestamp = int(timestamp); timestamps.append(timestamp)
+        if (not start * 1000000 <= timestamp < (stop + 1) * 1000000
+                or event.get('_BOOT_ID') != boot.replace('-', '')
+                or event.get('_PID') != (terminal[3] if service else '1')
+                or event.get('_SYSTEMD_UNIT') != (BUYER_UNIT if service else 'init.scope')
+                or (service and event.get('_SYSTEMD_INVOCATION_ID') != invocation)
+                or (not service and event.get('UNIT') != BUYER_UNIT)
+                or event.get('MESSAGE') != messages[index]):
+            raise RuntimeError('formula resume buyer journal native identity/outcome differs')
+    if (timestamps != sorted(set(timestamps)) or monotonic != sorted(set(monotonic))
+            or sequence != sorted(set(sequence)) or len({e['__SEQNUM_ID'] for e in events}) != 1):
+        raise RuntimeError('formula resume buyer journal invocation order differs')
+    if reset_terminal is not None and (timestamps[0] // 1000000 != start or timestamps[-1] // 1000000 != stop):
+        raise RuntimeError('formula resume buyer reset terminal journal bounds differ')
+    # A new timer invocation during the read cannot reuse the previous proof.
+    if (_buyer_invocation() != invocation or systemd.unit_state(BUYER_UNIT) != actual
+            or systemd.unit_state(timer) != current['units'][timer]
+            or barrier.barrier_status(runtime) != held):
+        raise RuntimeError('formula resume buyer journal readback changed')
+    # Journal transport may consume five seconds. Do not return the pre-read
+    # idle/control/unit sample if any other restored owner started meanwhile.
+    fresh = pause.readback(runtime, systemd=systemd,
+        activity_reader=activity_reader, proc_root=proc_root)
+    if (fresh['controls'] != plan['baseline']['controls'] or not fresh['admission']['ready']
+            or not fresh['admission']['idle'] or fresh['activity']['jobs']
+            or fresh['writer_processes'] or fresh['live_services']
+            or set(fresh['units']) != set(current['units'])
+            or fresh['units'][BUYER_UNIT] != actual):
+        raise RuntimeError('formula resume buyer post-journal idle/control proof changed')
+    for name, before in current['units'].items():
+        after = fresh['units'][name]
+        if ([before['is_enabled'], before['is_active']] != [after['is_enabled'], after['is_active']]
+                or not _same_unit_configuration(before, after)):
+            raise RuntimeError('formula resume buyer post-journal unit proof changed')
+    if reset_terminal is not None and _buyer_reset_terminal() != reset_terminal:
+        raise RuntimeError('formula resume buyer reset terminal readback changed')
+    current.clear(); current.update(fresh)
+    return dict(unit=BUYER_UNIT, original_pair=['static', 'failed'], observed_pair=['static', 'inactive'],
+        original_service_pair_restored=False, operation_id=plan['operation_id'],
+        window_id=plan['window_id'], baseline_fingerprint=plan['baseline_fingerprint'],
+        plan_fingerprint=plan['fingerprint'], expected_sha=plan['expected_sha'],
+        boot_id=boot, invocation_id=invocation, pid=terminal[3], start=terminal[1], stop=terminal[2],
+        journal_sha256=_hash(barrier._canonical_json(events).encode()),
+        journal_events=events, source_hashes=BUYER_GUARD_SOURCES)
+
+
 def _observe(runtime, plan, systemd, activity_reader, proc_root, *, final=False):
     old = pause.load_state(runtime)
     if (not old or old['window_id'] != plan['window_id'] or old['baseline'] != plan['baseline']
@@ -397,7 +629,10 @@ def _observe(runtime, plan, systemd, activity_reader, proc_root, *, final=False)
             if actual['is_enabled'] not in allowed_enabled or actual['is_active'] not in allowed_active:
                 raise RuntimeError('formula resume timer state is outside exact restore: ' + unit)
         elif [actual['is_enabled'], actual['is_active']] != held_services[unit]:
-            raise RuntimeError('formula resume held service enabled/activity differs: ' + unit)
+            if unit != BUYER_UNIT:
+                raise RuntimeError('formula resume held service enabled/activity differs: ' + unit)
+            current['guarded_service_completions'] = {
+                unit: _buyer_guarded_completion(runtime, plan, old, current, systemd, activity_reader, proc_root)}
     app, directory = Path(plan['app_dir']), Path(plan['unit_directory'])
     authority = _authority(runtime, plan['operation_id'], plan['window_id'], plan['expected_sha'], app, directory, systemd)
     if authority != plan['authority'] or _delta(plan['baseline'], current, app, directory, authority['new_epoch']) != plan['delta']:
@@ -441,6 +676,8 @@ def prove_committed(runtime, operation_id, *, systemd, activity_reader, proc_roo
         raise RuntimeError('formula resume committed transition is absent')
     old, current = _observe(runtime, state['plan'], systemd, activity_reader, proc_root, final=True)
     receipt = state.get('receipt') or {}
+    if receipt.get('guarded_service_completions', {}) != current.get('guarded_service_completions', {}):
+        raise RuntimeError('formula resume retained guarded service completion differs')
     if (receipt.get('schema_version') != RECEIPT_SCHEMA or receipt.get('status') != 'restored'
             or receipt.get('exact_target_state_restored') is not True or receipt.get('exact_prior_state_restored') is not False
             or receipt.get('operation_id') != operation_id or receipt.get('target_fingerprint') != state['plan']['fingerprint']
@@ -605,6 +842,8 @@ def apply(runtime_dir, *, reviewed_plan, expected_fingerprint, actor, reason,
                 baseline_fingerprint=plan['baseline_fingerprint'], target_fingerprint=plan['fingerprint'],
                 expected_sha=plan['expected_sha'], delta=plan['delta'], control_signature=pause.fingerprint(after['controls']),
                 units=after['units'], captured_at=pause.now_iso(), skipped_cycles_replayed=False)
+            if after.get('guarded_service_completions'):
+                state['receipt']['guarded_service_completions'] = after['guarded_service_completions']
             state['phase'] = 'committed'; _save(runtime, state, 'committed'); fault('committed')
         # A missing/released barrier cannot grant authority to finish partial work.
         state, old, current = prove_committed(runtime, plan['operation_id'], systemd=systemd,

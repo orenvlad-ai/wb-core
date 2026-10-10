@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Synthetic files/systemd only, using actual native pause/deploy/barrier APIs."""
 from copy import deepcopy
-from contextlib import contextmanager
-from datetime import timedelta
+from contextlib import contextmanager, redirect_stdout
+from datetime import datetime, timedelta, timezone
+import io
 import json
 import re
 from pathlib import Path
@@ -43,6 +44,9 @@ class FileSystemd(FakeSystemd):
         return super().disable_now(unit)
 
     def _run(self, args):
+        if args == ['show', formula.BUYER_UNIT, '--property=InvocationID']:
+            return SimpleNamespace(returncode=0, stdout='InvocationID=' +
+                self.states[formula.BUYER_UNIT]['properties']['InvocationID'] + '\n')
         if args[0] == 'show':
             value = self.states[args[1]]
             props = dict(value['properties'],UnitFileState=value['is_enabled'],ActiveState=value['is_active'])
@@ -67,6 +71,20 @@ class FormulaResumeTests(unittest.TestCase):
         (self.runtime / pause.POLICY_FILENAME).chmod(0o600)
         self.systemd = FileSystemd()
         self.proc = self.root / 'proc'; self.proc.mkdir()
+        guarded_buyer = self._testMethodName.startswith('test_guarded_buyer')
+        if guarded_buyer:
+            boot = self.proc / 'sys/kernel/random/boot_id'; boot.parent.mkdir(parents=True)
+            boot.write_text('11111111-2222-3333-4444-555555555555\n')
+            for relative in formula.BUYER_GUARD_SOURCES:
+                path = self.app / relative; path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((ROOT / relative).read_bytes())
+            native_read = formula._buyer_native_read
+            def read_native(command):
+                if command == ['/usr/bin/systemctl', 'show', formula.BUYER_UNIT, '--property=InvocationID', '--no-pager']:
+                    return self.systemd._run(['show', formula.BUYER_UNIT, '--property=InvocationID']).stdout.encode()
+                return native_read(command)
+            self.addCleanup(patch.stopall)
+            patch.object(formula, '_buyer_native_read', side_effect=read_native).start()
         # Real canonical artifact and complete native formula path set. A tiny
         # synthetic source delta models a reviewed deploy; no formula executes.
         contract = json.loads((ROOT / formula.CONTRACT_RELATIVE).read_bytes())
@@ -94,6 +112,13 @@ class FormulaResumeTests(unittest.TestCase):
         for unit, value in self.systemd.states.items():
             fragment = self.units / unit
             data = self.original_artifact if unit == formula.UNIT else b'[Unit]\nDescription=Synthetic ordinary unit\n'
+            if guarded_buyer and unit == formula.BUYER_UNIT:
+                data = (ROOT / ('artifacts/registry_upload_http_entrypoint/systemd/' + unit)).read_bytes().replace(
+                    b'/opt/wb-core-runtime/state', str(self.runtime).encode())
+                artifact = self.app / ('artifacts/registry_upload_http_entrypoint/systemd/' + unit)
+                artifact.write_bytes(data)
+                value.update(is_enabled='static', is_active='failed')
+                value['properties'].update(Result='exit-code', ExecMainCode='1', ExecMainStatus='1')
             fragment.write_bytes(data)
             value['properties'].update(FragmentPath=str(fragment), DropInPaths='', ExecStart='{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 apps/synthetic.py ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }')
             if unit.endswith('.timer'):
@@ -105,6 +130,8 @@ class FormulaResumeTests(unittest.TestCase):
             if unit == formula.UNIT:
                 exec_line = next(line for line in data.decode().splitlines() if line.startswith('ExecStart='))[10:]
                 value['properties']['ExecStart'] = '{ path=/usr/bin/python3 ; argv[]=' + exec_line + ' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }'
+            if guarded_buyer and unit == formula.BUYER_UNIT:
+                value['properties']['ExecStart'] = '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 apps/wb_buyer_authenticated_collect.py --tick --runtime-dir ' + str(self.runtime) + ' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }'
             if unit in {formula.UNIT, 'wb-core-sheet-vitrina-canary-restore.service'}:
                 value['properties']['ExecStart'] = value['properties']['ExecStart'].replace('start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0', 'start_time=[Thu 2026-10-08 19:31:08 UTC] ; stop_time=[Thu 2026-10-08 19:31:09 UTC] ; pid=2419611 ; code=exited ; status=0')
         self.dropin = self.units / (formula.UNIT + '.d') / '10-fixture.conf'
@@ -114,6 +141,8 @@ class FormulaResumeTests(unittest.TestCase):
             properties=dict(LoadState='loaded',MainPID='42',SubState='running'))
         from packages.application.business_data_schedule_profile import WAREHOUSE_TIMER
         self.systemd.states[WAREHOUSE_TIMER].update(is_enabled='enabled',is_active='active')
+        if guarded_buyer:
+            self.systemd.states[formula.BUYER_UNIT.replace('.service', '.timer')].update(is_enabled='enabled', is_active='active')
         self.options = dict(systemd=self.systemd,activity_reader=self.activity,proc_root=self.proc)
         self.pause_options = dict(**self.options,window_id='formula-pause-001',actor='test',reason='synthetic deploy')
         self.addCleanup(patch.stopall)
@@ -147,6 +176,355 @@ class FormulaResumeTests(unittest.TestCase):
         plan = plan or self.prepare()
         return formula.apply(self.runtime, reviewed_plan=plan, expected_fingerprint=plan['fingerprint'],
             **self.apply_options, **options)
+
+    def guarded_buyer_fixture(self):
+        plan = self.prepare()
+        timer = formula.BUYER_UNIT.replace('.service', '.timer')
+        with self.assertRaisesRegex(RuntimeError, 'synthetic buyer timer boundary'):
+            self.apply(plan, _fault=lambda p: (_ for _ in ()).throw(RuntimeError('synthetic buyer timer boundary'))
+                if p == 'timer:start:' + timer else None)
+        self.assertEqual(formula.load(self.runtime, OP)['phase'], 'restoring')
+        start = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=1)
+        stop = start + timedelta(seconds=1)
+        fmt = lambda value: value.strftime('%a %Y-%m-%d %H:%M:%S UTC')
+        props = self.systemd.states[formula.BUYER_UNIT]['properties']
+        props.update(ActiveState='inactive', SubState='dead', MainPID='0', Result='success',
+            ExecMainCode='1', ExecMainStatus='0', ExecMainStartTimestamp=fmt(start), InvocationID='a' * 32)
+        props['ExecStart'] = re.sub(r' ; start_time=.*', ' ; start_time=[' + fmt(start) +
+            '] ; stop_time=[' + fmt(stop) + '] ; pid=2668333 ; code=exited ; status=0 }', props['ExecStart'])
+        self.systemd.states[formula.BUYER_UNIT]['is_active'] = 'inactive'
+        self.systemd.states[timer]['properties']['LastTriggerUSec'] = fmt(start)
+        description = 'WB Core account-scoped buyer price observations'
+        messages = ['Starting ' + formula.BUYER_UNIT + ' - ' + description + '...',
+            '{"status": "skipped_maintenance", "reason": "skipped_maintenance"}',
+            formula.BUYER_UNIT + ': Deactivated successfully.', 'Finished ' + formula.BUYER_UNIT + ' - ' + description + '.']
+        events = []
+        for i, micros in enumerate((10000, 1300000, 1400000, 1500000)):
+            event = dict(MESSAGE=messages[i], _BOOT_ID='11111111222233334444555555555555',
+                _PID='2668333' if i == 1 else '1', _SYSTEMD_UNIT=formula.BUYER_UNIT if i == 1 else 'init.scope',
+                __REALTIME_TIMESTAMP=str(int(start.timestamp()) * 1000000 + micros))
+            event.update(__SEQNUM_ID='c' * 32, __SEQNUM=str(i + 1), __MONOTONIC_TIMESTAMP=str(micros))
+            event['__CURSOR'] = 's=' + 'c' * 32 + ';i=' + format(i + 1, 'x') + ';b=' + event['_BOOT_ID'] + ';m=' + format(micros, 'x') + ';t=' + format(int(event['__REALTIME_TIMESTAMP']), 'x') + ';x=1'
+            if i == 1:event['_SYSTEMD_INVOCATION_ID'] = 'a' * 32
+            else:event['UNIT'] = formula.BUYER_UNIT
+            events.append(event)
+        return plan, events
+
+    def buyer_journal_bytes(self, events):
+        return ('\n'.join(json.dumps(v) for v in events) + '\n').encode()
+
+    def test_guarded_buyer_native_guard_before_main_and_same_plan_resume(self):
+        plan, events = self.guarded_buyer_fixture()
+        from packages.application.business_data_procedure_admission import guarded_cli
+        called = []
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(guarded_cli(lambda: called.append('main'), argv=['--runtime-dir', str(self.runtime)]), 0)
+        self.assertEqual(called, [])
+        self.assertEqual(output.getvalue().strip(), events[1]['MESSAGE'])
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            receipt = self.apply(plan)
+        deviation = receipt['guarded_service_completions'][formula.BUYER_UNIT]
+        self.assertFalse(deviation['original_service_pair_restored'])
+        self.assertEqual(deviation['original_pair'], ['static', 'failed'])
+        self.assertEqual(deviation['observed_pair'], ['static', 'inactive'])
+        self.assertEqual(formula.load(self.runtime, OP)['plan'], plan)
+        self.assertEqual(pause.load_state(self.runtime)['baseline'], self.baseline)
+        self.assertEqual(pause.load_state(self.runtime)['restore_readback'], receipt)
+        self.assertEqual(formula.prove_recorded_release(formula.load(self.runtime, OP), barrier._load_state(self.runtime)), receipt)
+
+    def test_guarded_buyer_preview_and_prepared_remain_strict(self):
+        plan, events = self.guarded_buyer_fixture()
+        state = formula.load(self.runtime, OP)
+        state['phase'] = 'prepared'; formula._save(self.runtime, state, 'synthetic_prepared_boundary')
+        with patch.object(formula, '_buyer_journal', side_effect=AssertionError('must not read witness before authority')):
+            with self.assertRaisesRegex(RuntimeError, 'original restoring authority'):
+                formula._observe(self.runtime, plan, **self.options)
+        state['phase'] = 'restoring'; formula._save(self.runtime, state, 'synthetic_restoring_boundary')
+        with self.assertRaises(RuntimeError):self.prepare()
+
+    def test_guarded_buyer_missing_stale_foreign_malformed_journal_refuses(self):
+        plan, events = self.guarded_buyer_fixture()
+        cases = [[], events[:3], events + [events[-1]], [None], ['bad']]
+        for key, value in [('_PID', '2668334'), ('_BOOT_ID', 'b' * 32),
+                ('_SYSTEMD_UNIT', 'foreign.service'), ('_SYSTEMD_INVOCATION_ID', 'b' * 32),
+                ('__REALTIME_TIMESTAMP', '1'), ('MESSAGE', '{"status":"success"}')]:
+            altered = deepcopy(events); altered[1][key] = value; cases.append(altered)
+        swapped = deepcopy(events); swapped[2], swapped[3] = swapped[3], swapped[2]; cases.append(swapped)
+        for key in ('__CURSOR', '__MONOTONIC_TIMESTAMP', '__SEQNUM', '__SEQNUM_ID'):
+            altered = deepcopy(events); altered[1].pop(key); cases.append(altered)
+        for key, value in [('extra', 'unknown'), ('__CURSOR', 'unknown'), ('__SEQNUM', '999'),
+                ('__MONOTONIC_TIMESTAMP', '999'), ('__SEQNUM_ID', 'd' * 32),
+                ('__CURSOR', None), ('__CURSOR', []), ('__SEQNUM', float('nan'))]:
+            altered = deepcopy(events); altered[1][key] = value; cases.append(altered)
+        raw = self.buyer_journal_bytes(events)
+        duplicate = raw.replace(b'"_PID": "2668333"', b'"_PID": "2668333", "_PID": "2668333"')
+        raws = [self.buyer_journal_bytes(v) for v in cases] + [b'not-json', b'x' * 65537, duplicate]
+        before = deepcopy(formula.load(self.runtime, OP)); calls = list(self.systemd.calls)
+        for raw in raws:
+            with self.subTest(raw=raw[:80]), patch.object(formula, '_buyer_journal', return_value=raw):
+                with self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
+        with patch.object(formula, '_buyer_journal', side_effect=TimeoutError('synthetic native read timeout')):
+            with self.assertRaises(TimeoutError):formula._observe(self.runtime, plan, **self.options)
+        self.assertEqual(formula.load(self.runtime, OP), before)
+        self.assertEqual(self.systemd.calls, calls)
+
+    def test_guarded_buyer_terminal_source_config_and_timer_refusals(self):
+        plan, events = self.guarded_buyer_fixture()
+        props = self.systemd.states[formula.BUYER_UNIT]['properties']
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            for key, value in [('MainPID', '9'), ('SubState', 'running'), ('Result', 'exit-code'),
+                    ('ExecMainStatus', '1'), ('ExecMainCode', '2'),
+                    ('ExecMainStartTimestamp', 'Thu 2026-10-08 19:00:00 UTC'), ('InvocationID', 'b' * 32)]:
+                original = props.get(key)
+                with self.subTest(key=key):
+                    props[key] = value
+                    with self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
+                    props[key] = original
+            self.systemd.states[formula.BUYER_UNIT]['is_active'] = 'active'
+            with self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
+            self.systemd.states[formula.BUYER_UNIT]['is_active'] = 'inactive'
+            timer = formula.BUYER_UNIT.replace('.service', '.timer')
+            self.systemd.states[timer]['is_active'] = 'inactive'
+            with self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
+            self.systemd.states[timer]['is_active'] = 'active'
+            for relative in formula.BUYER_GUARD_SOURCES:
+                path = self.app / relative; original = path.read_bytes(); path.write_bytes(original + b'\n# foreign\n')
+                with self.assertRaisesRegex(RuntimeError, 'admission source'):formula._observe(self.runtime, plan, **self.options)
+                path.write_bytes(original)
+            original = props['ExecStart']; props['ExecStart'] = original.replace('--tick', '--run-now')
+            with self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
+            props['ExecStart'] = original
+        self.assertEqual(formula.load(self.runtime, OP)['plan'], plan)
+
+    def test_guarded_buyer_crash_after_commit_same_invocation_finishes_without_resend(self):
+        plan, events = self.guarded_buyer_fixture()
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'synthetic guarded committed crash'):
+                self.apply(plan, _fault=lambda p: (_ for _ in ()).throw(RuntimeError('synthetic guarded committed crash')) if p == 'committed' else None)
+            calls = list(self.systemd.calls)
+        reordered = [dict(reversed(list(v.items()))) for v in events]
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(reordered)):
+            self.apply(plan)
+        self.assertEqual(self.systemd.calls, calls)
+        self.assertEqual(formula.load(self.runtime, OP)['phase'], 'released')
+
+    def test_guarded_buyer_original_control_activity_process_and_owner_guards(self):
+        plan, events = self.guarded_buyer_fixture()
+        calls = list(self.systemd.calls)
+        state = deepcopy(formula.load(self.runtime, OP))
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            for target, value in [('admission_idle', {'ready':False, 'idle':False}),
+                    ('_writer_processes', [{'pid':'synthetic'}])]:
+                with patch.object(pause, target, return_value=value):
+                    with self.assertRaisesRegex(RuntimeError, 'raw controls/idle'):formula._observe(self.runtime, plan, **self.options)
+            activity = self.activity(); activity['jobs'] = [{'job_id':'synthetic-live'}]
+            with self.assertRaisesRegex(RuntimeError, 'raw controls/idle'):
+                formula._observe(self.runtime, plan, self.systemd, lambda:activity, self.proc)
+            paths = [self.runtime / pause.POLICY_FILENAME, self.app / '.wb-core-runtime-sha',
+                self.app / next(iter(plan['authority']['formula_code_hashes']))]
+            for path in paths:
+                original = path.read_bytes(); path.write_bytes(original + b'\n# foreign\n')
+                with self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
+                path.write_bytes(original)
+            owner_path = self.runtime / deploy.FILENAME; original = owner_path.read_bytes()
+            owner = deploy.load(self.runtime); owner['operation_id'] = 'foreign-owner'; deploy._save(self.runtime, owner)
+            with self.assertRaisesRegex(RuntimeError, 'same completed canonical deploy owner'):formula._observe(self.runtime, plan, **self.options)
+            owner_path.write_bytes(original)
+        self.assertEqual(formula.load(self.runtime, OP), state)
+        self.assertEqual(self.systemd.calls, calls)
+        self.assertTrue(barrier.barrier_status(self.runtime)['active'])
+
+    def test_guarded_buyer_idle_job_process_and_unit_drift_during_journal_refuses(self):
+        plan, events = self.guarded_buyer_fixture()
+        original = pause.readback
+        current = original(self.runtime, **self.options)
+        other = next(u for u in current['units'] if u.endswith('.service') and u != formula.BUYER_UNIT)
+        variants = []
+        for key, value in [('admission', {'ready':True, 'idle':False}),
+                ('writer_processes', [{'pid':'synthetic'}]), ('live_services', [other])]:
+            fresh = deepcopy(current); fresh[key] = value; variants.append(fresh)
+        fresh = deepcopy(current); fresh['activity']['jobs'] = [{'job_id':'new-job'}]; variants.append(fresh)
+        fresh = deepcopy(current); fresh['controls']['owner_policy'] = 'foreign'; variants.append(fresh)
+        fresh = deepcopy(current); fresh['units'][other]['is_active'] = 'active'; variants.append(fresh)
+        for fresh in variants:
+            with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)), \
+                 patch.object(pause, 'readback', side_effect=[deepcopy(current), fresh]):
+                with self.assertRaisesRegex(RuntimeError, 'post-journal'):
+                    formula._observe(self.runtime, plan, **self.options)
+        self.assertEqual(formula.load(self.runtime, OP)['plan'], plan)
+        self.assertTrue(barrier.barrier_status(self.runtime)['active'])
+
+    def test_guarded_buyer_new_invocation_after_commit_refuses_old_receipt(self):
+        plan, events = self.guarded_buyer_fixture()
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'synthetic guarded committed crash'):
+                self.apply(plan, _fault=lambda p: (_ for _ in ()).throw(RuntimeError('synthetic guarded committed crash')) if p == 'committed' else None)
+        state = deepcopy(formula.load(self.runtime, OP)); calls = list(self.systemd.calls)
+        self.systemd.states[formula.BUYER_UNIT]['properties']['InvocationID'] = 'b' * 32
+        events[1]['_SYSTEMD_INVOCATION_ID'] = 'b' * 32
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'retained guarded service completion differs'):
+                self.apply(plan)
+        self.assertEqual(formula.load(self.runtime, OP), state)
+        self.assertEqual(self.systemd.calls, calls)
+        self.assertTrue(barrier.barrier_status(self.runtime)['active'])
+
+    def test_guarded_buyer_native_journal_transport_byte_timeout_and_exit_bounds(self):
+        # Real private child pipes exercise the native bounded transport; the
+        # captured journalctl argv never reaches systemd/journald on this host.
+        original = formula.subprocess.Popen
+        commands = []
+        def child(code):
+            def spawn(command, **options):
+                commands.append(command)
+                return original([sys.executable, '-c', code], **options)
+            return spawn
+        with patch.object(formula.subprocess, 'Popen', side_effect=child('print("bounded")')):
+            self.assertEqual(formula._buyer_journal('a' * 32, 1, 2), b'bounded\n')
+        for code, reason in [('import sys;sys.stdout.write("x"*65537)', 'exceeds bound'),
+                ('raise SystemExit(1)', 'read failed')]:
+            with patch.object(formula.subprocess, 'Popen', side_effect=child(code)):
+                with self.assertRaisesRegex(RuntimeError, reason):formula._buyer_journal('a' * 32, 1, 2)
+        with patch.object(formula.subprocess, 'Popen', side_effect=child('import time;time.sleep(10)')), \
+             patch.object(formula.time, 'monotonic', side_effect=[0, 6]):
+            with self.assertRaisesRegex(RuntimeError, 'timeout'):formula._buyer_journal('a' * 32, 1, 2)
+        self.assertTrue(all(c[:6] == ['/usr/bin/journalctl', '--no-pager', '--output=json', '--all', '-n', '5'] for c in commands))
+
+    def buyer_reset_fields(self):
+        props = self.systemd.states[formula.BUYER_UNIT]['properties']
+        terminal = re.search(r' ; start_time=\[([^]]+)\] ; stop_time=\[([^]]+)\] ; pid=([1-9][0-9]*) ; code=exited ; status=0 \}$', props['ExecStart'])
+        return dict(ExecMainPID=terminal[3], ExecMainStartTimestamp=terminal[1],
+            ExecMainExitTimestamp=terminal[2], InvocationID=props['InvocationID'])
+
+    @contextmanager
+    def buyer_reset_native_read(self, payload):
+        native_read = formula._buyer_native_read
+        command = ['/usr/bin/systemctl', 'show', formula.BUYER_UNIT,
+            '--property=ExecMainPID,ExecMainStartTimestamp,ExecMainExitTimestamp,InvocationID', '--no-pager']
+        with patch.object(formula, '_buyer_native_read', side_effect=lambda args:
+                payload() if args == command else native_read(args)):
+            yield
+
+    def test_guarded_buyer_canonical_enable_reset_terminal_resumes_same_receipt(self):
+        plan, events = self.guarded_buyer_fixture()
+        fields = self.buyer_reset_fields()
+        native_run = self.systemd._run
+        def enable_and_reload(args):
+            result = native_run(args)
+            if args[0] == 'enable':
+                props = self.systemd.states[formula.BUYER_UNIT]['properties']
+                props['ExecStart'] = re.sub(r' ; start_time=.*',
+                    ' ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }', props['ExecStart'])
+            return result
+        from packages.application.business_data_schedule_profile import WAREHOUSE_TIMER
+        self.systemd.states[WAREHOUSE_TIMER].update(is_enabled='disabled', is_active='inactive')
+        payload = lambda: ('\n'.join(k + '=' + v for k, v in fields.items()) + '\n').encode()
+        with self.buyer_reset_native_read(payload), patch.object(self.systemd, '_run', side_effect=enable_and_reload), \
+                patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            receipt = self.apply(plan)
+            proof = receipt['guarded_service_completions'][formula.BUYER_UNIT]
+            self.assertEqual([proof[k] for k in ('pid', 'start', 'stop')],
+                [fields[k] for k in ('ExecMainPID', 'ExecMainStartTimestamp', 'ExecMainExitTimestamp')])
+            self.assertFalse(proof['original_service_pair_restored'])
+            self.assertIn(('enable', WAREHOUSE_TIMER), self.systemd.calls)
+            calls = list(self.systemd.calls)
+            self.assertEqual(self.apply(plan), receipt)
+            self.assertEqual(self.systemd.calls, calls)
+
+    def test_guarded_buyer_reset_terminal_native_fields_fail_closed(self):
+        plan, events = self.guarded_buyer_fixture()
+        fields = self.buyer_reset_fields()
+        props = self.systemd.states[formula.BUYER_UNIT]['properties']
+        props['ExecStart'] = re.sub(r' ; start_time=.*',
+            ' ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }', props['ExecStart'])
+        variants = []
+        for key in fields:
+            missing = dict(fields); missing.pop(key); variants.append(missing)
+        for key, value in [('ExecMainPID', '0'), ('ExecMainPID', '2671797'),
+                ('ExecMainPID', '2147483648'), ('ExecMainStartTimestamp', 'n/a'),
+                ('ExecMainStartTimestamp', 'Sat 2026-10-10 00:10:08 UTC'),
+                ('ExecMainExitTimestamp', 'Thu 2020-10-08 00:00:00 UTC'),
+                ('ExecMainExitTimestamp', 'bad'), ('InvocationID', 'b' * 32), ('InvocationID', '')]:
+            changed = dict(fields); changed[key] = value; variants.append(changed)
+        variants.append(dict(fields, Unexpected='1'))
+        variants.append(dict(fields, ExecMainExitTimestamp=(datetime.strptime(
+            fields['ExecMainExitTimestamp'], '%a %Y-%m-%d %H:%M:%S UTC') + timedelta(seconds=10)).strftime('%a %Y-%m-%d %H:%M:%S UTC')))
+        for changed in variants:
+            with self.subTest(fields=changed), self.buyer_reset_native_read(lambda:
+                    ('\n'.join(k + '=' + v for k, v in changed.items()) + '\n').encode()), \
+                    patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+                with self.assertRaises(RuntimeError):
+                    formula._observe(self.runtime, plan, **self.options)
+        normal = '\n'.join(k + '=' + v for k, v in fields.items()) + '\n'
+        for raw in (normal + 'ExecMainPID=' + fields['ExecMainPID'] + '\n', normal + '\n', '\xff'):
+            with self.subTest(raw=raw), self.buyer_reset_native_read(lambda: raw.encode('latin1')):
+                with self.assertRaises(RuntimeError):
+                    formula._observe(self.runtime, plan, **self.options)
+        self.assertEqual(formula.load(self.runtime, OP)['phase'], 'restoring')
+        self.assertTrue(barrier.barrier_status(self.runtime)['active'])
+
+    def test_guarded_buyer_partial_reset_and_terminal_read_drift_refuse(self):
+        plan, events = self.guarded_buyer_fixture()
+        fields = self.buyer_reset_fields()
+        props = self.systemd.states[formula.BUYER_UNIT]['properties']
+        command = props['ExecStart'].split(' ; start_time=')[0]
+        with patch.object(formula, '_buyer_reset_terminal') as native:
+            for tail in ('[n/a] ; stop_time=[n/a] ; pid=1 ; code=(null) ; status=0/0 }',
+                    '[n/a] ; stop_time=[n/a] ; pid=0 ; code=exited ; status=0 }'):
+                props['ExecStart'] = command + ' ; start_time=' + tail
+                with self.assertRaises(RuntimeError):
+                    formula._observe(self.runtime, plan, **self.options)
+            native.assert_not_called()
+        props['ExecStart'] = command + ' ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }'
+        reads = []
+        def changed_payload():
+            reads.append(1)
+            current = dict(fields)
+            if len(reads) > 1: current['ExecMainPID'] = '2671797'
+            return ('\n'.join(k + '=' + v for k, v in current.items()) + '\n').encode()
+        with self.buyer_reset_native_read(changed_payload), \
+                patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'reset terminal readback changed'):
+                formula._observe(self.runtime, plan, **self.options)
+        self.assertEqual(formula.load(self.runtime, OP)['phase'], 'restoring')
+
+    def test_guarded_buyer_committed_full_terminal_then_reset_retains_exact_proof(self):
+        plan, events = self.guarded_buyer_fixture()
+        fields = self.buyer_reset_fields()
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'synthetic committed reset'):
+                self.apply(plan, _fault=lambda p: (_ for _ in ()).throw(RuntimeError('synthetic committed reset'))
+                    if p == 'committed' else None)
+            saved = formula.load(self.runtime, OP)['receipt']
+            calls = list(self.systemd.calls)
+            props = self.systemd.states[formula.BUYER_UNIT]['properties']
+            props['ExecStart'] = re.sub(r' ; start_time=.*',
+                ' ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }', props['ExecStart'])
+            with self.buyer_reset_native_read(lambda:
+                    ('\n'.join(k + '=' + v for k, v in fields.items()) + '\n').encode()):
+                self.assertEqual(self.apply(plan), saved)
+                self.assertEqual(self.systemd.calls, calls)
+
+    def test_guarded_buyer_reset_terminal_drift_during_fresh_readback_refuses(self):
+        plan, events = self.guarded_buyer_fixture()
+        fields = self.buyer_reset_fields()
+        props = self.systemd.states[formula.BUYER_UNIT]['properties']
+        props['ExecStart'] = re.sub(r' ; start_time=.*',
+            ' ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }', props['ExecStart'])
+        native_readback = pause.readback
+        reads = []
+        def fresh_then_changed(*args, **kwargs):
+            result = native_readback(*args, **kwargs); reads.append(1)
+            if len(reads) == 2: fields['ExecMainPID'] = '2671797'
+            return result
+        with self.buyer_reset_native_read(lambda:
+                ('\n'.join(k + '=' + v for k, v in fields.items()) + '\n').encode()), \
+                patch.object(pause, 'readback', side_effect=fresh_then_changed), \
+                patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'reset terminal readback changed'):
+                formula._observe(self.runtime, plan, **self.options)
+        self.assertEqual(formula.load(self.runtime, OP)['phase'], 'restoring')
 
     def test_realistic_runtime_reset_and_committed_timer_rearm_keep_static_proof(self):
         plan = self.prepare()
