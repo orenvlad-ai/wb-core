@@ -23085,6 +23085,32 @@
     }
 
     async function loadSourceStatusDetails(options) {
+      if (historySnapshotEnabled()) {
+        // The finished reader stores dated cell quality, not live API statuses.
+        // Bind this panel to the edition actually painted; never invoke the
+        // legacy native composition route behind an activated history view.
+        state.sourceStatus.requestSequence += 1;
+        state.sourceStatus.loading = false;
+        const marker = ((state.composition || {}).history_snapshot || {});
+        const displayed = historySnapshotState.displayed;
+        const valid = displayed && marker.edition_id === displayed.edition
+          && marker.date_from === displayed.summary.history_snapshot.date_from
+          && marker.date_to === displayed.summary.history_snapshot.date_to;
+        const block = valid ? {
+          title: "Источники снимка", subtitle: "Основание показанных данных",
+          source_status_state: "loaded", updated_at: marker.saved_at,
+          columns: [{id:"source",label:"Источник"},{id:"today_status",label:"Состояние"},{id:"today_reason",label:"Период"}],
+          rows: [{source_key:"saved_history", source_label:"Сохранённая история витрины",
+            today:{label:"Снимок сохранён",tone:"neutral"},
+            today_reason:marker.date_from + " — " + marker.date_to}], groups: [],
+          detail: "Качество и полнота показаны в подсказках ячеек."
+        } : {title:"Источники снимка",source_status_state:"empty",empty_message:"Нет показанного снимка."};
+        if (state.composition) {
+          state.composition.activity_surface = Object.assign({}, state.composition.activity_surface || {}, {loading_table:block});
+        }
+        renderLoadingTable(block);
+        return;
+      }
       const normalizedOptions = options || {};
       if (state.sourceStatus.loading) {
         return;
@@ -24194,6 +24220,8 @@
         blocks: new Map(), busy: false, draft: null, error: message});
       h.viewId += 1;
       state.composition = null; snapshotPilotToolbarNode.hidden = true;
+      state.sourceStatus.requestSequence += 1; state.sourceStatus.loading = false;
+      renderLoadingTable({title:"Источники снимка", source_status_state:"empty", empty_message:"Нет показанного снимка."});
       document.querySelector("[data-history-current-unavailable]").hidden = true;
       loadRefreshButton.hidden = true;
       setFiltersRailOpen(false);

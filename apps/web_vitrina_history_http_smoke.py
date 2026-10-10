@@ -151,6 +151,11 @@ def _browser(base, edition, expected_summary):
         if evidence:
             page.screenshot(path=str(Path(evidence) / "history-sku-fixture-180.png"))
         assert all("history_snapshot=1" in url for url in requests), requests
+        before_details = len(requests)
+        page.evaluate("async () => { await loadSourceStatusDetails({force:true}); }")
+        assert len(requests) == before_details, "finished snapshot source details invoked a legacy business route"
+        assert page.evaluate("loadingTableBlock().rows[0].today_reason") == start + " — 2026-04-20"
+        assert page.evaluate("loadingTableBlock().updated_at === state.composition.history_snapshot.saved_at")
         # A failed refresh must retain the last fully painted edition, including
         # lazy SKU blocks; an admitted catalog alone is never a painted edition.
         visible = page.evaluate("""() => ({edition:historySnapshotState.edition,
@@ -195,6 +200,8 @@ def _browser(base, edition, expected_summary):
             assert page.locator('[data-table-body]').is_visible()
             assert "Показан сохранённый снимок" in page.locator('[data-history-current-unavailable]').inner_text()
         refresh(); retained()
+        page.evaluate("async () => { await loadSourceStatusDetails({force:true}); }")
+        assert page.evaluate("loadingTableBlock().updated_at === historySnapshotState.displayed.composition.history_snapshot.saved_at")
         failure["phase"] = "held"
         refresh(); retained()
         assert len(held) == 1, "a timed-out read was retried automatically"
@@ -215,6 +222,8 @@ def _browser(base, edition, expected_summary):
         refresh()
         assert page.evaluate("historySnapshotState.summary === null && state.composition === null")
         assert page.locator('[data-table-body]').is_hidden()
+        page.evaluate("async () => { await loadSourceStatusDetails({force:true}); }")
+        assert page.evaluate("state.sourceStatus.loaded === false")
         page.evaluate("history.replaceState(null,'','?history_mode=explicit&date_from=" + start + "&date_to=2026-04-20')")
         failure["phase"] = ""
         refresh()
