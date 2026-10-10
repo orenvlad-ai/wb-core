@@ -16,6 +16,8 @@ import os
 import re
 from pathlib import Path
 import sqlite3
+import time
+import threading
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -247,11 +249,88 @@ def forecast_cells(*, today, horizon_days, quantity, daily_demand, inbounds, dat
 
 
 class StockMonitorService:
-    def __init__(self, *, runtime, now_factory=None, cache_dir=None, observer_db_path=None):
+    def __init__(self, *, runtime, now_factory=None, cache_dir=None, observer_db_path=None, ads_loader=None):
         self.runtime = runtime
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self.cache_dir = Path(cache_dir or (Path(runtime.runtime_dir) / 'stock_monitor'))
         self.observer_db_path = Path(observer_db_path or (Path(runtime.runtime_dir) / 'fbs_observer' / 'observations.sqlite3'))
+        self._ads_loader = ads_loader
+        self._market_ads = None
+        self._market_ads_read = None
+        self._market_ads_read_at = None
+        self._market_ads_failed = False
+        self._market_scope = threading.local()
+
+    @contextmanager
+    def market_refresh_scope(self):
+        """One lazy reference batch for all periods in an owned refresh operation."""
+        existing = getattr(self._market_scope, 'batch', None)
+        if existing is not None:
+            yield
+            return
+        self._market_scope.batch = {'attempted': False}
+        try:
+            yield
+        finally:
+            del self._market_scope.batch
+
+    def _load_market_ads(self):
+        monotonic = time.monotonic()
+        scope = getattr(self._market_scope, 'batch', None)
+        if scope is not None and scope['attempted']:
+            if scope.get('failed'):
+                raise RuntimeError('market_ads_batch_unavailable')
+            return scope['read']
+        if scope is None and self._market_ads_read_at is not None and monotonic - self._market_ads_read_at < 120:
+            if self._market_ads_failed:
+                raise RuntimeError('market_ads_batch_unavailable')
+            return self._market_ads_read
+        try:
+            if self._ads_loader is not None:
+                read = self._ads_loader()
+            else:
+                if self._market_ads is None:
+                    from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
+                    self._market_ads = SheetVitrinaV1AdsBlock(runtime=self.runtime,
+                        runtime_dir=Path(self.runtime.runtime_dir), now_factory=self.now_factory,
+                        timestamp_factory=lambda: self.now_factory().isoformat(), cache_ttl_seconds=120)
+                read = self._market_ads.build_placement_index_read(bypass_cache=scope is not None)
+                # The existing batch cache retains the actual timestamp even
+                # for an empty index. No additional request is made here.
+                payload = self._market_ads._campaign_cache['payload']
+                read['captured_at'] = payload['fetched_at']
+                # The index omits unknown bids; preserve membership from this
+                # same batch so a missing second campaign/placement is visible.
+                read['campaigns'] = payload['campaigns']
+            self._market_ads_read, self._market_ads_failed = read, False
+            return read
+        except Exception:
+            self._market_ads_failed = True
+            raise
+        finally:
+            # A failed batch is also reused between the default/preferred N;
+            # do not duplicate a provider request during one cycle refresh.
+            self._market_ads_read_at = monotonic
+            if scope is not None:
+                scope.update(attempted=True, failed=self._market_ads_failed, read=self._market_ads_read)
+
+    def _enrich_market(self, base, previous):
+        from packages.application.stock_monitor_market import build_market, FIELDS
+        old = {row['nm_id']: row.get('market', {}) for row in previous.get('rows', [])}
+        try:
+            market = build_market(self.runtime, nm_ids=[r['nm_id'] for r in base['rows']],
+                today=base['report_date'], previous=old, ads_loader=self._load_market_ads)
+        except Exception:
+            market = {}
+            for row in base['rows']:
+                market[row['nm_id']] = {field: {'value': None, 'captured_at': None,
+                    'status': 'missing', 'source': source, 'warning': 'Справочные данные не обновились.'}
+                    for field, source in FIELDS.items()}
+                for field, cell in old.get(row['nm_id'], {}).items():
+                    if field in FIELDS and field != 'buyer_wallet_price' and cell.get('value') is not None:
+                        market[row['nm_id']][field] = {**cell, 'status': 'stale', 'warning': 'Справочные данные не обновились.'}
+        for row in base['rows']:
+            row['market'] = market[row['nm_id']]
 
     @staticmethod
     def _period(value):
@@ -277,6 +356,24 @@ class StockMonitorService:
         with self._lock():
             try:
                 base = self._build_base(period_days)
+                try:
+                    previous = json.loads(path.read_text())
+                except (OSError, ValueError):
+                    previous = {}
+                if not previous and period_days != 14:
+                    try:
+                        previous = json.loads(self._path(14).read_text())
+                    except (OSError, ValueError):
+                        pass
+                try:
+                    self._enrich_market(base, previous)
+                except Exception:
+                    # Reference enrichment must never prevent stock publication.
+                    for row in base['rows']:
+                        row['market'] = {}
+                base['source_fingerprint'] = hashlib.sha256(json.dumps(
+                    {'stock': base['source_fingerprint'], 'market': [row['market'] for row in base['rows']]},
+                    sort_keys=True, ensure_ascii=False).encode()).hexdigest()
                 _atomic_json(path, base)
             except Exception as exc:
                 try:
