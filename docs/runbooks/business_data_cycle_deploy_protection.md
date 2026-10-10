@@ -63,6 +63,21 @@ Digest/path/drop-ins, команда, флаги и расписание ост�
 completed owner, baseline и canonical claim guard не изменяют. После same-ID
 resume исправление выпускают обычным порядком в новом штатном окне.
 
+В том же four-path private recovery разрешён только явно описанный в linked
+runbook terminal guarded skip buyer collector: исходный `static/failed` сменился
+на `static/inactive` после штатного запуска восстановленного таймера под тем же
+барьером. Нужны свежие native journal/boot/InvocationID/PID/start-stop и точные
+source pins; исходный plan/baseline не меняют. Receipt явно сохраняет отклонение
+и не утверждает восстановление старого failed state.
+При точном полном сбросе временного ExecStart нужны отдельные свежие native
+ExecMainPID/start/exit/InvocationID, связанные с тем же полным journal invocation.
+Частичный сброс или сохранённый PID не даёт разрешения.
+Preview/prepared, остальные
+service pairs и ordinary exact resume строгие. После committed новый invocation
+блокирует stale receipt; automatic refresh/retry не предусмотрены. Эта extension
+также требует root + independent review и trusted exact Gate до private `-I`
+применения из полного actual-base дерева; installed app не переписывают.
+
 ## Диагностика и неопределённость
 
 Owner можно прочитать без изменения через:

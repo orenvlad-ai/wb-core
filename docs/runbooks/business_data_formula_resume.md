@@ -80,10 +80,54 @@ release. Root reviews the change before any production use.
 ### One bounded recovery when the formula-changing deploy is already held
 
 If the completed original deploy changed the formula pin and its older resume
-tool rejects ONLY the recognized runtime tails above, another canonical deploy
+tool rejects ONLY the recognized runtime tails above, or the exact guarded buyer
+completion described below, another canonical deploy
 claim cannot pass the original baseline. Do not reset claim or rewrite baseline.
 Root may authorize a private recovery ONLY after independent review and trusted
 Gate PASS of the exact fix. This is no generic force/fallback command.
+
+The only additional service-state case is the canonical buyer collector which
+was `static/failed` (exit-code/status 1) in the original hold, then completed as
+`static/inactive/dead`, PID 0, exited 0/success because its restored original
+enabled/active timer launched the native CLI while the original barrier was
+still restoring. The CLI guard prints `skipped_maintenance` before calling main
+or constructing a runtime. This does not restore the historical failed state.
+Preview and prepared transitions still refuse this difference; only recovery of
+the already durable same-plan restoring/committed operation can prove it.
+
+The recovery independently pins the installed buyer CLI, procedure admission
+and barrier source bytes to reviewed base e47c7aa78b48a3cecb6f45506bab42ee46859d95.
+It retains exact configuration/digests, original timer target, unchanged raw
+controls, completed owner/runtime/formula authority and original window/baseline.
+A fresh bounded native journal read must prove one complete start/guarded-skip/
+deactivate/finish invocation, with current boot, unit, InvocationID, PID and
+start/stop interval matching live systemd and LastTriggerUSec. No caller flag or
+saved PID grants this exception. Missing, duplicate, malformed, foreign,
+oversized, timed-out or changing native evidence refuses without retry.
+Each native transport is limited to five seconds and 64 KiB. After reading the
+journal, a fresh nonrecursive native readback rechecks controls, admission,
+jobs/processes/live services and unit pairs/configuration before advancing.
+If the canonical ExecStart execution tail is exactly the fully reset native
+shape (`n/a`, `n/a`, PID 0, `(null)`, `0/0`), a separate bounded native read must
+provide positive ExecMainPID, valid ordered ExecMainStartTimestamp and
+ExecMainExitTimestamp, and current InvocationID. Start matches the existing
+live start and timer trigger; start/exit match the complete journal boundaries.
+After the journal and fresh idle/control readback, these fields are re-read and
+must remain exact. Partial/malformed resets never use this branch. Receipt provenance is
+the same terminal PID/start/stop/events whether ExecStart retains or resets its
+volatile tail; no stored PID or caller-supplied witness supplies authority.
+
+The existing receipt schema adds `guarded_service_completions`: original and
+observed pairs, `original_service_pair_restored=false`, complete dated native
+provenance and same plan/window/baseline/owner SHA bindings. Exact target means
+the original timer/configuration target plus this explicitly proven disposition;
+it never means the old failed service pair was recreated. Before release the
+fresh proof must equal the committed provenance. JSON key order is irrelevant;
+duplicate JSON keys refuse. A crash after commit can continue without repeating
+timer commands only while the same invocation is still current. A later timer
+invocation refuses the retained receipt; this narrow fix does not refresh or
+replace a committed/retained receipt. Root must separately review that case.
+Ordinary exact-prior pause/resume/direct release remain strict for all services.
 
 Use a full isolated verified candidate tree whose exact base equals the actual
 installed runtime SHA. Its ONLY differences are these four reviewed paths:
