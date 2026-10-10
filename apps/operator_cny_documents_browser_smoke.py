@@ -29,6 +29,15 @@ def database_image(path):
     finally:conn.close()
 
 
+def close_accepted(page,operation_id):
+    popup=page.locator('dialog.ff-operation-popup[open]')
+    expect(popup.locator('[data-ff-operation-receipt]')).to_have_attribute('data-ff-operation-receipt',operation_id)
+    expect(popup.locator('.ff-operation-check')).to_be_visible(timeout=10000)
+    expect(popup).to_contain_text('Документ сохранён.')
+    popup.get_by_role('button',name='Закрыть',exact=True).click()
+    expect(popup).to_have_count(0)
+
+
 def main():
     with TemporaryDirectory(prefix='operator-cny-browser-') as raw:
         rt,_=setup(raw);entry=RegistryUploadHttpEntrypoint(runtime_dir=rt.runtime_dir,runtime=rt)
@@ -61,17 +70,21 @@ def main():
                 assert len(writes)==1
                 stored=page.evaluate('Object.entries(localStorage).find(([k])=>k.startsWith("wbc_cny_source_pending_v1:"))[1]')
                 assert '2000' not in stored and 'rub_value' not in stored
-                page.close();foreign=False;page=context.new_page();page.goto(base+http.DEFAULT_SHEET_OPERATOR_UI_PATH+'?embedded_tab=factory-order');page.locator('[data-supply-mode-button="cny-account"]').click()
-                expect(page.locator('#cnySourceReceipt .ff-operation-check')).to_be_visible(timeout=10000)
-                expect(page.locator('#cnySourceReceipt')).to_contain_text('Документ сохранён.')
+                page.close();foreign=False;page=context.new_page();page.goto(base+http.DEFAULT_SHEET_OPERATOR_UI_PATH+'?embedded_tab=factory-order')
+                known=request(base,http.DEFAULT_CNY_ACCOUNT_PATH+'?request_id='+writes[0])[1]
+                assert known['domain']==cny.DOMAIN
+                close_accepted(page,known['acceptance']['operation_id'])
+                expect(page.locator('#cnySourceReceipt')).to_be_hidden()
+                page.locator('[data-supply-mode-button="cny-account"]').click()
                 assert len(writes)==1
-                assert request(base,http.DEFAULT_CNY_ACCOUNT_PATH+'?request_id='+writes[0])[1]['domain']==cny.DOMAIN
                 create();refusal=submit('bad');assert refusal.get('error') and not page.evaluate('testLocked')
                 assert request(base,http.DEFAULT_CNY_ACCOUNT_PATH+'?request_id='+writes[-1])[1]['status']=='rejected'
                 corrected=submit(amount='250');assert corrected['acceptance']['durable_saved'] and writes[-1]!=writes[-2]
                 assert len(writes)==3 and len(rt.list_cny_documents())==1
+                close_accepted(page,corrected['acceptance']['operation_id'])
                 page.goto(base+corrected['acceptance']['detail_path'])
-                expect(page.locator('#cnySourceReceipt .ff-operation-check')).to_be_visible(timeout=10000)
+                close_accepted(page,corrected['acceptance']['operation_id'])
+                expect(page.locator('#cnySourceReceipt')).to_be_hidden()
                 assert len(writes)==3
                 create()
                 uploaded=page.evaluate('''async () => {
@@ -82,6 +95,7 @@ def main():
                         {filename:file.name,file_sha256:sha,payment_date:''},'POST',file);
                 }''')
                 assert uploaded['acceptance']['domain']==cny.DOMAIN and len(rt.list_cny_documents())==2
+                close_accepted(page,uploaded['acceptance']['operation_id'])
                 from packages.application.business_data_write_barrier import acquire_barrier
                 acquire_barrier(rt.runtime_dir,window_id='cny-smoke-maintenance',window_kind='snapshot',plan_fingerprint='sha256:'+'a'*64,
                     approval_reference='synthetic-fixture',actor='fixture',reason='synthetic maintenance regression')
