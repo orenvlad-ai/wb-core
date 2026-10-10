@@ -108,6 +108,16 @@ def main() -> None:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(directory) / "runtime")
         accepted = runtime.ingest_bundle(_bundle(), activated_at=ACTIVATED_AT)
         assert accepted.status == "accepted"
+        # Production collection now uses the stock-monitor catalog as well as
+        # the reporting bundle. Seed its authoritative identities in this fixture.
+        with sqlite3.connect(runtime.db_path) as connection:
+            connection.executemany("""
+                INSERT INTO sheet_vitrina_v1_nomenclature_items
+                  (item_id,nm_id,is_active,nomenclature_name,product_type,match_key,
+                   aliases_json,created_at,updated_at)
+                VALUES(?,?,1,?,'fixture',?,'[]',?,?)
+            """, [(f"fixture-{nm}",nm,str(nm),str(nm),ACTIVATED_AT,ACTIVATED_AT)
+                   for nm in REQUESTED_NM_IDS])
         assert load_active_requested_nm_ids(runtime) == REQUESTED_NM_IDS
         assert load_source_requested_nm_ids(runtime, CURRENT_DATE) == (
             REQUESTED_NM_IDS, "versioned_day_bundle",

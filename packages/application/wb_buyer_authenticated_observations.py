@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from packages.business_time import business_date_from_timestamp
+from packages.application.stock_catalog_scope import read_stock_catalog_scope, StockCatalogScopeError
 
 
 SOURCE_KEY = "wb_buyer_authenticated"
@@ -33,16 +34,56 @@ def _connect(runtime: Any, *, write: bool = False) -> sqlite3.Connection:
     return connection
 
 
-def load_active_requested_nm_ids(runtime: Any) -> list[int]:
-    """Read the collector roster without the runtime's schema-writing loader."""
-    with _connect(runtime) as connection:
-        rows = connection.execute("""
+def _active_requested_nm_ids(connection: sqlite3.Connection) -> list[int]:
+    rows = connection.execute("""
             SELECT config.nm_id FROM registry_upload_config_v2 AS config
             JOIN registry_upload_current_state AS current
               ON current.bundle_version=config.bundle_version AND current.slot=1
             WHERE config.enabled=1 ORDER BY config.nm_id
         """).fetchall()
     return [int(row[0]) for row in rows]
+
+
+def load_active_requested_nm_ids(runtime: Any) -> list[int]:
+    """Read the enabled reporting scope without activating additional SKUs."""
+    with _connect(runtime) as connection:
+        return _active_requested_nm_ids(connection)
+
+
+def load_collection_requested_nm_ids(runtime: Any) -> list[int]:
+    """Collect for reporting and the full stock-monitor catalog, independently of visibility."""
+    with _connect(runtime) as connection:
+        connection.execute("BEGIN")
+        active = _active_requested_nm_ids(connection)
+        catalog = read_stock_catalog_scope(connection)
+        if not catalog["complete"]:
+            raise StockCatalogScopeError("buyer_collection_catalog_incomplete")
+    return sorted(set(active) | set(catalog["nm_ids"]))
+
+
+def select_collection_nm_ids(runtime: Any, *, requested_nm_ids: list[int],
+                             business_date: str, limit: int) -> list[int]:
+    """Visit untouched cards first, then the least recently attempted cards today.
+
+    Deferred rows and an exhausted reader budget are not card visits. Counting
+    them would repeatedly select the same prefix of a catalog larger than one
+    Chrome batch. Actual unavailable prices do count, so one failing card does
+    not prevent the rest of the catalog from being measured.
+    """
+    with _connect(runtime) as connection:
+        rows = connection.execute("""
+            SELECT nm_id, measured_at FROM wb_buyer_authenticated_observations
+            WHERE business_date=? AND COALESCE(json_extract(payload_json,'$.reason'),'')
+              NOT IN ('batch_chunk_deferred','authenticated_price_batch_budget_exhausted',
+                      'buyer_reader_failed')
+        """, (business_date,)).fetchall()
+    latest: dict[int, datetime] = {}
+    for row in rows:
+        nm_id, measured_at = int(row["nm_id"]), _timestamp(row["measured_at"])
+        if nm_id not in latest or measured_at > latest[nm_id]:
+            latest[nm_id] = measured_at
+    untouched = datetime.min.replace(tzinfo=timezone.utc)
+    return sorted(set(requested_nm_ids), key=lambda nm: (latest.get(nm, untouched), nm))[:limit]
 
 
 def load_source_requested_nm_ids(runtime: Any, business_date: str) -> tuple[list[int], str]:
@@ -435,7 +476,10 @@ def load_daily_projection(runtime: Any, business_date: str, requested_nm_ids: li
         if nm_id not in wanted:
             continue
         payload = json.loads(row["payload_json"])
-        attempts.setdefault(nm_id, payload)
+        # Unvisited cards are explicitly persisted for roster accounting, but
+        # do not replace the timestamp/reason of a genuine measurement attempt.
+        if payload.get("reason") not in {"batch_chunk_deferred", "authenticated_price_batch_budget_exhausted"}:
+            attempts.setdefault(nm_id, payload)
         context = (str(payload.get("auth_run_reference") or ""),
                    str(payload.get("profile_reference") or ""))
         if row["status"] == "observed" and payload.get("buyer_nonwallet_price_rub") is not None and context == latest_context:
