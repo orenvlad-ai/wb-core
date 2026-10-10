@@ -53,31 +53,6 @@ finished-snapshot service после exact completed deploy предусмотр
 точную before/after конфигурацию и сохраняет исходный baseline. Во всех остальных
 случаях действует прежний exact resume; редактирование baseline не разрешено.
 
-Этот typed путь строго разделяет неизменную loaded configuration и только
-распознанные native runtime tails (timer next_elapse, ExecStart execution).
-Digest/path/drop-ins, команда, флаги и расписание остаются точными; неизвестный
-формат блокирует resume. Если старый tool уже находится в исходном held окне,
-новый deploy.claim не обходят: только после independent review + trusted Gate
-допустим описанный в linked runbook private exact-base recovery из полного
-проверенного дерева с четырьмя allowlisted путями. Installed app, исходный
-completed owner, baseline и canonical claim guard не изменяют. После same-ID
-resume исправление выпускают обычным порядком в новом штатном окне.
-
-В том же four-path private recovery разрешён только явно описанный в linked
-runbook terminal guarded skip buyer collector: исходный `static/failed` сменился
-на `static/inactive` после штатного запуска восстановленного таймера под тем же
-барьером. Нужны свежие native journal/boot/InvocationID/PID/start-stop и точные
-source pins; исходный plan/baseline не меняют. Receipt явно сохраняет отклонение
-и не утверждает восстановление старого failed state.
-При точном полном сбросе временного ExecStart нужны отдельные свежие native
-ExecMainPID/start/exit/InvocationID, связанные с тем же полным journal invocation.
-Частичный сброс или сохранённый PID не даёт разрешения.
-Preview/prepared, остальные
-service pairs и ordinary exact resume строгие. После committed новый invocation
-блокирует stale receipt; automatic refresh/retry не предусмотрены. Эта extension
-также требует root + independent review и trusted exact Gate до private `-I`
-применения из полного actual-base дерева; installed app не переписывают.
-
 ## Диагностика и неопределённость
 
 Owner можно прочитать без изменения через:
@@ -110,49 +85,9 @@ Canonical completed-claim readback сначала проверяет exact runti
 receipt. Повторное чтение той же claim может завершить только owner; оно не
 повторяет sync/restart/activation/CAS. Уже completed owner читается без перезаписи.
 
-## Первый выпуск этой защиты
-
-До первого sync installed owner helper отсутствует. Trusted candidate source
-передаётся inline только после независимой проверки **существующих installed**
-pause/profile/barrier/admission APIs. Claim/start и checks первого mkdir/rsync
-используют этот bootstrap; rsync receiver не печатает служебный JSON в протокол.
-Затем используется installed helper из exact synced code. Проверки bounded;
-force/weakening режима нет.
-
-Старый trusted Runner ещё не содержит pre-merge claim, а старые central release
-APIs ещё не знают owner. Поэтому **первый выпуск выполняет один ответственный
-writer под заранее доказанным explicit held/quiet pause**; concurrent resume,
-barrier release, иной deploy и restore запрещены эксплуатационно до sync новой
-защиты. Первый pre-merge участок опирается на это явное окно. Не выдавать его за
-автоматически защищённый новым Runner. Subsequent releases используют новый
-trusted Runner и central owner guards. При неизвестном исходе первого sync
-сохраняют окно и читают ту же operation; старый runtime без helper не допускает
-новый generic recovery.
-
-Старый Runner передаёт PR/head, но ещё не передаёт operation ID. Новый adapter
-до claim восстанавливает **тот же release-v3 ID**, который старый Runner запишет
-в receipt: trusted `workflow_run` event, successful Gate run/jobs, один immutable
-checked plan с верным hash, exact PR/head/base и единственный merge parent,
-совпадающий с plan base, плюс текущий checkout exact merge. Это шесть read-only
-GitHub запросов с существующим timeout 30 секунд каждый. Недостаток, timeout или
-drift evidence блокирует выпуск до claim/sync; release context никогда не
-переходит на manual identity. Вне release context сохраняется standalone manual
-identity. Active owner не переименовывается. Поэтому поддержанный recovery после
-первого sync получает исходный ID и не оставляет foreign owner.
-GitHub после merge может вернуть пустой список PR links у Gate run; он не
-является обязательной связью. Binding дают checked plan PR/head/base, env PR/head
-и exact merged PR/parent. Непустой противоречивый список links отвергается.
-
-Первый старый Runner также не передаёт defer-finish: candidate adapter завершает
-owner после собственного полного readback, а явное ручное окно продолжает
-держаться через оставшийся внешний readback старого Runner. Single-writer
-граница первого выпуска действует до его окончательного receipt; resume до
-этого запрещён. Новые Runner удерживают сам owner через внешний readback.
-
-Этот блок не восстанавливает старый uncertain цикл. Его canonical receipt
-остаётся interrupted с честным исходом; следующий distinct scheduled slot
-допустим после exact resume. Автоматического replay старой операции, resume или
-новой глобальной очереди нет.
+Границы первого выпуска со старым Runner и runtime описаны в
+[частных случаях выпуска](release_recovery.md#первый-выпуск-защиты-deploy-ownership).
+Они применяются только к соответствующему переходу, а не к каждому выпуску.
 
 ## Свежий цикл после обслуживания
 

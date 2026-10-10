@@ -52,7 +52,3 @@ operations; это не fabricated accepted JSON. Native SKU/Balance core и com
 receipt/journal/feedback regressions сохраняются. Legacy
 `sku_management_browser_smoke.py` уже на frozen38714c6a падает на initial hidden
 general rows; продукт/этот тест данным patch не раскрываются и не меняются.
-
-Следующие 10C owners: native AI settings audit/transition receipts, cleaner
-settings requests, JSON business schedule version seams и Balance/SPP native
-job IDs/GET-only recovery. Этот checkpoint не объявляет их выполненными.

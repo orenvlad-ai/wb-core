@@ -229,7 +229,7 @@ restore, manifest/checksum, полного restore и проверки SQLite, �
 > Исходная операция [завершена с подтверждением / осталась конкретная стадия].
 
 Для восстановления прерванного выпуска следовать
-[актуальному Release Recovery](../architecture/11_github_release_train.md#завершение-прерванного-выпуска-после-merge).
+[актуальному Release Recovery](release_recovery.md#завершение-прерванного-выпуска-после-merge).
 Fingerprint retention не является fingerprint восстановления выпуска.
 
 [Проверенные случаи и источники](temporary_data_cleanup_cases.md).

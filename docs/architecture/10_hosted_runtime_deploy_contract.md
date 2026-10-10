@@ -14,24 +14,16 @@ Production-команда получает точную цель явно. Ис�
 
 ## Выпуск кода
 
-Доверенный Release Runner:
+[Обычный порядок выпуска](11_github_release_train.md) использует успешный Gate
+точных base/head и доверенный Runner. Он проверяет готовность PR и план, делает
+один squash merge, подтверждает merge parent и `main`, разворачивает точный merge
+SHA и публикует receipt после проверки версии, сервисов и health. Изменение
+только документов или GitHub-механики не обращается к серверу.
 
-1. принимает только готовый PR с успешной проверкой точного head;
-2. для выбранного трёхчасового профиля получает deploy ownership на заранее
-   удерживаемое тихое maintenance окно, затем повторно проверяет base/head и
-   выполняет один squash merge;
-3. подтверждает родителя merge и фактический `main`;
-4. для runtime-изменения разворачивает именно merge SHA;
-5. проверяет marker версии, состояние сервисов и применимые health-признаки;
-6. публикует короткий receipt.
-
-Изменение только документов или GitHub-механики не обращается к серверу.
-
-Runtime mutation и все restart/recovery хвосты удерживают ту же operation до
-финального readback. Успех снимает только deploy ownership; explicit pause
-возобновляет ответственный отдельно. Порядок, неопределённые исходы и обязательная
-граница первого выпуска описаны в
-[runbook защиты цикла](../runbooks/business_data_cycle_deploy_protection.md).
+Для выбранного трёхчасового профиля [защита цикла](../runbooks/business_data_cycle_deploy_protection.md)
+требует заранее held/quiet окно и deploy ownership до merge. Runtime mutation
+и restart/recovery хвосты удерживают ту же operation до финального readback.
+Успех снимает ownership; явную pause возобновляет ответственный отдельно.
 
 ## Production-данные
 

@@ -6,6 +6,16 @@ on:
       - PR Gate
     types:
       - completed
+  workflow_dispatch:
+    inputs:
+      workflow_run_id:
+        description: Successful PR Gate run for the current PR head and main
+        required: true
+        type: string
+
+concurrency:
+  group: wb-core-release-${{ inputs.workflow_run_id || github.event.workflow_run.id }}
+  cancel-in-progress: false
 
 permissions:
   actions: read
@@ -17,13 +27,16 @@ jobs:
   route:
     name: Route successful exact PR Gate plan
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'pull_request'
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       deploy_required: ${{ steps.route.outputs.deploy_required }}
       release_kind: ${{ steps.route.outputs.release_kind }}
+      gate_run_id: ${{ steps.route.outputs.gate_run_id }}
     steps:
       - name: Checkout trusted main router
         uses: actions/checkout@v5
@@ -36,10 +49,15 @@ jobs:
         id: route
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          python3 apps/github_release_runner.py route
-          --workflow-run-id "${{ github.event.workflow_run.id }}"
-          --github-output "$GITHUB_OUTPUT"
+          GATE_RUN_ID: ${{ inputs.workflow_run_id || github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GATE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid PR Gate run ID" >&2; exit 1; }
+          python3 apps/github_release_runner.py route \
+            --workflow-run-id "$GATE_RUN_ID" \
+            --github-output "$GITHUB_OUTPUT"
+          echo "gate_run_id=$GATE_RUN_ID" >> "$GITHUB_OUTPUT"
 
   repo_release:
     name: One-shot repository release
@@ -59,16 +77,17 @@ jobs:
       - name: Admit once, merge expected head once, emit one receipt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GATE_RUN_ID: ${{ needs.route.outputs.gate_run_id }}
         run: >-
           python3 apps/github_release_runner.py run
-          --workflow-run-id "${{ github.event.workflow_run.id }}"
+          --workflow-run-id "$GATE_RUN_ID"
           --output "$RUNNER_TEMP/release-receipt.json"
 
       - name: Upload release receipt
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: release-receipt-${{ github.event.workflow_run.id }}
+          name: release-receipt-${{ needs.route.outputs.gate_run_id }}
           path: ${{ runner.temp }}/release-receipt.json
           if-no-files-found: warn
           retention-days: 90
@@ -101,18 +120,19 @@ jobs:
       - name: Admit once, merge expected head once, deploy exact merge once, emit one receipt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GATE_RUN_ID: ${{ needs.route.outputs.gate_run_id }}
           WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
           WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
         run: >-
           python3 apps/github_release_runner.py run
-          --workflow-run-id "${{ github.event.workflow_run.id }}"
+          --workflow-run-id "$GATE_RUN_ID"
           --output "$RUNNER_TEMP/release-receipt.json"
 
       - name: Upload release receipt
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: release-receipt-${{ github.event.workflow_run.id }}
+          name: release-receipt-${{ needs.route.outputs.gate_run_id }}
           path: ${{ runner.temp }}/release-receipt.json
           if-no-files-found: warn
           retention-days: 90

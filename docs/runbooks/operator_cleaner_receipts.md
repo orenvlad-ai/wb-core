@@ -54,6 +54,3 @@ stores, actual HTTP/forms и loopback FakeWB. Layout-only browser fixtures им�
 bindings в worker/summary и получают needs_attention при отсутствии native
 result proof. Подставленные layout/WB данные не доказательство production
 completion. `operator_cleaner_operations_fixture.py` не входит в runtime.
-
-Оставшиеся 10C: AI settings/instruction source receipts, JSON schedules,
-Balance/SPP native jobs. Этот checkpoint их не объявляет выполненными.

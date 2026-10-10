@@ -13,14 +13,15 @@ reconciliation и explicit cleaner refresh. Site login/logout остаются �
 
 ## CLI и восстановление
 
-Из установленного `/opt/wb-core-runtime/app` (команды выполняет ответственный
-production writer после выпуска и проверки версии):
+Из установленного `/opt/wb-core-runtime/app`, после проверки цели и версии.
+`WINDOW_ID`, `ACTOR` и `REASON` — выбранные для этой операции значения, а не
+исторический пример. Один ответственный writer ведёт окно до завершения:
 
 ```sh
 python3 apps/business_data_maintenance_pause.py preflight --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env --base-url http://127.0.0.1:8765
-python3 apps/business_data_maintenance_pause.py pause --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env --base-url http://127.0.0.1:8765 --window-id WBC0069K16-maintenance-20261004 --actor WBC0069K16 --reason 'Подготовка истории' --wait-timeout-seconds 1200
+python3 apps/business_data_maintenance_pause.py pause --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env --base-url http://127.0.0.1:8765 --window-id "$WINDOW_ID" --actor "$ACTOR" --reason "$REASON" --wait-timeout-seconds 1200
 python3 apps/business_data_maintenance_pause.py status --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env --base-url http://127.0.0.1:8765
-python3 apps/business_data_maintenance_pause.py resume --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env --base-url http://127.0.0.1:8765 --window-id WBC0069K16-maintenance-20261004 --actor WBC0069K16 --reason 'Работы завершены'
+python3 apps/business_data_maintenance_pause.py resume --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env --base-url http://127.0.0.1:8765 --window-id "$WINDOW_ID" --actor "$ACTOR" --reason 'Работы завершены'
 ```
 
 `preflight` и `status` не создают файлы, не меняют systemd и не запускают jobs.
@@ -65,70 +66,35 @@ monitor исключён. Штатный release уже перезапускае
 системы выпуска не добавлено. Изменение конфигурации защищённых units внутри
 паузы требует разбора drift до resume, а не обхода проверок.
 
-Явно разрешённая отдельная derived read-only history сборка остаётся контролируемой
-техоперацией; этот PR не запускает её, не включает режим обслуживания и не
-меняет UI/history reader, cron, owner-policy или business данные.
+Отдельная derived read-only history сборка требует явной области техоперации;
+обычный выпуск не запускает её и не включает профиль расписания.
 
-## Проверки кандидата
-
-### Время жизни фоновых продолжений
+## Фоновые workers
 
 FF inventory/overhead preview, SKU Balance calculation, WB supplies backfill,
-transit-cost enrichment и manual change-registry observer удерживают отдельный
-SH admission lease до выхода потока, включая сохранение результата/ошибки и
-`finally`. Starts расчёта, поставок и observer получают caller admission до
-durable acceptance; FF processing claim происходит внутри admitted worker.
-Пауза после acceptance не прерывает уже принятую работу. Отказ независимого
-допуска или `Thread.start()` не оставляет активный слот без worker: FF остаётся
-`accepted` для существующего `resume_incomplete`, остальные finite starts
-сохраняют контролируемую ошибку и освобождают слот. Нового FF picker нет.
+transit-cost enrichment и manual change-registry observer удерживают SH admission
+lease до выхода worker, включая сохранение результата/ошибки и `finally`.
+Caller admission предшествует durable acceptance; FF claim находится внутри
+admitted worker. Уже принятую работу пауза не прерывает.
 
-Прерывание запуска (`KeyboardInterrupt`/`SystemExit`) повторно выбрасывается.
-Terminal failure/очистка допускаются только при доказанном отсутствии native
-child. Проверка опирается на CPython `_started`, `_limbo` и
-`_active_limbo_lock` в поддерживаемых Linux/macOS средах. Child, ожидающий
-bootstrap, сохраняет lease/слот/ссылку; недоступные internals не дают доказательства
-no-start. Неопределённый запуск разрешает только чтение того же job, не resend.
-Raw SKU poll loop использует тот же no-start proof без собственного lease:
-сохранённая ссылка считается занятой и до bootstrap, и после него. Только
-доказанный no-start очищает её при startup exception; штатный `finally`
-очищает только ссылку своего потока.
+При отказе допуска или доказанном незапуске child FF остаётся `accepted` для
+`resume_incomplete`; остальные finite starts сохраняют ошибку и освобождают слот.
+Неопределённый startup не доказывает no-start: lease/слот/ссылка сохраняются,
+допустим только readback того же job. `KeyboardInterrupt`/`SystemExit` пробрасываются.
+Raw SKU poll также не очищает ссылку без no-start proof; `finally` очищает только
+собственную ссылку. Native proof реализован в admission-коде и проверяется
+`business_data_procedure_admission_smoke.py` и `business_data_async_workers_smoke.py`.
 
-SKU live apply получает допуск **перед claim каждого job** и сохраняет его через
-submit, readback, восстановление неоднозначного результата и terminal evidence.
-Poll/wakeup ожидание не держит lease; при maintenance pending/recoverable jobs
-остаются незахваченными до существующего pickup после resume. Существующие
-startup recovery, canary/readback и запрет blind resend не меняются.
-
-Offline regression: `apps/business_data_async_workers_smoke.py` использует
-private временные SQLite и fake services; `business_data_procedure_admission_smoke.py`
-дополнен отдельным process drain proof, гонкой pause/handoff, отказами создания и
-запуска потока, повторным `start()` и cancellation/target-finally.
-
-Первый выпуск требует pause **и отдельного idle proof старых raw-thread путей**:
-старый runtime ещё не удерживает новые leases, а обычный prepare-deploy не
-доказывает завершение этих daemon threads. Этот код не запускает pause/deploy.
-После выпуска проверка только чтением: сверить deployed SHA, readiness
-admission и maintenance `status`; наблюдать статусы существующих jobs через
-read-only endpoints/operational sessions (`mode=ro`, `query_only=ON`). Для
-естественно активного job drain должен оставаться non-idle до completion/error,
-после завершения всех jobs — idle. Ожидающий SKU worker сам по себе не означает
-non-idle. Не запускать новый job или pause ради такой проверки без отдельного
-разрешения; отсутствие активного job не доказывает его lifetime в production.
-
-Новые focused smokes: `business_data_procedure_admission_smoke.py`,
-`business_data_maintenance_pause_smoke.py`, `business_data_maintenance_boundary_smoke.py`.
-Проверены overlap/nested/fork ownership, принятый async handoff через race,
-thread.start/finally failure, specialized warehouse до регистрации job,
-writer drain/no TTL, pause/restore interruption, unit drift и exact restore.
-HTTP auth smoke дополнен side-effect GET и cleaner PATCH/DELETE; browser smoke
-проверяет жёлтый текст и работоспособный read filter. Finance HTTP и существующие
-cleaner/feedback/SPP/default maintenance/deploy-barrier smokes пройдены локально.
-Полные команды, hashes и приватные результаты — в `candidate-final-005.json`
-в evidence задачи; production acceptance выполняется отдельно после выпуска.
+SKU live apply получает admission перед claim каждого job и удерживает его через
+submit, readback, recovery неопределённого результата и terminal evidence.
+Poll/wakeup ожидание не держит lease; pending/recoverable jobs ждут pickup после
+resume. Admission lifetime и drain наблюдают по уже существующим jobs;
+отсутствие активной работы не доказывает lifetime в production.
+Первый переход со старых raw-thread путей имеет
+[отдельную границу выпуска](../runbooks/release_recovery.md#первый-выпуск-admission-leases-для-фоновых-workers).
 
 Фиксированный переход в общее расписание описан отдельно в
 [dormant schedule profile](../runbooks/business_data_cycle_schedule_profile.md).
 Он сохраняет старый baseline и использует отдельный точный target receipt;
-обычный resume по-прежнему отказывает при intentional unit drift. Сам выпуск
-кода не включает профиль, а применение блокируют незакрытые code dependencies.
+обычный resume отказывает при intentional unit drift. Код сам не включает
+профиль; применение требует фактической readiness и проверенного target-плана.
