@@ -10,6 +10,167 @@
     needs_attention: "Требует внимания"
   });
   const unaccepted = new Set(["draft", "preview", "staged", "parsed", "validation"]);
+  const popups = new WeakMap();
+  const dismissedOperations = new WeakMap();
+  let lastTrigger = null;
+  document.addEventListener("click", function (event) {
+    const control = event.target.closest && event.target.closest("button, a, input, select, textarea");
+    if (control) lastTrigger = control;
+  }, {capture:true});
+
+  function viewportDocument() {
+    let host = window;
+    // A dialog inside an auto-height iframe is centered in that frame, not in
+    // the operator's viewport. Only traverse accessible same-origin parents.
+    try {
+      while (host.parent !== host && host.parent.location.origin === window.location.origin) {
+        void host.parent.document.body;
+        host = host.parent;
+      }
+    } catch (_) { /* Cross-origin embedding keeps its own document boundary. */ }
+    return host.document;
+  }
+
+  function dismissPopup(container, notify, userDismiss) {
+    const popup = popups.get(container);
+    if (popup) popup.dismiss(notify, userDismiss);
+  }
+
+  function popupFocus(dialog) {
+    const active = dialog.ownerDocument.activeElement;
+    return dialog.contains(active) ? {tag:active.tagName, href:active.getAttribute("href"),
+      text:active.textContent, operation:active.dataset.ffOperationReceipt} : null;
+  }
+
+  function restorePopupFocus(dialog, focus) {
+    if (!focus) return true;
+    const node = Array.from(dialog.querySelectorAll(focus.tag)).find(node =>
+      focus.operation ? node.dataset.ffOperationReceipt === focus.operation
+        : node.getAttribute("href") === focus.href && node.textContent === focus.text);
+    if (node) node.focus({preventScroll:true});
+    return Boolean(node);
+  }
+
+  function receiptPopup(container, section, receipt, options) {
+    const doc = viewportDocument();
+    const parent = container.parentNode;
+    if (!parent) return null;
+    const embedded = doc !== container.ownerDocument;
+    const active = container.ownerDocument.activeElement;
+    // Native submit locks can disable the clicked button before the receipt
+    // arrives, which makes the browser focus BODY. Retain that real trigger.
+    const focus = active && active !== container.ownerDocument.body ? active
+      : lastTrigger && lastTrigger.isConnected ? lastTrigger : active;
+    const dialog = doc.createElement("dialog");
+    dialog.className = "ff-operation-popup";
+    dialog.setAttribute("aria-label", "Принято");
+    Object.assign(dialog.style, {position:"fixed", inset:"0", margin:"auto", padding:"0",
+      width:"min(660px, calc(100vw - 32px))", maxHeight:"calc(100dvh - 32px)",
+      overflow:"auto", border:"1px solid var(--border, #d8dee6)", borderRadius:"16px",
+      background:"var(--panel-bg, white)", color:"var(--text, #182230)"});
+    let observer = null;
+    let closed = false;
+    let pendingFocus = null;
+    const frames = [];
+    for (let child = window; child.frameElement && child.document !== doc; child = child.parent) {
+      frames.push({frame:child.frameElement, document:child.document});
+    }
+    const lifetime = new MutationObserver(checkOwner);
+    const display = container.style.getPropertyValue("display");
+    const priority = container.style.getPropertyPriority("display");
+    // Keep source-document IDs and ancestor queries valid. In a nested frame,
+    // mirror presentation only; the original controllers retain their nodes.
+    function sync(focusState) {
+      if (container.hidden || !container.querySelector("[data-ff-operation-receipt]")) { dismiss(false); return; }
+      const active = focusState || pendingFocus || popupFocus(dialog);
+      const view = container.cloneNode(true);
+      view.hidden = false;
+      view.style.removeProperty("display");
+      dialog.replaceChildren(view);
+      const close = view.querySelector(".ff-operation-actions button");
+      if (close) close.addEventListener("click", () => dismiss(true));
+      const journal = view.querySelector(".ff-operation-actions .ff-operation-link");
+      if (journal) journal.addEventListener("click", function (event) {
+        dismiss(false, true);
+        if (typeof options.onJournal === "function") {
+          event.preventDefault(); options.onJournal(receipt, event);
+        }
+      });
+      pendingFocus = restorePopupFocus(dialog, active) ? null : active;
+    }
+    if (embedded) {
+      container.style.setProperty("display", "none", "important");
+      doc.body.appendChild(dialog);
+      sync();
+      observer = new MutationObserver(() => sync());
+      observer.observe(container, {subtree:true,childList:true,characterData:true,attributes:true});
+    } else {
+      // Native top-layer layout works from the original DOM location, so even
+      // polling callers that query their ancestor retain the same container.
+      parent.insertBefore(dialog, container);
+      dialog.appendChild(container);
+      observer = new MutationObserver(function () {
+        if (container.hidden || !container.querySelector("[data-ff-operation-receipt]")) dismiss(false);
+        else if (pendingFocus && restorePopupFocus(dialog, pendingFocus)) pendingFocus = null;
+      });
+      observer.observe(container, {childList:true,attributes:true});
+    }
+    function dismiss(notify, userDismiss) {
+      if (closed) return;
+      closed = true;
+      if (observer) observer.disconnect();
+      lifetime.disconnect();
+      frames.forEach(owner => owner.frame.removeEventListener("load", checkOwner));
+      popups.delete(container);
+      window.removeEventListener("pagehide", onPageHide);
+      if (dialog.open) dialog.close();
+      if (embedded) {
+        if (display) container.style.setProperty("display", display, priority);
+        else container.style.removeProperty("display");
+      } else if (dialog.parentNode) dialog.replaceWith(container);
+      dialog.remove();
+      if (notify || userDismiss) {
+        const dismissed = dismissedOperations.get(container) || new Set();
+        dismissed.add(receipt.operation_id);
+        dismissedOperations.set(container, dismissed);
+        container.hidden = true;
+      }
+      if (notify && typeof options.onClose === "function") options.onClose(receipt);
+      if (focus && focus.isConnected) focus.focus({preventScroll:true});
+    }
+    function checkOwner() {
+      if (!container.isConnected || !dialog.isConnected || frames.some(owner =>
+        !owner.frame.isConnected || owner.frame.contentDocument !== owner.document)) dismiss(false);
+    }
+    function onPageHide() { dismiss(false); }
+    dialog.addEventListener("cancel", function (event) { event.preventDefault(); dismiss(true); });
+    dialog.addEventListener("close", function () { dismiss(true); });
+    dialog.addEventListener("keydown", function (event) {
+      if (event.key !== "Tab") return;
+      const controls = Array.from(dialog.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]'))
+        .filter(node => node.getClientRects().length);
+      if (!controls.length) { event.preventDefault(); return; }
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && (doc.activeElement === first || !controls.includes(doc.activeElement))) {
+        event.preventDefault(); last.focus({preventScroll:true});
+      } else if (!event.shiftKey && doc.activeElement === last) {
+        event.preventDefault(); first.focus({preventScroll:true});
+      }
+    });
+    window.addEventListener("pagehide", onPageHide);
+    lifetime.observe(doc.documentElement, {childList:true,subtree:true});
+    frames.forEach(owner => owner.frame.addEventListener("load", checkOwner));
+    const popup = {dismiss, operationId:receipt.operation_id, focus:() => popupFocus(dialog),
+      refresh(nextReceipt, nextOptions, focusState) {
+        receipt = nextReceipt; options = nextOptions;
+        if (embedded) sync(focusState);
+        else pendingFocus = restorePopupFocus(dialog, focusState) ? null : focusState;
+      }};
+    popups.set(container, popup);
+    dialog.showModal();
+    (embedded ? dialog.querySelector(".ff-operation-receipt") : section).focus({preventScroll:true});
+    return popup;
+  }
 
   function object(value) {
     return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -58,6 +219,7 @@
   }
 
   function renderState(container, receipt) {
+    dismissPopup(container, false);
     const section = make("section", "ff-operation-detail");
     section.setAttribute("role", "status");
     section.appendChild(stateNode(receipt));
@@ -110,6 +272,11 @@
   function renderReceipt(container, receipt, options) {
     if (!acceptedOperation(receipt)) return renderState(container, receipt);
     options = options || {};
+    const current = popups.get(container);
+    const refresh = current && current.operationId === receipt.operation_id && options.mode !== "inline";
+    const focusState = refresh ? current.focus() : null;
+    if (!refresh) dismissPopup(container, false);
+    const modal = Boolean(refresh) || options.mode !== "inline" && !container.closest("dialog");
     const section = make("section", "ff-operation-receipt");
     section.dataset.ffOperationReceipt = receipt.operation_id;
     section.setAttribute("role", "status");
@@ -145,14 +312,20 @@
     const actions = make("div", "ff-operation-actions");
     const close = make("button", "button primary", "Закрыть");
     close.type = "button";
-    close.disabled = typeof options.onClose !== "function";
+    close.disabled = !modal && typeof options.onClose !== "function";
     if (!close.disabled) close.addEventListener("click", function (event) {
-      options.onClose(receipt, event);
+      if (popups.has(container)) dismissPopup(container, true);
+      else if (typeof options.onClose === "function") options.onClose(receipt, event);
     });
-    actions.append(close, journalLink(receipt, options));
+    const journal = journalLink(receipt, options);
+    if (modal) journal.addEventListener("click", function () { dismissPopup(container, false, true); }, {capture:true});
+    actions.append(close, journal);
     section.appendChild(actions);
     container.replaceChildren(section);
-    if (!section.closest("[hidden]") && section.getClientRects().length) section.focus({preventScroll: true});
+    if (refresh) current.refresh(receipt, options, focusState);
+    else if (modal && dismissedOperations.get(container)?.has(receipt.operation_id)) container.hidden = true;
+    else if (modal) { container.hidden = false; receiptPopup(container, section, receipt, options); }
+    else if (!section.closest("[hidden]") && section.getClientRects().length) section.focus({preventScroll: true});
     return section;
   }
 
