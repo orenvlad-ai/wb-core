@@ -263,4 +263,6 @@ class LinuxTests(unittest.TestCase):
                 with self.assertRaises(Exception):entry._cycle_verify_ready(before)
 
 
-if __name__=='__main__':unittest.main()
+if __name__=='__main__':
+    from ci.parallel_unittest import main
+    main(sys.modules[__name__])

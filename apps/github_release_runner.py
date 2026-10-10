@@ -249,8 +249,8 @@ def successful_jobs(client: GitHub, run_id: int) -> bool:
     )
 
 
-def recompute_plan(pr: int, base: str, head: str) -> dict[str, Any]:
-    if trusted_main_sha() != base:
+def recompute_plan(pr: int, base: str, head: str, *, trusted_base: str | None = None) -> dict[str, Any]:
+    if trusted_main_sha() != (trusted_base or base):
         raise RunnerError("base-main-drift")
     subprocess.run(
         ["git", "fetch", "--no-tags", "--no-recurse-submodules", "origin", f"+refs/pull/{pr}/head:refs/remotes/origin/release-head"],
@@ -278,12 +278,45 @@ def recompute_plan(pr: int, base: str, head: str) -> dict[str, Any]:
     return result
 
 
+def documentation_only_diff(before: str, after: str) -> None:
+    """Allow only ordinary, non-executable Markdown; inspect both entry modes."""
+    raw = subprocess.run(
+        ["git", "diff", "--raw", "-z", "--no-renames", "--no-ext-diff", before, after],
+        cwd=ROOT, check=True, capture_output=True,
+    ).stdout.split(b"\0")
+    if raw.pop() != b"" or len(raw) % 2:
+        raise RunnerError("documentation-diff-invalid")
+    for metadata, raw_path in zip(raw[::2], raw[1::2]):
+        fields = metadata.split()
+        path = raw_path.decode("utf-8")
+        if (len(fields) != 5 or fields[0] not in {b":100644", b":000000"}
+                or fields[1] not in {b"100644", b"000000"}
+                or not (path == "AGENTS.md" or (path.startswith("docs/") and path.endswith(".md")))):
+            raise RunnerError("main-change-requires-new-gate")
+
+
+def documentation_merge_tree(tested_base: str, base: str, head: str) -> str:
+    ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", tested_base, base], cwd=ROOT)
+    if ancestor.returncode != 0:
+        raise RunnerError("tested-base-not-ancestor")
+    documentation_only_diff(tested_base, base)
+    merged = subprocess.run(["git", "merge-tree", "--write-tree", base, head],
+                            cwd=ROOT, capture_output=True, text=True)
+    if merged.returncode != 0:
+        raise RunnerError("documentation-merge-conflict")
+    tree = exact_sha(merged.stdout.splitlines()[0], "admitted-merge-tree")
+    # A docs rebase may not alter any candidate code, dependency or CI entry.
+    documentation_only_diff(head, tree)
+    return tree
+
+
 def admit(client: GitHub, run_id: int) -> tuple[dict[str, Any], dict[str, Any], int, str, str]:
     run, plan = collect_plan(client, run_id)
     pr_number = workflow_pr(run)
     pr = client.get(f"/pulls/{pr_number}")
     base = exact_sha(pr.get("base", {}).get("sha"), "pr-base")
     head = exact_sha(pr.get("head", {}).get("sha"), "pr-head")
+    tested_base = exact_sha(plan.get("base_sha"), "tested-base")
     reasons: list[str] = []
     if client.repository != REPOSITORY:
         reasons.append("repository-mismatch")
@@ -305,23 +338,46 @@ def admit(client: GitHub, run_id: int) -> tuple[dict[str, Any], dict[str, Any], 
         reasons.append("base-main-drift")
     if pr.get("mergeable") is not True:
         reasons.append("pr-not-mergeable")
-    if plan.get("pull_request") != pr_number or plan.get("base_sha") != base or plan.get("head_sha") != head:
+    if plan.get("pull_request") != pr_number or plan.get("head_sha") != head:
         reasons.append("plan-binding-invalid")
     if not successful_jobs(client, run_id):
         reasons.append("gate-jobs-invalid")
+    merge_tree = None
     if not reasons:
         try:
-            expected = recompute_plan(pr_number, base, head)
+            if tested_base != base:
+                # No runtime or selector change can enter via an untested main.
+                merge_tree = documentation_merge_tree(tested_base, base, head)
+                expected = recompute_plan(pr_number, tested_base, head, trusted_base=base)
+            else:
+                expected = recompute_plan(pr_number, base, head)
             if canonical_bytes(expected) != canonical_bytes(plan):
                 reasons.append("plan-recomputation-mismatch")
+            elif tested_base != base:
+                current = recompute_plan(pr_number, base, head)
+                semantic = lambda value: {k: v for k, v in value.items() if k not in {"base_sha", "plan_sha256"}}
+                if canonical_bytes(semantic(current)) != canonical_bytes(semantic(plan)):
+                    reasons.append("current-plan-mismatch")
         except Exception as exc:
             reasons.append(exc.reason if isinstance(exc, RunnerError) else "plan-recomputation-failed")
     if reasons:
         raise RunnerError(",".join(sorted(set(reasons))))
-    return run, plan, pr_number, base, head
+    return {**run, "admitted_merge_tree": merge_tree}, plan, pr_number, base, head
 
 
-def merge_exact(client: GitHub, pr: int, base: str, head: str) -> str:
+def merge_exact(client: GitHub, pr: int, base: str, head: str, *, expected_tree: str | None = None) -> str:
+    if expected_tree is not None:
+        current_pr = client.get(f"/pulls/{pr}")
+        current_main = client.get("/git/ref/heads/main")
+        if (current_pr.get("state") != "open" or current_pr.get("draft") is not False
+                or current_pr.get("mergeable") is not True
+                or current_pr.get("base", {}).get("sha") != base
+                or current_pr.get("base", {}).get("ref") != "main"
+                or current_pr.get("base", {}).get("repo", {}).get("full_name") != client.repository
+                or current_pr.get("head", {}).get("sha") != head
+                or current_pr.get("head", {}).get("repo", {}).get("full_name") != client.repository
+                or current_main.get("object", {}).get("sha") != base):
+            raise RunnerError("premerge-identity-drift")
     try:
         result = client.put(f"/pulls/{pr}/merge", {"sha": head, "merge_method": "squash"})
     except RunnerError:
@@ -338,6 +394,8 @@ def merge_exact(client: GitHub, pr: int, base: str, head: str) -> str:
     parents = commit.get("parents") if isinstance(commit, Mapping) else None
     if not isinstance(parents, list) or [item.get("sha") for item in parents] != [base]:
         raise RunnerError("merge-parent-mismatch")
+    if expected_tree is not None and commit.get("tree", {}).get("sha") != expected_tree:
+        raise RunnerError("merge-tree-mismatch")
     ref = client.get("/git/ref/heads/main")
     if exact_sha(ref.get("object", {}).get("sha"), "main-ref") != merge:
         raise RunnerError("main-ref-mismatch")
@@ -530,6 +588,8 @@ def receipt(*, state: str, run_id: int, pr: int, base: str, head: str, plan: Map
         "pull_request": pr,
         "gate_run_id": run_id,
         "base_sha": base,
+        "tested_base_sha": plan.get("base_sha", base),
+        "gate_plan_sha256": plan.get("plan_sha256"),
         "head_sha": head,
         "merge_sha": merge,
         "deployed_sha": deployed,
@@ -577,7 +637,9 @@ def run(client: GitHub, run_id: int, output: Path) -> dict[str, Any]:
         operation = operation_id(run_id, pr, base, head, str(plan.get('plan_sha256') or ''))
         if kind == 'live_runtime':
             prepare_deploy_ownership(operation)
-        merge = merge_exact(client, pr, base, head)
+        tree = _run.get("admitted_merge_tree")
+        merge = (merge_exact(client, pr, base, head, expected_tree=tree) if tree is not None
+                 else merge_exact(client, pr, base, head))
         checkout_merge(merge)
         if kind == "live_runtime":
             deployed = deploy_exact(pr, head, merge, operation=operation)
