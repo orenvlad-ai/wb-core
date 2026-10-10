@@ -33,10 +33,48 @@ EXPECTED_NATIVE={
 }
 
 
-def _checked(runtime,identity,reason,now,*,state='processing'):
+class SupplierHistoryCheckConflict(ValueError):
+    """A stale check or borrowed reader cannot authorize an attempt write."""
+
+
+def _require_check_writer_context():
+    from packages.application.web_vitrina_window_read_context import active_window_read_context
+    if active_window_read_context() is not None:
+        raise SupplierHistoryCheckConflict('supplier_history_borrowed_read_context')
+
+
+def _pending_check(conn,op):
+    """Capture the exact early-branch decision, including its native ACK."""
+    current=processing.current(conn,op);prior=ack=None
+    if not current:reason='supplier_history_native_source_pending'
+    elif op['action']=='factual_date':reason='supplier_history_native_factual_owner_pending'
+    else:
+        prior=publication_for(conn,processing.ref(op))
+        if prior:ack=completed_proof(conn,processing.ref(op))
+        if not ack:return None,prior
+        reason='supplier_history_finance_pending'
+    if conn.execute(f'SELECT 1 FROM {processing.COMPLETIONS} WHERE operation_id=?',(op['operation_id'],)).fetchone():
+        raise SupplierHistoryCheckConflict('supplier_history_pending_check_completed')
+    return dict(reason=reason,operation=deepcopy(op),source_ref=processing.ref(op),
+        current=current,superseded=processing.superseded(conn,op),
+        publication=dict(prior) if prior else None,ack=deepcopy(ack)),prior
+
+
+def _checked(runtime,identity,reason,now,*,state='processing',expected_check=None):
+    _require_check_writer_context()
     with closing(sqlite3.connect(runtime.db_path)) as conn:
         conn.row_factory=sqlite3.Row;conn.execute('BEGIN IMMEDIATE')
         actual=processing.operation(conn,identity)
+        if expected_check is not None:
+            if actual!=expected_check['operation'] or processing.ref(actual)!=expected_check['source_ref']:
+                raise SupplierHistoryCheckConflict('supplier_history_pending_check_changed')
+            try:current,_=_pending_check(conn,actual)
+            except SupplierHistoryCheckConflict:raise
+            except ValueError as exc:
+                # A changed/corrupt native ACK is not a new diagnostic write.
+                raise SupplierHistoryCheckConflict('supplier_history_pending_check_changed') from exc
+            if current!=expected_check or reason!=expected_check['reason']:
+                raise SupplierHistoryCheckConflict('supplier_history_pending_check_changed')
         if processing.superseded(conn,actual):state,reason='needs_attention',processing.SUPERSEDED
         conn.execute(f'INSERT OR REPLACE INTO {processing.ATTEMPTS} VALUES(?,?,?,?)',(identity,state,reason,now.isoformat()));conn.commit()
 
@@ -280,6 +318,8 @@ def completed_row(row):
 
 def pending(runtime,*,now):
     """Bounded oldest-check fairness using the existing supplier attempt rows."""
+    # A logical borrowed connection cannot end its owner's physical snapshot.
+    _require_check_writer_context()
     with ready.readonly(runtime.db_path) as conn:
         if not sources.source._exists(conn,processing.FUNCTIONAL):return None
         identities=processing.captured_cohort(conn)
@@ -287,13 +327,9 @@ def pending(runtime,*,now):
         try:
             with ready.readonly(runtime.db_path) as conn:
                 op=processing.operation(conn,identity)
-                if not processing.current(conn,op):
-                    _checked(runtime,identity,'supplier_history_native_source_pending',now);continue
-                if op['action']=='factual_date':
-                    _checked(runtime,identity,'supplier_history_native_factual_owner_pending',now);continue
-                prior=publication_for(conn,processing.ref(op))
-                if prior and completed_proof(conn,processing.ref(op)):
-                    _checked(runtime,identity,'supplier_history_finance_pending',now);continue
+                check,prior=_pending_check(conn,op)
+            if check is not None:
+                _checked(runtime,identity,check['reason'],now,expected_check=check);continue
             if prior:
                 manifest=json.loads(prior['inputs_json']);_verify(manifest)
                 try:
