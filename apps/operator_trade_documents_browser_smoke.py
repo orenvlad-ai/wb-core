@@ -11,6 +11,14 @@ from packages.adapters import registry_upload_http_entrypoint as http
 from packages.application import operator_trade_documents as receipts
 
 
+def close_accepted(page,operation_id):
+    dialog=page.get_by_role('dialog',name='Принято',exact=True)
+    expect(dialog.locator('[data-ff-operation-receipt]')).to_have_attribute('data-ff-operation-receipt',operation_id)
+    expect(dialog.locator('.ff-operation-check')).to_be_visible()
+    dialog.get_by_role('button',name='Закрыть',exact=True).click()
+    expect(dialog).to_have_count(0)
+
+
 def check_selected_upload_intent():
     with TemporaryDirectory(prefix='operator-library-selected-intent-') as raw:
         rt,entry,_=seed(raw);server,thread,base=server_for(entry)
@@ -50,6 +58,7 @@ def check_selected_upload_intent():
                 assert (doc['document_type'],doc['number'],doc['document_date'],doc['supplier_name'],doc['file_original_name'])==(
                   'invoice','INVOICE-SELECTED','2026-10-08','Selected supplier','invoice-selected.pdf'),doc
                 assert writes[0]['acceptance']['source_ref']['document_type']=='invoice' and not errors
+                close_accepted(page,writes[0]['acceptance']['operation_id'])
                 # File read failure occurs before persistence; controls must recover.
                 page.evaluate("()=>{File.prototype.arrayBuffer=()=>Promise.reject(new Error('synthetic file read failure'));}")
                 with page.expect_file_chooser() as choice:page.locator('#addInvoiceButton').click()
@@ -68,7 +77,7 @@ def main():
         try:
             with sync_playwright() as pw:
                 browser=pw.chromium.launch();context=browser.new_context();page=context.new_page();writes=[];patches=[];foreign=True;errors=[]
-                context.on('request',lambda req: patches.append(req.url) if req.method=='PATCH' and http.DEFAULT_TRADE_DOCUMENTS_PATH in req.url else None)
+                context.on('request',lambda req: patches.append(req) if req.method=='PATCH' and http.DEFAULT_TRADE_DOCUMENTS_PATH in req.url else None)
                 page.on('pageerror',lambda error:errors.append(str(error)))
                 def lose(route):
                     if route.request.method=='POST':
@@ -97,6 +106,8 @@ def main():
                 expect(page.locator('#tradeSourceReceipt .ff-operation-check')).to_be_visible(timeout=10000)
                 expect(page.locator('#tradeSourceReceipt')).to_contain_text('Документ сохранён.')
                 assert len(writes)==1 and rt.db_path.read_bytes()==before
+                accepted=request(base,http.DEFAULT_TRADE_DOCUMENTS_PATH+'?request_id='+writes[-1])[1]
+                close_accepted(page,accepted['acceptance']['operation_id'])
                 # Actual unsupported file refusal clears the alias; a corrected file uses a distinct ID.
                 page.locator('#invoiceDateInput').fill('')
                 with page.expect_file_chooser() as chooser:page.locator('#addInvoiceButton').click()
@@ -109,12 +120,16 @@ def main():
                 chooser.value.set_files({'name':'corrected.pdf','mimeType':'application/pdf','buffer':b'library-corrected'})
                 expect(page.locator('#tradeSourceReceipt .ff-operation-check')).to_be_visible(timeout=10000)
                 assert len(writes)==3 and len(set(writes))==3 and len(rt.list_trade_documents())==2
+                accepted=request(base,http.DEFAULT_TRADE_DOCUMENTS_PATH+'?request_id='+writes[-1])[1]
+                close_accepted(page,accepted['acceptance']['operation_id'])
                 # Real contract form, metadata edit and linked-contract refusal.
                 page.locator('[data-settings-tab-button="contracts"]').click()
                 with page.expect_file_chooser() as chooser:page.locator('#addContractButton').click()
                 chooser.value.set_files({'name':'contract.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':contract_bytes()})
                 expect(page.locator('#tradeSourceReceipt .ff-operation-check')).to_be_visible(timeout=10000)
                 expect(page.locator('#contractRows [data-contract-edit]')).to_be_visible()
+                accepted=request(base,http.DEFAULT_TRADE_DOCUMENTS_PATH+'?request_id='+writes[-1])[1]
+                close_accepted(page,accepted['acceptance']['operation_id'])
                 page.locator('#contractRows [data-contract-edit]').click()
                 page.locator('[data-contract-edit-field="number"]').fill('<img src=x onerror="window.bad=true">')
                 edit_count=len(patches)
@@ -122,11 +137,15 @@ def main():
                 expect(page.locator('#tradeSourceReceipt')).to_contain_text('<img src=x')
                 assert len(patches)==edit_count+1
                 assert not page.evaluate('window.bad || false')
+                accepted=request(base,http.DEFAULT_TRADE_DOCUMENTS_PATH+'?request_id='+patches[-1].post_data_json['request_id'])[1]
+                close_accepted(page,accepted['acceptance']['operation_id'])
                 cid=next(r['document_id'] for r in rt.list_trade_documents() if r['document_type']=='contract')
                 iid=next(r['document_id'] for r in rt.list_trade_documents() if r['number']=='I-browser')
                 page.locator('[data-settings-tab-button="invoices"]').click()
                 row=page.locator('tr[data-document-id="'+iid+'"]');row.locator('[data-contract-select]').select_option(cid);row.locator('[data-document-link]').click()
                 expect(row.locator('[data-document-unlink]')).to_be_visible(timeout=10000)
+                accepted=request(base,http.DEFAULT_TRADE_DOCUMENTS_PATH+'?request_id='+patches[-1].post_data_json['request_id'])[1]
+                close_accepted(page,accepted['acceptance']['operation_id'])
                 page.locator('[data-settings-tab-button="contracts"]').click();page.on('dialog',lambda dialog:dialog.accept())
                 page.locator('#contractRows [data-document-archive]').click()
                 expect(page.locator('#contractsMessage')).to_contain_text('cannot be archived')
@@ -139,6 +158,7 @@ def main():
                 page.goto(base+last['acceptance']['detail_path']+'&embedded=1')
                 expect(page.locator('#tradeSourceReceipt .ff-operation-check')).to_be_visible(timeout=10000)
                 assert len(writes)==4
+                close_accepted(page,last['acceptance']['operation_id'])
                 from packages.application.business_data_write_barrier import acquire_barrier
                 acquire_barrier(rt.runtime_dir,window_id='library-maintenance-smoke',window_kind='snapshot',
                     plan_fingerprint='sha256:'+'a'*64,approval_reference='synthetic-fixture',actor='fixture',reason='synthetic maintenance')

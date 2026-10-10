@@ -279,6 +279,29 @@ def modal_checks(browser) -> None:
     assert page.locator('dialog[open]').count()==1 and page.locator('.ff-operation-popup').count()==0
     page.locator('#native').get_by_role('button',name='Закрыть').click()
     assert page.locator('dialog[open]').count()==0 and not errors,errors
+    # Recovery can finish while its native owner is hidden. The visible popup
+    # must acknowledge the exact operation without opening/moving that owner.
+    for hidden_style in ('hidden', 'style="display:none"'):
+        page.set_content('<button id="next">Next</button><div id="owner" '+hidden_style+'><div id="receipt"></div></div>')
+        page.add_script_tag(path=str(ASSET))
+        page.evaluate("""() => {window.hiddenOwnerCloses=[];window.saved={durable_saved:true,operation_id:'hidden-native',accepted_at:'now',state:'accepted'};
+          window.show=value=>OperatorAcceptance.renderReceipt(document.getElementById('receipt'),value,{onClose:r=>hiddenOwnerCloses.push(r.operation_id)});show(saved);}""")
+        dialog=page.get_by_role('dialog',name='Принято',exact=True)
+        expect(dialog.locator('.ff-operation-check')).to_be_visible()
+        expect(dialog.locator('[data-ff-operation-receipt]')).to_have_attribute('data-ff-operation-receipt','hidden-native')
+        assert page.evaluate("document.getElementById('receipt').parentElement.id")=='owner'
+        page.evaluate("show({...saved,state:'processing'})")
+        expect(dialog).to_contain_text('Обрабатывается')
+        assert page.locator('dialog[open]').count()==1
+        dialog.get_by_role('button',name='Закрыть',exact=True).click()
+        expect(dialog).to_have_count(0)
+        assert page.evaluate('hiddenOwnerCloses')==['hidden-native']
+        page.get_by_role('button',name='Next',exact=True).click()
+        page.evaluate("show({...saved,state:'completed'})")
+        expect(dialog).to_have_count(0)
+        page.evaluate("show({...saved,operation_id:'removed-owner'});document.getElementById('owner').remove()")
+        expect(dialog).to_have_count(0)
+    assert not errors,errors
     template=(ROOT/'packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html').read_text()
     actions=template.split('<div class="shell-actions">',1)[1].split('</div>',1)[0]
     page.set_content('<div class="shell-actions">'+actions+'</div>')
