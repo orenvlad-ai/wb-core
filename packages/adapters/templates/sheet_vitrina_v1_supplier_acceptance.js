@@ -10,10 +10,21 @@
     const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
     return "sha256:" + Array.from(new Uint8Array(bytes), item => item.toString(16).padStart(2, "0")).join("");
   }
+  async function boundedRequest(url, options, timeoutMs, consume) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try { return await consume(await fetch(url, Object.assign({}, options, {signal: controller.signal}))); }
+    finally { window.clearTimeout(timer); }
+  }
   function create(options) {
     const key = "wbc_supplier_source_pending_v1:" + options.scope;
     const container = options.container;
     let pending = null;
+    let readSequence = 0;
+    function samePending(expected) {
+      const current = JSON.parse(localStorage.getItem(key) || "null");
+      return current && ["request_id", "action", "entity_id", "payload_digest"].every(name => current[name] === expected[name]);
+    }
     function load() {
       const raw = localStorage.getItem(key);
       pending = raw ? JSON.parse(raw) : null;
@@ -31,7 +42,7 @@
       window.OperatorAcceptance.renderState(container, null);
       const button = document.createElement("button");
       button.type = "button"; button.textContent = "Проверить статус";
-      button.addEventListener("click", () => read(true).catch(() => unknown()));
+      button.addEventListener("click", () => {button.disabled = true; read(true).catch(() => {if (pending) unknown();});});
       container.appendChild(button);
     }
     function present(result) {
@@ -62,8 +73,10 @@
       const domain = /^supplier_financial_(?:batch_)?[a-f0-9]{32}$/.test(operationId) ? "supplier_financial_document" : /^ssfc_job_[a-f0-9]{32}$/.test(operationId) ? "supplier_factual_date"
         : /^supplier_[a-f0-9]{32}$/.test(operationId) ? "supplier_shipment" : "";
       if (!domain) return;
-      const response = await fetch(options.path + "?operation_id=" + encodeURIComponent(operationId), {headers: {Accept: "application/json"}});
-      const result = response.ok ? await response.json() : null;
+      const sequence = ++readSequence;
+      const result = await boundedRequest(options.path + "?operation_id=" + encodeURIComponent(operationId), {headers: {Accept: "application/json"}}, 5000,
+        async response => response.ok ? await response.json() : null);
+      if (sequence !== readSequence || localStorage.getItem(key)) return;
       if (!result || result.domain !== domain
           || !result.acceptance || result.acceptance.domain !== domain || !result.acceptance.source_ref
           || !result.shipment || result.shipment.shipment_id !== result.acceptance.source_ref.entity_id
@@ -75,12 +88,16 @@
       }
       // Known saved-operation detail is GET-only. It does not replace an
       // editable card with an older source revision or clear a pending action.
+      if (sequence !== readSequence || localStorage.getItem(key)) return;
       present(result);
     }
-    async function read(recover) {
+    async function read(recover, submitted) {
       load();
       if (!pending) return null;
+      if (submitted && !samePending(submitted)) return null;
       const expected = pending;
+      const sequence = ++readSequence;
+      const currentRead = () => sequence === readSequence && samePending(expected);
       const financial = expected.action.startsWith("financial_");
       const domain = financial ? "supplier_financial_document" : expected.action === "factual_date" ? "supplier_factual_date" : "supplier_shipment";
       const readPath = expected.action === "factual_date"
@@ -88,9 +105,9 @@
         : financial ? options.path + "/" + encodeURIComponent(expected.entity_id) + "/financial-documents" : options.path;
       let result;
       try {
-        const response = await fetch(readPath + "?request_id=" + encodeURIComponent(expected.request_id), {headers: {Accept: "application/json"}});
-        if (!response.ok) throw new Error("Проверка недоступна");
-        result = await response.json();
+        result = await boundedRequest(readPath + "?request_id=" + encodeURIComponent(expected.request_id), {headers: {Accept: "application/json"}}, 5000,
+          async response => {if (!response.ok) throw new Error("Проверка недоступна"); return await response.json();});
+        if (!currentRead()) return null;
         if (result.domain === domain && result.request_id === expected.request_id
             && result.action === expected.action && (result.wire_digest || result.payload_digest) === expected.payload_digest
             && result.status === "rejected" && result.acceptance === null) {
@@ -123,12 +140,13 @@
         if (exact.status !== "accepted") throw new Error("Не удалось проверить ID операции");
       } catch (error) {
         if (error && error.nativeRejected) throw new Error(error.message);
+        if (!currentRead()) return null;
         unknown();
         throw new Error("Проверяем сохранение. Повторно отправлять заказ не нужно.");
       }
       // Another tab may have completed and begun a new action during this GET.
-      const current = JSON.parse(localStorage.getItem(key) || "null");
-      if (current && current.request_id === expected.request_id) persist(null); else load();
+      if (!currentRead()) return null;
+      persist(null);
       present(result);
       if (financial) {
         if (recover && options.onFinancialRecovered) await options.onFinancialRecovered(result);
@@ -168,19 +186,23 @@
         // Retain only the digest. The server independently binds the exact
         // wire text to its native semantic operands before storing its hash.
         const wire = JSON.stringify(canonical(payload));
-        persist(Object.assign({request_id, payload_digest: await digest(wire)}, action));
+        const submitted = Object.assign({request_id, payload_digest: await digest(wire)}, action);
+        persist(submitted);
         const body = Object.assign({}, payload, {request_id, operator_wire_json: wire});
         const target = requestOptions.method === "DELETE" ? url + "?request_id=" + encodeURIComponent(request_id) : url;
         const financial = action.action.startsWith("financial_");
         const headers = new Headers(requestOptions.headers || {});
         if (financial) headers.set("X-Request-ID", request_id);
-        let response;
-        try {response = await fetch(target, Object.assign({}, requestOptions, {headers}, requestOptions.method === "DELETE" ? {} : {body: JSON.stringify(body)}));} catch (_) {}
+        let response, refusal;
+        // Aborting the transport never proves that the native write stopped.
+        try {
+          await boundedRequest(target, Object.assign({}, requestOptions, {headers}, requestOptions.method === "DELETE" ? {} : {body: JSON.stringify(body)}), 8000,
+            async result => {response = result; if (financial && result.status === 423) {try {refusal = await result.json();} catch (_) {}}});
+        } catch (_) {}
         // The existing global admission gate returns this exact ID before a
         // business writer can run. A lost response still follows unknown GET.
         if (financial && response && response.status === 423) {
-          let refusal;try {refusal = await response.json();} catch (_) {}
-          if (refusal && refusal.code === "business_data_maintenance" && refusal.status === "blocked" && refusal.request_id === request_id) {
+          if (samePending(submitted) && refusal && refusal.code === "business_data_maintenance" && refusal.status === "blocked" && refusal.request_id === request_id) {
             const current = JSON.parse(localStorage.getItem(key) || "null");
             if (current && current.request_id === request_id) persist(null); else load();
             container.hidden = false;container.replaceChildren();
@@ -188,7 +210,7 @@
             throw new Error(message.textContent);
           }
         }
-        return read(false);
+        return read(false, submitted);
       });
     }
     window.addEventListener("storage", event => {if (event.key === key) {try {load(); if (pending) unknown();} catch (_) {options.onLock(true); unknown();}}});

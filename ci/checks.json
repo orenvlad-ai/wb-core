@@ -85,6 +85,7 @@
         "apps/operator_nomenclature_browser_smoke.py",
         "apps/operator_supplier_shipments_browser_smoke.py",
         "apps/operator_supplier_factual_dates_browser_smoke.py",
+        "apps/operator_supplier_ui_recovery_browser_smoke.py",
         "apps/operator_policy_browser_smoke.py",
         "apps/operator_external_operations_browser_smoke.py",
         "apps/operator_external_forms_browser_smoke.py",
@@ -676,6 +677,7 @@
         "packages/application/operator_supplier_factual_dates.py",
         "packages/application/operator_supplier_processing.py",
         "packages/application/operator_supplier_cost_proof.py",
+        "apps/operator_supplier_ui_recovery_browser_smoke.py",
         "packages/adapters/templates/sheet_vitrina_v1_supplier*"
       ],
       "commands": [
@@ -698,6 +700,10 @@
         [
           "python3",
           "apps/operator_supplier_factual_dates_browser_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_ui_recovery_browser_smoke.py"
         ],
         [
           "python3",
