@@ -104,6 +104,17 @@ def fixture():
         yield server
 
 
+def _open_stable_manual_panel(page, base_url):
+    _open_manual_panel(page, base_url)
+    # The first buyer-ready label can precede the final startup price/status render.
+    page.wait_for_function('''() => {
+        const prices=state.prices,s=prices.sppTest;
+        return prices.loaded && !prices.loading && prices.writeEnabled
+            && !!s.operatorScope && !s.buyerSessionLoading && !s.statusLoading
+            && s.buyerSession?.valid === true && s.buyerSession?.capability_valid === true;
+    }''', timeout=7000)
+
+
 class Native(unittest.TestCase):
     def test_accept_before_preflight_and_same_id_race(self):
         with fixture() as f:
@@ -324,7 +335,7 @@ class Native(unittest.TestCase):
                 else:route.continue_()
             context.route('**/*',intercept)
             for page in pages:
-                _open_manual_panel(page,f.base_url);page.locator('[data-spp-test-price-index="0"]').fill('810')
+                _open_stable_manual_panel(page,f.base_url);page.locator('[data-spp-test-price-index="0"]').fill('810')
                 try:
                     page.wait_for_function('() => document.querySelector("[data-spp-test-start]").disabled === false')
                 except PlaywrightTimeoutError:
@@ -341,7 +352,7 @@ class Native(unittest.TestCase):
             for page in pages:self.assertTrue(page.locator('[data-spp-test-start]').is_disabled())
             for page in pages:page.close()
             get_fail[0]=False
-            reopened=context.new_page();_open_manual_panel(reopened,f.base_url)
+            reopened=context.new_page();_open_stable_manual_panel(reopened,f.base_url)
             reopened.wait_for_function('() => document.querySelector("[data-spp-test-acceptance]").innerText.includes("Задание сохранено")',timeout=10000)
             reopened.locator('[data-spp-test-read]').click();self.assertEqual(len(posts),1)
             recovered=context.request.get(f.base_url+operator.PATH+'?request_id='+identity).json()
@@ -392,7 +403,7 @@ class Native(unittest.TestCase):
 
     def test_chromium_click_time_operands_before_web_lock_and_buyer_preflight(self):
         with fixture() as f,sync_playwright() as pw:
-            browser=pw.chromium.launch();page=browser.new_page(viewport={'width':1440,'height':940});_open_manual_panel(page,f.base_url)
+            browser=pw.chromium.launch();page=browser.new_page(viewport={'width':1440,'height':940});_open_stable_manual_panel(page,f.base_url)
             page.locator('[data-spp-test-price-index="0"]').fill('810');page.wait_for_function('() => document.querySelector("[data-spp-test-start]").disabled === false')
             operator_scope=page.request.get(f.base_url+operator.PATH).json()['operator_scope']
             key='operator-spp-start:'+operator_scope+':/v1/sheet-vitrina-v1/prices/spp-test/start'
@@ -423,7 +434,7 @@ class Native(unittest.TestCase):
                     posts.append(route.request.post_data_json);reply=route.fetch();self.assertEqual(reply.status,200);saved.append(reply.json());route.abort()
                 else:route.continue_()
             metadata=_spp_tab_metadata(page)
-            context.route('**/*',intercept);_open_manual_panel(page,f.base_url)
+            context.route('**/*',intercept);_open_stable_manual_panel(page,f.base_url)
             page.locator('[data-spp-test-price-index="0"]').fill('810')
             try:
                 page.wait_for_function('()=>document.querySelector("[data-spp-test-start]").disabled===false')
