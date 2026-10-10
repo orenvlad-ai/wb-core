@@ -1095,8 +1095,9 @@ def load_supplier_cost_summary_fields(
     if not selected_ids:
         return {}
     selected = set(selected_ids)
-    with _connect(runtime.db_path) as conn:
-        ensure_warehouse_functional_schema(conn)
+    from packages.application.web_vitrina_window_read_context import borrowed_operational_connection, WindowReadContextError
+    borrowed = borrowed_operational_connection(runtime.db_path)
+    with (borrowed if borrowed is not None else _connect_readonly(runtime.db_path)) as conn:
         tables = {
             str(row[0])
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -1107,10 +1108,12 @@ def load_supplier_cost_summary_fields(
             "sheet_vitrina_v1_cny_ledger_operations",
             "sheet_vitrina_v1_supplier_financial_documents",
             "sheet_vitrina_v1_supplier_financial_expense_lines",
+            "sheet_vitrina_v1_warehouse_functional_active",
         }
         if not required.issubset(tables):
-            return {}
-        conn.execute("BEGIN")
+            raise WindowReadContextError("supplier cost source schema is incomplete")
+        if borrowed is None:
+            conn.execute("BEGIN")
         sources = {
             "shipments": [
                 dict(row)

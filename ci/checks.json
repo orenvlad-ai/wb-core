@@ -921,6 +921,7 @@
     },
     "supplier_source_operations": {
       "patterns": [
+        "apps/supplier_shipments_read_only_smoke.py",
         "apps/supplier_confirmation_flows_smoke.py",
         "apps/supplier_preparation_intents_smoke.py",
         "packages/application/supplier_preparation_intents.py",
@@ -929,6 +930,7 @@
         "packages/application/registry_upload_http_entrypoint.py"
       ],
       "commands": [
+        ["python3", "apps/supplier_shipments_read_only_smoke.py"],
         ["python3", "apps/supplier_preparation_intents_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"],
         ["python3", "apps/supplier_confirmation_flows_smoke.py"],
