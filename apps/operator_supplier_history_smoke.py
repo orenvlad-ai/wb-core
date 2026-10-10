@@ -1,5 +1,5 @@
 """Disposable native supplier cost, dated stages/book/ready and exact authority."""
-from contextlib import closing
+from contextlib import closing,contextmanager
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime,date,timedelta
@@ -372,6 +372,167 @@ class SelectionTests(unittest.TestCase):
                 self.assertIs(h.pending(runtime,now=MOMENT),receipt)
             self.assertEqual(checked.call_args.args[2],'supplier_history_formula_changed')
             self.assertEqual(checked.call_args.kwargs['state'],'needs_attention')
+
+
+class PendingTransactionTests(unittest.TestCase):
+    """Real native readers/attempt writer on disposable DELETE, not WAL seams.
+
+    Minimal relational operands exercise the native decision/ACK readers. The
+    seeded publication is synthetic; these tests claim no monetary execution.
+    """
+    def fixture(self,kind='source',*,mode='DELETE'):
+        from types import SimpleNamespace
+        from packages.application import operator_supplier_factual_dates as factual
+        from packages.application.supplier_shipment_factual_correction import _ensure_correction_schema
+        from packages.application.warehouse_targeted_replay import TARGETED_PUBLICATION_TABLE
+        tmp=TemporaryDirectory(prefix='supplier-pending-delete-');self.addCleanup(tmp.cleanup)
+        rt=SimpleNamespace(db_path=Path(tmp.name)/'operational.sqlite3',runtime_dir=Path(tmp.name))
+        with closing(sqlite3.connect(rt.db_path)) as conn,conn:
+            conn.row_factory=sqlite3.Row
+            self.assertEqual(conn.execute('PRAGMA journal_mode='+mode).fetchone()[0],mode.lower())
+            source.ensure_schema(conn);intents.ensure_schema(conn);ready.ensure_publication_schema(conn)
+            conn.execute('CREATE TABLE sheet_vitrina_v1_supplier_shipments(shipment_id TEXT PRIMARY KEY,invoice_date TEXT)')
+            conn.execute('CREATE TABLE sheet_vitrina_v1_supplier_shipment_lines(line_id TEXT,shipment_id TEXT)')
+            conn.execute('CREATE TABLE sheet_vitrina_v1_supplier_financial_documents(document_id TEXT,supplier_order_id TEXT,document_type TEXT)')
+            conn.execute('CREATE TABLE sheet_vitrina_v1_supplier_financial_expense_lines(line_id TEXT,supplier_order_id TEXT,financial_document_id TEXT)')
+            conn.execute('CREATE TABLE registry_upload_current_state(value TEXT)')
+            conn.execute('CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version TEXT,as_of_date TEXT,plan_json TEXT)')
+            conn.execute('INSERT INTO sheet_vitrina_v1_supplier_shipments VALUES(?,?)',('local',FIRST))
+            captured=intents.capture_source(conn,'local');digest=intents._fingerprint(captured)
+            conn.execute(f'INSERT INTO {intents.TABLE}(shipment_id,revision,source_fingerprint,affected_nm_ids_json,effective_date,document_ids_json,status,requested_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',('local',1,digest,'[1]',FIRST,'[]','delivered',NOW,NOW))
+            intent=dict(conn.execute(f'SELECT * FROM {intents.TABLE}').fetchone())
+            saved={'preparation_source':captured};identity='local-operation'
+            if kind=='factual':
+                factual.ensure_schema(conn);_ensure_correction_schema(conn)
+                conn.execute(f'CREATE TABLE {TARGETED_PUBLICATION_TABLE}(publication_id TEXT PRIMARY KEY,status TEXT,version_id TEXT,plan_fingerprint TEXT)')
+                conn.execute(f'INSERT INTO {TARGETED_PUBLICATION_TABLE} VALUES(?,?,?,?)',('local-publication','complete','local-version','local-plan'))
+                conn.execute(f'INSERT INTO {factual.JOB}(correction_id,request_fingerprint,shipment_id,actor,source,reason,status,phase,progress_text,requested_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(identity,'local-request','local','alice','fixture','fixture','success','complete','fixture',NOW,NOW))
+                request=dict(request_scope='alice',request_id='local-request',shipment_id='local',confirmation_token='fixture',payload_digest='fixture',wire_digest='',actor='alice',accepted_at=NOW,status='accepted',reason='',correction_id=identity,request_fingerprint='local-request',source_digest='before',source_json='{}')
+                factual._insert(conn,request)
+                proof=dict(correction_id=identity,request_fingerprint='local-request',source_before_digest='before',source_after={'supplier':saved},version_id='local-version',plan_fingerprint='local-plan',publication_id='local-publication',preparation_intent=intent)
+                conn.execute(f'INSERT INTO {factual.APPLIED} VALUES(?,?,?,?,?)',(identity,'local-version','local-plan',source.digest(proof),canonical(proof)))
+            else:
+                conn.execute(f'INSERT INTO {source.TABLE}(operation_id,request_scope,request_id,action,payload_digest,shipment_id,revision,source_digest,source_json,accepted_at,actor,intent_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(identity,'alice','local-request','edit','fixture','local',1,source.digest(saved),canonical(saved),NOW,'alice',canonical(intent)))
+            op=processing.operation(conn,identity)
+            if kind=='source':conn.execute(f'UPDATE {intents.TABLE} SET source_fingerprint=?',('unknown-source',))
+            if kind=='finance':
+                numerical=dict(code_authority=candidate.code_authority(),effect_dates=[FIRST],functional={'business_date':FIRST},candidate_book={},cohort_refs=[processing.ref(op)],editions={FIRST:{'version_id':'local-version'}})
+                manifest=dict(contract=h.CONTRACT,operation_id='supplier-history:'+identity,attempt_id='local-attempt',source_ref=processing.ref(op),candidate=numerical,targets=[{'dates':[FIRST],'after_json':'{}'}],after_book=fingerprint({}))
+                manifest['manifest_digest']=fingerprint(manifest)
+                ack={'manifest_digest':manifest['manifest_digest'],'native':{FIRST:{'object_digest':'synthetic-object','edition_id':'synthetic-edition','functional_version':'local-version'}}}
+                ready.record_intent(conn,operation_id=manifest['operation_id'],attempt_id=manifest['attempt_id'],kind=h.CONTRACT,expected=None,inputs=manifest,expected_book='synthetic-before',book_required=True,ready_required=True,created_at=NOW)
+                ready.complete_publication(conn,operation_id=manifest['operation_id'],attempt_id=manifest['attempt_id'],book_version=manifest['after_book'],after_digest=ready.digest('{}'),finished_at=NOW)
+                conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=?',(canonical({'supplier_history_ack':ack}),))
+        return rt,identity,digest
+    def image(self,rt):
+        with closing(sqlite3.connect(rt.db_path)) as conn:
+            return {name:list(conn.execute('SELECT * FROM "'+name+'" ORDER BY rowid')) for name, in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name<>? ORDER BY name",(processing.ATTEMPTS,))}
+    def attempts(self,rt):
+        with closing(sqlite3.connect(rt.db_path)) as conn:return list(conn.execute(f'SELECT * FROM {processing.ATTEMPTS}'))
+    def invoke(self,rt,*,gap=lambda conn:None):
+        native=ready.readonly;readers=[];after_gap=[]
+        @contextmanager
+        def observed(path):
+            with native(path) as conn:
+                readers.append(conn);self.assertTrue(conn.in_transaction);self.assertEqual(conn.execute('PRAGMA query_only').fetchone()[0],1)
+                yield conn
+            with self.assertRaises(sqlite3.ProgrammingError):conn.execute('SELECT 1')
+            if len(readers)==2:
+                with closing(sqlite3.connect(rt.db_path)) as writer,writer:
+                    writer.row_factory=sqlite3.Row;writer.execute('BEGIN IMMEDIATE');gap(writer)
+                after_gap.append(self.image(rt))
+        try:
+            with patch.object(ready,'readonly',side_effect=observed):return h.pending(rt,now=MOMENT)
+        finally:
+            self.assertEqual(len(readers),2)
+            if after_gap:self.assertEqual(self.image(rt),after_gap[0])
+    def test_delete_all_three_early_branches_close_physical_reader(self):
+        for kind,reason in [('source','native_source_pending'),('factual','native_factual_owner_pending'),('finance','finance_pending')]:
+            with self.subTest(kind=kind):
+                rt,identity,_=self.fixture(kind);before=self.image(rt)
+                self.assertIsNone(self.invoke(rt))
+                self.assertEqual(self.attempts(rt),[(identity,'processing','supplier_history_'+reason,MOMENT.isoformat())])
+                self.assertEqual(self.image(rt),before)
+    def test_wal_control_still_uses_real_attempt_writer(self):
+        rt,identity,_=self.fixture(mode='WAL');self.assertIsNone(self.invoke(rt));self.assertEqual(len(self.attempts(rt)),1)
+    def test_external_delete_reader_busy_propagates_without_attempt_or_retry(self):
+        rt,identity,_=self.fixture()
+        with ready.readonly(rt.db_path) as external:
+            external.execute('SELECT * FROM '+source.TABLE).fetchall()
+            with self.assertRaises(sqlite3.OperationalError) as caught:h.pending(rt,now=MOMENT)
+            self.assertEqual(caught.exception.sqlite_errorcode,sqlite3.SQLITE_BUSY)
+            self.assertTrue(external.in_transaction);self.assertEqual(self.attempts(rt),[])
+        self.assertIsNone(self.invoke(rt));self.assertEqual(len(self.attempts(rt)),1)
+    def test_current_and_monotonic_successor_gap_refuse_stale_reason(self):
+        for successor in (False,True):
+            with self.subTest(successor=successor):
+                rt,_,digest=self.fixture()
+                def gap(conn):conn.execute(f'UPDATE {intents.TABLE} SET source_fingerprint=?,revision=?',(digest,2 if successor else 1))
+                with self.assertRaisesRegex(h.SupplierHistoryCheckConflict,'pending_check_changed'):self.invoke(rt,gap=gap)
+                self.assertEqual(self.attempts(rt),[])
+    def test_already_proven_supersession_preserves_native_priority(self):
+        rt,identity,digest=self.fixture()
+        with closing(sqlite3.connect(rt.db_path)) as conn,conn:conn.execute(f'UPDATE {intents.TABLE} SET source_fingerprint=?,revision=2',(digest,))
+        self.assertIsNone(self.invoke(rt));self.assertEqual(self.attempts(rt)[0][1:3],('needs_attention',processing.SUPERSEDED))
+        with ready.readonly(rt.db_path) as conn:self.assertEqual(processing.captured_cohort(conn),[])
+    def test_completion_arriving_after_reader_prevents_processing_stamp(self):
+        rt,identity,_=self.fixture()
+        def gap(conn):conn.execute(f'INSERT INTO {processing.COMPLETIONS} VALUES(?,?,?,?)',(identity,'{}','fixture-completion',NOW))
+        with self.assertRaisesRegex(h.SupplierHistoryCheckConflict,'pending_check_completed'):self.invoke(rt,gap=gap)
+        self.assertEqual(self.attempts(rt),[])
+    def test_finance_publication_and_exact_ack_gap_never_write_old_reason(self):
+        for drift in ('missing','prepared','ack','corrupt','retired'):
+            with self.subTest(drift=drift):
+                rt,_,_=self.fixture('finance')
+                def gap(conn):
+                    if drift=='missing':conn.execute('DELETE FROM sheet_vitrina_v1_ready_publications')
+                    elif drift=='prepared':conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET state='prepared'")
+                    else:
+                        row=conn.execute('SELECT diagnostics_json FROM sheet_vitrina_v1_ready_publications').fetchone();d=json.loads(row[0])
+                        if drift=='ack':d['supplier_history_ack']['native'][FIRST]['edition_id']='different-native-edition'
+                        elif drift=='corrupt':d['supplier_history_ack']={}
+                        else:d['supplier_history_replaced_by']={'foreign':'unproved'}
+                        conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=?',(canonical(d),))
+                with self.assertRaises(ValueError):self.invoke(rt,gap=gap)
+                self.assertEqual(self.attempts(rt),[])
+    def test_immutable_ref_or_source_port_drift_never_falls_back_to_checked(self):
+        for field in ('revision','source_digest','saved_source'):
+            with self.subTest(field=field):
+                rt,_,_=self.fixture();native=processing.operation
+                def operation(conn,key):
+                    op=native(conn,key)
+                    if not conn.execute('PRAGMA query_only').fetchone()[0]:
+                        op[field]={'unknown':'source'} if field=='saved_source' else 'foreign-ref'
+                    return op
+                with patch.object(processing,'operation',side_effect=operation),self.assertRaises(ValueError):self.invoke(rt)
+                self.assertEqual(self.attempts(rt),[])
+    def test_borrowed_delete_outer_pin_survives_rejection(self):
+        from packages.application.web_vitrina_window_read_context import window_read_context,active_window_read_context
+        rt,identity,_=self.fixture();before=self.image(rt)
+        with window_read_context(rt.db_path) as outer:
+            reader=outer.borrow(rt.db_path);physical=outer._physical
+            with self.assertRaisesRegex(h.SupplierHistoryCheckConflict,'borrowed_read_context'):h.pending(rt,now=MOMENT)
+            with self.assertRaisesRegex(h.SupplierHistoryCheckConflict,'borrowed_read_context'):h._checked(rt,identity,'fixture',MOMENT)
+            self.assertIs(active_window_read_context(),outer);self.assertIs(outer._physical,physical);self.assertTrue(reader.in_transaction)
+            self.assertEqual(reader.execute('SELECT COUNT(*) FROM '+processing.ATTEMPTS).fetchone()[0],0)
+            self.assertEqual(reader.execute('PRAGMA query_only').fetchone()[0],1)
+        with self.assertRaises(sqlite3.ProgrammingError):physical.execute('SELECT 1')
+        self.assertEqual(self.image(rt),before);self.assertIsNone(self.invoke(rt));self.assertEqual(len(self.attempts(rt)),1)
+    def test_native_cohort_limit_and_oldest_attempt_fairness_unchanged(self):
+        rt,identity,_=self.fixture('factual')
+        with closing(sqlite3.connect(rt.db_path)) as conn,conn:
+            conn.row_factory=sqlite3.Row
+            # Native shipment receipts provide independent admitted cohort IDs.
+            saved={'preparation_source':intents.capture_source(conn,'local')};intent=dict(conn.execute(f'SELECT * FROM {intents.TABLE}').fetchone())
+            for n in range(processing.COHORT_LIMIT+2):
+                conn.execute(f'INSERT INTO {source.TABLE}(operation_id,request_scope,request_id,action,payload_digest,shipment_id,revision,source_digest,source_json,accepted_at,actor,intent_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',('other-'+str(n),'alice','request-'+str(n),'edit','fixture','local',n+2,source.digest(saved),canonical(saved),NOW,'alice',canonical(intent)))
+            conn.row_factory=sqlite3.Row;before=processing.captured_cohort(conn)
+        self.assertEqual(len(before),processing.COHORT_LIMIT);self.assertIn(identity,before)
+        # Each nonfactual operation is pending rather than a numerical candidate.
+        with closing(sqlite3.connect(rt.db_path)) as conn,conn:conn.execute(f"UPDATE {intents.TABLE} SET source_fingerprint='unknown-source'")
+        self.assertIsNone(h.pending(rt,now=MOMENT+timedelta(seconds=1)));self.assertEqual(len(self.attempts(rt)),processing.COHORT_LIMIT)
+        with ready.readonly(rt.db_path) as conn:after=processing.captured_cohort(conn)
+        self.assertEqual(len(after),processing.COHORT_LIMIT);self.assertNotEqual(before,after)
 
 
 @unittest.skipUnless(sys.platform=='linux','actual kernel History owner descriptors required')
