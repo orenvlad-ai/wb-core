@@ -2012,6 +2012,8 @@ class SkuManagementBlock:
             "requested_value": facts["new_bid_rub"],
             "min_bid_rub": facts.get("min_bid_rub"),
             "warnings": warnings,
+            "safety_threshold_policy": facts.get("safety_threshold_policy"),
+            "safety_threshold_warnings": list(facts.get("safety_threshold_warnings") or []),
             "override_required_warnings": [item["code"] for item in stabilization],
             "stabilization_warnings": stabilization,
             "current_bid_freshness": facts.get("created_at"),
@@ -2049,7 +2051,7 @@ class SkuManagementBlock:
                 phases_ms,
                 "guarded_bid_commit",
                 lambda: self.ads_block.commit_bid_change(
-                    {"preview_id": preview["delegated_preview_id"]},
+                    {"preview_id": preview["delegated_preview_id"], "confirm": True},
                     actor=actor,
                 ),
             )
@@ -2124,6 +2126,8 @@ class SkuManagementBlock:
                 "requested_value": float(preview["requested_value"]),
                 "confirmed_value": confirmed,
                 "readback_status": "matching",
+                "safety_threshold_policy": delegated.get("safety_threshold_policy"),
+                "safety_threshold_warnings": list(delegated.get("safety_threshold_warnings") or []),
                 "diagnostics": diagnostics,
                 "event": event,
             }

@@ -219,7 +219,7 @@ def main() -> None:
         if preview_facts["min_bid_kopecks"] != 1200:
             raise AssertionError(f"preview must include min bid, got {preview_facts}")
 
-        commit = block.commit_bid_change({"preview_id": preview_facts["preview_id"]}, actor="smoke_actor")
+        commit = block.commit_bid_change({"preview_id": preview_facts["preview_id"], "confirm": True}, actor="smoke_actor")
         if commit.get("status") != "pending_refresh":
             raise AssertionError(f"commit should return pending refresh, got {commit}")
         expected_patch = {
@@ -292,7 +292,7 @@ def _assert_negative_cases(runtime: RegistryUploadDbBackedRuntime, runtime_dir: 
         }
     )
     try:
-        block.commit_bid_change({"preview_id": preview["preview"]["preview_id"]}, actor="smoke")
+        block.commit_bid_change({"preview_id": preview["preview"]["preview_id"], "confirm": True}, actor="smoke")
     except SheetVitrinaV1AdsError as exc:
         if exc.http_status != 403:
             raise AssertionError(f"write disabled must be 403, got {exc.http_status}") from exc
@@ -423,7 +423,7 @@ def _run_http_smoke(runtime: RegistryUploadDbBackedRuntime, runtime_dir: Path) -
             raise AssertionError(f"preview route mismatch: {status} {preview}")
         status, commit = _post_json(
             f"{base_url}{DEFAULT_SHEET_ADS_BID_COMMIT_PATH}",
-            {"preview_id": preview["preview"]["preview_id"]},
+            {"preview_id": preview["preview"]["preview_id"], "confirm": True},
         )
         if status != 200 or commit.get("contract_name") != "sheet_vitrina_v1_ads_bid_change_commit":
             raise AssertionError(f"commit route mismatch: {status} {commit}")

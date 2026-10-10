@@ -510,7 +510,7 @@ def _assert_concrete_writer_blocks(
         }
     )
     bid_commit = ads.commit_bid_change(
-        {"preview_id": bid_preview["preview"]["preview_id"]},
+        {"preview_id": bid_preview["preview"]["preview_id"], "confirm": True},
         actor="operator",
     )
     assert len(promotion_source.patch_payloads) == 1
