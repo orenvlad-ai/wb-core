@@ -23085,6 +23085,32 @@
     }
 
     async function loadSourceStatusDetails(options) {
+      if (historySnapshotEnabled()) {
+        // The finished reader stores dated cell quality, not live API statuses.
+        // Bind this panel to the edition actually painted; never invoke the
+        // legacy native composition route behind an activated history view.
+        state.sourceStatus.requestSequence += 1;
+        state.sourceStatus.loading = false;
+        const marker = ((state.composition || {}).history_snapshot || {});
+        const displayed = historySnapshotState.displayed;
+        const valid = displayed && marker.edition_id === displayed.edition
+          && marker.date_from === displayed.summary.history_snapshot.date_from
+          && marker.date_to === displayed.summary.history_snapshot.date_to;
+        const block = valid ? {
+          title: "Источники снимка", subtitle: "Основание показанных данных",
+          source_status_state: "loaded", updated_at: marker.saved_at,
+          columns: [{id:"source",label:"Источник"},{id:"today_status",label:"Состояние"},{id:"today_reason",label:"Период"}],
+          rows: [{source_key:"saved_history", source_label:"Сохранённая история витрины",
+            today:{label:"Снимок сохранён",tone:"neutral"},
+            today_reason:marker.date_from + " — " + marker.date_to}], groups: [],
+          detail: "Качество и полнота показаны в подсказках ячеек."
+        } : {title:"Источники снимка",source_status_state:"empty",empty_message:"Нет показанного снимка."};
+        if (state.composition) {
+          state.composition.activity_surface = Object.assign({}, state.composition.activity_surface || {}, {loading_table:block});
+        }
+        renderLoadingTable(block);
+        return;
+      }
       const normalizedOptions = options || {};
       if (state.sourceStatus.loading) {
         return;
@@ -24178,10 +24204,57 @@
     // All row pages repeat the full selected range and one edition. No column paging.
     const historySnapshotState = {summary: null, edition: "", requestId: 0, viewId: 0,
       blocks: new Map(), selection: {total:true,totals:[],skus:[]}, draft: null,
-      loadedBytes: 0, busy: false, error: "", progress: ""};
+      loadedBytes: 0, busy: false, error: "", progress: "", displayed: null, refreshError: ""};
     const HISTORY_CLIENT_BYTES = 128 * 1024 * 1024;
     function historySnapshotEnabled() {
       return WEB_VITRINA_CONFIG.history_snapshots_configured === true;
+    }
+    function rememberDisplayedHistorySnapshot() {
+      const h = historySnapshotState;
+      h.displayed = {summary: h.summary, edition: h.edition, blocks: h.blocks,
+        selection: h.selection, loadedBytes: h.loadedBytes, composition: state.composition};
+    }
+    function clearDisplayedHistorySnapshot(error) {
+      const h = historySnapshotState, message = String(error.message || error);
+      Object.assign(h, {displayed: null, edition: "", refreshError: "", summary: null,
+        blocks: new Map(), busy: false, draft: null, error: message});
+      h.viewId += 1;
+      state.composition = null; snapshotPilotToolbarNode.hidden = true;
+      state.sourceStatus.requestSequence += 1; state.sourceStatus.loading = false;
+      renderLoadingTable({title:"Источники снимка", source_status_state:"empty", empty_message:"Нет показанного снимка."});
+      document.querySelector("[data-history-current-unavailable]").hidden = true;
+      loadRefreshButton.hidden = true;
+      setFiltersRailOpen(false);
+      setStateBox("error", "Готовая история недоступна для выбранного периода", escapeHtml(message));
+      setLoadStatusLamp("история недоступна", "warning");
+      let period;
+      try { period = historySnapshotPeriod(); } catch (_) { period = {date_from: "", date_to: ""}; }
+      renderHistoricalAccess({meta: {today_current_date: snapshotBusinessToday()}, historical_access: {
+        options: (error.availableDates || []).map(function(day) { return {value: day, label: day}; }),
+        current_mode: "period", selected_date_from: period.date_from, selected_date_to: period.date_to,
+        default_as_of_date: snapshotBusinessToday(), status_text: message, preset_options: []}});
+    }
+    function restoreDisplayedHistorySnapshot(requestId, error) {
+      const h = historySnapshotState, displayed = h.displayed;
+      if (!displayed || error.httpStatus === 401 || error.httpStatus === 403) return false;
+      let period;
+      try { period = historySnapshotPeriod(); } catch (_) { return false; }
+      const marker = (displayed.summary || {}).history_snapshot || {};
+      const shown = (displayed.composition || {}).history_snapshot || {};
+      if (marker.date_from !== period.date_from || marker.date_to !== period.date_to
+          || !/^[a-f0-9]{64}$/.test(displayed.edition) || marker.edition_id !== displayed.edition
+          || shown.edition_id !== displayed.edition || shown.date_from !== period.date_from
+          || shown.date_to !== period.date_to) return false;
+      h.viewId += 1;
+      Object.assign(h, {summary: displayed.summary, edition: displayed.edition, blocks: displayed.blocks,
+        selection: displayed.selection, loadedBytes: displayed.loadedBytes,
+        requestId: requestId, busy: false, draft: null,
+        error: "Не удалось обновить снимок: " + String(error.message || error), progress: ""});
+      h.refreshError = h.error;
+      renderPage(displayed.composition, {tableFreshness: "stale_error",
+        deferSourceStatusAutoLoad: true, preserveExistingMetricPresentation: true});
+      historySnapshotControls();
+      return true;
     }
     function historySnapshotPeriod() {
       const selected = currentExplicitHistoryQuery();
@@ -24202,8 +24275,17 @@
       if (groupId) params.group_id = groupId;
       Object.keys(params).forEach(function(key) { url.searchParams.set(key, params[key]); });
       const startedAt = window.performance.now();
-      const response = await fetch(url.toString(), {headers: {Accept: "application/json"}, cache: "no-store"});
+      const controller = new AbortController();
+      const timer = window.setTimeout(function() { controller.abort(); }, 15000);
+      try {
+      const response = await fetch(url.toString(), {headers: {Accept: "application/json"}, cache: "no-store", signal: controller.signal});
       const headersAt = window.performance.now();
+      // An access denial is authoritative even if its body is not JSON or stalls.
+      if (response.status === 401 || response.status === 403) {
+        const denied = new Error("Нет доступа к снимку.");
+        denied.httpStatus = response.status;
+        throw denied;
+      }
       const text = await response.text();
       const downloadedAt = window.performance.now();
       const payload = JSON.parse(text);
@@ -24211,6 +24293,7 @@
       if (!response.ok) {
         const error = new Error(payload.error || "Готовая история недоступна.");
         error.code = payload.error;
+        error.httpStatus = response.status;
         error.availableDates = payload.available_dates || [];
         throw error;
       }
@@ -24233,6 +24316,7 @@
       decodeTableResponse(payload);
       payload.historyDecodeMs = boundedPerformanceDuration(decodedAt, window.performance.now());
       return payload;
+      } finally { window.clearTimeout(timer); }
     }
     async function historySnapshotPage(scope, period, edition, offset, limit, groupId) {
       for (;;) {
@@ -24311,14 +24395,16 @@
       filterSummaryNode.hidden = true;
       const marker = ((historySnapshotState.summary || {}).history_snapshot || {});
       const missingToday = (marker.unmaterialized_dates || []).length > 0;
+      const refreshFailed = !!historySnapshotState.refreshError;
       const notice = document.querySelector("[data-history-current-unavailable]");
-      notice.hidden = !missingToday;
-      notice.textContent = missingToday
+      notice.hidden = !missingToday && !refreshFailed;
+      const currentDayNotice = missingToday
         ? (marker.date_from === marker.date_to
           ? "За текущий день ещё нет сохранённых данных. Текущий день предварительный."
           : "За текущий день ещё нет сохранённых данных. Прошлые дни показаны из готовой истории.") : "";
-      setLoadStatusLamp(missingToday ? "текущий день ещё не сохранён" : "готовая история",
-        missingToday ? "warning" : "success");
+      notice.textContent = (refreshFailed ? "Показан сохранённый снимок. Обновление временно недоступно. " : "") + currentDayNotice;
+      setLoadStatusLamp(refreshFailed ? "сохранённый снимок · обновление недоступно" : missingToday ? "текущий день ещё не сохранён" : "готовая история",
+        missingToday || refreshFailed ? "warning" : "success");
       renderHistoryBlockFilters();
     }
     function historySnapshotMerged() {
@@ -24409,6 +24495,7 @@
       const h=historySnapshotState;
       renderPage(historySnapshotMerged(),{tableFreshness:"fresh",deferSourceStatusAutoLoad:true,preserveExistingMetricPresentation:true});
       historySnapshotControls();
+      rememberDisplayedHistorySnapshot();
       if (!h.selection.total && !h.selection.totals.length && !h.selection.skus.length) {
         setStateBox("warning","Выберите блоки","Откройте фильтры и включите итоги или SKU нужных групп.");
       }
@@ -24425,7 +24512,10 @@
         renderSelectedHistoryBlocks();
         setFiltersRailOpen(false);
       } catch(error) {
-        if (historyBlockIsCurrent(requestId,viewId)) h.error=String(error.message || error);
+        if (historyBlockIsCurrent(requestId,viewId)) {
+          if (error.httpStatus === 401 || error.httpStatus === 403) clearDisplayedHistorySnapshot(error);
+          else h.error=String(error.message || error);
+        }
       } finally {
         if (historyBlockIsCurrent(requestId,viewId)) { h.busy=false; renderHistoryBlockFilters(); }
       }
@@ -24445,7 +24535,8 @@
       resetFilterState(h.summary);
       const renderStart=window.performance.now();
       renderPage(historySnapshotMerged(),{tableFreshness:"fresh",deferSourceStatusAutoLoad:true});
-      markFreshTableDisplayed(h.summary); h.busy=false; historySnapshotControls();
+      markFreshTableDisplayed(h.summary); h.busy=false; h.refreshError=""; historySnapshotControls();
+      rememberDisplayedHistorySnapshot();
       const renderEnd=window.performance.now();
       const paintMs=await measureDoubleAnimationFrame(renderEnd);
       if (!historyBlockIsCurrent(requestId,viewId)) return;
@@ -25839,19 +25930,8 @@
         if (normalizedOptions.activeTabOnly && !isVitrinaTabActive()) return;
         const message = String(error && error.message ? error.message : error);
         if (historySnapshotEnabled()) {
-          historySnapshotState.summary = null; historySnapshotState.blocks = new Map(); historySnapshotState.busy = false;
-          historySnapshotState.viewId += 1;
-          state.composition = null; snapshotPilotToolbarNode.hidden = true;
-          document.querySelector("[data-history-current-unavailable]").hidden = true;
-          loadRefreshButton.hidden = true;
-          setStateBox("error", "Готовая история недоступна для выбранного периода", escapeHtml(message));
-          setLoadStatusLamp("история недоступна", "warning");
-          let period;
-          try { period = historySnapshotPeriod(); } catch (_) { period = {date_from: "", date_to: ""}; }
-          renderHistoricalAccess({meta: {today_current_date: snapshotBusinessToday()}, historical_access: {
-            options: (error.availableDates || []).map(function(day) { return {value: day, label: day}; }),
-            current_mode: "period", selected_date_from: period.date_from, selected_date_to: period.date_to,
-            default_as_of_date: snapshotBusinessToday(), status_text: message, preset_options: []}});
+          if (restoreDisplayedHistorySnapshot(requestId, error)) return;
+          clearDisplayedHistorySnapshot(error);
           return;
         }
         if (hasDisplayedCachedTableForRequest(requestKey)) {
@@ -26121,7 +26201,19 @@
     function renderSppTestPriceFields() {
       if (!sppTestPriceFieldsNode) return;
       const count = Math.max(1, Math.min(6, Number(state.prices.sppTest.priceCount || 1)));
+      const nmId = String(state.prices.sppTest.selectedNmId || "");
       if (sppTestPriceCountNode) sppTestPriceCountNode.value = String(count);
+      const fields = Array.from(sppTestPriceFieldsNode.querySelectorAll("[data-spp-test-price-index]"));
+      if (sppTestPriceFieldsNode.dataset.nmId === nmId && fields.length === count
+          && fields.every(function(field, index) { return field.getAttribute("data-spp-test-price-index") === String(index); })) {
+        // Buyer/status replies must retain the actual input and its browser selection.
+        fields.forEach(function(field, index) {
+          const value = String(state.prices.sppTest.prices[index] || "");
+          if (document.activeElement !== field && field.value !== value) field.value = value;
+        });
+        return;
+      }
+      sppTestPriceFieldsNode.dataset.nmId = nmId;
       sppTestPriceFieldsNode.innerHTML = Array.from({length: count}, function(_, index) {
         const value = String(state.prices.sppTest.prices[index] || "");
         return '<label class="spp-test-field">Цена ' + String(index + 1)

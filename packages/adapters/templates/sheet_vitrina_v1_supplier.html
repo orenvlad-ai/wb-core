@@ -650,6 +650,7 @@
           <div>
             <h2 id="cardTitle">Новый заказ</h2>
             <p id="cardMessage" class="message"></p>
+            <p id="supplierProcessingStatus" class="message" hidden></p>
           </div>
           <div class="toolbar">
             <span id="matchStatusBadge" class="badge">-</span>
@@ -1089,6 +1090,8 @@
           let financialDocumentColumnPreference = null;
 
       let currentShipment = null;
+      let cardRequestSequence = 0;
+      let registryRequestSequence = 0;
       let allShipments = [];
       let targetFacilityOptions = [];
       let currentUploadId = "";
@@ -1111,6 +1114,7 @@
       let pendingDeepLinkTab = String(queryParams.get("tab") || "").trim();
       let saveRequestInFlight = false;
       let factualCorrectionInFlight = false;
+      let factualCorrectionControls = null;
       let packageDownloadInFlight = "";
       let systemModalResolver = null;
       let systemModalPreviousFocus = null;
@@ -1809,33 +1813,43 @@
         if (action) return supplierAcceptance.submit(url, options, action);
         if (options.supplierFactualDates) {options = Object.assign({}, options); delete options.supplierFactualDates;}
 
-        const response = await fetch(url, options || {});
-        const contentType = response.headers.get("content-type") || "";
-        const text = await response.text();
-        const isJson = contentType.toLowerCase().includes("application/json");
-        if (!isJson) {
-          const preview = text.replace(/\s+/g, " ").trim().slice(0, 240);
-          throw new Error(
-            "HTTP " + response.status + " " + response.url
-            + " returned non-JSON " + (contentType || "content-type")
-            + (preview ? ": " + preview : "")
-          );
-        }
-        let payload = {};
+        const timeoutMs = options.timeoutMs || 0;
+        options = Object.assign({}, options); delete options.timeoutMs;
+        const controller = timeoutMs ? new AbortController() : null;
+        const timer = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+        if (controller) options.signal = controller.signal;
         try {
-          payload = text ? JSON.parse(text) : {};
+          const response = await fetch(url, options || {});
+          const contentType = response.headers.get("content-type") || "";
+          const text = await response.text();
+          const isJson = contentType.toLowerCase().includes("application/json");
+          if (!isJson) {
+            const preview = text.replace(/\s+/g, " ").trim().slice(0, 240);
+            throw new Error(
+              "HTTP " + response.status + " " + response.url
+              + " returned non-JSON " + (contentType || "content-type")
+              + (preview ? ": " + preview : "")
+            );
+          }
+          let payload = {};
+          try {
+            payload = text ? JSON.parse(text) : {};
+          } catch (error) {
+            const preview = text.replace(/\s+/g, " ").trim().slice(0, 240);
+            throw new Error(
+              "HTTP " + response.status + " " + response.url
+              + " returned invalid JSON"
+              + (preview ? ": " + preview : "")
+            );
+          }
+          if (!response.ok) {
+            throw new Error(payload.error || ("HTTP " + response.status));
+          }
+          return payload;
         } catch (error) {
-          const preview = text.replace(/\s+/g, " ").trim().slice(0, 240);
-          throw new Error(
-            "HTTP " + response.status + " " + response.url
-            + " returned invalid JSON"
-            + (preview ? ": " + preview : "")
-          );
-        }
-        if (!response.ok) {
-          throw new Error(payload.error || ("HTTP " + response.status));
-        }
-        return payload;
+          if (controller && controller.signal.aborted) throw new Error("Ответ не получен вовремя. Проверьте статус или откройте заказ снова.");
+          throw error;
+        } finally { if (timer !== null) window.clearTimeout(timer); }
       }
 
       function renderTargetFacilityOptions(selectedId) {
@@ -1847,10 +1861,12 @@
       }
 
       async function loadRegistry() {
-        renderRegistryLoading();
+        const sequence = ++registryRequestSequence;
+        if (!allShipments.length) renderRegistryLoading();
         setMessage(registryMessage, uiText("读取订单 / Loading orders / Читаем заказы...", "Читаем заказы..."), "");
         try {
-          const payload = await fetchJson(shipmentsPath, { headers: { Accept: "application/json" } });
+          const payload = await fetchJson(shipmentsPath, { headers: { Accept: "application/json" }, timeoutMs: 5000 });
+          if (sequence !== registryRequestSequence) return;
           allShipments = Array.isArray(payload.shipments) ? payload.shipments : [];
           targetFacilityOptions = Array.isArray(payload.target_facility_options) ? payload.target_facility_options : [];
           renderTargetFacilityOptions(targetFacilityInput.value);
@@ -1864,7 +1880,8 @@
             openShipment(shipmentId, { tab });
           }
         } catch (error) {
-          renderRegistryError(error.message);
+          if (sequence !== registryRequestSequence) return;
+          if (!allShipments.length) renderRegistryError(error.message);
           setMessage(registryMessage, error.message, "error");
         }
       }
@@ -2108,6 +2125,8 @@
       }
 
       function openNewShipment() {
+        cardRequestSequence += 1;
+        setFactualCorrectionBlocking(false);
         currentShipment = blankShipment();
         currentUploadId = "";
         isNewShipment = true;
@@ -2122,10 +2141,14 @@
       }
 
       async function openShipment(shipmentId, options) {
+        const sequence = ++cardRequestSequence;
+        setFactualCorrectionBlocking(false);
         try {
-          currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
-            headers: { Accept: "application/json" }
+          const shipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+            headers: { Accept: "application/json" }, timeoutMs: 5000
           });
+          if (sequence !== cardRequestSequence) return;
+          currentShipment = shipment;
           currentUploadId = "";
           isNewShipment = false;
           cardDirty = false;
@@ -2144,13 +2167,15 @@
           if (currentShipment.factual_date_correction && currentShipment.factual_date_correction.active) {
             await pollFactualDateCorrection(
               shipmentId,
-              currentShipment.factual_date_correction
+              currentShipment.factual_date_correction,
+              sequence
             );
           }
           if (canManageFinancialDocuments) {
             loadFinancialDocuments();
           }
         } catch (error) {
+          if (sequence !== cardRequestSequence) return;
           setMessage(registryMessage, error.message, "error");
         }
       }
@@ -2201,6 +2226,16 @@
 
       function renderCard() {
         const shipment = currentShipment || blankShipment();
+        const receipt = shipment.acceptance;
+        const pendingDate = receipt && receipt.domain === "supplier_factual_date" && receipt.processing && !receipt.processing.complete;
+        const processingStatus = document.getElementById("supplierProcessingStatus");
+        processingStatus.hidden = !pendingDate;
+        if (pendingDate) {
+          const target = (receipt.fields || []).find(field => field.label === "Фактическая дата");
+          processingStatus.textContent = "Принята фактическая дата: " + formatRussianDate(target && target.value || "—")
+            + ". Текущая фактическая дата: " + formatRussianDate(shipment.actual_shipment_date || "—")
+            + ". " + (receipt.reason_ru || "Запрос сохранён; обработка продолжается.");
+        }
         const metadata = shipment.metadata || {};
         cardTitle.textContent = shipment.shipment_id ? uiText("订单 / Order / Заказ ", "Заказ ") + shipment.shipment_id : uiText("新订单 / New order / Новый заказ", "Новый заказ");
         shipmentDateInput.value = shipment.planned_shipment_date || shipment.shipment_date || "";
@@ -4027,13 +4062,21 @@
       }
 
       function setFactualCorrectionBlocking(active) {
+        // Polling must not erase native read-only/permission control states.
+        if (active && !factualCorrectionInFlight) factualCorrectionControls = new Map();
         factualCorrectionInFlight = Boolean(active);
         Array.from(shipmentCard.querySelectorAll("input, select, textarea, button")).forEach((control) => {
           if (control === closeShipmentButton) {
             return;
           }
-          control.disabled = factualCorrectionInFlight;
+          if (factualCorrectionInFlight) {
+            if (!factualCorrectionControls.has(control)) factualCorrectionControls.set(control, control.disabled);
+            control.disabled = true;
+          } else if (factualCorrectionControls && factualCorrectionControls.has(control)) {
+            control.disabled = factualCorrectionControls.get(control);
+          }
         });
+        if (!factualCorrectionInFlight) factualCorrectionControls = null;
         saveShipmentButton.setAttribute("aria-busy", factualCorrectionInFlight ? "true" : "false");
         updateTotalsAndState();
       }
@@ -4060,60 +4103,74 @@
         }
       }
 
-      async function pollFactualDateCorrection(shipmentId, initial) {
+      async function pollFactualDateCorrection(shipmentId, initial, sequence = cardRequestSequence) {
+        const currentCard = () => sequence === cardRequestSequence && currentShipment && currentShipment.shipment_id === shipmentId;
+        if (!currentCard()) return;
         setFactualCorrectionBlocking(true);
         notifyWarehouseBusinessProjection(
           "warehouse_business_projection_updating",
           {}
         );
         let correction = initial || {};
-        for (let attempt = 0; attempt < 2400; attempt += 1) {
-          if (correction.progress_text) {
-            setMessage(cardMessage, correction.progress_text, "");
-          }
-          if (correction.status === "success") {
-            currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
-              headers: { Accept: "application/json" }
+        const correctionId = correction.correction_id;
+        const deadline = Date.now() + 20 * 60 * 1000;
+        try {
+          for (let attempt = 0; attempt < 2400 && Date.now() < deadline; attempt += 1) {
+            if (!currentCard()) return;
+            if (!correctionId || correction.correction_id !== correctionId) throw new Error("Получен статус другого изменения даты. Откройте заказ повторно, чтобы проверить текущую операцию.");
+            if (correction.progress_text) {
+              setMessage(cardMessage, correction.progress_text, "");
+            }
+            if (correction.status === "success") {
+              const shipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+                headers: { Accept: "application/json" }, timeoutMs: 5000
+              });
+              if (!currentCard()) return;
+              currentShipment = shipment;
+              cardDirty = false;
+              setFactualCorrectionBlocking(false);
+              renderCard();
+              await loadRegistry();
+              if (!currentCard()) return;
+              const scope = (correction.report && correction.report.scope) || {};
+              const range = scope.date_from && scope.date_to
+                ? " Диапазон пересчёта: " + formatRussianDate(scope.date_from) + "–" + formatRussianDate(scope.date_to) + "."
+                : "";
+              setMessage(cardMessage, "Изменение сохранено и проверено." + range, "success");
+              notifyOperatorSupplierShipmentsChanged({
+                shipment_id: shipmentId,
+                changed_field: "actual_shipment_date",
+                order_status: currentShipment.order_status
+              });
+              notifyWarehouseBusinessProjection(
+                "warehouse_business_projection_changed",
+                (correction.report && correction.report.business_projection) || {}
+              );
+              return currentShipment;
+            }
+            if (correction.status === "error" || correction.status === "needs_review") {
+              setFactualCorrectionBlocking(false);
+              const shipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+                headers: { Accept: "application/json" }, timeoutMs: 5000
+              });
+              if (!currentCard()) return;
+              currentShipment = shipment;
+              renderCard();
+              throw new Error(correction.error_message || (
+                correction.status === "needs_review"
+                  ? "Требует разбора. Прежняя версия сохранена."
+                  : "Ошибка пересчёта. Прежняя версия сохранена."
+              ));
+            }
+            await waitForCorrectionPoll();
+            if (!currentCard()) return;
+            correction = await fetchJson(correctionStatusPath(shipmentId), {
+              headers: { Accept: "application/json" }, timeoutMs: 5000
             });
-            cardDirty = false;
-            setFactualCorrectionBlocking(false);
-            renderCard();
-            await loadRegistry();
-            const scope = (correction.report && correction.report.scope) || {};
-            const range = scope.date_from && scope.date_to
-              ? " Диапазон пересчёта: " + formatRussianDate(scope.date_from) + "–" + formatRussianDate(scope.date_to) + "."
-              : "";
-            setMessage(cardMessage, "Изменение сохранено и проверено." + range, "success");
-            notifyOperatorSupplierShipmentsChanged({
-              shipment_id: shipmentId,
-              changed_field: "actual_shipment_date",
-              order_status: currentShipment.order_status
-            });
-            notifyWarehouseBusinessProjection(
-              "warehouse_business_projection_changed",
-              (correction.report && correction.report.business_projection) || {}
-            );
-            return currentShipment;
           }
-          if (correction.status === "error" || correction.status === "needs_review") {
-            setFactualCorrectionBlocking(false);
-            currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
-              headers: { Accept: "application/json" }
-            });
-            renderCard();
-            throw new Error(correction.error_message || (
-              correction.status === "needs_review"
-                ? "Требует разбора. Прежняя версия сохранена."
-                : "Ошибка пересчёта. Прежняя версия сохранена."
-            ));
-          }
-          await waitForCorrectionPoll();
-          correction = await fetchJson(correctionStatusPath(shipmentId), {
-            headers: { Accept: "application/json" }
-          });
-        }
-        setFactualCorrectionBlocking(false);
-        throw new Error("Операция всё ещё выполняется. Откройте поставку повторно, чтобы получить итог.");
+          setFactualCorrectionBlocking(false);
+          throw new Error("Операция всё ещё выполняется. Откройте поставку повторно, чтобы получить итог.");
+        } finally { if (currentCard()) setFactualCorrectionBlocking(false); }
       }
 
       async function saveCurrentShipment() {
@@ -4126,11 +4183,12 @@
           return;
         }
         saveRequestInFlight = true;
+        const sequence = cardRequestSequence;
         saveShipmentButton.disabled = true;
         setMessage(cardMessage, uiText("保存中 / Saving / Сохраняем...", "Сохраняем..."), "");
         try {
           if (isNewShipment) {
-            currentShipment = await fetchJson(shipmentsPath, {
+            const response = await fetchJson(shipmentsPath, {
               method: "POST",
               headers: { "Content-Type": "application/json", Accept: "application/json" },
               body: JSON.stringify({
@@ -4142,6 +4200,8 @@
                 payload
               })
             });
+            if (sequence !== cardRequestSequence || !response) return;
+            currentShipment = response;
             isNewShipment = false;
             currentUploadId = "";
           } else {
@@ -4171,6 +4231,7 @@
                   body: JSON.stringify(mutationPayload)
                 }
               );
+              if (sequence !== cardRequestSequence) return;
               const changes = (preview.changes || []).map((item) => (
                 '<li><strong>' + escapeHtml(item.label || item.field)
                 + '</strong>: ' + escapeHtml(item.old_value || "не задана")
@@ -4187,6 +4248,7 @@
                   + '<ul>' + changes + '</ul>'
                   + '<p><strong>Складские и стоимостные последствия</strong></p><ul>' + consequences + '</ul>'
               });
+              if (sequence !== cardRequestSequence) return;
               if (!decision.confirmed) {
                 setMessage(cardMessage, "Сохранение отменено; складские и стоимостные данные не изменены.", "");
                 return;
@@ -4206,6 +4268,7 @@
                 body: JSON.stringify(mutationPayload)
               });
             }
+            if (sequence !== cardRequestSequence || !response) return;
             if (response.status === "accepted" && response.correction) {
               saveRequestInFlight = false;
               await pollFactualDateCorrection(shipmentId, response.correction);
@@ -4216,6 +4279,7 @@
           cardDirty = false;
           renderCard();
           await loadRegistry();
+          if (sequence !== cardRequestSequence) return;
           if (canManageFinancialDocuments && currentShipment && currentShipment.shipment_id) {
             if (activeCardTab === "financial") {
               await loadFinancialDocuments();
@@ -4225,6 +4289,7 @@
           }
           setMessage(cardMessage, uiText("订单已保存 / Order saved / Заказ сохранён.", "Заказ сохранён."), "success");
         } catch (error) {
+          if (sequence !== cardRequestSequence) return;
           setMessage(cardMessage, error.message, "error");
           updateTotalsAndState();
         } finally {
@@ -4298,6 +4363,8 @@
         if ((cardDirty || (isNewShipment && currentUploadId)) && !confirm(uiText("关闭且不保存修改？ / Close without saving changes? / Закрыть карточку без сохранения изменений?", "Закрыть карточку без сохранения изменений?"))) {
           return;
         }
+        cardRequestSequence += 1;
+        setFactualCorrectionBlocking(false);
         shipmentCard.hidden = true;
         currentShipment = null;
         currentUploadId = "";
@@ -4327,6 +4394,8 @@
       }
 
       function closeCardWithoutConfirm() {
+        cardRequestSequence += 1;
+        setFactualCorrectionBlocking(false);
         shipmentCard.hidden = true;
         currentShipment = null;
         currentUploadId = "";
@@ -4729,7 +4798,11 @@
           await loadRegistry();
         },
         onRecovered: async shipment => {
-          if (!shipment.archived) {currentShipment = shipment; isNewShipment = false; currentUploadId = ""; cardDirty = false; renderCard(); shipmentCard.hidden = false;} await loadRegistry();
+          const sameCard = currentShipment && currentShipment.shipment_id === shipment.shipment_id && !cardDirty;
+          if (!shipment.archived && !(shipment.acceptance.processing || {}).terminal && (sameCard || !currentShipment && cardRequestSequence === 0)) {
+            currentShipment = shipment; isNewShipment = false; currentUploadId = ""; cardDirty = false; renderCard(); shipmentCard.hidden = false;
+          }
+          await loadRegistry();
         }
       });
       if (canManageDocuments) {

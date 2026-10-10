@@ -85,6 +85,7 @@
         "apps/operator_nomenclature_browser_smoke.py",
         "apps/operator_supplier_shipments_browser_smoke.py",
         "apps/operator_supplier_factual_dates_browser_smoke.py",
+        "apps/operator_supplier_ui_recovery_browser_smoke.py",
         "apps/operator_policy_browser_smoke.py",
         "apps/operator_external_operations_browser_smoke.py",
         "apps/operator_external_forms_browser_smoke.py",
@@ -117,7 +118,8 @@
         "apps/operator_supplier_financial_browser_smoke.py",
         "apps/operator_cny_documents_browser_smoke.py",
         "apps/operator_cash_operations_smoke.py",
-        "apps/operator_trade_documents_browser_smoke.py"
+        "apps/operator_trade_documents_browser_smoke.py",
+        "apps/web_vitrina_history_http_smoke.py"
       ],
       "commands": [
         [
@@ -675,6 +677,7 @@
         "packages/application/operator_supplier_factual_dates.py",
         "packages/application/operator_supplier_processing.py",
         "packages/application/operator_supplier_cost_proof.py",
+        "apps/operator_supplier_ui_recovery_browser_smoke.py",
         "packages/adapters/templates/sheet_vitrina_v1_supplier*"
       ],
       "commands": [
@@ -697,6 +700,10 @@
         [
           "python3",
           "apps/operator_supplier_factual_dates_browser_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_ui_recovery_browser_smoke.py"
         ],
         [
           "python3",
@@ -914,6 +921,7 @@
     },
     "supplier_source_operations": {
       "patterns": [
+        "apps/supplier_shipments_read_only_smoke.py",
         "apps/supplier_confirmation_flows_smoke.py",
         "apps/supplier_preparation_intents_smoke.py",
         "packages/application/supplier_preparation_intents.py",
@@ -922,6 +930,7 @@
         "packages/application/registry_upload_http_entrypoint.py"
       ],
       "commands": [
+        ["python3", "apps/supplier_shipments_read_only_smoke.py"],
         ["python3", "apps/supplier_preparation_intents_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"],
         ["python3", "apps/supplier_confirmation_flows_smoke.py"],
@@ -1211,6 +1220,14 @@
         ["python3", "apps/ff_stock_ledger_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5"]
+    },
+    "web_vitrina_history_ui": {
+      "patterns": [
+        "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html",
+        "apps/web_vitrina_history_http_smoke.py"
+      ],
+      "commands": [["python3", "apps/web_vitrina_history_http_smoke.py", "--browser-only"]],
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     },
     "web_vitrina_history_activation": {
       "patterns": [

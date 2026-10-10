@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import wraps
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
@@ -28,6 +29,7 @@ from packages.adapters.wb_content import (
     WbContentTransportError,
 )
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.application.web_vitrina_window_read_context import active_window_read_context, window_read_context
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.supplier_invoice_parser import (
     extract_iphone_model_keys,
@@ -225,6 +227,19 @@ class NomenclatureBarcodeSource(Protocol):
         raise NotImplementedError
 
 
+def _supplier_read_only(method):
+    """Pin saved sources; ordinary reads never bootstrap or migrate storage."""
+    @wraps(method)
+    def read(self, *args, **kwargs):
+        active = active_window_read_context()
+        if active is not None:
+            active.borrow(self.runtime.db_path)
+            return method(self, *args, **kwargs)
+        with window_read_context(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir):
+            return method(self, *args, **kwargs)
+    return read
+
+
 class SupplierShipmentsBlock:
     def __init__(
         self,
@@ -237,8 +252,8 @@ class SupplierShipmentsBlock:
         self.barcode_source = barcode_source or HttpBackedWbContentSource()
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
 
+    @_supplier_read_only
     def list_shipments(self) -> dict[str, Any]:
-        self.migrate_existing_supplier_shipments_into_trade_documents()
         rows = self.runtime.list_supplier_shipments()
         from packages.application.warehouse_functional import (
             load_supplier_cost_summary_fields,
@@ -261,6 +276,7 @@ class SupplierShipmentsBlock:
             ],
         }
 
+    @_supplier_read_only
     def list_shipments_supplier_safe(self) -> dict[str, Any]:
         business_today = supplier_business_today(timestamp=self.timestamp_factory())
         return {
@@ -512,8 +528,8 @@ class SupplierShipmentsBlock:
     ) -> dict[str, Any]:
         return _sanitize_supplier_write_payload(payload, require_upload_id=require_upload_id)
 
+    @_supplier_read_only
     def get_shipment(self, shipment_id: str) -> dict[str, Any]:
-        self.migrate_existing_supplier_shipments_into_trade_documents()
         detail = self.runtime.load_supplier_shipment(shipment_id)
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
@@ -521,7 +537,7 @@ class SupplierShipmentsBlock:
         payload = _detail_payload(detail)
         payload["lines"] = _project_supplier_line_contract(
             payload.get("lines") or [],
-            self._sku_groups(),
+            self._sku_groups_read_only(),
         )
         payload["product_lines"] = [
             item for item in payload["lines"] if item.get("line_type") == LINE_TYPE_PRODUCT
@@ -533,6 +549,7 @@ class SupplierShipmentsBlock:
             self._with_approx_cost_fields(self._with_document_fields(payload))
         )
 
+    @_supplier_read_only
     def get_shipment_supplier_safe(self, shipment_id: str) -> dict[str, Any]:
         detail = self.runtime.load_supplier_shipment(shipment_id)
         if detail is None:
@@ -1354,6 +1371,7 @@ class SupplierShipmentsBlock:
             result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result, defer=bool(operator_request))
         return result
 
+    @_supplier_read_only
     def download_invoice(self, shipment_id: str) -> tuple[bytes, str, str]:
         detail = self.runtime.load_supplier_shipment(shipment_id)
         if detail is None:
@@ -1373,6 +1391,7 @@ class SupplierShipmentsBlock:
         content_type = SUPPLIER_INVOICE_CONTENT_TYPE
         return file_path.read_bytes(), str(header.get("source_filename") or "supplier-invoice.xlsx"), content_type
 
+    @_supplier_read_only
     def download_shipment_contract(self, shipment_id: str) -> tuple[bytes, str, str]:
         shipment = self.get_shipment(shipment_id)
         contract_document_id = str(shipment.get("contract_document_id") or "")
@@ -1380,6 +1399,7 @@ class SupplierShipmentsBlock:
             raise ValueError(f"supplier shipment contract is not linked: {shipment_id}")
         return self.download_trade_document_file(contract_document_id)
 
+    @_supplier_read_only
     def list_trade_documents(self, *, include_archived: bool = False) -> dict[str, Any]:
         documents = [self._with_document_download_path(item) for item in self.runtime.list_trade_documents(include_archived=include_archived)]
         return {
@@ -1547,6 +1567,7 @@ class SupplierShipmentsBlock:
             "document": self._with_document_download_path(document),
         }
 
+    @_supplier_read_only
     def download_trade_document_file(self, document_id: str) -> tuple[bytes, str, str]:
         document = self.runtime.load_trade_document(document_id)
         if document is None or str(document.get("status") or "") != TRADE_DOCUMENT_STATUS_ACTIVE:
@@ -2061,9 +2082,11 @@ class SupplierShipmentsBlock:
             items=saved_items,
         )
 
+    @_supplier_read_only
     def list_sku_groups(self, *, include_inactive: bool = True) -> dict[str, Any]:
-        self._ensure_sku_groups_ready()
-        groups = self.runtime.list_sku_groups(include_inactive=include_inactive)
+        groups = self._sku_groups_read_only()
+        if not include_inactive:
+            groups = [group for group in groups if bool(group.get("is_active"))]
         return {
             "contract_name": "sheet_vitrina_v1_sku_groups",
             "status": "ok",
@@ -2638,7 +2661,8 @@ class SupplierShipmentsBlock:
         source_file_path = str(header.get("source_file_path") or "").strip()
         if not source_file_path:
             raise ValueError(f"supplier shipment invoice file is missing: {shipment_id}")
-        self.migrate_existing_supplier_shipments_into_trade_documents()
+        from packages.application.operator_supplier_contracts import materialize_invoice_for_legacy_mutation
+        materialize_invoice_for_legacy_mutation(self, shipment_id)
         refreshed = self.runtime.load_supplier_shipment(shipment_id)
         if refreshed is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
@@ -2767,6 +2791,15 @@ class SupplierShipmentsBlock:
     def _sku_groups(self) -> list[dict[str, Any]]:
         self._ensure_sku_groups_ready()
         return self.runtime.list_sku_groups(include_inactive=True)
+
+    def _sku_groups_read_only(self) -> list[dict[str, Any]]:
+        groups = self.runtime.list_sku_groups(include_inactive=True)
+        known = {str(group.get("group_key") or "") for group in groups}
+        # Preserve the default projection without persisting rows from a GET.
+        groups += [{**deepcopy(group), "is_active": True, "is_system": True,
+                    "display_order": 0, "created_at": "", "updated_at": ""}
+                   for group in DEFAULT_SKU_GROUPS if str(group.get("group_key") or "") not in known]
+        return sorted(groups, key=lambda group: (int(group.get("display_order") or 0), str(group.get("group_key") or "")))
 
     def _apply_authoritative_nomenclature_matches(
         self,

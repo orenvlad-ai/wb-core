@@ -115,7 +115,116 @@ def _open_stable_manual_panel(page, base_url):
     }''', timeout=7000)
 
 
+@contextmanager
+def _held_spp_refresh(page, kind):
+    """Hold one real native GET until the user has focused/selected a control."""
+    pattern='**/buyer-session/check' if kind=='buyer' else '**/prices/spp-test/status'
+    held=[]
+    def intercept(route):
+        reply=route.fetch()
+        if reply.status!=200:raise AssertionError('native refresh failed: '+str(reply.status))
+        held.append((route,reply))
+    page.route(pattern,intercept)
+    try:
+        page.locator('[data-wb-buyer-session-check]' if kind=='buyer' else '[data-prices-subtab="spp-test"]').click()
+        deadline=time.monotonic()+5
+        while not held and time.monotonic()<deadline:page.wait_for_timeout(10)
+        if len(held)!=1:raise AssertionError('expected one held native refresh')
+        if kind=='status':page.wait_for_function('()=>!state.prices.sppTest.buyerSessionLoading')
+        def release():
+            route,reply=held.pop()
+            route.fulfill(response=reply)
+            page.wait_for_function('()=>!state.prices.sppTest.buyerSessionLoading&&!state.prices.sppTest.statusLoading')
+        yield release
+    finally:
+        page.unroute(pattern,intercept)
+        for route,_ in held:route.abort()
+
+
 class Native(unittest.TestCase):
+    def test_chromium_async_buyer_refresh_before_first_input_keeps_node_and_focus(self):
+        with fixture() as f,sync_playwright() as pw:
+            browser=pw.chromium.launch();page=browser.new_page(viewport={'width':1440,'height':940})
+            _open_stable_manual_panel(page,f.base_url)
+            posts=[];page.on('request',lambda request:posts.append(request.url) if request.method=='POST' else None)
+            with _held_spp_refresh(page,'buyer') as release:
+                price=page.locator('[data-spp-test-price-index="0"]');original=price.element_handle()
+                price.select_text()
+                self.assertEqual(price.input_value(),'')
+                release()
+                self.assertTrue(original.evaluate('(node)=>node.isConnected&&document.activeElement===node'))
+                page.keyboard.insert_text('810')
+                self.assertEqual(price.input_value(),'810')
+                self.assertEqual(page.evaluate('()=>state.prices.sppTest.prices'),['810'])
+                self.assertFalse(page.locator('[data-spp-test-start]').is_disabled())
+            self.assertEqual(posts,[]);self.assertEqual(f.spp_prices_source.upload_payloads,[])
+            self.assertEqual(page.request.get(f.base_url+'/v1/sheet-vitrina-v1/operations?domain=spp_test_jobs').json()['total'],0)
+            browser.close()
+
+    def test_chromium_async_status_refresh_preserves_selection_and_entered_price(self):
+        with fixture() as f,sync_playwright() as pw:
+            browser=pw.chromium.launch();page=browser.new_page(viewport={'width':1440,'height':940})
+            _open_stable_manual_panel(page,f.base_url)
+            price=page.locator('[data-spp-test-price-index="0"]');price.fill('810')
+            with _held_spp_refresh(page,'status') as release:
+                original=price.element_handle();price.select_text()
+                release()
+                self.assertTrue(original.evaluate('(node)=>node.isConnected&&document.activeElement===node'))
+                self.assertEqual(price.input_value(),'810')
+                page.keyboard.insert_text('800')
+                self.assertEqual(price.input_value(),'800')
+                self.assertEqual(page.evaluate('()=>state.prices.sppTest.prices'),['800'])
+                self.assertFalse(page.locator('[data-spp-test-start]').is_disabled())
+            self.assertEqual(f.spp_prices_source.upload_payloads,[])
+            self.assertEqual(page.request.get(f.base_url+'/v1/sheet-vitrina-v1/operations?domain=spp_test_jobs').json()['total'],0)
+            browser.close()
+
+    def test_chromium_async_refresh_does_not_reclaim_foreign_focus_or_panel(self):
+        with fixture() as f,sync_playwright() as pw:
+            browser=pw.chromium.launch();page=browser.new_page(viewport={'width':1440,'height':940})
+            _open_stable_manual_panel(page,f.base_url)
+            for kind,move in (('buyer','control'),('status','panel'),('buyer','readonly')):
+                with self.subTest(kind=kind,move=move):
+                    if move=='readonly':page.locator('[data-prices-subtab="spp-test"]').click();page.wait_for_function('()=>!state.prices.sppTest.buyerSessionLoading&&!state.prices.sppTest.statusLoading')
+                    with _held_spp_refresh(page,kind) as release:
+                        price=page.locator('[data-spp-test-price-index="0"]');price.focus()
+                        if move=='panel':
+                            foreign=page.locator('[data-prices-subtab="current"]');foreign.click()
+                        else:
+                            if move=='readonly':price.evaluate('(node)=>{node.readOnly=true;node.disabled=true;}')
+                            foreign=page.locator('[data-spp-test-price-count]');foreign.focus()
+                        owner=foreign.element_handle()
+                        release()
+                        self.assertTrue(owner.evaluate('(node)=>document.activeElement===node'))
+                        if move=='panel':self.assertTrue(page.locator('[data-prices-subpanel="spp-test"]').is_hidden())
+                        if move=='readonly':self.assertTrue(price.is_disabled());self.assertTrue(price.evaluate('(node)=>node.readOnly'))
+            self.assertEqual(f.spp_prices_source.upload_payloads,[])
+            browser.close()
+
+    def test_chromium_async_refresh_respects_new_sku_and_price_count(self):
+        with fixture() as f,sync_playwright() as pw:
+            browser=pw.chromium.launch();page=browser.new_page(viewport={'width':1440,'height':940})
+            _open_stable_manual_panel(page,f.base_url)
+            with _held_spp_refresh(page,'buyer') as release:
+                old=page.locator('[data-spp-test-price-index="0"]').element_handle();old.focus()
+                selector=page.locator('[data-spp-test-nm]');selector.select_option('210184534');selector.focus()
+                new=page.locator('[data-spp-test-price-index="0"]').element_handle()
+                self.assertFalse(old.evaluate('(node)=>node.isConnected'))
+                release()
+                self.assertEqual(selector.input_value(),'210184534')
+                self.assertTrue(selector.evaluate('(node)=>document.activeElement===node'))
+                self.assertTrue(new.evaluate('(node)=>node.isConnected'))
+            with _held_spp_refresh(page,'status') as release:
+                count=page.locator('[data-spp-test-price-count]');count.select_option('2');count.focus()
+                fields=page.locator('[data-spp-test-price-index]');self.assertEqual(fields.count(),2)
+                second=fields.nth(1).element_handle()
+                release()
+                self.assertEqual(fields.count(),2)
+                self.assertTrue(second.evaluate('(node)=>node.isConnected'))
+                self.assertTrue(count.evaluate('(node)=>document.activeElement===node'))
+            self.assertEqual(f.spp_prices_source.upload_payloads,[])
+            browser.close()
+
     def test_accept_before_preflight_and_same_id_race(self):
         with fixture() as f:
             command=body();sc=scope(f);entered=threading.Event();release=threading.Event();count=[];errors=[]

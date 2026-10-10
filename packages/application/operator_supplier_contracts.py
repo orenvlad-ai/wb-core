@@ -184,6 +184,56 @@ def _materialize_invoice(block, ctx):
         conn.commit();ctx['order']=after
 
 
+def materialize_invoice_for_legacy_mutation(block, shipment_id):
+    """Compatibility write owner: one retained invoice, source CAS and proof.
+
+    Reads never call this owner. A reply lost after the atomic save is recovered
+    from the same native invoice/stage, without a second materialization.
+    """
+    from packages.application.web_vitrina_window_read_context import active_window_read_context
+    if active_window_read_context() is not None:
+        raise ValueError('invoice materialization cannot run inside a read snapshot')
+    rt=block.runtime
+    with (rt.runtime_dir/'.operator-supplier-contract.lock').open('a') as lock:
+        deadline=time.monotonic()+5
+        while True:
+            try:
+                fcntl.flock(lock.fileno(),fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic()>=deadline:
+                    raise ValueError('invoice source is still saving; read the same order')
+                time.sleep(0.01)
+        with closing(source.readonly(rt.db_path)) as conn:
+            captured=source.capture(conn,shipment_id)
+            ctx={'shipment_id':shipment_id,'order':captured,'runtime_dir':rt.runtime_dir}
+            _order_guard(conn,ctx)
+            invoice_id=captured['header'].get('invoice_document_id') or ''
+            if invoice_id:
+                invoice,_=_pair(conn,invoice_id,'');_file(rt.runtime_dir,invoice)
+                rows=conn.execute(f"SELECT operation_id FROM {STAGES} WHERE stage='invoice_source' "
+                    "AND json_extract(source_json,'$.after.header.shipment_id')=? "
+                    "AND json_extract(source_json,'$.invoice.document_id')=? ORDER BY saved_at DESC",
+                    (shipment_id,invoice_id)).fetchall() if source._exists(conn,STAGES) else []
+                for row in rows:
+                    proof=_stage(conn,row['operation_id'],'invoice_source')
+                    if proof and proof['invoice']==invoice:
+                        return {'operation_id':row['operation_id'],'invoice_document_id':invoice_id,
+                                'source_digest':source.digest(proof)}
+                return {'operation_id':'','invoice_document_id':invoice_id,'source_digest':''}
+            operation_id='supplier_invoice_source_'+source.digest(captured)[:40]
+            if source._exists(conn,STAGES) and _stage(conn,operation_id,'invoice_source'):
+                raise ValueError('saved invoice source no longer matches its order; reload required')
+        ctx['operation_id']=operation_id
+        _materialize_invoice(block,ctx)
+        with closing(source.readonly(rt.db_path)) as conn:
+            proof=_stage(conn,operation_id,'invoice_source')
+            if not proof:
+                raise ValueError('invoice source acknowledgement is unavailable; read the same order')
+            return {'operation_id':operation_id,'invoice_document_id':proof['invoice']['document_id'],
+                    'source_digest':source.digest(proof)}
+
+
 def _lookup(conn, scope, identity):
     return conn.execute(f'SELECT * FROM {REQUESTS} WHERE request_scope=? AND request_id=?',(scope,identity)).fetchone() if source._exists(conn,REQUESTS) else None
 
