@@ -64,7 +64,6 @@ BOUNDARIES = {
         "packages/contracts/finance_liquidity.py",
         "packages/application/registry_upload_db_backed_runtime.py",
         "packages/adapters/registry_upload_http_entrypoint.py",
-        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md",
     ),
     'warehouse_recovery_retention_smoke': (
         'apps/warehouse_recovery_retention.py',
@@ -765,6 +764,36 @@ def exists(_head: str, path: str) -> bool:
     }
 
 
+def documentation_only_checks() -> None:
+    boundaries = {
+        "docs/runbooks/sheet_vitrina_v1_closed_backlog.md": "packages/application/sheet_vitrina_v1_closed_backlog.py",
+        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md": "packages/contracts/finance_liquidity.py",
+        "docs/runbooks/finance_liquidity_cash_dormant_release.md": "packages/contracts/finance_liquidity.py",
+        "docs/runbooks/heavy_derived_intents.md": "packages/application/supplier_preparation_intents.py",
+        "docs/runbooks/owned_history_worker.md": "packages/application/owned_history_worker.py",
+        "docs/runbooks/business_data_formula_resume.md": "packages/application/business_data_formula_resume.py",
+        "docs/runbooks/business_data_cycle_deploy_protection.md": "packages/application/business_data_formula_resume.py",
+    }
+
+    def select(paths):
+        plan = build_plan_from_paths(pull_request=161, base=BASE, head=HEAD,
+            paths=paths, file_exists=lambda _, path: (select_checks.ROOT / path).is_file())
+        verify_plan(plan)
+        return plan
+
+    for docs in [[path] for path in boundaries] + [list(boundaries)]:
+        plan = select(docs)
+        assert plan["release_kind"] == "repo_only", plan
+        assert plan["groups"] == plan["commands"] == plan["pip"] == [], plan
+    for doc, source in boundaries.items():
+        code = select([source])
+        mixed = select([doc, source])
+        assert code["commands"], (source, code)
+        for field in ("release_kind", "groups", "commands", "pip"):
+            assert mixed[field] == code[field], (doc, source, field, code, mixed)
+    print("Documentation: 7 guides select no runtime checks; mixed source coverage unchanged")
+
+
 def finance_liquidity_checks() -> None:
     own_smokes = [
         ["python3", "apps/finance_liquidity_contract_smoke.py"],
@@ -788,8 +817,6 @@ def finance_liquidity_checks() -> None:
         "packages/domain/finance_liquidity/money.py",
         "packages/application/finance_liquidity.py",
         "packages/adapters/finance_liquidity.py",
-        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md",
-        "docs/runbooks/finance_liquidity_cash_dormant_release.md",
         "artifacts/finance_liquidity_cash/dormant/systemd/wb-core-finance-liquidity.service",
         "artifacts/finance_liquidity_cash/dormant/nginx/finance-liquidity.routes.candidate.md",
     )
@@ -800,9 +827,7 @@ def finance_liquidity_checks() -> None:
         )
         verify_plan(plan)
         assert plan["groups"] == ["finance_liquidity"], (path, plan)
-        assert plan["release_kind"] == (
-            "repo_only" if path.startswith("docs/") else "live_runtime"
-        )
+        assert plan["release_kind"] == "live_runtime"
         assert plan["pip"] == [
             "apsw==3.53.4.0",
             "openpyxl==3.1.5",
@@ -1009,6 +1034,7 @@ def autoanswers_mjs_checks() -> None:
 
 
 def main() -> None:
+    documentation_only_checks()
     autoanswers_mjs_checks()
     cleaner_command_checks()
     # The hosted system Python may install into user-site, which -I correctly

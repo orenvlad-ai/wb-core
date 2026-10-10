@@ -325,8 +325,7 @@
       "patterns": [
         "packages/application/sheet_vitrina_v1_closed_backlog.py",
         "packages/application/sheet_vitrina_v1_cycle_sources.py",
-        "apps/sheet_vitrina_v1_closed_backlog_smoke.py",
-        "docs/runbooks/sheet_vitrina_v1_closed_backlog.md"
+        "apps/sheet_vitrina_v1_closed_backlog_smoke.py"
       ],
       "commands": [["python3", "apps/sheet_vitrina_v1_closed_backlog_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
@@ -1187,9 +1186,7 @@
         "packages/application/registry_upload_db_backed_runtime.py",
         "packages/adapters/registry_upload_http_entrypoint.py",
         "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html",
-        "artifacts/finance_liquidity_cash/**",
-        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md",
-        "docs/runbooks/finance_liquidity_cash_dormant_release.md"
+        "artifacts/finance_liquidity_cash/**"
       ],
       "commands": [
         ["python3", "apps/finance_liquidity_contract_smoke.py"],
@@ -1447,8 +1444,7 @@
         "packages/application/supplier_shipment_invoice_revision.py",
         "apps/supplier_preparation_intents_smoke.py",
         "apps/cny_preparation_intents_smoke.py",
-        "apps/heavy_derived_intents_smoke.py",
-        "docs/runbooks/heavy_derived_intents.md"
+        "apps/heavy_derived_intents_smoke.py"
       ],
       "commands": [
         [
@@ -1466,7 +1462,6 @@
         "packages/application/owned_history_worker_capability.py",
         "apps/web_vitrina_owned_history_worker.py",
         "apps/owned_history_worker_smoke.py",
-        "docs/runbooks/owned_history_worker.md",
         "packages/application/owned_history_native_ack.py",
         "apps/owned_history_completion_smoke.py",
         "apps/owned_history_diagnostics_smoke.py",
@@ -1563,9 +1558,7 @@
         "packages/application/business_data_maintenance_pause.py",
         "packages/application/business_data_write_barrier.py",
         "packages/application/business_data_cycle_wakeup.py",
-        "apps/business_data_formula_resume*.py",
-        "docs/runbooks/business_data_formula_resume.md",
-        "docs/runbooks/business_data_cycle_deploy_protection.md"
+        "apps/business_data_formula_resume*.py"
       ],
       "commands": [
         [
