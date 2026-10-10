@@ -7843,12 +7843,12 @@ class RegistryUploadHttpEntrypoint:
                 self.warehouse_functional_block.build_sync_plan,
             )
             def publish_functional() -> dict[str, Any]:
-                from packages.application.fbs_accounting_runtime import refresh
+                from apps.warehouse_functional_runner import _publish_fbs_snapshot_accounting
                 result = self.warehouse_functional_block.apply_plan(
                     plan,
                     confirm_fingerprint=str(plan["plan_fingerprint"]),
                 )
-                accounting = refresh(self.runtime.runtime_dir, ready_runtime=self.runtime)
+                accounting = _publish_fbs_snapshot_accounting(self.runtime)
                 planning = self.inventory_planning.current()
                 return {**result, "fbs_snapshot_accounting": accounting,
                         "planning_inventory_readback": planning}

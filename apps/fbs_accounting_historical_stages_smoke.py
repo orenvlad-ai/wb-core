@@ -31,8 +31,9 @@ from packages.application.fbs_snapshot_cost_sources import capture_current
 from packages.application.fbs_accounting_historical_sources import augment_native_requests
 
 
-def native_stages_fixture(db, *, end=END,service_receipt=False):
-    book,cap,receipt,_=native_writer_fixture(db,end=end,receipt_source_type=None if service_receipt else "china_acceptance_form",receipt_source_id="selected-shipment",service_receipt=service_receipt)
+def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt_clock=False,confirmation_actor=None):
+    book,cap,receipt,_=native_writer_fixture(db,end=end,receipt_source_type=None if service_receipt else "china_acceptance_form",receipt_source_id="selected-shipment",service_receipt=service_receipt,
+        advancing_receipt_clock=advancing_receipt_clock,confirmation_actor=confirmation_actor)
     saved_dates=sorted(book["state"]["periods"])
     days=[*saved_dates,end]
     with closing(sqlite3.connect(db)) as conn,conn:

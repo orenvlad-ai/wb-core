@@ -22,6 +22,8 @@ from packages.application.fbs_snapshot_cost_sources import capture_current
 def posted_requests(conn):
     """Native wrapper workflow headers, no constructed source monetary values."""
     for request in conn.execute(f"SELECT * FROM {REQUESTS_TABLE}").fetchall():
+        if request['posted_document_id']:
+            continue  # Preserve clocks/authority emitted by the actual service.
         row = conn.execute(f"SELECT posted_manifest_json,posted_at FROM {DOCUMENTS_TABLE} WHERE request_id=? ORDER BY document_id LIMIT 1", (request["request_id"],)).fetchone()
         posted = json.loads(row[0])
         original = {k: v for k, v in posted.items() if k not in {"document_id", "document_role", "lines"}}

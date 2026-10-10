@@ -29,7 +29,8 @@ class HistoricalPublication(unittest.TestCase):
         self.now=getattr(self,'fixture_now',NOW)
         temp=TemporaryDirectory(prefix="historical-real-publication-");self.addCleanup(temp.cleanup)
         self.runtime=Path(temp.name);self.db=self.runtime/"registry_upload_runtime.sqlite3"
-        self.book,self.cap,self.plan,self.dated=native_stages_fixture(self.db,end=self.now.date().isoformat(),service_receipt=getattr(self,'service_receipt',False))
+        self.book,self.cap,self.plan,self.dated=native_stages_fixture(self.db,end=self.now.date().isoformat(),service_receipt=getattr(self,'service_receipt',False),
+            advancing_receipt_clock=getattr(self,'advancing_receipt_clock',False),confirmation_actor=getattr(self,'confirmation_actor',None))
         self.before=accounting._save_book(self.runtime,self.book,expected=None,operation_id="initial-local-book")
         with closing(sqlite3.connect(self.db)) as conn:
             conn.row_factory=sqlite3.Row
@@ -50,7 +51,7 @@ class HistoricalPublication(unittest.TestCase):
             request=conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id='native:new-late-receipt'").fetchone()
             native=_build_posting_plan(conn,request=request,manifest=json.loads(request["request_payload_json"]),epoch=1,intrinsic_only=True)
             source={k:request[k] for k in operations.SOURCE_KEYS}
-            source.update(manifest=json.loads(request["request_payload_json"]),effect=operations.effect(native),effect_digest=fingerprint(operations.effect(native)))
+            source.update(manifest=json.loads(request["request_payload_json"]),effect=operations.effect(native),effect_digest=fingerprint(operations.effect(native)),preview_actor=request['actor'])
             # Actual immutable accepted-source schema; no service recovery or
             # guided legacy completion is claimed by this local fixture.
             conn.execute(f"INSERT OR IGNORE INTO {operations.TABLE}(request_id,source_json,source_digest,accepted_at,actor,state,updated_at) VALUES(?,?,?,?,?,'processing',?)",

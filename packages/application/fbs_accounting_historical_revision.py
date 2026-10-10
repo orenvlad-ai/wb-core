@@ -63,7 +63,11 @@ def _require(condition, code, **details):
 
 
 def _time(value):
-    result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    _require(type(value) is str and bool(value), "observation_timestamp_invalid")
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise HistoricalRevisionError("observation_timestamp_invalid") from error
     _require(result.tzinfo is not None, "observation_timezone_missing")
     return result
 
@@ -112,8 +116,8 @@ def _verify_request_operands(doc, capture):
     _require(all(request[k] == doc[k] for k in ("source_system", "source_type", "source_id", "source_revision",
                  "idempotency_epoch", "business_date")) and request["request_id"] == posted["request_id"]
              and request["posted_document_id"] == posted["primary_document_id"]
-             and request["posted_at"] == doc["posted_at"]
-             and _time(request["accepted_at"]) <= _time(doc["posted_at"]),
+             and _time(request["accepted_at"]) <= _time(doc["posted_at"])
+             <= _time(request["posted_at"]) <= _time(capture["captured_at"]),
              "native_cohort_request_identity_mismatch", document_id=doc["document_id"])
     _require(capture.get("posted_actors_by_id", {}).get(doc["document_id"]) == request["actor"],
              "native_cohort_actor_mismatch", document_id=doc["document_id"])

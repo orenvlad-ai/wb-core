@@ -244,6 +244,8 @@ def _append_and_activate(runtime_dir,manifest):
 def publish(manifest, *, runtime_dir, fault_injector=None):
     """Exact identity recovery; actual ready target, live owner, short source CAS."""
     _verify(manifest);require_warehouse_job_owner(Path(runtime_dir))
+    from packages.application.web_vitrina_window_read_context import active_window_read_context
+    stages.require(active_window_read_context() is None,'historical_publication_window_reader_active')
     stages.require(Path(runtime_dir).resolve()==Path(manifest["authority"]["runtime_dir"]),"historical_runtime_changed")
     inject=fault_injector or (lambda _boundary:None)
     db=Path(manifest["authority"]["path"]);started=time.monotonic()

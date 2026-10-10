@@ -519,6 +519,7 @@ def _test_http_manual_snapshot_publication_order() -> None:
             require_warehouse_job_owner(runtime.runtime_dir)
             return action("overhead_reconcile", {"processed_count": 0})
         with tempfile.TemporaryDirectory(prefix="manual-publication-order-") as temporary, \
+             patch("packages.application.fbs_accounting_historical_cycle.refresh", return_value=None), \
              patch("packages.application.fbs_accounting_runtime.refresh", side_effect=refresh), \
              patch("packages.application.fbs_accounting_runtime.publish_ready", side_effect=AssertionError("duplicate independent publication")), \
              patch("packages.application.operator_ff_overhead.drain", side_effect=drain) as overhead_drain, \

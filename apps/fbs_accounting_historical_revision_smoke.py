@@ -184,7 +184,8 @@ def late(facts=(), *, end=END, identity="late", day=DAY, facility="A", pool="FBS
     return captured(end, [*facts, value], basis, fbo, (quantities or {}).get(end))
 
 
-def native_writer_fixture(path, *, end=END, receipt_source_type=None, receipt_source_id=None, service_receipt=False):
+def native_writer_fixture(path, *, end=END, receipt_source_type=None, receipt_source_id=None, service_receipt=False,
+                          advancing_receipt_clock=False, confirmation_actor=None):
     """LOCAL TEST DB only: real builder/_apply_plan + capture_current/_documents.
 
     The official stock fixture supplies synthetic registry/stock evidence. Its
@@ -244,9 +245,12 @@ def native_writer_fixture(path, *, end=END, receipt_source_type=None, receipt_so
             from packages.application.operator_warehouse_documents import confirm_source
             from types import SimpleNamespace
             complete_local_metadata(path)
-            service=FfPoolDocumentService(db_path=path,runtime_dir=path.parent,timestamp_factory=lambda:posted_at,resume=False,bootstrap=False)
+            stamp=datetime.fromisoformat(posted_at.replace('Z','+00:00'))
+            ticks=iter(range(1,1000))
+            clock=(lambda:(stamp+timedelta(seconds=next(ticks))).isoformat().replace('+00:00','Z')) if advancing_receipt_clock else (lambda:posted_at)
+            service=FfPoolDocumentService(db_path=path,runtime_dir=path.parent,timestamp_factory=clock,resume=False,bootstrap=False)
             service.process_request(request['request_id'])
-            confirm_source(SimpleNamespace(db_path=path,runtime_dir=path.parent,_now=lambda:posted_at),request['request_id'])
+            confirm_source(SimpleNamespace(db_path=path,runtime_dir=path.parent,_now=clock),request['request_id'],actor=confirmation_actor)
             service.post(request['request_id'],defer_replay=True)
             status=service.status(request_id=request['request_id'])
             assert status['state']=='posted',status
@@ -347,6 +351,23 @@ class HistoricalRevisionTests(unittest.TestCase):
         self.assertEqual(plan["scope"]["affected_nm_ids"], [1, 2])
         self.assertIn("fee", plan["targets"][DAY]["allocations"])
         self.assertIn("A:FBO:1", plan["targets"][DAY]["fbo_locations"])
+
+    def test_prefix_expense_applied_once_and_prior_versions_remain_unchanged(self):
+        # Synthetic amount/date; no real supplier or production source bytes.
+        fee = overhead('prefix-fee', amount='61425', day=DAY)
+        book, _ = saved_book(facts=[fee])
+        before = deepcopy(book)
+        plan = self.ready(book, late([fee], day='2026-09-09'))
+        candidate = plan['candidate_book']
+        self.assertEqual(book, before)
+        self.assertEqual(revision._prefix(candidate, '2026-09-09'), revision._prefix(book, '2026-09-09'))
+        allocations = [(day, allocation) for day, period in candidate['state']['periods'].items()
+                       for allocation in period['document_valuation']['allocations'] if allocation['document_id']=='prefix-fee']
+        self.assertEqual(len(allocations), 1)
+        self.assertEqual(allocations[0][0], DAY)
+        self.assertEqual(sum(allocations[0][1]['amounts_kopecks'].values()), 6142500)
+        self.assertEqual(candidate['state']['periods'][DAY]['applied_documents']['prefix-fee'],
+                         book['state']['periods'][DAY]['applied_documents']['prefix-fee'])
 
     def test_referenced_shipment_partial_receipt_loss_fbo_cost_conservation(self):
         facts = [root(dst_pool="FBO"), shipment(amount="5"), receipt(q=200, day="2026-09-09", pool="FBO"),
