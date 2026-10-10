@@ -8,7 +8,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 
-from packages.application.fbs_accounting_historical_revision import _manifest_known, MAX_DOCUMENTS
+from packages.application.fbs_accounting_historical_revision import _manifest_known, _time, MAX_DOCUMENTS
 from packages.application.fbs_accounting_historical_revision_writer import REQUEST_PROOF_FIELDS
 from packages.application.fbs_snapshot_cost_sources import capture_current
 from packages.application.ff_pool_documents import DOCUMENTS_TABLE, REQUESTS_TABLE
@@ -114,6 +114,7 @@ def verify_cohort_confirmations(conn, *, plan, capture):
     require(conn.in_transaction and conn.execute('PRAGMA query_only').fetchone()[0]==1,
         'historical_confirmation_query_only_required')
     required={json.loads(capture['posted_manifest_json_by_id'][i])['request_id'] for i in plan['receipt_document_ids']}
+    documents={d['document_id']:d for d in capture['documents']}
     confirmations={}
     for request_id in sorted(capture['native_requests_by_id']):
         request=conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(request_id,)).fetchone()
@@ -122,7 +123,15 @@ def verify_cohort_confirmations(conn, *, plan, capture):
             require(request_id not in required,'historical_operator_confirmation_authority_mismatch')
             continue
         source=assert_source(conn,request)
-        require(accepted['actor']==request['actor'] and accepted['accepted_at']==request['accepted_at']
+        primary=documents.get(request['posted_document_id'])
+        require(primary is not None,'historical_confirmation_primary_document_missing')
+        # The saved request/physical actor owns the preview and posting; the
+        # immutable confirmation separately owns the final human decision.
+        require(type(accepted['actor']) is str and bool(accepted['actor'].strip())
+            and source.get('preview_actor')==request['actor']
+            and _time(request['accepted_at']) <= _time(accepted['accepted_at'])
+            <= _time(primary['posted_at'])
+            <= _time(request['posted_at']) <= _time(capture['captured_at'])
             and source['effect']['primary_document_id']==request['posted_document_id'],
             'historical_operator_confirmation_authority_mismatch')
         if request_id in required:confirmations[request_id]=dict(accepted)

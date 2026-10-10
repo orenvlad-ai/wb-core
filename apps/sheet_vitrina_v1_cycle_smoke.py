@@ -837,7 +837,10 @@ class BoundWarehouseTests(unittest.TestCase):
             accounting={'status':'published','ready_obligation':'complete','version':'book','operation_id':'book-ready'}
             publication={'status':'published','accounting_version':'book','operation_id':'book-ready'}
             book={'state':{'periods':{'2026-09-29':{'snapshot':{'id':'fbs','digest':'fbs-digest'}}}}}
-            with patch('packages.application.fbs_accounting_runtime.refresh',return_value=accounting) as refresh, \
+            # This fixture exercises ordinary publication without a historical
+            # cohort; the owned handler still consults the historical path first.
+            with patch('packages.application.fbs_accounting_historical_cycle.refresh',return_value=None) as historical_refresh, \
+                 patch('packages.application.fbs_accounting_runtime.refresh',return_value=accounting) as refresh, \
                  patch('packages.application.fbs_accounting_runtime.load',return_value=(book,'book')), \
                  patch('packages.application.fbs_accounting_runtime.current_publication_receipt',return_value=publication) as publication_read, \
                  patch('packages.application.operator_warehouse_documents.drain',return_value={'request_ids':['receipt-1']}) as operator_drain, \
@@ -849,6 +852,7 @@ class BoundWarehouseTests(unittest.TestCase):
             self.assertEqual(proof.warnings, (
                 {'source_key':'warehouse_valuation','policy':'cost_unavailable','nm_id':'101','date':'2026-09-29'},
                 {'source_key':'warehouse_valuation','policy':'provisional_fbs_valuation','nm_id':'102','date':'2026-09-29'}))
+            historical_refresh.assert_called_once_with(entry.runtime)
             self.assertEqual(refresh.call_count,1)
             publication_read.assert_called_once_with(entry.runtime)
             operator_drain.assert_called_once_with(entry.runtime)

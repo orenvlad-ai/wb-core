@@ -28,14 +28,21 @@ from packages.application.warehouse_functional_lock import require_warehouse_job
 
 def refresh(runtime, *, now=None):
     require_warehouse_job_owner(runtime.runtime_dir)
+    from packages.application.web_vitrina_window_read_context import active_window_read_context
+    require(active_window_read_context() is None,'historical_refresh_window_reader_active')
     now=now or datetime.now(timezone.utc)
     book,version=accounting.load(runtime.runtime_dir)
     if not book or not book['active']:return None
+    prepared=[]
     with ready.readonly(runtime.db_path) as conn:
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sheet_vitrina_v1_ready_publications'").fetchone():
             prepared=conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE kind=? AND state<>'complete' ORDER BY created_at,operation_id,attempt_id",(publication.CONTRACT,)).fetchall()
             require(len(prepared)<=1,'historical_multiple_prepared_publications')
-            if prepared:return publication.publish(json.loads(prepared[0][0]),runtime_dir=runtime.runtime_dir)
+    # Reopening the native writer while this reader is alive blocks its own
+    # commit under DELETE journaling. The stored intent is revalidated by the
+    # publisher's exact source fences and book/Ready CAS after the reader exits.
+    if prepared:return publication.publish(json.loads(prepared[0][0]),runtime_dir=runtime.runtime_dir)
+    with ready.readonly(runtime.db_path) as conn:
         pending=pending_receipt(runtime)
         if pending:
             # Do not supersede an unacknowledged contour with another book.

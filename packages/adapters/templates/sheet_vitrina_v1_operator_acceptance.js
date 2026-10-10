@@ -55,7 +55,16 @@
     const doc = viewportDocument();
     const parent = container.parentNode;
     if (!parent) return null;
-    const embedded = doc !== container.ownerDocument;
+    // Recovery may finish before its source tab/modal is opened. A top-layer
+    // dialog still inherits display:none from an ancestor, so mirror that
+    // presentation at BODY just as for an embedded source document.
+    let concealed = false;
+    for (let node = parent; node; node = node.parentElement) {
+      const style = container.ownerDocument.defaultView.getComputedStyle(node);
+      if (node.hidden || style.display === "none" || style.visibility === "hidden"
+          || style.visibility === "collapse") { concealed = true; break; }
+    }
+    const mirrored = doc !== container.ownerDocument || concealed;
     const active = container.ownerDocument.activeElement;
     // Native submit locks can disable the clicked button before the receipt
     // arrives, which makes the browser focus BODY. Retain that real trigger.
@@ -78,8 +87,8 @@
     const lifetime = new MutationObserver(checkOwner);
     const display = container.style.getPropertyValue("display");
     const priority = container.style.getPropertyPriority("display");
-    // Keep source-document IDs and ancestor queries valid. In a nested frame,
-    // mirror presentation only; the original controllers retain their nodes.
+    // Keep source-document IDs and ancestor queries valid. Mirror presentation
+    // only when needed; the original controllers retain their nodes.
     function sync(focusState) {
       if (container.hidden || !container.querySelector("[data-ff-operation-receipt]")) { dismiss(false); return; }
       const active = focusState || pendingFocus || popupFocus(dialog);
@@ -98,7 +107,7 @@
       });
       pendingFocus = restorePopupFocus(dialog, active) ? null : active;
     }
-    if (embedded) {
+    if (mirrored) {
       container.style.setProperty("display", "none", "important");
       doc.body.appendChild(dialog);
       sync();
@@ -124,7 +133,7 @@
       popups.delete(container);
       window.removeEventListener("pagehide", onPageHide);
       if (dialog.open) dialog.close();
-      if (embedded) {
+      if (mirrored) {
         if (display) container.style.setProperty("display", display, priority);
         else container.style.removeProperty("display");
       } else if (dialog.parentNode) dialog.replaceWith(container);
@@ -163,12 +172,12 @@
     const popup = {dismiss, operationId:receipt.operation_id, focus:() => popupFocus(dialog),
       refresh(nextReceipt, nextOptions, focusState) {
         receipt = nextReceipt; options = nextOptions;
-        if (embedded) sync(focusState);
+        if (mirrored) sync(focusState);
         else pendingFocus = restorePopupFocus(dialog, focusState) ? null : focusState;
       }};
     popups.set(container, popup);
     dialog.showModal();
-    (embedded ? dialog.querySelector(".ff-operation-receipt") : section).focus({preventScroll:true});
+    (mirrored ? dialog.querySelector(".ff-operation-receipt") : section).focus({preventScroll:true});
     return popup;
   }
 

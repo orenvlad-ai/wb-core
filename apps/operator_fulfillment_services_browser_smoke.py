@@ -170,6 +170,14 @@ def main():
                 expect(page.locator('#fulfillmentAcceptance')).to_contain_text('Обработка не требуется',timeout=10000)
                 assert page.locator('#fulfillmentAcceptance').get_by_text('Обработано',exact=True).count()==0
                 assert mutations==['upload','delete','upload']
+                request_id=parse_qs(urlsplit(recoveries[-1][1]).query)['request_id'][0]
+                status,accepted=request(base,UPLOADS+'?request_id='+request_id)
+                assert status==200 and accepted['status']=='accepted'
+                dialog=page.get_by_role('dialog',name='Принято',exact=True)
+                expect(dialog.locator('[data-ff-operation-receipt]')).to_have_attribute('data-ff-operation-receipt',accepted['acceptance']['operation_id'])
+                expect(dialog.locator('.ff-operation-check')).to_be_visible()
+                dialog.get_by_role('button',name='Закрыть',exact=True).click()
+                expect(dialog).to_have_count(0)
                 choose_workbook(page, {'name':'diagnostic.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('missing')])})
                 expect(page.locator('#fulfillmentServicesMessage')).to_contain_text('Документ не принят.',timeout=10000)
                 expect(page.locator('#fulfillmentAcceptance')).to_be_hidden()

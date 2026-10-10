@@ -17,7 +17,7 @@ import sqlite3
 from packages.application import fbs_accounting_runtime as accounting
 from packages.application import ready_publication as ready
 from packages.application.fbs_accounting_historical_revision import (
-    HEADER_FIELDS, validate_historical_revision_plan,
+    HEADER_FIELDS, _time, validate_historical_revision_plan,
 )
 from packages.application.fbs_snapshot_cost import canonical, fingerprint
 from packages.application.fbs_snapshot_cost_sources import capture_current
@@ -130,10 +130,9 @@ def _confirmation(conn, capture, receipt_ids):
         posted = json.loads(capture["posted_manifest_json_by_id"][identity])
         _require(request["state"] in {"posted", "replay", "complete"}, "stage_native_request_not_posted")
         _require(request["actor"].strip() and doc["actor"] == request["actor"], "stage_actor_authority_mismatch")
-        _require(request["accepted_at"] and request["posted_at"]
-                 and datetime.fromisoformat(request["accepted_at"].replace("Z", "+00:00"))
-                 <= datetime.fromisoformat(doc["posted_at"].replace("Z", "+00:00"))
-                 and request["posted_at"] == doc["posted_at"], "stage_native_confirmation_frontier_mismatch")
+        _require(_time(request["accepted_at"]) <= _time(doc["posted_at"])
+                 <= _time(request["posted_at"]) <= _time(capture["captured_at"]),
+                 "stage_native_confirmation_frontier_mismatch")
         fields = ("source_system", "source_type", "source_id", "source_revision", "idempotency_epoch", "business_date",
                   "source_filename", "source_content_type", "source_sha256", "template_fingerprint")
         _require(all(request[key] == doc[key] for key in fields), "stage_native_request_source_mismatch")

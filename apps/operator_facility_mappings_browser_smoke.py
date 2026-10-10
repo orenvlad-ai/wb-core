@@ -9,8 +9,9 @@ from packages.application.ff_pool_dense_fbs import DenseFbsService
 from packages.adapters import registry_upload_http_entrypoint as http
 
 
-def open_modal(page,base):
+def open_modal(page,base,*,recovered_operation_id=None):
     page.goto(base+http.DEFAULT_SHEET_WEB_VITRINA_UI_PATH+'?tab=warehouses&warehouse=ff')
+    if recovered_operation_id is not None:close_accepted(page,recovered_operation_id)
     page.locator('[data-unified-tab-button="warehouses"]').click()
     page.locator('[data-warehouse-key="ff"]').click()
     page.locator('[data-open-warehouse-costs]').click()
@@ -22,6 +23,17 @@ def edit(page,name):
     page.locator('[data-ff-pool-facilities] .ff-pool-list-item').filter(has_text=name).get_by_role('button',name='Открыть',exact=True).click()
     page.locator('[data-ff-pool-facility-detail]').get_by_role('button',name='Изменить склад',exact=True).click()
     return page.locator('[data-ff-facility-form]')
+
+
+def close_accepted(page,operation_id,*,keyboard=False):
+    dialog=page.locator('dialog.ff-operation-popup[open]')
+    expect(dialog).to_have_attribute('aria-label','Принято')
+    expect(dialog.locator('[data-ff-operation-receipt]')).to_have_attribute('data-ff-operation-receipt',operation_id)
+    expect(dialog.locator('.ff-operation-check')).to_be_visible()
+    close=dialog.get_by_role('button',name='Закрыть',exact=True)
+    if keyboard:close.focus();page.keyboard.press('Enter')
+    else:close.click()
+    expect(dialog).to_have_count(0)
 
 
 def held_preview_snapshot():
@@ -83,6 +95,7 @@ def held_preview_snapshot():
                 assert len(writes)==1 and writes[0]['status']=='accepted'
                 fid=writes[0]['acceptance']['source_ref']['entity_id'];actual=entry.ff_pool_surface.facility_detail(fid)['facility']
                 assert {key:actual[key] for key in ('name','city','display_timezone','active')}=={'name':'EDITED-C','city':'CITY-C','display_timezone':'Asia/Yekaterinburg','active':False}
+                close_accepted(page,writes[0]['acceptance']['operation_id'],keyboard=True)
                 # A failed preview unlocks its draft without creating a durable source marker.
                 page.locator('[data-ff-pool-facility-new]').click();form=page.locator('[data-ff-facility-form]')
                 form.get_by_label('Название').fill('RETRY-D');fail=True
@@ -134,8 +147,8 @@ def main():
                 storage_key=page.evaluate('Object.keys(localStorage).find(k=>k.startsWith("wbc_facility_source_pending_v1:"))')
                 expected=json.loads(page.evaluate('key=>localStorage.getItem(key)',storage_key))
                 assert set(expected)=={'request_id','action','entity_id','digest'} and hostile not in json.dumps(expected)
-                page.close();foreign=False;page=context.new_page();open_modal(page,base)
-                receipt=page.locator('[data-ff-facility-acceptance]');expect(receipt.locator('.ff-operation-check')).to_be_visible()
+                page.close();foreign=False;page=context.new_page();open_modal(page,base,recovered_operation_id=writes[0]['acceptance']['operation_id'])
+                receipt=page.locator('[data-ff-facility-acceptance]');expect(receipt.locator('.ff-operation-check')).to_have_count(1)
                 assert len(writes)==1 and page.evaluate('window.__facilityXss') is None
                 fid=writes[0]['acceptance']['source_ref']['entity_id'];assert not entry.ff_pool_surface.facility_detail(fid)['facility']['active']
                 form=edit(page,hostile);form.get_by_label('Статус').select_option('true')
@@ -147,16 +160,18 @@ def main():
                 assert native.drain_facility_activations()['active']==1
                 receipt.locator('.ff-operation-link').click();expect(receipt).to_contain_text('Склад активирован.')
                 assert len(writes)==2
-                close=receipt.get_by_role('button',name='Закрыть',exact=True);close.focus();page.keyboard.press('Enter');expect(receipt).to_be_hidden()
+                expect(receipt).to_be_hidden();expect(page.locator('dialog.ff-operation-popup')).to_have_count(0)
                 # Exact source metadata change, lost reply and same-ID after closure.
                 form=edit(page,hostile);form.get_by_label('Название').fill('Browser renamed');previous=writes[-1]['acceptance']['operation_id'];form.get_by_role('button',name='Сохранить',exact=True).click()
                 expect(receipt.locator('[data-ff-operation-receipt]')).not_to_have_attribute('data-ff-operation-receipt',previous);assert len(writes)==3
+                close_accepted(page,writes[-1]['acceptance']['operation_id'])
                 # Native full-source stale guard refuses the old editor. Correcting requires a fresh form and new identity.
                 form.get_by_label('Название').fill('Must not save');form.get_by_role('button',name='Сохранить',exact=True).click()
                 expect(form).to_contain_text('source changed');expect(form.get_by_role('button',name='Сохранить',exact=True)).to_be_enabled()
                 assert len(writes)==4 and writes[-1]['status']=='rejected' and not receipt.locator('.ff-operation-check').count()
                 form=edit(page,'Browser renamed');form.get_by_label('Название').fill('Corrected browser');form.get_by_role('button',name='Сохранить',exact=True).click()
                 expect(receipt.locator('[data-ff-operation-receipt]')).not_to_have_attribute('data-ff-operation-receipt',previous);assert len(writes)==5 and writes[-1]['request_id']!=writes[-2]['request_id']
+                close_accepted(page,writes[-1]['acceptance']['operation_id'])
                 # Mapping preview is not accepted; actual confirmation has one exact immutable native source receipt.
                 wb=page.locator('[data-ff-pool-wb-warehouses] .ff-pool-list-item').filter(has_text='Official A')
                 wb.get_by_role('button',name='Привязать',exact=True).click();binding=page.locator('[data-ff-binding-form]')
@@ -166,6 +181,7 @@ def main():
                 binding.get_by_role('button',name='Подтвердить привязку',exact=True).evaluate('(button)=>{button.click();button.click();}')
                 expect(receipt).to_contain_text('Точная связь со складом WB сохранена')
                 assert len(writes)==6 and writes[-1]['action']=='binding'
+                close_accepted(page,writes[-1]['acceptance']['operation_id'])
                 # A live other-tab mutation lock prevents source mutation.
                 other=context.new_page();open_modal(other,base);other_form=edit(other,'Corrected browser');other_form.get_by_label('Название').fill('Other tab')
                 key=storage_key
@@ -182,7 +198,7 @@ def main():
                 stored=json.loads(page.evaluate('key=>localStorage.getItem(key)',storage_key))
                 assert len(writes)==7 and stored['operation_id']==writes[-1]['acceptance']['operation_id']
                 assert not receipt.locator('.ff-operation-check').count()
-                page.close();foreign_operation=False;page=context.new_page();open_modal(page,base);receipt=page.locator('[data-ff-facility-acceptance]')
+                page.close();foreign_operation=False;page=context.new_page();open_modal(page,base,recovered_operation_id=stored['operation_id']);receipt=page.locator('[data-ff-facility-acceptance]')
                 expect(receipt.locator('[data-ff-operation-receipt]')).to_have_attribute('data-ff-operation-receipt',stored['operation_id'])
                 assert len(writes)==7
                 # Received maintenance is not_saved; lost maintenance stays unknown across closing the tab.
