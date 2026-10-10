@@ -153,7 +153,8 @@ def http_races(root):
     assert final["user_status"] == "Без изменений: данные уже актуальны"
     assert entry.handle_warehouse_manual_sync_status_request()["run_id"] == final["run_id"], "page reload lost last job"
     metrics = final["technical_details"]["lock_metrics"]
-    assert metrics["hold_ms"] > 0 and metrics["writer_count"] == 1
+    # Publication and the two serialized native retention boundaries.
+    assert metrics["hold_ms"] > 0 and metrics["writer_count"] == 3
     assert metrics["writer_hold_ms"] < metrics["hold_ms"]
     assert entry.warehouse_update_journal.public_status()["manual_updates"]["status"] == "success"
     entry.warehouse_functional_block.build_sync_plan = lambda: {

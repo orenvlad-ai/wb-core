@@ -18,6 +18,7 @@ from packages.application.warehouse_functional_lock import (
 
 
 PHASES = (
+    "recovery_retention_before",
     "wb_supply_registry",
     "transit_enrichment",
     "ff_ledger_reservations",
@@ -25,9 +26,12 @@ PHASES = (
     "cost_materialization",
     "functional_publication",
     "dependent_replay_economics",
+    "recovery_retention_after",
 )
 
 PHASE_LABELS_RU = {
+    "recovery_retention_before": "Ротация recovery-копий до обновления",
+    "recovery_retention_after": "Ротация recovery-копий после обновления",
     "wb_supply_registry": "Реестр поставок WB",
     "transit_enrichment": "Транзитная себестоимость",
     "ff_ledger_reservations": "FF ledger и резервы",
@@ -246,6 +250,15 @@ class WarehouseUpdateJournal:
         now = self.timestamp_factory()
         with _connect(self.db_path) as conn:
             self._fence(conn, run_id, owner)
+            # An accepted run may predate these additive retention phases.
+            # Only its fenced running owner may create the missing phase row;
+            # readbacks and orphan recovery never resume a business mutation.
+            if phase_key in {"recovery_retention_before", "recovery_retention_after"}:
+                conn.execute(
+                    "INSERT OR IGNORE INTO sheet_vitrina_v1_warehouse_update_phases "
+                    "(run_id,phase_key,status,item_count,last_error,details_json) VALUES(?,?,'pending',0,'','{}')",
+                    (run_id, phase_key),
+                )
             conn.execute(
                 "UPDATE sheet_vitrina_v1_warehouse_update_runs SET active_phase=?,updated_at=? WHERE run_id=?",
                 (phase_key, now, run_id),
