@@ -14,13 +14,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.sheet_vitrina_v1_ads_smoke import (  # noqa: E402
-    FakePromotionSource,
     NOW,
-    PRIMARY_NM,
-    _build_ads_block,
     _reserve_free_port,
     _seed_runtime,
 )
+from apps.sheet_vitrina_v1_ads_confirmed_bid_smoke import NoFrameSource, SAFETY, EXTERNAL_NM
+from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -37,12 +36,13 @@ def main() -> None:
     with TemporaryDirectory(prefix="sheet-vitrina-ads-browser-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime = _seed_runtime(runtime_dir)
+        source = NoFrameSource()
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
             runtime=runtime,
             now_factory=lambda: NOW,
             activated_at_factory=lambda: "2026-06-28T06:00:00Z",
-            ads_block=_build_ads_block(runtime, runtime_dir, FakePromotionSource(), write_enabled=False),
+            ads_block=SheetVitrinaV1AdsBlock(runtime=runtime, runtime_dir=runtime_dir, source=source, now_factory=lambda: NOW, safety_config=SAFETY),
         )
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
@@ -66,15 +66,28 @@ def main() -> None:
                 page.locator('[data-unified-tab-button="sku-management"]').click()
                 page.locator('[data-sku-management-subtab="ads"]').click()
                 page.locator('[data-ads-section="bids"]').click()
-                page.locator(f'[data-ads-open-sku="{PRIMARY_NM}"]').wait_for(timeout=7000)
-                page.locator(f'[data-ads-open-sku="{PRIMARY_NM}"]').click()
+                page.locator(f'[data-ads-open-sku="{EXTERNAL_NM}"]').wait_for(timeout=7000)
+                page.locator(f'[data-ads-open-sku="{EXTERNAL_NM}"]').click()
                 page.locator('[data-ads-drawer]').wait_for(state="visible", timeout=7000)
-                page.locator('[data-ads-bid-input="0"]').fill("16.00")
+                page.locator('[data-ads-bid-input="0"]').fill("1500")
                 page.locator('[data-ads-preview-index="0"]').click()
                 page.locator('[data-ads-modal]').wait_for(state="visible", timeout=7000)
                 modal_text = page.locator("[data-ads-modal]").inner_text()
                 if "advert_id" not in modal_text or "Изменить live ставку" not in modal_text:
                     raise AssertionError(f"ads preview modal content mismatch: {modal_text}")
+                warnings = page.locator('[data-ads-modal] [data-ads-threshold-warnings]')
+                if warnings.locator('li').count() != 3 or "точную ставку" not in warnings.inner_text():
+                    raise AssertionError(f"all seller-threshold warnings must be visible: {modal_text}")
+                if source.patch_payloads:
+                    raise AssertionError("preview must not submit")
+                commits = []
+                page.on("request", lambda req: commits.append(req.post_data_json) if req.url.endswith('/ads/bid-change/commit') else None)
+                page.get_by_role("button", name="Изменить live ставку", exact=True).click()
+                page.wait_for_function("document.querySelector('[data-ads-modal]').innerText.includes('operation_id')", timeout=7000)
+                if len(commits) != 1 or commits[0].get("confirm") is not True or len(source.patch_payloads) != 1 or source.bid != 150_000:
+                    raise AssertionError(f"one existing confirmation must send one exact target: {commits} {source.patch_payloads}")
+                if warnings.locator('li').count() != 3:
+                    raise AssertionError("commit result must preserve visible threshold warnings")
                 browser.close()
         finally:
             server.shutdown()

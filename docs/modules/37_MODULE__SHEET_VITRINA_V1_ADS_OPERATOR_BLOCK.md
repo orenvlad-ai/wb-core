@@ -32,7 +32,7 @@ related_docs:
   - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
   - "docs/architecture/09_official_api_secret_boundary.md"
 source_of_truth_level: "module_canonical"
-update_note: "Guarded bid commit remains unchanged; shared Promotion boundary now also exposes official start/pause plus exact state readback only to the Balance durable writer."
+update_note: "Explicit operator confirmation permits an exact target bid above seller-defined thresholds; warnings remain visible in preview/commit while WB minimum, identity CAS and single-use submission remain hard guards."
 ---
 
 # 1. Идентификатор и статус
@@ -124,19 +124,21 @@ Preview route:
 - validates `payment_type`, `bid_type` and placement;
 - resolves current bid;
 - fetches min bid when available;
-- validates requested bid against min bid and safety thresholds;
+- validates requested bid against min bid and returns seller-threshold warnings;
 - converts rubles to kopecks with `Decimal` and at most two decimal places;
 - stores a short-lived preview payload;
 - performs no WB mutation.
 
 Commit route:
 - requires `SHEET_VITRINA_ADS_WRITE_ENABLED=1`;
-- accepts only one preview id / one bid operation;
+- accepts only one preview id / one bid operation with explicit `confirm=true`;
+- the existing modal commit button sends this flag in the same click; no second confirmation or threshold override is needed;
 - rejects stale preview;
 - re-fetches current bid and blocks if it differs from preview old bid;
-- re-fetches the current WB minimum and reapplies absolute/relative safety thresholds immediately before PATCH;
+- rechecks exact nmID/advert/placement membership and status/payment/bid-type identity against preview;
+- re-fetches the current WB minimum and recalculates seller-threshold warnings immediately before PATCH;
 - blocks before PATCH when minimum evidence is unavailable or the requested bid is now below it;
-- sends one `bids[0].nm_bids[0]` PATCH request to WB;
+- atomically claims the preview before the sole `bids[0].nm_bids[0]` PATCH request to WB; retries after success, rejection or an ambiguous response cannot resubmit that preview;
 - writes a JSONL audit event;
 - returns `pending_refresh` with delayed refresh guidance because WB bid sync has lag.
 
@@ -151,14 +153,25 @@ Runtime env/config:
 - `SHEET_VITRINA_ADS_MAX_ABSOLUTE_INCREASE_RUB`
 - `SHEET_VITRINA_ADS_PREVIEW_TTL_SECONDS`
 
-The backend blocks:
+The operator preview and confirmed commit return structured
+`safety_threshold_warnings` with codes `absolute_max_bid`,
+`max_percent_increase`, and `max_absolute_increase`, plus
+`safety_threshold_policy=owner_confirmed_operator`. These three seller-defined
+thresholds warn but do not block a confirmed exact target, including CPM
+1000 → 1500 ₽. No intermediate +100 ₽ steps or config_v2 membership are
+required by the standalone Ads operation. The same existing SKU modal
+confirmation covers these warnings; stabilization warnings retain their
+existing confirmation behavior. Balance retains its separate
+`owner_confirmed_balance` policy and strict default bulk preflight.
+
+The backend still blocks:
 - below-min bids when min bid is available;
 - unsupported status;
 - nm_id/advert_id mismatch;
 - unknown placement;
-- bid above absolute max;
-- increase above percent or absolute threshold;
-- stale preview/current-bid mismatch.
+- missing/false confirmation, stale or already attempted preview;
+- current-bid or status/payment/bid-type mismatch;
+- unavailable fresh minimum at commit, registry preparation failure.
 
 # 7. Audit
 
@@ -177,6 +190,7 @@ Each event stores:
 - bid_type;
 - old/new bid in rubles and kopecks;
 - delta;
+- recalculated seller-threshold policy and structured warnings;
 - preview facts;
 - sanitized WB request shape without token/secret;
 - WB response/result.
@@ -190,7 +204,7 @@ The `Реклама` tab is a sibling section in the unified operator shell. It 
 - drawer on SKU row click;
 - campaign/placement table in drawer;
 - per-row bid input and preview button;
-- confirmation modal with SKU/nm_id, advert_id, campaign name, placement, old/new/delta/min bid and live-spend warning;
+- confirmation modal with SKU/nm_id, advert_id, campaign name, placement, old/new/delta/min bid, visible seller-threshold warnings and live-spend warning;
 - commit button that calls only the guarded backend commit route.
 
 # 9. Verification
@@ -198,6 +212,7 @@ The `Реклама` tab is a sibling section in the unified operator shell. It 
 Targeted local smokes:
 - `python3 apps/sheet_vitrina_v1_ads_smoke.py`
 - `python3 apps/sheet_vitrina_v1_ads_browser_smoke.py`
+- `python3 apps/sheet_vitrina_v1_ads_confirmed_bid_smoke.py`
 
 These use fake Promotion API sources and do not call live WB write methods. They cover reverse mapping, placement normalization, min-bid/preflight validation, mocked PATCH shape, audit event, read routes, preview/commit routes, UI tab/table/drawer/modal, and negative safety cases.
 

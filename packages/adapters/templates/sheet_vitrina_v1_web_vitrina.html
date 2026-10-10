@@ -27619,7 +27619,8 @@
           return '<div class="ads-fact"><span class="ads-fact-label">' + escapeHtml(fact[0]) + '</span><span class="ads-fact-value">' + escapeHtml(fact[1] == null ? "—" : fact[1]) + '</span></div>';
         }).join(""),
         '</div>',
-        preview.warnings && preview.warnings.length ? '<p class="research-result-note">Warnings: ' + escapeHtml(preview.warnings.join(", ")) + '</p>' : '',
+        renderAdsBidThresholdWarnings(result || preview),
+        preview.warnings && preview.warnings.includes("min_bid_unavailable") ? '<p class="research-result-note">Текущий минимум WB не подтверждён. Перед отправкой проверим его повторно.</p>' : '',
         state.ads.commitError ? '<p class="research-error">' + escapeHtml(state.ads.commitError) + '</p>' : '',
         result ? '<p class="research-result-note">Commit: ' + escapeHtml(result.status || "") + ' · operation_id ' + escapeHtml(result.operation_id || "") + '</p>' : ''
       ].join("");
@@ -27644,7 +27645,7 @@
           method: "POST",
           credentials: "same-origin",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({preview_id: preview.preview_id})
+          body: JSON.stringify({preview_id: preview.preview_id, confirm: true})
         });
         const responsePayload = await readJsonResponse(response, "non-json response from ads bid commit route");
         if (!response.ok) {
@@ -27666,6 +27667,20 @@
         state.ads.commitLoading = false;
         renderAdsModal();
       }
+    }
+
+    function renderAdsBidThresholdWarnings(payload) {
+      const warnings = Array.isArray(payload.safety_threshold_warnings) ? payload.safety_threshold_warnings : [];
+      if (!warnings.length) return "";
+      const labels = {
+        absolute_max_bid: "Ставка превышает настроенный максимум",
+        max_absolute_increase: "Повышение превышает настроенный порог в рублях",
+        max_percent_increase: "Повышение превышает настроенный порог в процентах"
+      };
+      return '<div class="ads-danger-note" data-ads-threshold-warnings><strong>Предупреждения о ставке</strong><ul>' + warnings.map(function(item) {
+        const threshold = item.threshold_percent == null ? adsMoney(Number(item.threshold_minor) / 100) : formatNumber(Number(item.threshold_percent), 2, true) + "%";
+        return '<li>' + escapeHtml((labels[item.code] || item.message || item.code) + ": " + threshold + ".") + '</li>';
+      }).join("") + '</ul><p>Подтверждение разрешает указанную точную ставку. Минимум WB и актуальность кампании проверяются перед отправкой.</p></div>';
     }
 
     function adsMoney(value) {
@@ -28716,9 +28731,9 @@
         skuManagementModalTitleNode.textContent="Готовим preview";skuManagementModalBodyNode.innerHTML='<p class="sku-modal-state" data-sku-preview-loading>Готовим preview…</p>';skuManagementModalConfirmButton.textContent="Изменить";skuManagementModalConfirmButton.className="button danger";skuManagementModalConfirmButton.disabled=true;return;
       }
       if(modalState==="preview_ready"&&p){
-        const warnings=Array.isArray(p.stabilization_warnings)?p.stabilization_warnings:[];const all=Array.isArray(p.warnings)?p.warnings:[];const overrideRequired=Array.isArray(p.override_required_warnings)?p.override_required_warnings:[];const detailedCodes=new Set(warnings.map(function(item){return String(item.code||"");}));
+        const warnings=Array.isArray(p.stabilization_warnings)?p.stabilization_warnings:[];const all=Array.isArray(p.warnings)?p.warnings:[];const overrideRequired=Array.isArray(p.override_required_warnings)?p.override_required_warnings:[];const detailedCodes=new Set(warnings.concat(p.safety_threshold_warnings||[]).map(function(item){return String(item.code||"");}));
         skuManagementModalTitleNode.textContent=state.skuManagement.previewKind==="price"?"Подтверждение изменения цены":"Подтверждение изменения ставки";
-        skuManagementModalBodyNode.innerHTML=skuManagementPreviewFactsHtml(p)+(all.length?'<div class="ads-danger-note"><strong>Предупреждения</strong><ul>'+warnings.map(function(item){return '<li>'+escapeHtml(item.message||skuManagementWarningLabel(item.code))+'</li>';}).join("")+(all.filter(function(item){return typeof item==="string"&&!detailedCodes.has(item);}).map(function(item){return '<li>'+escapeHtml(skuManagementWarningLabel(item))+'</li>';}).join(""))+'</ul></div>':'<p class="panel-meta">Safety validation пройдена. Success будет показан только после WB readback.</p>');
+        skuManagementModalBodyNode.innerHTML=skuManagementPreviewFactsHtml(p)+renderAdsBidThresholdWarnings(p)+(warnings.length||all.some(function(item){return typeof item==="string"&&!detailedCodes.has(item);})?'<div class="ads-danger-note"><strong>Предупреждения</strong><ul>'+warnings.map(function(item){return '<li>'+escapeHtml(item.message||skuManagementWarningLabel(item.code))+'</li>';}).join("")+(all.filter(function(item){return typeof item==="string"&&!detailedCodes.has(item);}).map(function(item){return '<li>'+escapeHtml(skuManagementWarningLabel(item))+'</li>';}).join(""))+'</ul></div>':'<p class="panel-meta">Проверки WB пройдены. Success будет показан только после WB readback.</p>');
         skuManagementModalConfirmButton.textContent=overrideRequired.length?"Всё равно изменить":"Изменить";skuManagementModalConfirmButton.className="button danger";skuManagementModalConfirmButton.disabled=false;return;
       }
       if((modalState==="commit_running"||modalState==="readback_pending")&&p){
@@ -28735,7 +28750,7 @@
       if(modalState==="success"&&state.skuManagement.pendingConfirmedUpdate){
         const update=state.skuManagement.pendingConfirmedUpdate;const payload=update.payload||{};const preview=update.preview||{};const oldValue=update.kind==="price"?(preview.current||{}).discountedPrice:preview.old_value;const requestedValue=update.kind==="price"?preview.target_seller_price:preview.requested_value;const label=update.kind==="price"?"Цена изменена":"Ставка изменена";const productName=payload.product_name||preview.product_name||((state.skuManagement.quickSku||{}).name)||"SKU";const nmId=payload.nm_id||preview.nm_id||((state.skuManagement.quickSku||{}).nm_id);
         const bidIdentity=update.kind==="bid"?'<p><strong>advert_id:</strong> '+escapeHtml(payload.advert_id||preview.advert_id)+' · <strong>campaign:</strong> '+escapeHtml(payload.campaign_name||preview.campaign_name||"—")+' · <strong>placement:</strong> '+escapeHtml(payload.placement||preview.placement||"—")+'</p>':"";
-        skuManagementModalTitleNode.textContent=label;skuManagementModalBodyNode.innerHTML='<div class="sku-modal-state success"><strong>'+escapeHtml(label)+'</strong><p><strong>Товар:</strong> '+escapeHtml(productName)+'</p><p><strong>nmID:</strong> '+escapeHtml(nmId)+'</p>'+bidIdentity+'<p>'+escapeHtml(oldValue)+' → '+escapeHtml(payload.confirmed_value)+' ₽</p><p><strong>Было:</strong> '+escapeHtml(oldValue)+' ₽ · <strong>Запрошено:</strong> '+escapeHtml(requestedValue)+' ₽ · <strong>Подтверждено:</strong> '+escapeHtml(payload.confirmed_value)+' ₽</p><p>Изменение проверено через WB readback: значение совпадает.</p></div>';
+        skuManagementModalTitleNode.textContent=label;skuManagementModalBodyNode.innerHTML=renderAdsBidThresholdWarnings(payload)+'<div class="sku-modal-state success"><strong>'+escapeHtml(label)+'</strong><p><strong>Товар:</strong> '+escapeHtml(productName)+'</p><p><strong>nmID:</strong> '+escapeHtml(nmId)+'</p>'+bidIdentity+'<p>'+escapeHtml(oldValue)+' → '+escapeHtml(payload.confirmed_value)+' ₽</p><p><strong>Было:</strong> '+escapeHtml(oldValue)+' ₽ · <strong>Запрошено:</strong> '+escapeHtml(requestedValue)+' ₽ · <strong>Подтверждено:</strong> '+escapeHtml(payload.confirmed_value)+' ₽</p><p>Изменение проверено через WB readback: значение совпадает.</p></div>';
         renderExternalOperation(skuManagementModalBodyNode,payload,closeSkuManagementModal);
         skuManagementModalConfirmButton.textContent="Закрыть";skuManagementModalConfirmButton.className="button primary";skuManagementModalConfirmButton.disabled=false;return;
       }

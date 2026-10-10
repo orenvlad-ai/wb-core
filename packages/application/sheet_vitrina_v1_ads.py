@@ -58,6 +58,7 @@ class AdsBidSafetyThresholdPolicy(str, Enum):
 
     STRICT = "strict"
     OWNER_CONFIRMED_BALANCE = "owner_confirmed_balance"
+    OWNER_CONFIRMED_OPERATOR = "owner_confirmed_operator"
 
 
 class SheetVitrinaV1AdsBlock:
@@ -803,10 +804,11 @@ class SheetVitrinaV1AdsBlock:
         if min_bid_kopecks is None:
             warnings.append("min_bid_unavailable")
 
-        self._validate_safety_thresholds(
+        safety_warnings = self.bid_safety_threshold_warnings(
             old_bid_kopecks=old_bid_kopecks,
             new_bid_kopecks=new_bid_kopecks,
         )
+        warnings.extend(item["code"] for item in safety_warnings)
 
         preview_id = uuid4().hex
         operation_id = uuid4().hex
@@ -832,6 +834,8 @@ class SheetVitrinaV1AdsBlock:
             "min_bid_rub": _kopecks_to_rub(min_bid_kopecks) if min_bid_kopecks is not None else None,
             "min_bid_status": min_status,
             "warnings": warnings,
+            "safety_threshold_policy": AdsBidSafetyThresholdPolicy.OWNER_CONFIRMED_OPERATOR.value,
+            "safety_threshold_warnings": safety_warnings,
             "wb_request_preview": _build_patch_payload(
                 advert_id=advert_id,
                 nm_id=nm_id,
@@ -845,6 +849,7 @@ class SheetVitrinaV1AdsBlock:
             "status": "ready",
             "preview": preview,
             "confirmation_payload": {
+                "confirm": True,
                 "preview_id": preview_id,
                 "operation_id": operation_id,
                 "nm_id": nm_id,
@@ -856,6 +861,8 @@ class SheetVitrinaV1AdsBlock:
 
     def commit_bid_change(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
         preview_id = _extract_preview_id(payload)
+        if payload.get("confirm") is not True:
+            raise SheetVitrinaV1AdsError("confirm=true is required", http_status=400)
         if not self.safety.write_enabled:
             raise SheetVitrinaV1AdsError(
                 "ads bid writes are disabled; set SHEET_VITRINA_ADS_WRITE_ENABLED=1 for controlled live commit",
@@ -864,6 +871,8 @@ class SheetVitrinaV1AdsBlock:
         preview = self._load_preview(preview_id)
         if int(preview.get("expires_at_epoch") or 0) < int(time.time()):
             raise SheetVitrinaV1AdsError("bid-change preview is stale; run preview again", http_status=409)
+        if (self._preview_dir / f"{preview_id}.claim").exists():
+            raise SheetVitrinaV1AdsError("preview was already committed or attempted; read operation status", http_status=409)
 
         current = self._find_current_row(
             nm_id=int(preview["nm_id"]),
@@ -872,6 +881,12 @@ class SheetVitrinaV1AdsBlock:
             bypass_cache=True,
         )
         current_bid = _as_nonnegative_int(current.get("current_bid_kopecks"), "current_bid_kopecks")
+        for field in ("status", "payment_type", "bid_type"):
+            if current.get(field) != preview.get(field):
+                raise SheetVitrinaV1AdsError(
+                    f"current WB {field} differs from preview; run preview again",
+                    http_status=409,
+                )
         if current_bid != int(preview["old_bid_kopecks"]):
             raise SheetVitrinaV1AdsError(
                 "current WB bid differs from preview old_bid; run preview again",
@@ -896,7 +911,7 @@ class SheetVitrinaV1AdsBlock:
                 http_status=409,
                 payload={"min_bid_kopecks": min_bid_kopecks},
             )
-        self._validate_safety_thresholds(
+        safety_warnings = self.bid_safety_threshold_warnings(
             old_bid_kopecks=current_bid,
             new_bid_kopecks=int(preview["new_bid_kopecks"]),
         )
@@ -932,6 +947,9 @@ class SheetVitrinaV1AdsBlock:
                     http_status=503,
                     payload={"reason": "registry_fail_closed", "detail": str(exc)},
                 ) from exc
+        # The existing commit action confirms the stored exact target. Claim it
+        # before the sole submit, including attempts with ambiguous responses.
+        self._claim_preview(preview)
         try:
             response_payload = self.source.patch_bids(request_payload)
         except WbPromotionApiError as exc:
@@ -1003,6 +1021,8 @@ class SheetVitrinaV1AdsBlock:
             "new_bid_rub": preview.get("new_bid_rub"),
             "delta_kopecks": int(preview["delta_kopecks"]),
             "delta_rub": preview.get("delta_rub"),
+            "safety_threshold_policy": AdsBidSafetyThresholdPolicy.OWNER_CONFIRMED_OPERATOR.value,
+            "safety_threshold_warnings": safety_warnings,
             "preview_facts": preview,
             "wb_request": request_payload,
             "wb_response": response_payload,
@@ -1062,6 +1082,8 @@ class SheetVitrinaV1AdsBlock:
             "registry_operation_id": prepared.operation_id if prepared is not None else "",
             "registry_receipt_reference": registry_receipt if prepared is not None else "",
             "registry_readback_status": registry_readback_status,
+            "safety_threshold_policy": AdsBidSafetyThresholdPolicy.OWNER_CONFIRMED_OPERATOR.value,
+            "safety_threshold_warnings": safety_warnings,
             "audit_event": audit_event,
             "delayed_refresh_after_seconds": 30,
             "wb_response": response_payload,
@@ -1326,6 +1348,17 @@ class SheetVitrinaV1AdsBlock:
         if not isinstance(payload, dict):
             raise SheetVitrinaV1AdsError("stored preview is invalid", http_status=500)
         return payload
+
+    def _claim_preview(self, preview: Mapping[str, Any]) -> None:
+        claim_path = self._preview_dir / f"{preview['preview_id']}.claim"
+        try:
+            with claim_path.open("x", encoding="utf-8") as handle:
+                handle.write(self.timestamp_factory())
+        except FileExistsError as exc:
+            raise SheetVitrinaV1AdsError(
+                "preview was already committed or attempted; read operation status",
+                http_status=409,
+            ) from exc
 
     def _append_audit_event(self, event: Mapping[str, Any]) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)
