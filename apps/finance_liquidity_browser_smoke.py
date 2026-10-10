@@ -47,6 +47,7 @@ def _field(page: object, name: str) -> object:
 
 
 def _submit(page: object) -> None:
+    kind = page.locator('[data-dialog-content]').get_attribute('data-kind')
     page.locator("[data-dialog-submit]").click()
     try:
         expect(page.locator("[data-dialog]")).to_be_hidden()
@@ -54,6 +55,18 @@ def _submit(page: object) -> None:
         raise AssertionError(
             f"dialog submit failed: {page.locator('[data-error]').inner_text()}"
         ) from caught
+    if kind in {'opening', 'income', 'expense', 'transfer', 'reconcile', 'reverse', 'replace-opening', 'transfer-transition'}:
+        _close_accepted_receipt(page)
+
+
+def _close_accepted_receipt(page: object) -> None:
+    """Acknowledge the real latest native command before using background UI."""
+    dialog = page.locator('dialog.ff-operation-popup[open]')
+    expect(dialog.locator('[data-ff-operation-receipt]')).to_have_attribute(
+        'data-ff-operation-receipt', page._finance_receipt_identity)
+    expect(dialog.locator('.ff-operation-check')).to_be_visible()
+    dialog.get_by_role('button', name='Закрыть', exact=True).click()
+    expect(dialog).to_have_count(0)
 
 
 def _open(page: object, action: str) -> None:
@@ -147,6 +160,8 @@ def main() -> None:
                 operation_responses: list[tuple[str, int]] = []
 
                 def observe_request(request: object) -> None:
+                    if request.method in {'POST', 'PATCH'} and any('/v1/finance/'+part in request.url for part in ('documents', 'transfers', 'cash-reconciliations')):
+                        page._finance_receipt_identity = request.header_value('x-operation-id')
                     if request.method == "POST" and request.url.endswith("/post"):
                         submitted_posts.append((request.url, request.header_value("x-operation-id") or ""))
                     if request.method == "GET" and "/v1/finance/operations/" in request.url:
@@ -240,6 +255,7 @@ def main() -> None:
                 _submit(page)
                 failed_expense.locator("[data-post-draft]").click()
                 expect(failed_expense).to_contain_text("Проведено")
+                _close_accepted_receipt(page)
                 expect(page.locator("[data-attention]")).to_contain_text("Отрицательный остаток")
                 expect(page.locator("[data-accounts]", has_text="требуется разбор")).to_be_visible()
 
@@ -258,6 +274,7 @@ def main() -> None:
                 # Posting refreshes the history asynchronously; wait for its
                 # committed state rather than rejecting a still-pending reload.
                 expect(draft).to_contain_text("Проведено")
+                _close_accepted_receipt(page)
                 expect(draft).to_contain_text("+1\u202f500,00")
                 expect(failed_expense).to_contain_text("−1\u202f200,00")
 
@@ -346,6 +363,7 @@ def main() -> None:
                 if len(transfers) != 1 or transfers[0]["status"] != "posted":
                     raise AssertionError(f"invalid response created duplicate or missed transfer: {transfers}")
 
+                _close_accepted_receipt(page)
                 _open(page, "income")
                 _field(page, "incoming_basis").select_option("categorized")
                 _field(page, "target_account_id").select_option(label="Тестовая касса A · Тестовый оператор")
@@ -440,6 +458,7 @@ def main() -> None:
                 if not any(duplicate_readback in url for url in operation_readbacks):
                     raise AssertionError(f"duplicate action did not read back its operation: {operation_readbacks}")
 
+                _close_accepted_receipt(page)
                 lost_transfer.locator("[data-reverse]").click()
                 _field(page, "occurred_at").fill("2026-09-21T11:22")
                 _field(page, "reason").fill("Тестовая отмена перевода")

@@ -166,6 +166,7 @@ class CashProjectionTests(unittest.TestCase):
                             self.assertEqual(page.locator('[data-cash-operator-receipt] .ff-operation-check').count(),1)
                             # Hold an authentic native journal response; leave TEST,
                             # clear old views, return and load a fresh allowed view.
+                            page.locator('dialog.ff-operation-popup').get_by_role('button',name='Закрыть').click()
                             page.locator('#operator-journal summary').click()
                             page.locator('[data-cash-operator-total]').filter(has_text='Операций: 3').wait_for()
                             hold['target']='/v1/finance/operator-operations?'

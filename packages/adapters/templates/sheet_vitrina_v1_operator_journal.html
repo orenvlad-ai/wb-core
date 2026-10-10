@@ -58,7 +58,7 @@
       if(generation!==detailGeneration)return;
       const receipt=payload.operation;
       if(!receipt || receipt.operation_id!==identity || (!window.OperatorAcceptance.acceptedOperation(receipt) && receipt.source_confirmation_missing!==true))throw new Error("Подтверждение операции пока не получено.");
-      window.OperatorAcceptance.renderReceipt(nodes.detail,receipt,{onClose:closeDetail});
+      window.OperatorAcceptance.renderReceipt(nodes.detail,receipt,{mode:"inline",onClose:closeDetail});
       history.replaceState(null,"",location.pathname+"?operation_id="+encodeURIComponent(identity));
     } catch(error) { if(generation===detailGeneration)nodes.detail.replaceChildren(element("p",error.message,"journal-error")); }
   }

@@ -575,6 +575,8 @@ body.is-embedded .panel, body.is-embedded .block { box-shadow: none; }
 }
 
     /* Shared operator receipt and journal presentation. */
+    .ff-operation-popup::backdrop { background: rgba(15, 23, 42, .48); }
+    .ff-operation-popup .ff-operation-receipt { margin: 0; }
     .ff-operation-receipt { max-width: 660px; margin: 8px auto; padding: 24px; text-align: center; }
     .ff-operation-check { width: 60px; height: 60px; display: grid; place-items: center; margin: 0 auto 14px; border-radius: 50%; background: var(--success-text); color: var(--panel-bg); font-size: 36px; line-height: 1; }
     .ff-operation-receipt h3 { margin: 0; color: var(--success-text); font-size: 25px; font-weight: 600; }

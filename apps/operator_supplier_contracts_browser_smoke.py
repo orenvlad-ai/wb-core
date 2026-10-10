@@ -73,6 +73,7 @@ def main():
                 page.locator('#linkContractButton').evaluate('(button)=>{button.click();button.click();}')
                 expect(page.locator('#supplierContractAcceptance .ff-operation-check')).to_be_visible(timeout=10000)
                 assert len(writes)==4 and writes[-1]['action']=='link'
+                page.locator('dialog.ff-operation-popup').get_by_role('button',name='Закрыть').click()
                 # Cross-tab handshake never emits a mutation while the other tab owns this family lock.
                 other=context.new_page();other.goto(url);expect(other.locator('#linkContractButton')).to_be_visible()
                 # Scope is supplied by the actual page config; inspect the injected component's family lock via StorageEvent.
