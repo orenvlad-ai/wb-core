@@ -18006,7 +18006,9 @@
         if (numberValue === null) {
           return String(cell.display_text || cell.value);
         }
-        const decimals = formatter && typeof formatter.decimals === "number" ? formatter.decimals : 0;
+        // Rating precision is a UI choice, including already published catalogs.
+        const decimals = cell.formatter_id === "rating" ? 5 :
+          (formatter && typeof formatter.decimals === "number" ? formatter.decimals : 0);
         const suffix = formatter && formatter.suffix ? formatter.suffix : "";
         const valueMultiplier = formatter && typeof formatter.value_multiplier === "number" ? formatter.value_multiplier : 1;
         return formatNumber(numberValue * valueMultiplier, decimals, formatter ? formatter.thousands_separator !== false : true) + suffix;
@@ -23022,7 +23024,7 @@
       }
       const metricFormat = String(metric.metric_format || "").toLowerCase();
       if (metricFormat === "rating") {
-        return formatNumber(numberValue, 2, false);
+        return formatNumber(numberValue, 5, false);
       }
       if (metricFormat === "percent") {
         return formatNumber(numberValue * 100, 2, true) + "%";
