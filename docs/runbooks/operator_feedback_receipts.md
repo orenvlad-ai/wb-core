@@ -47,4 +47,4 @@ worker и fake WB transports. `apps/operator_feedback_forms_browser_smoke.py`
 выполняет actual UI functions → native HTTP → source commit и намеренно теряет
 POST responses. Реальные WB/portal работы не запускаются. Дополнительно сохранить
 native publication / buyer HTTP/browser / complaints и common journal/component
-regressions. CI declaration и release принадлежат root задачи WBC0137.
+regressions.

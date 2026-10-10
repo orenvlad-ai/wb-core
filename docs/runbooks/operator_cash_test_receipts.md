@@ -39,4 +39,4 @@ bootstrap/ledger лишь в temporary fixture, then readonly API/Chromium reque
 Проверяются grants до totals/search/detail, foreign actor, TEST binding до read,
 failed native ledger proof, draft, protected reconciliation и неизменные DB bytes.
 Дополнительно native cash/auth/HTTP/browser smokes. Нужны existing APSW и
-Playwright Chromium; CI mapping/release принадлежат root WBC0137.
+Playwright Chromium.
