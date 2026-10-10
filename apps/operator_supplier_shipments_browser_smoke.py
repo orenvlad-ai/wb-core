@@ -126,10 +126,16 @@ def embedded_native_confirm(screenshot_path=None):
                 dialog=page.locator('dialog.ff-operation-popup[open]')
                 expect(dialog).to_be_visible(timeout=10000);expect(dialog).to_contain_text('Документ сохранён.')
                 expect(dialog.locator('.ff-operation-check')).to_be_visible()
+                # The receipt is presented before the native caller finishes
+                # card/registry reflow. Snapshot the completed source layout.
+                expect(frame.locator('#saveShipmentButton')).to_be_enabled()
+                expect(frame.locator('#shipmentRows')).to_have_attribute('data-registry-state','loaded_with_rows')
+                expect(frame.locator('#cardMessage')).to_contain_text('Заказ сохранён.')
                 box=dialog.bounding_box();assert box and abs(box['x']+box['width']/2-550)<2 and abs(box['y']+box['height']/2-400)<2,box
                 # Native card recovery can reflow the source document; both
                 # frames remain scrolled, and modal dismissal must not move them.
                 parent_scroll=page.evaluate('scrollY');child_scroll=frame.evaluate('scrollY')
+                print('embedded-scroll-baseline: '+str({'parent':parent_scroll,'child':child_scroll,'saveButtonDisabled':frame.locator('#saveShipmentButton').is_disabled(),'cardMessage':frame.locator('#cardMessage').inner_text(),'registryState':frame.locator('#shipmentRows').get_attribute('data-registry-state')}),flush=True)
                 assert parent_scroll==2200 and child_scroll>1000
                 if screenshot_path is not None:
                     page.screenshot(path=str(screenshot_path))
@@ -139,6 +145,7 @@ def embedded_native_confirm(screenshot_path=None):
                     assert conn.execute(f'SELECT count(*) FROM {receipts.TABLE}').fetchone()[0]==1
                     assert conn.execute('SELECT count(*) FROM sheet_vitrina_v1_supplier_shipments').fetchone()[0]==1
                 dialog.get_by_role('button',name='Закрыть').click();expect(dialog).to_have_count(0)
+                print('embedded-scroll-after-close: '+str({'parent':page.evaluate('scrollY'),'child':frame.evaluate('scrollY'),'saveButtonDisabled':frame.locator('#saveShipmentButton').is_disabled(),'cardMessage':frame.locator('#cardMessage').inner_text(),'registryState':frame.locator('#shipmentRows').get_attribute('data-registry-state')}),flush=True)
                 assert frame.evaluate("document.activeElement.id")=='saveShipmentButton'
                 assert page.evaluate('scrollY')==parent_scroll and frame.evaluate('scrollY')==child_scroll
                 expect(frame.locator('#saveShipmentButton')).to_be_enabled()
