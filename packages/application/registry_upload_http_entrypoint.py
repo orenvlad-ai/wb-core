@@ -7808,6 +7808,9 @@ class RegistryUploadHttpEntrypoint:
         try:
             if not durable_run_id:
                 durable_run_id = self.warehouse_update_journal.start(trigger_source="manual")
+            from packages.application.warehouse_recovery_sync_retention import run_bounded_recovery_retention
+            retention_before = run_phase("recovery_retention_before",
+                lambda: run_bounded_recovery_retention(self.runtime))
             economics_backup = (
                 self.calculation_parameters_block.prepare_functional_economics_backup()
             )
@@ -7914,6 +7917,8 @@ class RegistryUploadHttpEntrypoint:
             reconcile_operator_documents(self.runtime,request_ids=operator_documents['request_ids'],
                 finance_receipt=dict(dependent.get('finance_cost_recalculation') or {}),
                 economics_receipt=dict(dependent.get('economics_publication') or {}))
+            retention_after = run_phase("recovery_retention_after",
+                lambda: run_bounded_recovery_retention(self.runtime))
             sync = dict(supply_payload.get("sync") or {})
             proxy_recalculation = dict(dependent.get("proxy_recalculation") or {})
             economics_publication = dict(dependent.get("economics_publication") or {})
@@ -7924,6 +7929,8 @@ class RegistryUploadHttpEntrypoint:
             payload = {
                 "status": "success",
                 "mode": "manual_sync",
+                "recovery_retention_before": retention_before,
+                "recovery_retention_after": retention_after,
                 "fulfillment_operations": fulfillment_operations,
                 "fbs_snapshot_accounting": result.get("fbs_snapshot_accounting"),
                 "wb_valuation": dict(plan.get("wb_valuation") or {}),

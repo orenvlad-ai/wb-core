@@ -49,6 +49,9 @@ from packages.application.warehouse_recovery_policy import (  # noqa: E402
     WarehouseRecoveryRegistry,
 )
 from packages.application.warehouse_update_journal import WarehouseUpdateJournal  # noqa: E402
+from packages.application.warehouse_recovery_sync_retention import (  # noqa: E402
+    run_bounded_recovery_retention as _run_bounded_recovery_retention,
+)
 from packages.application.warehouse_supplier_cost_state_replay import (  # noqa: E402
     apply_supplier_cost_state_replay_plan,
     build_supplier_cost_state_replay_plan,
@@ -451,11 +454,14 @@ def _run_admitted(
             lock_evidence.get("wait_ms") or 0
         )
         try:
+            durable_phase = "recovery_retention_before"
+            journal.phase_started(durable_run_id, durable_phase)
             retention_before = _run_sync_phase(
                 "recovery_retention_before",
                 phase_timings_ms,
                 lambda: _run_bounded_recovery_retention(runtime),
             )
+            journal.phase_finished(durable_run_id, durable_phase, details=retention_before)
             economics_backup = _run_sync_phase(
                 "prepare_economics_restore_point",
                 phase_timings_ms,
@@ -579,11 +585,6 @@ def _run_admitted(
                     completed_at=block.timestamp_factory(),
                 ),
             )
-            retention_after = _run_sync_phase(
-                "recovery_retention_after",
-                phase_timings_ms,
-                lambda: _run_bounded_recovery_retention(runtime),
-            )
             _mark_plan_ff_replays(
                 runtime,
                 plan,
@@ -616,6 +617,14 @@ def _run_admitted(
                     "transit_cost_replays": transit_cost_replays,
                 },
             )
+            durable_phase = "recovery_retention_after"
+            journal.phase_started(durable_run_id, durable_phase)
+            retention_after = _run_sync_phase(
+                "recovery_retention_after",
+                phase_timings_ms,
+                lambda: _run_bounded_recovery_retention(runtime),
+            )
+            journal.phase_finished(durable_run_id, durable_phase, details=retention_after)
             payload = {
                 "status": "success",
                 "mode": args.command,
@@ -910,74 +919,6 @@ def _create_pre_sync_backup(
         str(operation["operation_id"]),
         after_digest=str(operation.get("checkpoint_digest") or fingerprint),
     )
-
-
-def _run_bounded_recovery_retention(
-    runtime: RegistryUploadDbBackedRuntime,
-) -> dict[str, Any]:
-    registry = WarehouseRecoveryRegistry(
-        runtime_dir=runtime.runtime_dir,
-        db_path=runtime.db_path,
-    )
-    with sqlite3.connect(
-        f"file:{runtime.db_path}?mode=ro",
-        uri=True,
-    ) as conn:
-        conn.execute("PRAGMA query_only=ON")
-        active_row = conn.execute(
-            "SELECT version_id FROM "
-            "sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
-        ).fetchone()
-        if int(conn.total_changes) != 0:
-            raise RuntimeError(
-                "warehouse recovery active-version readback mutated SQLite"
-            )
-    precheckpoint_reconciliation = (
-        registry.reconcile_failed_hourly_precheckpoint_locks(
-            current_active_version_id=(
-                str(active_row[0]) if active_row is not None else ""
-            ),
-        )
-    )
-    blocking = [
-        operation
-        for operation in registry.list_operations(limit=1000)
-        if operation.get("tier") == "T2"
-        and operation.get("lifecycle")
-        in {"failed_recoverable", "quarantined"}
-    ]
-    if blocking:
-        raise RuntimeError(
-            "warehouse recovery contains unresolved protected T2 evidence; "
-            "another domain checkpoint is blocked: "
-            + ",".join(
-                str(operation.get("operation_id") or "")
-                for operation in blocking[:10]
-            )
-        )
-    plan = registry.plan_retention()
-    if not bool(plan.get("would_change")):
-        return {
-            **plan,
-            "status": "no_change",
-            "applied": False,
-            "precheckpoint_reconciliation": precheckpoint_reconciliation,
-        }
-    result = registry.apply_retention(
-        plan_fingerprint=str(plan["fingerprint"]),
-    )
-    if str(result.get("status") or "") == "partial_failure":
-        capacity = registry.capacity_status()
-        raise RuntimeError(
-            "warehouse recovery retention could not prove a bounded exact "
-            "lifecycle; inspect quarantined artifacts before another T2 write "
-            f"(t2_hard_stop={bool(capacity.get('t2_hard_stop'))})"
-        )
-    return {
-        **result,
-        "applied": str(result.get("status") or "") == "applied",
-        "precheckpoint_reconciliation": precheckpoint_reconciliation,
-    }
 
 
 def _materialize_downstream_cost_layers(runtime: RegistryUploadDbBackedRuntime) -> int:
