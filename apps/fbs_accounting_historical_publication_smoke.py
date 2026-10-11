@@ -76,7 +76,11 @@ class HistoricalPublication(unittest.TestCase):
             row=next(r for s in saved["sheets"] if s["sheet_name"]=="DATA_VITRINA" for r in s["rows"] if r[1]=="SKU:1|own_capital_FF_capital_rub")
             self.assertEqual(row[2],123);self.assertEqual(row[3],350000.0)
             self.assertEqual(saved["metadata"]["fbs_accounting_bindings"]["2026-09-08"]["book_version"],result["book_version"])
-            self.assertEqual(conn.execute("SELECT count(*) FROM sheet_vitrina_v1_warehouse_business_projection_current_rows WHERE as_of_date='2026-09-08'").fetchone()[0],3)
+            self.assertEqual({r[0] for r in conn.execute("SELECT nm_id FROM sheet_vitrina_v1_warehouse_business_projection_current_rows WHERE as_of_date='2026-09-08'")},{0,1})
+        revised=accounting.load(self.runtime)[0]
+        self.assertEqual(set(revised['presentations']['2026-09-08']['rows']),{'1','2'})
+        self.assertEqual(revised['presentations']['2026-09-08']['rows']['2']['stages']['WB']['quantity'],'0')
+        self.assertIsNone(self.book['retained_days']['2026-09-08']['rows']['2']['stages']['WB']['quantity'])
         self.assertEqual(self.publish()["manifest_digest"],result["manifest_digest"])
 
     def test_live_owner_required(self):

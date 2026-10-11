@@ -132,6 +132,22 @@ def capture_retained_stages(db_path: Path, *, day: str, wb_version_id: str, nm_i
             conn.close()
 
 
+def retained_stage_operands(stage_row: dict, *, wb_capture: dict, expected_wb: dict) -> dict:
+    """Resolve a saved missing WB cell from its pinned official zero only.
+
+    Callers validate the retained date/version/digest and WB authority first.
+    Keep the saved book immutable and leave unproven or partial operands null.
+    """
+    stages = deepcopy(stage_row["stages"])
+    if (stage_row.get("reason") == "stage_projection_missing" and wb_capture.get("authority_complete")
+            and expected_wb.get("status") == "available" and number(expected_wb.get("quantity")) == 0
+            and number(expected_wb.get("capital_rub")) == 0
+            and stages["WB"].get("quantity") is None and stages["WB"].get("capital_rub") is None):
+        stages["WB"].update(quantity="0", capital_rub="0", wac_rub=None,
+                            zero_evidence=deepcopy(expected_wb.get("source", {})))
+    return stages
+
+
 class FbsInventorySnapshot:
     """One immutable in-memory version shared by FF, cards and Vitrina rows.
 
@@ -168,15 +184,10 @@ class FbsInventorySnapshot:
             for nm, fbs in fbs_by_nm.items():
                 fbo = fbo_by_nm.get(nm, [])
                 stage_row = retained["rows"][nm]
-                stages = deepcopy(stage_row["stages"])
                 # Shared cost and retained WB capital must refer to the same
                 # quantity and valuation; neither silently replaces the other.
                 expected_wb = wb.get(nm, {})
-                if (stage_row.get("reason") == "stage_projection_missing" and wb_capture.get("authority_complete")
-                        and expected_wb.get("status") == "available" and number(expected_wb.get("quantity")) == 0
-                        and number(expected_wb.get("capital_rub")) == 0):
-                    stages["WB"].update(quantity="0", capital_rub="0", wac_rub=None,
-                        zero_evidence=deepcopy(expected_wb.get("source", {})))
+                stages = retained_stage_operands(stage_row, wb_capture=wb_capture, expected_wb=expected_wb)
                 if not stage_row.get("reason") and expected_wb.get("status") != "missing":
                     for k in ("quantity", "capital_rub"):
                         observed, expected = number(stages["WB"].get(k)), number(expected_wb.get(k))
