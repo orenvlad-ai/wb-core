@@ -93,6 +93,10 @@ class HistoricalHistory(unittest.TestCase):
         proof=self.receipt.validate_native_readonly(adapter=adapter,store=self.store,now=NOW)
         self.assertEqual(set(proof['native']),{'2026-09-08','2026-09-09'})
         self.assertEqual(cell(self.store,'2026-09-08','SKU:1|own_capital_FF_capital_rub')[0],350000)
+        # The same sparse catalog SKU that blocked historical preparation
+        # survives the real compiler with a proven zero, not a missing value.
+        self.assertEqual(cell(self.store,'2026-09-08','SKU:2|own_capital_WB_qty')[0],0)
+        self.assertEqual(cell(self.store,'2026-09-08','SKU:2|own_capital_WB_capital_rub')[0],0)
         self.assertEqual(cell(self.store,'2026-09-08','SKU:1|own_capital_PRODUCTION_TO_FF_capital_rub')[0],500)
         self.assertEqual(self.keeper.execute('SELECT total_changes()').fetchone()[0],before)
         self.assertEqual(accounting.load(self.runtime.runtime_dir,version=self.fixture.before)[0],self.fixture.book)
