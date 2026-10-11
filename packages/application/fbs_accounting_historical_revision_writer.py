@@ -22,6 +22,9 @@ from packages.application.fbs_accounting_historical_revision import (
 from packages.application.fbs_snapshot_cost import canonical, fingerprint
 from packages.application.fbs_snapshot_cost_sources import capture_current
 from packages.application.ff_pool_documents import DOCUMENTS_TABLE, REQUESTS_TABLE
+from packages.application.wb_fbs_warehouse_registry import (
+    _complete_source_generation, STOCK_ROWS_TABLE, STOCK_RUNS_TABLE,
+)
 from packages.application.warehouse_functional_lock import (
     require_warehouse_job_owner, warehouse_functional_write_lock,
 )
@@ -156,13 +159,25 @@ def _capture(conn, db, plan, now, book):
         ("ff_pool_document_expense_lines", ("metadata_json", "amount_rub", "basis", "source_file_sha256")),
         ("ff_pool_movement_lines", ("metadata_json", "quantity_delta", "capital_delta_rub")),
         ("ff_pool_document_relations", ("parent_document_id", "child_document_id", "relation_type")),
-        ("wb_fbs_stock_snapshot_rows", ("provenance",)),
     ):
         expression = "+".join(f"coalesce(length({field}),0)" for field in text_fields)
         count, added = conn.execute(f"SELECT count(*),coalesce(sum({expression}),0) FROM sheet_vitrina_v1_{table}").fetchone()
         size += added
         _require(count <= 100000 and size <= MAX_NATIVE_BYTES, "stage_native_source_size_limit")
+    # The reader selects one full catalog/warehouse generation. Its immutable
+    # archived predecessors are not operands of this current source capture.
+    generation = _complete_source_generation(conn)
+    generation_id = generation.get("generation_id", "")
+    count, added = conn.execute(f"""SELECT count(*),coalesce(sum(length(CAST(r.provenance AS BLOB))),0)
+        FROM {STOCK_ROWS_TABLE} r JOIN {STOCK_RUNS_TABLE} s ON s.run_id=r.run_id
+        WHERE s.registry_run_id=?""", (generation_id,)).fetchone()
+    size += added
+    _require(count <= 100000 and size <= MAX_NATIVE_BYTES, "stage_native_source_size_limit")
     capture = capture_current(db, now=now, include_baseline=False, connection=conn)
+    _require(not capture["quantity_snapshot"]["complete"]
+             or (capture["quantity_snapshot"]["id"] == generation_id
+                 and capture["quantity_snapshot"]["digest"] == generation.get("generation_digest")),
+             "stage_native_source_generation_changed")
     capture["posted_manifest_json_by_id"] = {row[0]: row[1] for row in conn.execute(
         f"SELECT document_id,posted_manifest_json FROM {DOCUMENTS_TABLE} ORDER BY document_id")}
     if max(plan["candidate_book"]["state"]["periods"]) > max(book["state"]["periods"]):

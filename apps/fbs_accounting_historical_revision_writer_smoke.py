@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """LOCAL temporary native-source integration and staging crash/CAS fixtures.
 
-No runtime constructor, runner, external service or production path is used.
+No runner, external service or production path is used. All data are TEMP.
 The existing native fixture posts through _build_posting_plan/_apply_plan. Its
 direct posting requests are then given the exact posted workflow header written
 by FfPoolDocuments' outer posting transaction (without running that service).
@@ -17,9 +17,11 @@ import shutil
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from apps.fbs_accounting_historical_revision_smoke import native_writer_fixture, END
+from apps import fbs_accounting_backdated_documents_smoke as backdated_fixture
 from packages.application import fbs_accounting_historical_revision as planner
 from packages.application import fbs_accounting_historical_revision_writer as writer
 from packages.application import fbs_accounting_runtime as accounting
@@ -27,6 +29,7 @@ from packages.application import ready_publication as ready
 from packages.application.fbs_snapshot_cost import canonical, fingerprint
 from packages.application.ff_pool_documents import DOCUMENTS_TABLE, REQUESTS_TABLE, _build_posting_plan, _apply_plan
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
+from packages.application.wb_fbs_warehouse_registry import REGISTRY_RUNS_TABLE, STOCK_RUNS_TABLE, STOCK_ROWS_TABLE
 
 NOW = datetime.fromisoformat(END + "T14:00:00+00:00")
 
@@ -310,6 +313,140 @@ class HistoricalRevisionWriterTests(unittest.TestCase):
         self.assertEqual(blocked["blocker"]["code"], "unapproved_new_document_scope")
         self.assertIsNone(self.read())
         self.assert_current_preserved()
+
+
+class SelectedGenerationBudget(backdated_fixture.BackdatedDocuments):
+    """Real native backdated publication and selected-generation bounds."""
+
+    def selected_stock_run(self, conn):
+        return dict(conn.execute(f'SELECT * FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=? ORDER BY seller_warehouse_id LIMIT 1',
+                                 (self.fixture.cap['quantity_snapshot']['id'],)).fetchone())
+
+    def corrupt_stock(self, conn, trigger, sql, args):
+        # Adversarial LOCAL corruption; restore the exact immutable trigger so
+        # subsequent refusal proves row authority, not a missing schema fence.
+        original = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (trigger,)).fetchone()[0]
+        conn.execute('DROP TRIGGER '+trigger)
+        conn.execute(sql, args)
+        conn.execute(original)
+
+    def add_large_stock_archive(self):
+        # A complete older, wider catalog generation. Its rows are unrelated
+        # to the selected current generation and to the saved revised dates.
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            generation = dict(conn.execute(f'SELECT * FROM {REGISTRY_RUNS_TABLE} WHERE run_id=?',
+                                           (self.fixture.cap['quantity_snapshot']['id'],)).fetchone())
+            stock = self.selected_stock_run(conn)
+            catalog = json.loads(generation['catalog_scope_json'])
+            catalog.update(requested_chrt_count=100001, active_nm_id_count=100001)
+            warehouses = json.loads(generation['warehouse_scope_json'])
+            warehouses.update(warehouse_count=1, warehouses=warehouses['warehouses'][:1])
+            generation.update(run_id='LOCAL wide archived generation', run_sequence=0,
+                catalog_scope_json=canonical(catalog), warehouse_scope_json=canonical(warehouses),
+                generation_digest=fingerprint('LOCAL wide archived generation'),
+                started_at='2026-09-01T13:55:00Z', completed_at='2026-09-01T13:56:00Z')
+            stock.update(run_id='LOCAL wide archived stock', registry_run_id=generation['run_id'],
+                requested_chrt_count=100001, dense_row_count=100001, explicit_chrt_count=100001,
+                omitted_zero_count=0, source_digest=fingerprint('LOCAL wide archived stock'),
+                snapshot_at='2026-09-01T13:55:00Z')
+            for table, row in ((REGISTRY_RUNS_TABLE, generation), (STOCK_RUNS_TABLE, stock)):
+                conn.execute(f'INSERT INTO {table}('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')', tuple(row.values()))
+            conn.executemany(f'INSERT INTO {STOCK_ROWS_TABLE}(run_id,chrt_id,nm_id,amount,provenance) VALUES(?,?,?,0,?)',
+                ((stock['run_id'], i+1000, i+1, 'explicit_wb_row') for i in range(100001)))
+
+    def test_large_unselected_archive_real_prepare_publication_preserves_full_catalog_and_native_once(self):
+        self.add_large_stock_archive()
+        before_docs = self.document_image()
+        with ready.readonly(self.db) as conn:
+            before_counts = {table: conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0]
+                             for table in (STOCK_ROWS_TABLE, 'sheet_vitrina_v1_ff_pool_movement_lines')}
+            self.assertGreater(before_counts[STOCK_ROWS_TABLE], 100000)
+            selected_count = conn.execute(f'SELECT count(*) FROM {STOCK_ROWS_TABLE} r JOIN {STOCK_RUNS_TABLE} s ON s.run_id=r.run_id WHERE s.registry_run_id=?',
+                                         (self.fixture.cap['quantity_snapshot']['id'],)).fetchone()[0]
+            self.assertEqual(selected_count, 4)
+        self.fixture.manifest = self.fixture.prepare()
+        captured = self.fixture.manifest['original_capture']['quantity_snapshot']
+        self.assertEqual(captured, self.fixture.cap['quantity_snapshot'])
+        self.assertEqual({(row['facility_id'], row['nm_id'], row['quantity']) for row in captured['rows']},
+                         {('A', 1, 1000), ('B', 1, 1000), ('A', 2, 0), ('B', 2, 0)})
+        result = self.fixture.publish()
+        self.assertEqual(result['status'], 'published')
+        self.assertTrue(result['ready'])
+        self.assertFalse(result['operator_complete'])
+        self.assertEqual(self.fixture.publish()['manifest_digest'], result['manifest_digest'])
+        self.assertEqual(self.document_image(), before_docs)
+        self.assertEqual(accounting.load(self.fixture.runtime, version=self.fixture.before), (self.fixture.book, self.fixture.before))
+        with ready.readonly(self.db) as conn:
+            self.assertEqual({table: conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] for table in before_counts}, before_counts)
+
+    def assert_stock_preflight_refuses_without_capture_or_publication(self):
+        before_docs = self.document_image()
+        with patch.object(writer, 'capture_current', side_effect=AssertionError('unbounded capture must not start')) as capture:
+            with self.assertRaisesRegex(writer.HistoricalRevisionStageError, 'stage_native_source_size_limit'):
+                self.fixture.prepare()
+        capture.assert_not_called()
+        self.assertIsNone(self.status())
+        self.assertEqual(accounting.load(self.fixture.runtime)[1], self.fixture.before)
+        self.assertEqual(self.document_image(), before_docs)
+        with ready.readonly(self.db) as conn:
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {writer.TABLE}').fetchone()[0], 0)
+
+    def test_oversized_selected_generation_rows_refuse_before_capture(self):
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            runs = [row['run_id'] for row in conn.execute(f'SELECT run_id FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=?',
+                                                        (self.fixture.cap['quantity_snapshot']['id'],))]
+            self.assertEqual(len(runs), 2)
+            conn.executemany(f'INSERT INTO {STOCK_ROWS_TABLE}(run_id,chrt_id,nm_id,amount,provenance) VALUES(?,?,1,0,?)',
+                ((run, i+1000, 'explicit_wb_row') for run in runs for i in range(50000)))
+            # Each warehouse fits; their selected full generation does not.
+            self.assertEqual([conn.execute(f'SELECT count(*) FROM {STOCK_ROWS_TABLE} WHERE run_id=?', (run,)).fetchone()[0]
+                              for run in runs], [50002, 50002])
+        self.assert_stock_preflight_refuses_without_capture_or_publication()
+
+    def test_oversized_selected_provenance_bytes_refuse_before_capture(self):
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            stock = self.selected_stock_run(conn)
+            # TEXT characters fit the limit; actual UTF-8 bytes exceed it.
+            self.corrupt_stock(conn, 'wb_fbs_stock_rows_no_update',
+                f'UPDATE {STOCK_ROWS_TABLE} SET provenance=? WHERE run_id=? AND chrt_id=101',
+                ('я'*(writer.MAX_NATIVE_BYTES//2+1), stock['run_id']))
+            chars, size = conn.execute(f'SELECT length(provenance),length(CAST(provenance AS BLOB)) FROM {STOCK_ROWS_TABLE} WHERE run_id=? AND chrt_id=101',
+                                       (stock['run_id'],)).fetchone()
+            self.assertLess(chars, writer.MAX_NATIVE_BYTES)
+            self.assertGreater(size, writer.MAX_NATIVE_BYTES)
+        self.assert_stock_preflight_refuses_without_capture_or_publication()
+
+    def test_complete_capture_must_match_preflight_generation_identity_and_digest(self):
+        actual_capture = writer.capture_current
+        for field in ('id', 'digest'):
+            with self.subTest(field=field):
+                def foreign(*args, **kwargs):
+                    result = actual_capture(*args, **kwargs)
+                    self.assertTrue(result['quantity_snapshot']['complete'])
+                    result['quantity_snapshot'][field] = 'LOCAL foreign authority'
+                    return result
+                with patch.object(writer, 'capture_current', side_effect=foreign):
+                    with self.assertRaisesRegex(writer.HistoricalRevisionStageError, 'stage_native_source_generation_changed'):
+                        self.fixture.prepare()
+                self.assertIsNone(self.status())
+                self.assertEqual(accounting.load(self.fixture.runtime)[1], self.fixture.before)
+
+    def test_missing_catalog_only_dense_zero_still_refuses(self):
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            stock = self.selected_stock_run(conn)
+            self.corrupt_stock(conn, 'wb_fbs_stock_rows_no_delete',
+                f'DELETE FROM {STOCK_ROWS_TABLE} WHERE run_id=? AND nm_id=2', (stock['run_id'],))
+        actual_capture = writer.capture_current
+        with patch.object(writer, 'capture_current', wraps=actual_capture) as capture:
+            with self.assertRaises(ValueError):
+                self.fixture.prepare()
+        capture.assert_called_once()
+        self.assertIsNone(self.status())
+        self.assertEqual(accounting.load(self.fixture.runtime)[1], self.fixture.before)
 
 
 if __name__ == "__main__":
