@@ -32,7 +32,7 @@ from packages.application.fbs_snapshot_cost_sources import capture_current
 from packages.application.fbs_accounting_historical_sources import augment_native_requests
 
 
-def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt_clock=False,confirmation_actor=None,supplier_fractional_money=False):
+def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt_clock=False,confirmation_actor=None,supplier_fractional_money=False,saved_last=None,quantity_overrides_by_day=None):
     book,cap,receipt,_=native_writer_fixture(db,end=end,receipt_source_type=None if service_receipt else "china_acceptance_form",receipt_source_id="selected-shipment",service_receipt=service_receipt,
         advancing_receipt_clock=advancing_receipt_clock,confirmation_actor=confirmation_actor)
     saved_dates=sorted(book["state"]["periods"])
@@ -91,19 +91,51 @@ def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt
         runs=[dict(r) for r in stock_conn.execute('SELECT * FROM sheet_vitrina_v1_wb_fbs_stock_snapshot_runs')]
         stock_rows=[dict(r) for r in stock_conn.execute('SELECT * FROM sheet_vitrina_v1_wb_fbs_stock_snapshot_rows')]
         for sequence,day in enumerate(days,2):
-            g={**generation,'run_id':'history-generation:'+day,'run_sequence':sequence,'generation_digest':fingerprint([day,generation]),'started_at':day+'T13:55:00Z','completed_at':day+'T13:56:00Z'}
-            stock_conn.execute('INSERT INTO sheet_vitrina_v1_wb_fbs_warehouse_registry_runs('+','.join(g)+') VALUES('+','.join('?' for _ in g)+')',tuple(g.values()))
+            g={**generation,'run_id':'history-generation:'+day,'run_sequence':sequence,'started_at':day+'T13:55:00Z','completed_at':day+'T13:56:00Z'}
+            prepared=[]
+            catalog=json.loads(g['catalog_scope_json'])
+            warehouses={w['seller_warehouse_id']:w['facility_id'] for w in json.loads(g['warehouse_scope_json'])['warehouses']}
             for old in runs:
-                row={**old,'run_id':'history-stock:'+day+':'+old['run_id'],'registry_run_id':g['run_id'],'snapshot_at':day+'T13:55:00Z','source_digest':fingerprint([day,old])}
-                stock_conn.execute('INSERT INTO sheet_vitrina_v1_wb_fbs_stock_snapshot_runs('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',tuple(row.values()))
+                row={**old,'run_id':'history-stock:'+day+':'+old['run_id'],'registry_run_id':g['run_id'],'snapshot_at':day+'T13:55:00Z'}
+                lines=[];returned=[]
                 for item in stock_rows:
                     if item['run_id']!=old['run_id']:continue
                     line={**item,'run_id':row['run_id']}
+                    quantity=(quantity_overrides_by_day or {}).get(day,{}).get((warehouses[old['seller_warehouse_id']],line['nm_id']))
+                    if quantity is not None:
+                        assert type(quantity) is int and quantity>=0
+                        line.update(amount=quantity,provenance='explicit_wb_row')
+                    evidence={key:line[key] for key in ('chrt_id','nm_id','amount','provenance')}
+                    evidence['seller_warehouse_id']=row['seller_warehouse_id']
+                    evidence['evidence_digest']=fingerprint(evidence)
+                    if 'evidence_digest' in line:line['evidence_digest']=evidence['evidence_digest']
+                    lines.append(line);returned.append(evidence)
+                returned.sort(key=lambda r:r['chrt_id'])
+                row['source_digest']=fingerprint(dict(requested=[r['chrt_id'] for r in returned],returned=returned,identity_scope=catalog))
+                row['explicit_chrt_count']=sum(r['provenance']=='explicit_wb_row' for r in returned)
+                row['omitted_zero_count']=sum(r['provenance']=='omitted_requested_zero' for r in returned)
+                if 'identity_scope_json' in row:row['identity_scope_json']=canonical(catalog)
+                if 'returned_chrt_count' in row:row['returned_chrt_count']=row['explicit_chrt_count']
+                prepared.append((row,lines))
+            # Synthetic generation identity binds the actual native-format
+            # stock digests, including each day's deliberately distinct rows.
+            g['generation_digest']=fingerprint([day,generation,[row['source_digest'] for row,_ in prepared]])
+            stock_conn.execute('INSERT INTO sheet_vitrina_v1_wb_fbs_warehouse_registry_runs('+','.join(g)+') VALUES('+','.join('?' for _ in g)+')',tuple(g.values()))
+            for row,lines in prepared:
+                stock_conn.execute('INSERT INTO sheet_vitrina_v1_wb_fbs_stock_snapshot_runs('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',tuple(row.values()))
+                for line in lines:
                     stock_conn.execute('INSERT INTO sheet_vitrina_v1_wb_fbs_stock_snapshot_rows('+','.join(line)+') VALUES('+','.join('?' for _ in line)+')',tuple(line.values()))
             stock_conn.commit();stock_conn.execute('PRAGMA query_only=ON');stock_conn.execute('BEGIN')
             quantities[day]=capture_current(db,now=datetime.fromisoformat(day+'T14:00:00+00:00'),include_baseline=False,connection=stock_conn)['quantity_snapshot']
             stock_conn.rollback();stock_conn.execute('PRAGMA query_only=OFF')
             assert quantities[day]['complete']
+    if saved_last is not None:
+        book['state']['periods']={d:p for d,p in book['state']['periods'].items() if d<=saved_last}
+        book['state']['periods'][saved_last]['status']='open'
+        book['state']['periods'][saved_last]['quality']='preliminary'
+        for field in revision.BOOK_DAY_FIELDS:
+            book[field]={d:v for d,v in book[field].items() if d<=saved_last}
+        saved_dates=sorted(book['state']['periods'])
     for day in saved_dates:book['state']['periods'][day]['snapshot']=quantities[day]
     with ready.readonly(db) as conn:
         for day in days:
@@ -117,7 +149,7 @@ def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt
             assert retained["rows"]["2"]["stages"]["WB"]["quantity"] is None
             assert retained["rows"]["2"]["stages"]["WB"]["capital_rub"] is None
             if day==end:cap["current_dated_inputs"]=dict(wb_capture=wb,retained_capture=retained)
-            else:
+            elif day in saved_dates:
                 book["wb_days"][day]=wb;book["retained_days"][day]=retained
                 book["shared_days"][day]=build_shared_cost_day(book["state"],wb,day)
                 book["presentations"][day]=FbsInventorySnapshot(fbs_state=book["state"],wb_capture=wb,retained=retained,day=day).payload()
@@ -125,6 +157,9 @@ def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt
         fresh["posted_manifest_json_by_id"]={r[0]:r[1] for r in conn.execute(f"SELECT document_id,posted_manifest_json FROM {DOCUMENTS_TABLE}")}
         fresh["current_dated_inputs"]=cap["current_dated_inputs"]
         fresh=augment_native_requests(conn,fresh,document_ids=[receipt])
+        if saved_last is not None:
+            from packages.application.fbs_accounting_historical_sources import capture_missing_dated_inputs
+            capture_missing_dated_inputs(conn,db_path=db,book=book,capture=fresh)
     plan=revision.build_historical_revision_plan(book,fresh,receipt_document_ids=[receipt])
     assert plan["status"]=="ready",plan
     with ready.readonly(db) as conn:
@@ -137,6 +172,129 @@ class NativeHistoricalStages(unittest.TestCase):
         temp=TemporaryDirectory(prefix="historical-native-stages-");self.addCleanup(temp.cleanup)
         self.db=Path(temp.name)/"local.sqlite3"
         return native_stages_fixture(self.db,**kwargs)
+
+    def test_missing_tail_days_rebuilt_from_distinct_archived_official_generations(self):
+        book,cap,plan,dated=self.fixture(end='2026-09-12',saved_last='2026-09-09')
+        result=stages.build_dated_stage_revision(plan,capture=cap,dated=dated)
+        self.assertEqual(sorted(cap['archived_dated_inputs']),['2026-09-10','2026-09-11'])
+        for day,extra in cap['archived_dated_inputs'].items():
+            self.assertEqual(plan['dated_inputs'][day]['source_role'],'exact_archived_capture')
+            self.assertEqual(extra['quantity_snapshot']['id'],'history-generation:'+day)
+            self.assertNotEqual(extra['quantity_snapshot']['id'],cap['quantity_snapshot']['id'])
+            period=result['candidate_book']['state']['periods'][day]
+            self.assertEqual(period['status'],'closed')
+            self.assertEqual(period['rows']['A:1']['wac_rub'],'150.00')
+            self.assertEqual(period['snapshot'],extra['quantity_snapshot'])
+        self.assertEqual(result['candidate_book']['state']['periods']['2026-09-12']['status'],'open')
+        self.assertEqual(result['candidate_book']['state']['pending_documents'],[])
+        self.assertNotIn('2026-09-10',book['state']['periods'])
+
+    def test_archived_quantities_change_daily_capital_instead_of_reusing_current_stock(self):
+        expected={'2026-09-10':(1100,Decimal('365000')),
+                  '2026-09-11':(1200,Decimal('380000')),
+                  '2026-09-12':(1000,Decimal('350000'))}
+        book,cap,plan,dated=self.fixture(end='2026-09-12',saved_last='2026-09-09',
+            quantity_overrides_by_day={day:{('A',1):q} for day,(q,_) in expected.items()})
+        result=stages.build_dated_stage_revision(plan,capture=cap,dated=dated)
+        candidate=result['candidate_book'];digests=set()
+        for day,(quantity,capital) in expected.items():
+            period=candidate['state']['periods'][day]
+            self.assertEqual(Decimal(period['rows']['A:1']['quantity']),quantity)
+            self.assertEqual(Decimal(period['rows']['A:1']['wac_rub']),150)
+            self.assertEqual(Decimal(candidate['presentations'][day]['rows']['1']['stages']['FF']['capital_rub']),capital)
+            self.assertEqual(Decimal(candidate['presentations'][day]['totals']['stages']['FF']['capital_rub']),capital)
+            digests.add(period['snapshot']['facility_evidence']['A']['stock_digest'])
+        self.assertEqual(len(digests),3)
+        self.assertEqual(candidate['state']['pending_documents'],[])
+
+    def test_archived_missing_day_refuses_current_generation_substitution(self):
+        from packages.application import fbs_accounting_historical_sources as sources
+        book,cap,plan,_=self.fixture(end='2026-09-12',saved_last='2026-09-09')
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute("UPDATE sheet_vitrina_v1_wb_fbs_warehouse_registry_runs SET complete=0 WHERE run_id='history-generation:2026-09-10'")
+        with ready.readonly(self.db) as conn:
+            with self.assertRaisesRegex(ValueError,'historical_archived_quantity_missing'):
+                sources.capture_missing_dated_inputs(conn,db_path=self.db,book=book,capture=deepcopy(cap))
+            with self.assertRaisesRegex(ValueError,'historical_archived_quantity_generation_invalid'):
+                sources.capture_missing_dated_inputs(conn,db_path=self.db,book=book,capture=deepcopy(cap),plan=plan)
+
+    def test_archived_stock_run_metadata_bytes_bounded_before_loading_selected_rows(self):
+        from unittest.mock import patch
+        from packages.application import fbs_accounting_historical_sources as sources
+        _,cap,_,_=self.fixture(end='2026-09-12',saved_last='2026-09-09')
+        # A valid Unicode payload is below the character limit but above the
+        # byte limit. An unrelated current generation must not consume the
+        # selected historical generation's budget.
+        payload=canonical({'local_test':'я'*5000})
+        self.assertLess(len(payload),8192);self.assertGreater(len(payload.encode()),8192)
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute("ALTER TABLE sheet_vitrina_v1_wb_fbs_stock_snapshot_runs ADD COLUMN identity_scope_json TEXT NOT NULL DEFAULT '{}'")
+            conn.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_runs SET identity_scope_json=? WHERE run_id='history-stock:2026-09-12:A'",(payload,))
+        with patch.object(sources,'MAX_CAPTURE_BYTES',8192),ready.readonly(self.db) as conn:
+            self.assertEqual(sources.archived_quantity_snapshot(conn,day='2026-09-10',observed_at=cap['captured_at']),
+                             cap['archived_dated_inputs']['2026-09-10']['quantity_snapshot'])
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_runs SET identity_scope_json=? WHERE run_id='history-stock:2026-09-10:A'",(payload,))
+        statements=[]
+        with patch.object(sources,'MAX_CAPTURE_BYTES',8192),ready.readonly(self.db) as conn:
+            conn.set_trace_callback(statements.append)
+            with self.assertRaisesRegex(ValueError,'historical_archived_quantity_size_limit'):
+                sources.archived_quantity_snapshot(conn,day='2026-09-10',observed_at=cap['captured_at'])
+        self.assertFalse(any('SELECT * FROM sheet_vitrina_v1_wb_fbs_stock_snapshot_runs' in sql for sql in statements))
+
+    def test_archived_wrong_date_or_missing_wb_never_replaced_with_current_values(self):
+        from packages.application import fbs_accounting_historical_sources as sources
+        book,cap,plan,_=self.fixture(end='2026-09-12',saved_last='2026-09-09')
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_runs SET snapshot_at='2026-09-12T13:55:00Z' WHERE registry_run_id='history-generation:2026-09-10'")
+        with ready.readonly(self.db) as conn:
+            with self.assertRaisesRegex(ValueError,'historical_archived_quantity_date_or_completeness_invalid'):
+                sources.capture_missing_dated_inputs(conn,db_path=self.db,book=book,capture=deepcopy(cap),plan=plan)
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_runs SET snapshot_at='2026-09-10T13:55:00Z' WHERE registry_run_id='history-generation:2026-09-10'")
+            conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_versions SET status='failed' WHERE business_effective_date='2026-09-10'")
+        with ready.readonly(self.db) as conn:
+            with self.assertRaisesRegex(ValueError,'historical_archived_wb_missing'):
+                sources.capture_missing_dated_inputs(conn,db_path=self.db,book=book,capture=deepcopy(cap))
+
+    def test_staging_rereads_archive_operands_and_fences_every_generation(self):
+        from packages.application import fbs_accounting_historical_sources as sources
+        from packages.application import fbs_accounting_historical_revision_writer as writer
+        book,cap,plan,_=self.fixture(end='2026-09-12',saved_last='2026-09-09')
+        with ready.readonly(self.db) as conn:
+            fresh=writer._capture(conn,self.db,plan,datetime.fromisoformat('2026-09-12T14:00:00+00:00'),book)
+            fresh=sources.augment_native_requests(conn,fresh,document_ids=plan['receipt_document_ids'])
+            self.assertEqual(revision.validate_historical_revision_plan(plan,book=book,capture=fresh),plan)
+        queries=sources.original_source_queries(cap)
+        for day in cap['archived_dated_inputs']:
+            self.assertEqual(sum(args==('history-generation:'+day,) for _,args in queries),3)
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_rows SET amount=900 WHERE run_id='history-stock:2026-09-10:A' AND nm_id=1")
+        with ready.readonly(self.db) as conn:
+            fresh=writer._capture(conn,self.db,plan,datetime.fromisoformat('2026-09-12T14:00:00+00:00'),book)
+            fresh=sources.augment_native_requests(conn,fresh,document_ids=plan['receipt_document_ids'])
+            with self.assertRaisesRegex(ValueError,'revision_candidate_changed'):
+                revision.validate_historical_revision_plan(plan,book=book,capture=fresh)
+
+    def test_recovery_rereads_pinned_archive_after_active_generation_advances(self):
+        from packages.application import fbs_accounting_historical_sources as sources
+        book,cap,plan,_=self.fixture(end='2026-09-12',saved_last='2026-09-09',service_receipt=True)
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.row_factory=sqlite3.Row
+            run=dict(conn.execute("SELECT * FROM sheet_vitrina_v1_wb_fbs_warehouse_registry_runs ORDER BY run_sequence DESC LIMIT 1").fetchone())
+            run.update(run_id='later-active',run_sequence=1000,started_at='2026-09-13T12:00:00Z',completed_at='2026-09-13T12:01:00Z')
+            conn.execute('INSERT INTO sheet_vitrina_v1_wb_fbs_warehouse_registry_runs('+','.join(run)+') VALUES('+','.join('?' for _ in run)+')',tuple(run.values()))
+        with ready.readonly(self.db) as conn:
+            archived=sources.capture_archived_cohort(conn,plan=plan,original_capture=cap)
+            self.assertEqual(revision.validate_historical_revision_plan(plan,book=book,capture=archived),plan)
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            # Simulate corruption in this TEMP database beyond native immutable
+            # guards; recovery still independently checks the original operand.
+            conn.execute('DROP TRIGGER wb_fbs_stock_rows_no_update')
+            conn.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_rows SET amount=900 WHERE run_id='history-stock:2026-09-11:A' AND nm_id=1")
+        with ready.readonly(self.db) as conn:
+            with self.assertRaisesRegex(ValueError,'historical_original_archived_quantity_changed'):
+                sources.capture_archived_cohort(conn,plan=plan,original_capture=cap)
 
     def test_exact_shipment_removed_foreign_source_and_old_versions_unchanged(self):
         book,cap,plan,dated=self.fixture()

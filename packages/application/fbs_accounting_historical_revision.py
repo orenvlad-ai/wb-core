@@ -97,6 +97,8 @@ def _material(capture):
                                            for i, r in capture["native_requests_by_id"].items()}
     if "posted_actors_by_id" in capture:
         result["posted_actors_by_id"] = capture["posted_actors_by_id"]
+    if "archived_dated_inputs" in capture:
+        result["archived_dated_inputs"] = capture["archived_dated_inputs"]
     return result
 
 
@@ -419,7 +421,10 @@ def _build(book, capture, receipt_ids, observation, current_ids=(), auxiliary_id
     saved_last, last = max(periods), capture["business_date"]
     advance = (_date(last) - _date(saved_last)).days
     _require(advance >= 0, "capture_book_day_mismatch", business_date=saved_last)
-    _require(advance <= 1, "historical_period_gap", business_date=(date.fromisoformat(saved_last) + timedelta(days=1)).isoformat())
+    missing_days = [(date.fromisoformat(saved_last) + timedelta(days=n)).isoformat()
+                    for n in range(1, min(advance, MAX_DAYS + 1))]
+    _require(advance <= MAX_DAYS and set(capture.get("archived_dated_inputs", {})) == set(missing_days),
+             "historical_period_gap", business_date=(date.fromisoformat(saved_last) + timedelta(days=1)).isoformat())
     _require(saved_last == max(book["shared_days"]) == max(book["presentations"]), "book_tail_binding_mismatch")
     _require(periods[saved_last]["status"] == "open", "current_open_period_required")
     for identity in receipt_ids:
@@ -437,7 +442,13 @@ def _build(book, capture, receipt_ids, observation, current_ids=(), auxiliary_id
     inputs = {}
     snapshots, wb_inputs, retained_inputs = {}, {}, {}
     for day in days:
-        if day > saved_last:
+        if day > saved_last and day < last:
+            extra = capture["archived_dated_inputs"][day]
+            _require(set(extra) == {"quantity_snapshot", "wb_capture", "retained_capture"},
+                     "historical_archived_dated_inputs_invalid", business_date=day)
+            period, snapshot = None, extra["quantity_snapshot"]
+            wb, retained = extra["wb_capture"], extra["retained_capture"]
+        elif day > saved_last:
             extra = capture.get("current_dated_inputs", {})
             _require(set(extra) == {"wb_capture", "retained_capture"}, "current_dated_inputs_missing", business_date=day)
             period, snapshot = None, capture["quantity_snapshot"]
@@ -461,7 +472,8 @@ def _build(book, capture, receipt_ids, observation, current_ids=(), auxiliary_id
                  "historical_retained_source_missing", business_date=day)
         inputs[day] = {"quantity_snapshot": fingerprint(snapshot), "wb_capture": fingerprint(wb),
                        "retained_capture": fingerprint(retained), "before_period": fingerprint(period),
-                       "source_role": "saved_same_date" if period else "exact_new_current_capture"}
+                       "source_role": ("saved_same_date" if period else
+                                       "exact_archived_capture" if day < last else "exact_new_current_capture")}
         snapshots[day], wb_inputs[day], retained_inputs[day] = snapshot, wb, retained
     if advance == 0:
         _require(capture["quantity_snapshot"] == periods[last]["snapshot"], "current_quantity_frontier_changed")

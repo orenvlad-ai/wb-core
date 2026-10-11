@@ -105,6 +105,72 @@ class HistoricalHistory(unittest.TestCase):
         with self.assertRaises((ValueError,TypeError,KeyError)):self.receipt.validate_native_readonly(adapter=self.adapter(),store=self.store,now=NOW)
         with self.assertRaisesRegex(Exception,'not_supervised'):consume_historical_history_ack({},self.runtime.runtime_dir,self.receipt.manifest['manifest_digest'],self.receipt.dates)
 
+    def insert_ready(self,day,*,bundle='fixture-v1',padding='',retain_columns=False):
+        from dataclasses import replace
+        from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1TemporalSlot
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.row_factory=sqlite3.Row
+            row=dict(conn.execute(f'SELECT * FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',('fixture-v1','2026-09-10')).fetchone())
+            original=_deserialize_sheet_vitrina_plan(row['plan_json'])
+            dates=original.date_columns if retain_columns else [day]
+            sheets=original.sheets if retain_columns else [replace(s,header=['label','key',*dates],rows=[r[:2]+[999] for r in s.rows],column_count=3)
+                if s.sheet_name=='DATA_VITRINA' else s for s in original.sheets]
+            envelope=replace(original,as_of_date=day,date_columns=dates,sheets=sheets,
+                temporal_slots=[SheetVitrinaV1TemporalSlot(d,d,d) for d in dates],metadata={**original.metadata,'local_test_padding':padding})
+            row.update(bundle_version=bundle,as_of_date=day,plan_json=_serialize_sheet_vitrina_plan(envelope))
+            conn.execute(f'INSERT INTO {ready.TABLE}('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',tuple(row.values()))
+
+    def test_history_validation_ignores_large_unselected_ready_archive(self):
+        from unittest.mock import patch
+        expected=self.receipt.validate_sources_readonly(now=NOW)
+        selected_size=self.keeper.execute(f'SELECT length(CAST(plan_json AS BLOB)) FROM {ready.TABLE} WHERE as_of_date=?',('2026-09-10',)).fetchone()[0]
+        limit=selected_size+8192
+        self.insert_ready('2025-01-01',padding='x'*limit)
+        self.insert_ready('2025-01-02',padding='я'*limit)
+        self.assertGreater(self.keeper.execute(f'SELECT sum(length(CAST(plan_json AS BLOB))) FROM {ready.TABLE}').fetchone()[0],limit)
+        with patch.object(history,'MAX_READY_SOURCE_BYTES',limit):
+            self.assertEqual(self.receipt.validate_sources_readonly(now=NOW),expected)
+
+    def test_history_validation_rejects_selected_oversized_ready_in_bytes(self):
+        from unittest.mock import patch
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            text=conn.execute(f'SELECT plan_json FROM {ready.TABLE} WHERE as_of_date=?',('2026-09-10',)).fetchone()[0]
+            payload=json.loads(text);payload['metadata']['local_test_padding']='я'*5000
+            text=canonical(payload)
+            conn.execute(f'UPDATE {ready.TABLE} SET plan_json=? WHERE as_of_date=?',(text,'2026-09-10'))
+        limit=(len(text)+len(text.encode()))//2
+        with patch.object(history,'MAX_READY_SOURCE_BYTES',limit):
+            with self.assertRaisesRegex(ValueError,'historical_history_ready_size_limit'):
+                self.receipt.validate_sources_readonly(now=NOW)
+
+    def test_history_global_exact_bundle_preference_and_legacy_date_inference(self):
+        self.insert_ready('2026-09-08',bundle='previous-bundle',retain_columns=True)
+        baseline=self.receipt.validate_sources_readonly(now=NOW)
+        self.assertEqual(baseline['dated']['2026-09-08']['ready_key'],['previous-bundle','2026-09-08'])
+        self.assertEqual(baseline['dated']['2026-09-09']['ready_key'],['fixture-v1','2026-09-10'])
+        for value in ('absent',None):
+            with self.subTest(date_columns=value):
+                with closing(sqlite3.connect(self.db)) as conn,conn:
+                    # The 9th has no exact target: only inferred date columns
+                    # admit it from the default 10th. Exact 8th alone would not
+                    # detect a regression replacing absent columns with [].
+                    text=conn.execute(f'SELECT plan_json FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',('fixture-v1','2026-09-10')).fetchone()[0]
+                    payload=json.loads(text)
+                    if value=='absent':payload.pop('date_columns',None)
+                    else:payload['date_columns']=None
+                    conn.execute(f'UPDATE {ready.TABLE} SET plan_json=? WHERE bundle_version=? AND as_of_date=?',(canonical(payload),'fixture-v1','2026-09-10'))
+                proof=self.receipt.validate_sources_readonly(now=NOW)
+                self.assertEqual(proof['dated']['2026-09-08']['ready_key'],['previous-bundle','2026-09-08'])
+                self.assertEqual(proof['dated']['2026-09-08']['book_version'],baseline['dated']['2026-09-08']['book_version'])
+                self.assertEqual(proof['dated']['2026-09-09']['ready_key'],['fixture-v1','2026-09-10'])
+
+    def test_history_preserves_inner_revision_join_for_untracked_archive(self):
+        expected=self.receipt.validate_sources_readonly(now=NOW)
+        self.insert_ready('2025-01-01',bundle='untracked')
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute('DELETE FROM sheet_vitrina_v1_ready_revisions WHERE bundle_version=?',('untracked',))
+        self.assertEqual(self.receipt.validate_sources_readonly(now=NOW),expected)
+
     def test_old_edition_remains_after_new_exact_source_history_revision(self):
         self.compile();prior=self.store._current()['current'];paths={p:p.read_bytes() for p in (self.store.root/'objects').iterdir()}
         self.compile()
@@ -183,6 +249,28 @@ class HistoricalHistory(unittest.TestCase):
                 self.assertEqual(cell(store,day,'SKU:1|own_capital_FF_capital_rub')[0],350000)
                 self.assertEqual(cell(store,day,'SKU:1|own_capital_PRODUCTION_TO_FF_capital_rub')[0],500)
             self.assertEqual(accounting.load(fixture.runtime,version=fixture.before),(fixture.book,fixture.before))
+
+    def test_missing_days_real_publication_and_history_use_each_archive(self):
+        now=datetime.fromisoformat('2026-09-12T14:00:00+00:00')
+        fixture=publication_fixture.HistoricalPublication();fixture.fixture_now=now;fixture.saved_last='2026-09-09'
+        fixture.setUp();self.addCleanup(fixture.doCleanups);fixture.publish()
+        complete_local_metadata(fixture.db);runtime=RegistryUploadDbBackedRuntime(fixture.runtime)
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+        OwnProductCapitalBlock(runtime=runtime)
+        with closing(sqlite3.connect(fixture.db)) as keeper:
+            keeper.execute('PRAGMA journal_mode=WAL');ready.ensure_publication_schema(keeper);keeper.commit()
+            receipt=history.HistoricalReceipt(runtime,'local-late-publication','1')
+            root=self.root/'missing-days';store=HistoryStore(root/'history')
+            adapter=LiveNativeAdapter(db_path=fixture.db,runtime_dir=runtime.runtime_dir,cache_dir=root/'proofs',now=now,
+                date_from='2026-09-08',date_to='2026-09-12',formula_epoch='local-gap-publication')
+            result=update_live_history(adapter=adapter,runtime=runtime,store=store,max_recomputes=31,deadline_monotonic=time.monotonic()+60,
+                rolling14=False,group_blocks=True,backfill_dates=list(receipt.dates))
+            self.assertEqual(result['status'],'published')
+            self.assertEqual(set(receipt.validate_native_readonly(adapter=adapter,store=store,now=now)['native']),
+                             {'2026-09-08','2026-09-09','2026-09-10','2026-09-11'})
+            for day in ('2026-09-10','2026-09-11'):
+                self.assertEqual(cell(store,day,'SKU:1|own_capital_FF_capital_rub')[0],350000)
+        self.assertEqual(accounting.load(fixture.runtime,version=fixture.before),(fixture.book,fixture.before))
 
     def test_actual_service_and_functional_queue_cannot_bypass_history_completion(self):
         fixture,runtime=self.service_fixture()
