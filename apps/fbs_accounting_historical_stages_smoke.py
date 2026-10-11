@@ -7,6 +7,7 @@ and business projection publisher are real; no runtime or production opens.
 from contextlib import closing
 from copy import deepcopy
 from datetime import datetime
+from decimal import Decimal, localcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
@@ -31,7 +32,7 @@ from packages.application.fbs_snapshot_cost_sources import capture_current
 from packages.application.fbs_accounting_historical_sources import augment_native_requests
 
 
-def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt_clock=False,confirmation_actor=None):
+def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt_clock=False,confirmation_actor=None,supplier_fractional_money=False):
     book,cap,receipt,_=native_writer_fixture(db,end=end,receipt_source_type=None if service_receipt else "china_acceptance_form",receipt_source_id="selected-shipment",service_receipt=service_receipt,
         advancing_receipt_clock=advancing_receipt_clock,confirmation_actor=confirmation_actor)
     saved_dates=sorted(book["state"]["periods"])
@@ -71,8 +72,11 @@ def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt
             add("wb","500","100000",[dict(source="official_wb_snapshot",snapshot_id=watermark["snapshot_id"],snapshot_date=day,fetched_at=stamp)],wb="500")
             add("ff","2000","300000",[dict(source="current_facility_pool_exact_projection",business_date=day,
                 locations=[dict(facility_id="A",pool="FBS",nm_id=1,quantity="1000",capital_rub="100000"),dict(facility_id="B",pool="FBS",nm_id=1,quantity="1000",capital_rub="200000")])])
-            add("china_to_ff","1010","200500",[dict(shipment_id="selected-shipment",supplier_flow_id="selected-flow",source_fingerprint="sha256:local-selected",flow_quantity="1000",flow_capital_rub="200000"),
-                                                       dict(shipment_id="foreign-shipment",supplier_flow_id="foreign-flow",source_fingerprint="sha256:local-foreign",flow_quantity="10",flow_capital_rub="500")])
+            selected_money="200000.00000000000000000000002" if supplier_fractional_money else "200000"
+            foreign_money="500.00000000000000000000001" if supplier_fractional_money else "500"
+            total_money="200500.00000000000000000000003" if supplier_fractional_money else "200500"
+            add("china_to_ff","1010",total_money,[dict(shipment_id="selected-shipment",supplier_flow_id="selected-flow",source_fingerprint="sha256:local-selected",flow_quantity="1000",flow_capital_rub=selected_money),
+                                                       dict(shipment_id="foreign-shipment",supplier_flow_id="foreign-flow",source_fingerprint="sha256:local-foreign",flow_quantity="10",flow_capital_rub=foreign_money)])
             _materialize_compact_warehouse_read_models(conn,version_id=version,plan=dict(lines=lines),created_at=stamp,effective_at=stamp,business_effective_date=day)
             from packages.application.warehouse_business_projection import publish_functional_version_business_projection
             publish_functional_version_business_projection(conn,published_version_id=version,business_effective_date=day,published_at=stamp,source_revision=fingerprint(['LOCAL original native edition',day]))
@@ -177,6 +181,21 @@ class NativeHistoricalStages(unittest.TestCase):
             wb=next(r for r in candidate['wb_days'][day]['rows'] if r['nm_id']==2)
             self.assertEqual(wb['source']['basis'],'explicit_dense_zero_in_linked_complete_wb_snapshot')
             self.assertEqual(candidate['presentations'][day]['rows']['2']['stages']['WB']['quantity'],'0')
+
+    def test_native_fractional_money_preserved_independently_of_caller_precision(self):
+        _,cap,plan,dated=self.fixture(supplier_fractional_money=True)
+        before=deepcopy((plan,cap,dated));results=[]
+        for precision in (12,28,160):
+            with localcontext() as context:
+                context.prec=precision
+                results.append(stages.build_dated_stage_revision(plan,capture=cap,dated=dated))
+                self.assertEqual(context.prec,precision)
+        self.assertEqual(results[0],results[1]);self.assertEqual(results[1],results[2])
+        self.assertEqual((plan,cap,dated),before)
+        for edition in results[0]['editions'].values():
+            row=next(r for r in edition['balances'] if r['warehouse_key']=='china_to_ff')
+            self.assertEqual(Decimal(row['capital_rub']),Decimal('500.00000000000000000000001'))
+            self.assertEqual(Decimal(edition['supplier_revision'][0]['removed_capital_rub']),Decimal('200000.00000000000000000000002'))
 
     def test_missing_partial_foreign_or_unproven_operands_still_refuse(self):
         _,_,plan,_=self.fixture();day=plan['scope']['date_from']

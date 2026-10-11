@@ -7,7 +7,7 @@ transaction and an exact prepared source fence.
 """
 from __future__ import annotations
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 import sqlite3
 from contextlib import closing
@@ -280,6 +280,15 @@ def _cloned_wb_capture(version, snapshot, balances, *, day, nm_ids):
 
 
 def build_dated_stage_revision(plan, *, capture, dated):
+    # Native source folds and immutable money use 160 digits. The ambient
+    # Decimal default (28) rounds valid source sums before exact conservation
+    # checks and can also truncate retained foreign shipment capital.
+    with localcontext() as context:
+        context.prec = 160
+        return _build_dated_stage_revision(plan, capture=capture, dated=dated)
+
+
+def _build_dated_stage_revision(plan, *, capture, dated):
     require(plan["status"] == "ready" and dated["source_digest"] == fingerprint(dated["dates"]), "historical_stage_plan_authority_missing")
     candidate, editions = deepcopy(plan["candidate_book"]), {}
     receipts = [d for d in capture["documents"] if d["document_id"] in plan["receipt_document_ids"]]
