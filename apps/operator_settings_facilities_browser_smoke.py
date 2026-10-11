@@ -16,6 +16,21 @@ def open_settings(page,base):
     page.wait_for_function("document.documentElement.dataset.settingsReady==='true'")
 
 
+def source_receipt(page):
+    # Recovery from a hidden Settings tab mirrors its confirmation into a
+    # top-layer dialog. Keep source identity and visible confirmation distinct.
+    return page.locator('#warehousesGroupPanel #warehouseSourceReceipt')
+
+
+def accepted_popup(page,receipt):
+    popup=page.get_by_role('dialog',name='Принято',exact=True)
+    expect(popup).to_be_visible()
+    expect(popup.locator('.ff-operation-check')).to_be_visible()
+    operation=receipt.locator('[data-ff-operation-receipt]').get_attribute('data-ff-operation-receipt')
+    expect(popup.locator('[data-ff-operation-receipt]')).to_have_attribute('data-ff-operation-receipt',operation)
+    return popup
+
+
 def main():
     with TemporaryDirectory(prefix='settings-facility-browser-') as raw:
         rt,entry=setup(raw);server,thread,base=server_for(entry)
@@ -43,7 +58,7 @@ def main():
                 assert not writes
                 page.locator('#createWarehouseButton').click();expect(page.locator('#createWarehouseButton')).to_have_text('Подтвердить создание')
                 page.locator('#createWarehouseButton').evaluate('(b)=>{b.click();b.click();}')
-                receipt=page.locator('#warehouseSourceReceipt');expect(receipt).to_contain_text('Проверяем сохранение')
+                receipt=source_receipt(page);expect(receipt).to_contain_text('Проверяем сохранение')
                 expect(page.locator('#createWarehouseButton')).to_be_disabled()
                 expect(page.locator('#warehousesActivationMessage')).to_contain_text('Повторно отправлять')
                 assert len(writes)==1
@@ -52,7 +67,8 @@ def main():
                 page.evaluate('localStorage.setItem("wb-core:sheet-vitrina-v1:settings-active-group:v1","directories")')
                 page.close();foreign=False;page=ctx.new_page();page.goto(base+http.DEFAULT_SETTINGS_UI_PATH+'?embedded=1')
                 expect(page.locator('#warehousesGroupPanel')).to_be_visible()
-                receipt=page.locator('#warehouseSourceReceipt');expect(receipt.locator('.ff-operation-check')).to_be_visible()
+                receipt=source_receipt(page)
+                accepted_popup(page,receipt).get_by_role('button',name='Закрыть',exact=True).click()
                 assert len(writes)==1 and page.evaluate('window.bad') is None
                 fid=writes[0]['acceptance']['source_ref']['entity_id']
                 card=page.locator('[data-facility-id="'+fid+'"]');expect(card).to_contain_text('Неактивен')
@@ -61,18 +77,20 @@ def main():
                 assert not entry.ff_pool_surface.facility_detail(fid)['facility']['active']
                 drain=DenseFbsService(db_path=rt.db_path,runtime_dir=rt.runtime_dir,timestamp_factory=lambda:NOW)
                 assert drain.drain_facility_activations()['active']==1
-                receipt.locator('.ff-operation-link').click();expect(receipt).to_contain_text('Склад активирован.')
+                accepted_popup(page,receipt).locator('.ff-operation-actions .ff-operation-link').click();expect(receipt).to_contain_text('Склад активирован.')
                 assert len(writes)==2
                 page.locator('#reloadWarehousesButton').click();expect(card.get_by_role('button',name='Деактивировать',exact=True)).to_be_enabled()
                 previous=receipt.locator('[data-ff-operation-receipt]').get_attribute('data-ff-operation-receipt')
                 card.locator('[data-warehouse-name]').fill('Settings renamed');card.get_by_role('button',name='Сохранить имя',exact=True).click()
                 expect(receipt.locator('[data-ff-operation-receipt]')).not_to_have_attribute('data-ff-operation-receipt',previous)
                 expect(card.locator('[data-warehouse-name]')).to_have_value('Settings renamed');assert len(writes)==3
+                accepted_popup(page,receipt).get_by_role('button',name='Закрыть',exact=True).click()
                 previous=receipt.locator('[data-ff-operation-receipt]').get_attribute('data-ff-operation-receipt')
                 expect(card.get_by_role('button',name='Деактивировать',exact=True)).to_be_enabled()
                 card.get_by_role('button',name='Деактивировать',exact=True).click()
                 expect(receipt.locator('[data-ff-operation-receipt]')).not_to_have_attribute('data-ff-operation-receipt',previous)
                 expect(card.get_by_role('button',name='Активировать',exact=True)).to_be_enabled();assert len(writes)==4
+                accepted_popup(page,receipt).get_by_role('button',name='Закрыть',exact=True).click()
                 assert not entry.ff_pool_surface.facility_detail(fid)['facility']['active']
                 # Current whole-source metadata drift blocks before source mutation.
                 current=entry.ff_pool_surface.facility_detail(fid)['facility']
@@ -97,7 +115,7 @@ def main():
                 card.get_by_role('button',name='Сохранить имя',exact=True).click()
                 expect(receipt).to_contain_text('Проверяем сохранение');expect(card.get_by_role('button',name='Сохранить имя',exact=True)).to_be_disabled()
                 page.close();page=ctx.new_page();open_settings(page,base)
-                expect(page.locator('#warehouseSourceReceipt')).to_contain_text('Проверяем сохранение')
+                expect(source_receipt(page)).to_contain_text('Проверяем сохранение')
                 expect(page.locator('#createWarehouseButton')).to_be_disabled()
                 assert len(writes)==4 and rt.db_path.read_bytes()==before and not errors,errors
                 ctx.close();browser.close()
