@@ -13,7 +13,7 @@ import sqlite3
 from contextlib import closing
 
 from packages.application.fbs_snapshot_cost import fingerprint, canonical, candidate_period_view
-from packages.application.fbs_inventory_presentation import FbsInventorySnapshot, RETAINED_STAGES
+from packages.application.fbs_inventory_presentation import FbsInventorySnapshot, RETAINED_STAGES, retained_stage_operands
 from packages.application.shared_sku_cost import build_shared_cost_day
 from packages.application.shared_sku_cost_sources import capture_wb_component
 from packages.application.sheet_vitrina_v1_own_product_capital import own_stage_metric_key
@@ -95,10 +95,15 @@ def capture_dated_stages(conn, *, db_path, book, dates):
                     "historical_stage_complete_payload_mismatch", day=day, source=model["warehouse_key"])
         metrics = _metric_rows(balances, affected_nm_ids=nm_ids)
         retained = book["retained_days"][day]
+        require(retained.get("date") == day and retained.get("wb_version_id") == version_id
+                and retained.get("source_digest") == fingerprint({k:v for k,v in retained.items() if k != "source_digest"}),
+                "historical_retained_stage_binding_mismatch", day=day)
+        wb_rows = {int(row["nm_id"]):row for row in wb["rows"]}
         for nm in nm_ids:
             require(str(nm) in retained["rows"], "historical_stage_catalog_mismatch", day=day)
+            operands = retained_stage_operands(retained["rows"][str(nm)], wb_capture=wb, expected_wb=wb_rows.get(nm, {}))
             for stage in RETAINED_STAGES:
-                item = retained["rows"][str(nm)]["stages"][stage]
+                item = operands[stage]
                 for key, field in (("quantity","qty"),("capital_rub","capital_rub")):
                     raw = metrics[nm]["metrics"][own_stage_metric_key(stage,field)]
                     observed = decimal(item[key])

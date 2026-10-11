@@ -22,7 +22,7 @@ from packages.application import ready_publication as ready
 from packages.application.fbs_snapshot_cost import canonical,fingerprint
 from packages.application.shared_sku_cost_sources import capture_wb_component, _digest
 from packages.application.shared_sku_cost import build_shared_cost_day
-from packages.application.fbs_inventory_presentation import FbsInventorySnapshot,RETAINED_STAGES
+from packages.application.fbs_inventory_presentation import FbsInventorySnapshot,RETAINED_STAGES,capture_retained_stages
 from packages.application.sheet_vitrina_v1_own_product_capital import own_stage_metric_key
 from packages.application.warehouse_functional import ensure_warehouse_functional_schema, _materialize_compact_warehouse_read_models
 from packages.application.warehouse_business_projection import ensure_warehouse_business_projection_schema,ensure_functional_version_business_time_schema,_metric_rows
@@ -44,6 +44,11 @@ def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt
             conn.execute("DROP TABLE IF EXISTS sheet_vitrina_v1_warehouse_"+name)
         ensure_warehouse_functional_schema(conn);ensure_warehouse_business_projection_schema(conn);ensure_functional_version_business_time_schema(conn)
         posted_requests(conn)
+        conn.execute("CREATE TABLE IF NOT EXISTS registry_upload_current_state(slot,bundle_version,activated_at)")
+        identity_columns={r[1] for r in conn.execute("PRAGMA table_info(sheet_vitrina_v1_nomenclature_items)")}
+        for column in ("our_sku","vendor_code","nomenclature_name","wb_title","barcode"):
+            if column not in identity_columns:
+                conn.execute("ALTER TABLE sheet_vitrina_v1_nomenclature_items ADD COLUMN "+column+" TEXT DEFAULT ''")
         for day in days:
             version="native-saved:"+day
             stamp=day+"T12:00:00Z"
@@ -64,7 +69,6 @@ def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt
                 conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_balances VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                              (version,stage,nm,q,row["wac_rub"],c,q,row["quality"],0,wb,"0","0",canonical(row["provenance"])))
             add("wb","500","100000",[dict(source="official_wb_snapshot",snapshot_id=watermark["snapshot_id"],snapshot_date=day,fetched_at=stamp)],wb="500")
-            add("wb","0","0",[dict(source="official_wb_snapshot",snapshot_id=watermark["snapshot_id"],snapshot_date=day,fetched_at=stamp)],nm=2)
             add("ff","2000","300000",[dict(source="current_facility_pool_exact_projection",business_date=day,
                 locations=[dict(facility_id="A",pool="FBS",nm_id=1,quantity="1000",capital_rub="100000"),dict(facility_id="B",pool="FBS",nm_id=1,quantity="1000",capital_rub="200000")])])
             add("china_to_ff","1010","200500",[dict(shipment_id="selected-shipment",supplier_flow_id="selected-flow",source_fingerprint="sha256:local-selected",flow_quantity="1000",flow_capital_rub="200000"),
@@ -101,14 +105,13 @@ def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt
         for day in days:
             wb=capture_wb_component(db,day=day,nm_ids=[1,2],version_id="native-saved:"+day,connection=conn)
             assert wb["complete"],wb
-            balances=stages._version_balances(conn,version_id="native-saved:"+day)
-            metrics=_metric_rows(balances,affected_nm_ids=[1,2])
-            # Native projection closes all stage zeros for catalog-only SKU2.
-            rows={}
-            for nm in [1,2]:
-                row=metrics.get(nm) or _metric_rows([dict(warehouse_key="ff",nm_id=2,quantity="0",capital_rub="0",wac_rub=None,cost_covered_quantity="0",quality="empty",certified=0,provenance={})],affected_nm_ids=[2])[2]
-                rows[str(nm)]=dict(stages={s:dict(quantity=str(row["metrics"][own_stage_metric_key(s,"qty")]),capital_rub=str(row["metrics"][own_stage_metric_key(s,"capital_rub")]),wac_rub=row["metrics"][own_stage_metric_key(s,"unit_cost_rub")]) for s in RETAINED_STAGES},reason="",identity={})
-            retained=dict(date=day,wb_version_id=wb["version_id"],rows=rows);retained["source_digest"]=fingerprint(retained)
+            # Catalog-only SKU2 is absent from sparse native balances and
+            # business projection. The real reader retains WB nulls; only the
+            # exact complete official snapshot can prove this SKU's zero.
+            retained=capture_retained_stages(db,day=day,wb_version_id=wb["version_id"],nm_ids=[1,2],connection=conn)
+            assert retained["rows"]["2"]["reason"] == "stage_projection_missing"
+            assert retained["rows"]["2"]["stages"]["WB"]["quantity"] is None
+            assert retained["rows"]["2"]["stages"]["WB"]["capital_rub"] is None
             if day==end:cap["current_dated_inputs"]=dict(wb_capture=wb,retained_capture=retained)
             else:
                 book["wb_days"][day]=wb;book["retained_days"][day]=retained
@@ -161,6 +164,46 @@ class NativeHistoricalStages(unittest.TestCase):
         with ready.readonly(self.db) as conn:
             with self.assertRaisesRegex(ValueError,"historical_complete_stage_models_missing"):
                 stages.capture_dated_stages(conn,db_path=self.db,book=plan["candidate_book"],dates=plan["scope"]["dates"])
+
+    def test_saved_sparse_zero_is_resolved_without_mutating_original_operands(self):
+        book,cap,plan,dated=self.fixture()
+        candidate=plan['candidate_book'];before=deepcopy(candidate)
+        with ready.readonly(self.db) as conn:
+            captured=stages.capture_dated_stages(conn,db_path=self.db,book=candidate,dates=plan['scope']['dates'])
+        self.assertEqual(captured,dated)
+        self.assertEqual(candidate,before)
+        for day in plan['scope']['dates']:
+            self.assertIsNone(candidate['retained_days'][day]['rows']['2']['stages']['WB']['quantity'])
+            wb=next(r for r in candidate['wb_days'][day]['rows'] if r['nm_id']==2)
+            self.assertEqual(wb['source']['basis'],'explicit_dense_zero_in_linked_complete_wb_snapshot')
+            self.assertEqual(candidate['presentations'][day]['rows']['2']['stages']['WB']['quantity'],'0')
+
+    def test_missing_partial_foreign_or_unproven_operands_still_refuse(self):
+        _,_,plan,_=self.fixture();day=plan['scope']['date_from']
+        cases=[('reason','stage_projection_binding_mismatch'),('partial_quantity','0'),
+               ('partial_capital','0'),('positive_quantity','1'),('missing_internal',None),
+               ('date','2026-09-07'),('version','foreign'),('digest','foreign'),
+               ('wb_authority',False),('wb_complete',False),('wb_quantity',1),('wb_capital',None)]
+        for case,value in cases:
+            with self.subTest(case=case):
+                candidate=deepcopy(plan['candidate_book']);retained=candidate['retained_days'][day]
+                row=retained['rows']['2'];wb=candidate['wb_days'][day]
+                if case=='reason':row['reason']=value
+                elif case in {'partial_quantity','positive_quantity'}:row['stages']['WB']['quantity']=value
+                elif case=='partial_capital':row['stages']['WB']['capital_rub']=value
+                elif case=='missing_internal':row['stages']['PRODUCTION']['quantity']=value
+                elif case=='date':retained['date']=value
+                elif case=='version':retained['wb_version_id']=value
+                elif case=='wb_authority':wb['authority_complete']=value
+                elif case=='wb_complete':wb['complete']=value
+                elif case in {'wb_quantity','wb_capital'}:
+                    next(r for r in wb['rows'] if r['nm_id']==2)['quantity' if case=='wb_quantity' else 'capital_rub']=value
+                retained['source_digest']=value if case=='digest' else fingerprint({k:v for k,v in retained.items() if k!='source_digest'})
+                before=deepcopy(candidate)
+                with ready.readonly(self.db) as conn:
+                    with self.assertRaises(ValueError):
+                        stages.capture_dated_stages(conn,db_path=self.db,book=candidate,dates=plan['scope']['dates'])
+                self.assertEqual(candidate,before)
 
     def test_precise_source_conservation_block(self):
         book,cap,plan,dated=self.fixture()
