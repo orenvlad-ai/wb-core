@@ -16,8 +16,62 @@ import time
 from packages.application import ready_publication as ready
 from packages.application import fbs_accounting_runtime as accounting
 from packages.application.fbs_snapshot_cost import canonical, fingerprint
-from packages.application.fbs_accounting_historical_publication import CONTRACT
+from packages.application.fbs_accounting_historical_publication import CONTRACT,expand_manifest
 from packages.application.fbs_accounting_historical_stages import require
+
+MAX_READY_HEADERS = 10000
+MAX_READY_HEADER_BYTES = 8 * 1024**2
+MAX_READY_SOURCE_BYTES = 160 * 1024**2
+
+
+def _selected_ready_sources(conn, *, dates, bundle, now):
+    """Keep native global-bundle preference; load only selected dated bodies."""
+    from packages.application.web_vitrina_window_v3 import _ReadyHeader, _select_bindings, has_complete_recovery
+    from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+    from packages.application.sheet_vitrina_v1 import _require_date_columns_or_infer
+    from packages.business_time import default_business_as_of_date
+    metadata = f'''SELECT s.bundle_version,s.as_of_date,s.snapshot_id,s.activated_at,s.refreshed_at,r.revision,
+        json_extract(s.plan_json,'$.date_columns') dates_json,
+        (SELECT json_extract(value,'$.header') FROM json_each(s.plan_json,'$.sheets')
+         WHERE json_extract(value,'$.sheet_name')='DATA_VITRINA' LIMIT 1) header_json,
+        json_extract(s.plan_json,'$.metadata.fbs_accounting_bindings') bindings_json
+        FROM {ready.TABLE} s JOIN sheet_vitrina_v1_ready_revisions r USING(bundle_version,as_of_date)'''
+    count,size = conn.execute(f'''SELECT count(*),coalesce(sum(
+        length(CAST(bundle_version||as_of_date||snapshot_id||activated_at||refreshed_at AS BLOB))+
+        length(CAST(coalesce(dates_json,'') AS BLOB))+length(CAST(coalesce(header_json,'') AS BLOB))+
+        length(CAST(coalesce(bindings_json,'') AS BLOB))),0)
+        FROM ({metadata})''').fetchone()
+    require(count <= MAX_READY_HEADERS and size <= MAX_READY_HEADER_BYTES, 'historical_history_ready_header_size_limit')
+    # Active bundle participates only in the native default preference. Exact
+    # and covering dates retain the original global order across all bundles.
+    headers=[]
+    for row in conn.execute(metadata+' ORDER BY s.activated_at DESC,s.refreshed_at DESC,s.as_of_date DESC,s.bundle_version DESC'):
+        header=json.loads(row['header_json'] or '[]')
+        columns=_require_date_columns_or_infer({'date_columns':json.loads(row['dates_json']) if row['dates_json'] is not None else None},header)
+        headers.append(_ReadyHeader(row['bundle_version'],row['as_of_date'],row['snapshot_id'],row['activated_at'],row['refreshed_at'],
+            tuple(columns),row['bindings_json'] or '{}',row['revision']))
+    recovery_cache={};recovery_bytes=0
+    def recovery(connection,header,day):
+        nonlocal recovery_bytes
+        if header.key not in recovery_cache:
+            field="json_extract(plan_json,'$.metadata.server_cell_presentation')"
+            size=connection.execute(f'SELECT length(CAST({field} AS BLOB)) FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',header.key).fetchone()
+            recovery_bytes+=(size[0] or 0) if size else 0
+            require(recovery_bytes<=MAX_READY_SOURCE_BYTES,'historical_history_ready_recovery_size_limit')
+            row=connection.execute(f'SELECT {field} FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',header.key).fetchone()
+            try:recovery_cache[header.key]=json.loads(row[0] or '{}') if row else {}
+            except json.JSONDecodeError:recovery_cache[header.key]={}
+        return has_complete_recovery({'server_cell_presentation':recovery_cache[header.key]},day)
+    bindings,_=_select_bindings(conn,headers,list(dates),bundle,default_business_as_of_date(now),recovery_check=recovery)
+    selected=sorted({b.source_key for b in bindings if b.source_key is not None})
+    size=0
+    for key in selected:
+        row=conn.execute(f'SELECT length(CAST(plan_json AS BLOB)) FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',key).fetchone()
+        require(row is not None,'historical_history_ready_date_missing')
+        size+=row[0]
+        require(size<=MAX_READY_SOURCE_BYTES,'historical_history_ready_size_limit')
+    texts={key:conn.execute(f'SELECT plan_json FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',key).fetchone()[0] for key in selected}
+    return bindings,{key:_deserialize_sheet_vitrina_plan(value) for key,value in texts.items()},texts
 
 
 class HistoricalReceipt:
@@ -37,7 +91,7 @@ class HistoricalReceipt:
             require(size and size[0]<=160*1024**2 and size[1]<=32*1024**2,'historical_history_publication_size_limit')
             row = conn.execute('SELECT kind,state,inputs_json,book_version,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?', (self.operation_id,self.attempt_id)).fetchone()
         require(row and row['kind']==CONTRACT and row['state']=='complete', 'historical_history_publication_not_complete')
-        manifest = json.loads(row['inputs_json'])
+        manifest = expand_manifest(json.loads(row['inputs_json']))
         require(manifest['manifest_digest'] == fingerprint({k:v for k,v in manifest.items() if k not in {'manifest_digest','prepare_seconds'}})
                 and manifest['after_book'] == row['book_version'], 'historical_history_manifest_corrupt')
         return manifest, json.loads(row['diagnostics_json'])
@@ -68,9 +122,6 @@ class HistoricalReceipt:
         """
         from packages.application.operator_warehouse_documents import TABLE,assert_source
         from packages.application.ff_pool_documents import REQUESTS_TABLE
-        from packages.application.web_vitrina_window_v3 import _ReadyHeader,_select_bindings
-        from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
-        from packages.business_time import default_business_as_of_date
         manifest = self.manifest
         current,version = accounting.load(self.runtime.runtime_dir)
         expected = manifest['candidate']['candidate_book']
@@ -99,21 +150,15 @@ class HistoricalReceipt:
                 actual = conn.execute(f'SELECT source_json,source_digest,accepted_at,actor FROM {TABLE} WHERE request_id=?',(identity,)).fetchone()
                 request = conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(identity,)).fetchone()
                 require(actual and dict(actual)==confirmation and fingerprint(assert_source(conn,request))==confirmation['source_digest'],'historical_history_source_changed')
-            count,size=conn.execute('SELECT count(*),coalesce(sum(length(plan_json)),0) FROM sheet_vitrina_v1_ready_snapshots').fetchone()
-            require(count<=10000 and size<=160*1024**2,'historical_history_ready_size_limit')
-            rows = conn.execute('SELECT s.*,r.revision FROM sheet_vitrina_v1_ready_snapshots s JOIN sheet_vitrina_v1_ready_revisions r USING(bundle_version,as_of_date) ORDER BY s.activated_at DESC,s.refreshed_at DESC,s.as_of_date DESC,s.bundle_version DESC').fetchall()
-            require(len(rows)<=10000, 'historical_history_ready_limit')
-            plans = {(r['bundle_version'],r['as_of_date']):_deserialize_sheet_vitrina_plan(r['plan_json']) for r in rows}
-            headers = [_ReadyHeader(r['bundle_version'],r['as_of_date'],r['snapshot_id'],r['activated_at'],r['refreshed_at'],tuple(plans[(r['bundle_version'],r['as_of_date'])].date_columns),canonical(plans[(r['bundle_version'],r['as_of_date'])].metadata.get('fbs_accounting_bindings',{})),r['revision']) for r in rows]
             bundle = conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()[0]
-            bindings,_ = _select_bindings(conn,headers,list(self.dates),bundle,default_business_as_of_date(now))
+            bindings,plans,texts = _selected_ready_sources(conn,dates=self.dates,bundle=bundle,now=now)
             for binding in bindings:
                 require(binding.source_key is not None,'historical_history_ready_date_missing',day=binding.date)
                 plan = plans[binding.source_key]
                 bound = plan.metadata.get('fbs_accounting_bindings',{}).get(binding.date,{})
                 bound_book,bound_version = accounting.load(self.runtime.runtime_dir,version=bound.get('book_version')) if bound.get('book_version') else (None,None)
                 require(bound_book and all(bound_book[field].get(binding.date)==expected[field][binding.date] for field in ('wb_days','retained_days','shared_days','presentations')),'historical_history_ready_book_binding_changed',day=binding.date)
-                proof[binding.date] = dict(ready_key=list(binding.source_key),book_version=bound_version,ready_digest=ready.digest(next(r['plan_json'] for r in rows if (r['bundle_version'],r['as_of_date'])==binding.source_key)),functional_version=expected['wb_days'][binding.date]['version_id'])
+                proof[binding.date] = dict(ready_key=list(binding.source_key),book_version=bound_version,ready_digest=ready.digest(texts[binding.source_key]),functional_version=expected['wb_days'][binding.date]['version_id'])
         require(self._read()[0]==manifest, 'historical_history_receipt_changed')
         return dict(binding=self.binding(),active_book=version,dated=proof)
 
@@ -143,7 +188,7 @@ class HistoricalReceipt:
         with closing(sqlite3.connect(Path(self.runtime.db_path).as_uri()+'?mode=rw',uri=True,timeout=0)) as conn,conn:
             conn.execute('BEGIN IMMEDIATE')
             row=conn.execute('SELECT inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND state=\'complete\'',(self.operation_id,self.attempt_id)).fetchone()
-            require(row and json.loads(row[0])==self.manifest,'historical_history_receipt_changed')
+            require(row and expand_manifest(json.loads(row[0]))==self.manifest,'historical_history_receipt_changed')
             diagnostics=json.loads(row[1]);diagnostics['historical_history_ack']=dict(manifest_digest=self.manifest['manifest_digest'],native={d:dict(v) for d,v in native.items()})
             require(conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=? WHERE operation_id=? AND attempt_id=? AND diagnostics_json=?',(canonical(diagnostics),self.operation_id,self.attempt_id,row[1])).rowcount==1,'historical_history_ack_cas_failed')
 

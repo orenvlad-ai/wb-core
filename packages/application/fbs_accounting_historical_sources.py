@@ -8,11 +8,145 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 
-from packages.application.fbs_accounting_historical_revision import _manifest_known, _time, MAX_DOCUMENTS
+from packages.application.fbs_accounting_historical_revision import _manifest_known, _time, MAX_DOCUMENTS, MAX_DAYS, MAX_CAPTURE_BYTES, MAX_LOCATIONS
 from packages.application.fbs_accounting_historical_revision_writer import REQUEST_PROOF_FIELDS
 from packages.application.fbs_snapshot_cost_sources import capture_current
 from packages.application.ff_pool_documents import DOCUMENTS_TABLE, REQUESTS_TABLE
 from packages.application.fbs_snapshot_cost import fingerprint
+
+
+def archived_quantity_snapshot(conn, *, day, observed_at, generation_id=None):
+    """Read one immutable official generation of the exact missing date.
+
+    The archived catalog/mapping owns this observation. Today's catalog,
+    mapping and stock are deliberately not substitutes for historical facts.
+    """
+    from datetime import date, datetime, time, timedelta, timezone
+    from packages.business_time import CANONICAL_BUSINESS_TIMEZONE, current_business_date_iso
+    from packages.application.wb_fbs_warehouse_registry import (
+        REGISTRY_RUNS_TABLE, STOCK_RUNS_TABLE, STOCK_ROWS_TABLE, COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+    )
+    from packages.application.fbs_accounting_historical_stages import require
+    require(conn.in_transaction and conn.execute('PRAGMA query_only').fetchone()[0] == 1,
+            'historical_archive_query_only_required')
+    start = datetime.combine(date.fromisoformat(day), time.min, CANONICAL_BUSINESS_TIMEZONE)
+    bounds = (start.astimezone(timezone.utc).isoformat(), (start + timedelta(days=1)).astimezone(timezone.utc).isoformat())
+    if generation_id is None:
+        # Metadata only: never load every archived catalog/stock payload.
+        selected = conn.execute(f'''SELECT g.run_id FROM {REGISTRY_RUNS_TABLE} g
+            WHERE g.status='success' AND g.complete=1 AND g.policy_version=?
+              AND julianday(g.completed_at)<=julianday(?)
+              AND EXISTS(SELECT 1 FROM {STOCK_RUNS_TABLE} s WHERE s.registry_run_id=g.run_id)
+              AND NOT EXISTS(SELECT 1 FROM {STOCK_RUNS_TABLE} s WHERE s.registry_run_id=g.run_id
+                  AND (s.complete<>1 OR julianday(s.snapshot_at) IS NULL
+                       OR julianday(s.snapshot_at)<julianday(?) OR julianday(s.snapshot_at)>=julianday(?)))
+            ORDER BY g.run_sequence DESC LIMIT 1''',
+            (COMPLETE_CATALOG_OMISSION_ZERO_POLICY, observed_at, *bounds)).fetchone()
+        require(selected is not None, 'historical_archived_quantity_missing', day=day)
+        generation_id = selected[0]
+    size = conn.execute(f'SELECT length(CAST(catalog_scope_json AS BLOB))+length(CAST(warehouse_scope_json AS BLOB)) FROM {REGISTRY_RUNS_TABLE} WHERE run_id=?', (generation_id,)).fetchone()
+    require(size and size[0] <= MAX_CAPTURE_BYTES, 'historical_archived_quantity_size_limit', day=day)
+    run = conn.execute(f'SELECT * FROM {REGISTRY_RUNS_TABLE} WHERE run_id=?', (generation_id,)).fetchone()
+    require(run and run['status'] == 'success' and run['complete'] == 1
+            and run['policy_version'] == COMPLETE_CATALOG_OMISSION_ZERO_POLICY and run['generation_digest']
+            and _time(run['completed_at']) <= _time(observed_at), 'historical_archived_quantity_generation_invalid', day=day)
+    catalog, scope = json.loads(run['catalog_scope_json']), json.loads(run['warehouse_scope_json'])
+    require(catalog.get('complete') is True and scope.get('complete') is True
+            and 0 < catalog['requested_chrt_count'] <= 100000
+            and 0 < scope['warehouse_count'] <= MAX_LOCATIONS
+            and len(scope['warehouses']) == scope['warehouse_count'], 'historical_archived_quantity_scope_invalid', day=day)
+    warehouses = scope['warehouses']
+    require(len({w['facility_id'] for w in warehouses}) == len(warehouses)
+            and len({w['seller_warehouse_id'] for w in warehouses}) == len(warehouses)
+            and all(w['facility_id'] and w['mapping_id'] and type(w['seller_warehouse_id']) is int
+                    and w['seller_warehouse_id'] > 0 for w in warehouses),
+            'historical_archived_quantity_facility_ambiguous', day=day)
+    count = conn.execute(f'SELECT count(*) FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=?', (generation_id,)).fetchone()[0]
+    require(count == len(warehouses), 'historical_archived_quantity_stock_scope_changed', day=day)
+    # SELECT * below (and the original-source fence) also consumes native
+    # identity_scope_json. Bound every persisted stock-run column before any
+    # wide row is loaded; minimal legacy test schemas have fewer columns.
+    columns = [str(r[1]).replace('"', '""') for r in conn.execute(f'PRAGMA table_info({STOCK_RUNS_TABLE})')]
+    widths = '+'.join(f'coalesce(length(CAST("{column}" AS BLOB)),0)' for column in columns)
+    size = conn.execute(f'SELECT coalesce(sum({widths}),0) FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=?', (generation_id,)).fetchone()[0]
+    require(size <= MAX_CAPTURE_BYTES, 'historical_archived_quantity_size_limit', day=day)
+    count, size = conn.execute(f'SELECT count(*),coalesce(sum(length(CAST(r.provenance AS BLOB))),0) FROM {STOCK_ROWS_TABLE} r JOIN {STOCK_RUNS_TABLE} s ON r.run_id=s.run_id WHERE s.registry_run_id=?', (generation_id,)).fetchone()
+    require(count <= 100000 and size <= MAX_CAPTURE_BYTES, 'historical_archived_quantity_size_limit', day=day)
+    quantities, evidence, observations, identities = {}, {}, [], None
+    for warehouse in warehouses:
+        stock = conn.execute(f'SELECT * FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=? AND seller_warehouse_id=?',
+                             (generation_id, warehouse['seller_warehouse_id'])).fetchone()
+        require(stock and stock['complete'] == 1 and stock['source_digest']
+                and current_business_date_iso(_time(stock['snapshot_at'])) == day
+                and _time(stock['snapshot_at']) <= _time(run['completed_at']),
+                'historical_archived_quantity_date_or_completeness_invalid', day=day)
+        rows = conn.execute(f'SELECT chrt_id,nm_id,amount,provenance FROM {STOCK_ROWS_TABLE} WHERE run_id=? ORDER BY chrt_id', (stock['run_id'],)).fetchall()
+        keys = {(r['chrt_id'], r['nm_id']) for r in rows}
+        require(len(rows) == len(keys) == len({r['chrt_id'] for r in rows}) == catalog['requested_chrt_count'] == stock['requested_chrt_count'] == stock['dense_row_count']
+                and len({r['nm_id'] for r in rows}) == catalog['active_nm_id_count']
+                and sum(r['provenance']=='explicit_wb_row' for r in rows) == stock['explicit_chrt_count']
+                and sum(r['provenance']=='omitted_requested_zero' for r in rows) == stock['omitted_zero_count']
+                and (identities is None or keys == identities), 'historical_archived_quantity_dense_identity_changed', day=day)
+        identities = keys
+        fid = str(warehouse['facility_id'])
+        evidence[fid] = {**warehouse, 'captured_at': stock['snapshot_at'], 'stock_run_id': stock['run_id'], 'stock_digest': stock['source_digest']}
+        observations.append(stock['snapshot_at'])
+        for row in rows:
+            require(type(row['chrt_id']) is int and row['chrt_id'] > 0
+                    and type(row['nm_id']) is int and row['nm_id'] > 0 and type(row['amount']) is int and row['amount'] >= 0
+                    and row['provenance'] in {'explicit_wb_row', 'omitted_requested_zero'}
+                    and (row['provenance'] != 'omitted_requested_zero' or row['amount'] == 0),
+                    'historical_archived_quantity_operand_invalid', day=day)
+            key = (row['nm_id'], fid)
+            quantities[key] = quantities.get(key, 0) + row['amount']
+    require(0 < len(quantities) <= MAX_LOCATIONS, 'historical_archived_quantity_size_limit', day=day)
+    return dict(date=day, captured_at=min(observations), id=generation_id, digest=run['generation_digest'], complete=True,
+                rows=[dict(nm_id=nm, facility_id=fid, quantity=q) for (nm, fid), q in sorted(quantities.items())],
+                source='official_fbs_stock_snapshot_v1', facility_evidence=evidence)
+
+
+def capture_missing_dated_inputs(conn, *, db_path, book, capture, plan=None):
+    """Fill only absent interior tail days; re-read pinned sources for a plan."""
+    from datetime import date, timedelta
+    from packages.application.fbs_accounting_historical_stages import require
+    from packages.application.shared_sku_cost_sources import capture_wb_component
+    from packages.application.fbs_inventory_presentation import capture_retained_stages
+    from packages.application.fbs_snapshot_cost import canonical
+    first, last = date.fromisoformat(max(book['state']['periods'])), date.fromisoformat(capture['business_date'])
+    advance = (last - first).days
+    require(0 <= advance <= MAX_DAYS, 'historical_date_scope_limit')
+    result = {}
+    for n in range(1, advance):
+        day = (first + timedelta(days=n)).isoformat()
+        pinned = plan['candidate_book'] if plan else None
+        generation_id = pinned['state']['periods'][day]['snapshot']['id'] if pinned else None
+        snapshot = archived_quantity_snapshot(conn, day=day, observed_at=capture['captured_at'], generation_id=generation_id)
+        nm_ids = sorted({r['nm_id'] for r in snapshot['rows']})
+        version = pinned['wb_days'][day]['version_id'] if pinned else None
+        if version is None:
+            found = conn.execute("SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_versions "
+                "WHERE cutover_id='warehouse_functional_cutover_v1' AND status='good' AND business_effective_date=? "
+                "ORDER BY COALESCE(NULLIF(published_at,''),created_at) DESC,created_at DESC,version_id DESC LIMIT 1", (day,)).fetchone()
+            require(found is not None, 'historical_archived_wb_missing', day=day)
+            version = found[0]
+        # Bound payloads before the existing exact-date native readers parse them.
+        for table, fields, clause, args in (
+            ('warehouse_wb_snapshots', ('items_json','raw_rows_json','requested_nm_ids_json'), 'version_id=?', (version,)),
+            ('warehouse_functional_balances', ('provenance_json','capital_rub','quantity'), 'version_id=?', (version,)),
+            ('warehouse_functional_read_models', ('payload_json',), 'version_id=?', (version,)),
+            ('warehouse_business_projection_current_rows', ('metrics_json','presentation_json','provenance_json'), 'as_of_date=?', (day,)),
+        ):
+            sizes = '+'.join(f'coalesce(length(CAST({field} AS BLOB)),0)' for field in fields)
+            count, size = conn.execute(f'SELECT count(*),coalesce(sum({sizes}),0) FROM sheet_vitrina_v1_{table} WHERE {clause}', args).fetchone()
+            require(count <= 100000 and size <= MAX_CAPTURE_BYTES, 'historical_archived_dated_source_size_limit', day=day)
+        wb = capture_wb_component(db_path, day=day, nm_ids=nm_ids, version_id=version, connection=conn)
+        require(wb['complete'] and wb.get('authority_complete') is True, 'historical_archived_wb_incomplete', day=day)
+        retained = capture_retained_stages(db_path, day=day, wb_version_id=version, nm_ids=nm_ids, connection=conn)
+        result[day] = dict(quantity_snapshot=snapshot, wb_capture=wb, retained_capture=retained)
+        require(len(canonical(result).encode()) <= MAX_CAPTURE_BYTES, 'historical_archived_dated_source_size_limit', day=day)
+    if result:
+        capture['archived_dated_inputs'] = result
+    return capture
 
 
 def original_source_queries(capture):
@@ -32,10 +166,13 @@ def original_source_queries(capture):
     for identity in sorted(capture['native_requests_by_id']):
         queries.append((f"SELECT {','.join(REQUEST_PROOF_FIELDS)} FROM {REQUESTS_TABLE} WHERE request_id=?",(identity,)))
     from packages.application.wb_fbs_warehouse_registry import REGISTRY_RUNS_TABLE,STOCK_RUNS_TABLE,STOCK_ROWS_TABLE
-    generation=capture['quantity_snapshot']['id']
-    queries.extend(((f'SELECT * FROM {REGISTRY_RUNS_TABLE} WHERE run_id=?',(generation,)),
-        (f'SELECT * FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=? ORDER BY seller_warehouse_id',(generation,)),
-        (f'SELECT r.* FROM {STOCK_ROWS_TABLE} r JOIN {STOCK_RUNS_TABLE} s ON s.run_id=r.run_id WHERE s.registry_run_id=? ORDER BY r.run_id,r.chrt_id',(generation,))))
+    generations = {capture['quantity_snapshot']['id'], *(v['quantity_snapshot']['id']
+        for v in capture.get('archived_dated_inputs', {}).values())}
+    require(len(generations) <= MAX_DAYS, 'historical_date_scope_limit')
+    for generation in sorted(generations):
+        queries.extend(((f'SELECT * FROM {REGISTRY_RUNS_TABLE} WHERE run_id=?',(generation,)),
+            (f'SELECT * FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=? ORDER BY seller_warehouse_id',(generation,)),
+            (f'SELECT r.* FROM {STOCK_ROWS_TABLE} r JOIN {STOCK_RUNS_TABLE} s ON s.run_id=r.run_id WHERE s.registry_run_id=? ORDER BY r.run_id,r.chrt_id',(generation,))))
     from packages.application.operator_warehouse_documents import TABLE
     for identity in sorted(capture['native_requests_by_id']):
         queries.append((f'SELECT request_id,source_json,source_digest,accepted_at,actor FROM {TABLE} WHERE request_id=?',(identity,)))
@@ -85,6 +222,14 @@ def capture_archived_cohort(conn, *, plan, original_capture):
     by_id={d['document_id']:d for d in documents}
     require(all(i in by_id and by_id[i]['fingerprint']==digest for i,digest in wanted.items()),'historical_original_document_changed')
     capture=deepcopy(original_capture);capture['documents']=[by_id[i] for i in sorted(wanted)]
+    # Dated WB/retained operands are independently verified against their
+    # immutable native versions by capture_dated_stages during every rebuild.
+    # Quantity generations need their own reconstruction, including recovery
+    # after today's active generation and projection pointers have advanced.
+    for archived_day, extra in capture.get('archived_dated_inputs', {}).items():
+        rebuilt = archived_quantity_snapshot(conn, day=archived_day, observed_at=capture['captured_at'],
+                                             generation_id=extra['quantity_snapshot']['id'])
+        require(rebuilt == extra['quantity_snapshot'], 'historical_original_archived_quantity_changed', day=archived_day)
     capture['posted_manifest_json_by_id']={i:conn.execute(f'SELECT posted_manifest_json FROM {DOCUMENTS_TABLE} WHERE document_id=?',(i,)).fetchone()[0] for i in sorted(wanted)}
     selected=[*plan['receipt_document_ids'],*plan.get('current_document_ids',[]),*plan.get('auxiliary_document_ids',[])]
     capture=augment_native_requests(conn,capture,document_ids=selected)

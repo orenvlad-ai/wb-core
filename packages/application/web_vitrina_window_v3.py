@@ -267,7 +267,9 @@ def _covering_recovery(conn: sqlite3.Connection, header: _ReadyHeader, day: str)
 def _select_bindings(
     conn: sqlite3.Connection, headers: list[_ReadyHeader], dates: list[str],
     current_bundle: str, default_date: str,
+    *, recovery_check: Callable | None = None,
 ) -> tuple[list[_DateBinding], _ReadyHeader | None]:
+    recovery_check = recovery_check or _covering_recovery
     exact: dict[str, _ReadyHeader] = {}
     covering: dict[str, _ReadyHeader] = {}
     requested = set(dates)
@@ -288,7 +290,7 @@ def _select_bindings(
             bindings.append(_DateBinding(day, "covered", default.as_of_date, default.key))
         else:
             selected = covering.get(day)
-            if selected is not None and _covering_recovery(conn, selected, day):
+            if selected is not None and recovery_check(conn, selected, day):
                 bindings.append(_DateBinding(day, "covered", selected.as_of_date, selected.key))
             else:
                 bindings.append(_DateBinding(day, "missing", "", None))

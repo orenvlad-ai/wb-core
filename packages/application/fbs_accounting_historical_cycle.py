@@ -51,6 +51,7 @@ def refresh(runtime, *, now=None):
         cohort=sources.capture_confirmed_cohort(conn,db_path=runtime.db_path,book=book,now=now)
         if not cohort['receipt_document_ids']:return None
         cap=cohort['capture'];day=cap['business_date']
+        sources.capture_missing_dated_inputs(conn,db_path=runtime.db_path,book=book,capture=cap)
         if day>max(book['state']['periods']):
             from packages.application.shared_sku_cost_sources import capture_wb_component
             from packages.application.fbs_inventory_presentation import capture_retained_stages
