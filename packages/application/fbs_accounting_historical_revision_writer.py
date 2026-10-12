@@ -186,6 +186,8 @@ def _capture(conn, db, plan, now, book):
         day = plan["scope"]["date_to"]
         capture["current_dated_inputs"] = {"wb_capture": plan["candidate_book"]["wb_days"][day],
                                           "retained_capture": plan["candidate_book"]["retained_days"][day]}
+    from packages.application.fbs_accounting_historical_sources import capture_missing_dated_inputs
+    capture_missing_dated_inputs(conn, db_path=db, book=book, capture=capture, plan=plan)
     return capture
 
 
@@ -207,6 +209,7 @@ def _code_authority():
     root = Path(__file__).resolve().parents[1]
     names = ("application/fbs_accounting_historical_revision_writer.py",
              "application/fbs_accounting_historical_revision.py", "application/fbs_snapshot_cost.py",
+             "application/fbs_accounting_historical_sources.py", "application/shared_sku_cost_sources.py",
              "application/fbs_snapshot_cost_sources.py", "application/fbs_document_cost.py",
              "application/fbs_inventory_presentation.py", "application/shared_sku_cost.py",
              "application/fbs_accounting_runtime.py", "application/official_fbs_stock_read.py",

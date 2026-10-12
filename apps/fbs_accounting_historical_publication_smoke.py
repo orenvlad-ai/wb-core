@@ -8,6 +8,7 @@ import json
 import sqlite3
 import sys
 import unittest
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from apps.fbs_accounting_historical_stages_smoke import native_stages_fixture
 from packages.application import fbs_accounting_historical_publication as publication
@@ -30,7 +31,8 @@ class HistoricalPublication(unittest.TestCase):
         temp=TemporaryDirectory(prefix="historical-real-publication-");self.addCleanup(temp.cleanup)
         self.runtime=Path(temp.name);self.db=self.runtime/"registry_upload_runtime.sqlite3"
         self.book,self.cap,self.plan,self.dated=native_stages_fixture(self.db,end=self.now.date().isoformat(),service_receipt=getattr(self,'service_receipt',False),
-            advancing_receipt_clock=getattr(self,'advancing_receipt_clock',False),confirmation_actor=getattr(self,'confirmation_actor',None))
+            advancing_receipt_clock=getattr(self,'advancing_receipt_clock',False),confirmation_actor=getattr(self,'confirmation_actor',None),
+            saved_last=getattr(self,'saved_last',None))
         self.before=accounting._save_book(self.runtime,self.book,expected=None,operation_id="initial-local-book")
         with closing(sqlite3.connect(self.db)) as conn:
             conn.row_factory=sqlite3.Row
@@ -47,6 +49,7 @@ class HistoricalPublication(unittest.TestCase):
                  SheetVitrinaWriteTarget("STATUS","A1","A1:B1","A:B","replace",False,["key","value"],[],0,2)])
             conn.execute("CREATE TABLE IF NOT EXISTS registry_upload_current_state(slot,bundle_version,activated_at)")
             conn.execute("INSERT INTO registry_upload_current_state VALUES(1,'fixture-v1','local-active')")
+            conn.execute('CREATE TABLE IF NOT EXISTS registry_upload_config_v2(bundle_version,nm_id,display_name,display_order)')
             conn.execute(f"INSERT INTO {ready.TABLE}(bundle_version,as_of_date,plan_json,activated_at,snapshot_id,plan_version,refreshed_at) VALUES(?,?,?,?,?,?,?)",("fixture-v1",days[-1],_serialize_sheet_vitrina_plan(envelope),NOW.isoformat(),"fixture-snapshot","fixture-plan",NOW.isoformat()))
             request=conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id='native:new-late-receipt'").fetchone()
             native=_build_posting_plan(conn,request=request,manifest=json.loads(request["request_payload_json"]),epoch=1,intrinsic_only=True)
@@ -95,9 +98,75 @@ class HistoricalPublication(unittest.TestCase):
         with ready.readonly(self.db) as conn:
             # Actual process recovery consumes only the durable JSON intent,
             # not the original caller's Python tuple/object identities.
-            self.manifest=json.loads(conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id='local-late-publication'").fetchone()[0])
+            self.manifest=publication.expand_manifest(json.loads(conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id='local-late-publication'").fetchone()[0]))
         result=self.publish();self.assertTrue(result["native_dated_stages"])
         self.assertEqual(publication.publication_receipt(self.manifest,runtime_dir=self.runtime)["manifest_digest"],result["manifest_digest"])
+
+    def parameters_and_book_crash(self):
+        from packages.application.calculation_parameters import ensure_calculation_parameters_schema,DEFAULT_PROXY_PARAMETERS,PROXY_BLOCK_KEY
+        from packages.application.calculation_parameters_v4 import ensure_proxy_v4_schema,PROXY_V4_BLOCK_KEY,AUTOMATIC_RATE_FIELDS,PROXY_V4_FORMULA_VERSION
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            ensure_calculation_parameters_schema(conn);ensure_proxy_v4_schema(conn)
+            conn.execute('INSERT INTO sheet_vitrina_v1_calculation_parameter_versions VALUES(?,?,?,?,?,?,?,?,?)',
+                ('local-proxy3',PROXY_BLOCK_KEY,1,'2026-07-01',canonical(DEFAULT_PROXY_PARAMETERS.public()),'local-fingerprint','fixture','fixture',NOW.isoformat()))
+            values={field:'0' for field in AUTOMATIC_RATE_FIELDS}
+            values.update(buyout_rate='0.91',tax_rate='0.06',agent_remuneration_rate='0.38',
+                source_week_ranges=[['2026-08-24','2026-08-30']],buyout_order_count_weight='123.4500',
+                finance_net_revenue_weight='456.7800',formula_version=PROXY_V4_FORMULA_VERSION)
+            conn.execute('INSERT INTO sheet_vitrina_v1_proxy_v4_parameter_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                ('local-proxy4',PROXY_V4_BLOCK_KEY,1,'2026-07-01','2026-08-24','2026-08-30','local-window',canonical(values),'local-fingerprint','fixture','fixture',NOW.isoformat()))
+        self.manifest=self.prepare()
+        proof=self.manifest['parameter_proof']['2026-09-08']
+        self.assertEqual(proof[0]['buyout_rate'],'0.91')
+        self.assertEqual(proof[1]['buyout_order_count_weight'],'123.4500')
+        self.assertEqual(proof[1]['source_week_ranges'],[['2026-08-24','2026-08-30']])
+        def crash(boundary):
+            if boundary=='after_book':raise RuntimeError('parameters book crash')
+        with self.assertRaisesRegex(RuntimeError,'parameters book crash'):self.publish(fault_injector=crash)
+        with ready.readonly(self.db) as conn:
+            self.manifest=publication.expand_manifest(json.loads(conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id='local-late-publication'").fetchone()[0]))
+
+    def test_native_decimal_parameters_survive_durable_recovery(self):
+        self.parameters_and_book_crash()
+        self.assertTrue(self.publish()['ready'])
+
+    def test_native_parameter_change_blocks_book_crash_recovery(self):
+        self.parameters_and_book_crash()
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute("UPDATE sheet_vitrina_v1_proxy_v4_parameter_versions SET parameters_json=json_set(parameters_json,'$.buyout_order_count_weight','124.4500')")
+        with self.assertRaisesRegex(ValueError,'historical_original_dated_parameters_changed'):self.publish()
+
+    def test_shared_book_and_before_operands_roundtrip_without_source_mutation(self):
+        before=canonical(self.manifest)
+        stored=json.loads(canonical(publication.compact_manifest(self.manifest)))
+        self.assertNotIn('candidate_book',stored['candidate'])
+        self.assertNotIn('before_envelope_json',stored['targets'][0])
+        restored=publication.expand_manifest(stored)
+        self.assertEqual(restored,self.manifest)
+        self.assertEqual(canonical(self.manifest),before)
+        self.assertEqual(publication._json_size(stored,publication.MAX_BYTES,'test-limit'),len(canonical(stored).encode()))
+        publication._verify(restored)
+        with warehouse_functional_job_lock(self.runtime):
+            self.assertTrue(publication.publish(stored,runtime_dir=self.runtime)['ready'])
+
+    def test_compact_book_preserves_json_numeric_types(self):
+        from copy import deepcopy
+        for left,right in ((1,True),(1,1.0),(0,False),(-0.0,0.0)):
+            manifest=deepcopy(self.manifest)
+            manifest['plan']['candidate_book']['test_scalar']=left
+            manifest['candidate']['candidate_book']['test_scalar']=right
+            restored=publication.expand_manifest(json.loads(canonical(publication.compact_manifest(manifest))))
+            self.assertEqual(canonical(restored),canonical(manifest))
+
+    def test_prepare_refuses_intent_that_its_recovery_cannot_admit(self):
+        # Admission uses the same conservative expanded-reference budget as
+        # recovery, including overlay overhead, before persisting any intent.
+        limit=len(canonical(self.manifest).encode())+1
+        with patch.object(publication,'MAX_EXPANDED_BYTES',limit):
+            with self.assertRaisesRegex(ValueError,'expanded_size_limit'):self.prepare()
+        self.assertEqual(accounting.load(self.runtime)[1],self.before)
+        with ready.readonly(self.db) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM sheet_vitrina_v1_ready_publications').fetchone()[0],0)
 
     def mixed_current_without_operator_confirmation(self):
         # Actual native request/_build_posting_plan/_apply_plan overhead fixture,
@@ -130,7 +199,7 @@ class HistoricalPublication(unittest.TestCase):
             if boundary=='after_book':raise RuntimeError('native mixed cohort after book crash')
         with self.assertRaisesRegex(RuntimeError,'after book crash'):self.publish(fault_injector=crash)
         with ready.readonly(self.db) as conn:
-            self.manifest=json.loads(conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id='local-late-publication'").fetchone()[0])
+            self.manifest=publication.expand_manifest(json.loads(conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id='local-late-publication'").fetchone()[0]))
         self.assertEqual(accounting.load(self.runtime)[1],self.manifest['after_book'])
         return current,request_id
 
@@ -186,7 +255,7 @@ class HistoricalPublication(unittest.TestCase):
                     conn.execute('INSERT INTO sheet_vitrina_v1_wb_fbs_stock_snapshot_rows('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',tuple(row.values()))
             from apps.fbs_accounting_historical_cohort_smoke import post
             foreign=post(conn,name='LOCAL new current expense after crash',kind='pool_overhead',day=day,manifest=dict(facility_id='A',scope='FBS',amount_rub='100',category='other',comment='LOCAL',source_mode='manual'))
-            self.manifest=json.loads(conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id='local-late-publication'").fetchone()[0])
+            self.manifest=publication.expand_manifest(json.loads(conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id='local-late-publication'").fetchone()[0]))
         result=self.publish()
         self.assertEqual(result['dates'],['2026-09-08','2026-09-09','2026-09-10'])
         recovered=accounting.load(self.runtime)[0]
@@ -212,7 +281,7 @@ class HistoricalPublication(unittest.TestCase):
         with warehouse_functional_job_lock(self.runtime):result=refresh(runtime,now=self.now)
         self.assertEqual(result['status'],'published')
         with ready.readonly(self.db) as conn:
-            manifest=json.loads(conn.execute('SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=?',(result['operation_id'],)).fetchone()[0])
+            manifest=publication.expand_manifest(json.loads(conn.execute('SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=?',(result['operation_id'],)).fetchone()[0]))
             assigned=[d for t in manifest['targets'] for d in t['dates']]
             self.assertEqual(sorted(assigned),manifest['plan']['scope']['dates'])
             self.assertEqual(len(assigned),len(set(assigned)))
@@ -231,6 +300,244 @@ class HistoricalPublication(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"historical_numeric_or_stage_rebuild_mismatch"):
                 publication.publish(forged,runtime_dir=self.runtime)
         self.assertEqual(accounting.load(self.runtime)[1],self.before)
+
+
+class ReadySelectionBudget(unittest.TestCase):
+    def setUp(self):
+        self.fixture=HistoricalPublication();self.fixture.setUp();self.addCleanup(self.fixture.doCleanups)
+        self.db=self.fixture.db
+
+    def select(self, **kwargs):
+        with ready.readonly(self.db) as conn:
+            return publication._selected_ready_rows(conn,plan=self.fixture.plan,
+                authority=ready.capture_authority(self.fixture.runtime),current_envelope=kwargs.get('overlay'),now=NOW)
+
+    def insert(self,day,*,dates=None,padding='',bundle='fixture-v1',metadata=None):
+        from dataclasses import replace
+        from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            source=conn.execute(f'SELECT plan_json FROM {ready.TABLE} LIMIT 1').fetchone()[0]
+            old=_deserialize_sheet_vitrina_plan(source);dates=dates or [day]
+            sheets=[replace(s,header=['label','key',*dates],rows=[r[:2]+[999]*len(dates) for r in s.rows],
+                            column_count=2+len(dates)) if s.sheet_name=='DATA_VITRINA' else s for s in old.sheets]
+            env=replace(old,as_of_date=day,date_columns=dates,sheets=sheets,
+                        temporal_slots=[SheetVitrinaV1TemporalSlot(d,d,d) for d in dates],
+                        metadata=metadata or {'local_archive_padding':padding})
+            _deserialize_sheet_vitrina_plan(_serialize_sheet_vitrina_plan(env))
+            conn.execute(f'INSERT INTO {ready.TABLE} VALUES(?,?,?,?,?,?,?)',
+                         (bundle,NOW.isoformat(),day,env.snapshot_id,env.plan_version,NOW.isoformat(),_serialize_sheet_vitrina_plan(env)))
+
+    def test_real_large_unselected_archive_no_longer_blocks_publication(self):
+        from datetime import date,timedelta
+        # More than the real guard, not a patched-down limit. 161 inactive-date
+        # rows reproduce the archive-size failure; only the native target loads.
+        for n in range(161):self.insert((date(2025,1,1)+timedelta(days=n)).isoformat(),padding='x'*(1024**2+1000))
+        with ready.readonly(self.db) as conn:
+            old_size=conn.execute(f'SELECT sum(length(plan_json)) FROM {ready.TABLE}').fetchone()[0]
+        self.assertGreater(old_size,publication.MAX_BYTES)
+        self.fixture.manifest=self.fixture.prepare()
+        self.assertEqual(len(self.fixture.manifest['targets']),1)
+        self.assertLess(len(canonical(self.fixture.manifest).encode()),publication.MAX_BYTES)
+        self.assertTrue(self.fixture.publish()['ready'])
+        self.assertEqual(self.fixture.publish()['manifest_digest'],self.fixture.manifest['manifest_digest'])
+
+    def test_gap_candidate_real_publication_crash_recovery(self):
+        fixture=HistoricalPublication();fixture.fixture_now=datetime.fromisoformat('2026-09-12T14:00:00+00:00')
+        fixture.saved_last='2026-09-09';fixture.setUp();self.addCleanup(fixture.doCleanups)
+        def crash(boundary):
+            if boundary=='after_book':raise RuntimeError('local gap after_book crash')
+        with self.assertRaisesRegex(RuntimeError,'local gap'):fixture.publish(fault_injector=crash)
+        with ready.readonly(fixture.db) as conn:
+            fixture.manifest=publication.expand_manifest(json.loads(conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id='local-late-publication'").fetchone()[0]))
+        self.assertTrue(fixture.publish()['ready'])
+        revised=accounting.load(fixture.runtime)[0]
+        for day in ('2026-09-10','2026-09-11'):
+            self.assertEqual(revised['state']['periods'][day]['snapshot'],fixture.cap['archived_dated_inputs'][day]['quantity_snapshot'])
+        self.assertEqual(accounting.load(fixture.runtime,version=fixture.before)[0],fixture.book)
+
+    def test_exact_overlapping_and_inactive_bundle_selection(self):
+        self.insert('2026-09-08',dates=['2026-09-08','2026-09-09'])
+        self.insert('2026-09-09',bundle='unrelated',padding='x'*10000)
+        rows,selected=self.select()
+        self.assertEqual(selected,{'2026-09-08':('fixture-v1','2026-09-08'),
+                                  '2026-09-09':('fixture-v1','2026-09-10'),
+                                  '2026-09-10':('fixture-v1','2026-09-10')})
+        self.assertEqual(len(rows),2)
+
+    def test_selected_utf8_budget_fails_before_body_load(self):
+        self.insert('2026-09-08',padding='я'*2000)
+        with ready.readonly(self.db) as conn:
+            text,encoded=conn.execute(f'SELECT length(plan_json),length(CAST(plan_json AS BLOB)) FROM {ready.TABLE} WHERE as_of_date=?',('2026-09-08',)).fetchone()
+        self.assertGreater(encoded,text)
+        with patch.object(publication,'MAX_BYTES',(text+encoded)//2):
+            with self.assertRaisesRegex(ValueError,'historical_ready_source_size_limit'):self.select()
+
+    def test_header_budget_is_independent_of_body_budget(self):
+        with patch.object(publication,'MAX_READY_HEADER_BYTES',10):
+            with self.assertRaisesRegex(ValueError,'historical_ready_header_size_limit'):self.select()
+
+    def test_header_count_limit(self):
+        self.insert('2026-09-08')
+        with patch.object(publication,'MAX_READY_HEADERS',1):
+            with self.assertRaisesRegex(ValueError,'historical_ready_header_size_limit'):self.select()
+
+    def test_missing_dates_fail_closed(self):
+        self.fixture.plan['scope']['dates'].append('2025-01-01')
+        with self.assertRaisesRegex(ValueError,'historical_exact_ready_dates_missing'):self.select()
+
+    def test_recovery_metadata_budget(self):
+        # An older covering source reaches recovery checking only when today's
+        # default does not cover it. This otherwise hidden read is also bounded.
+        self.insert('2026-09-07',dates=['2025-01-01'],metadata={'server_cell_presentation':{'padding':'я'*1000}})
+        self.fixture.plan['scope']['dates']=['2025-01-01']
+        with patch.object(publication,'MAX_BYTES',1000):
+            with self.assertRaisesRegex(ValueError,'historical_ready_recovery_size_limit'):self.select()
+
+    def test_one_recovery_payload_budgeted_once_for_multiple_dates(self):
+        from packages.application.web_vitrina_management_history import FACT_SOURCE,FACT_GROUPS
+        dates=['2025-01-01','2025-01-02']
+        meta={'server_cell_presentation':{'row':{d:{'source':FACT_SOURCE,'source_as_of_date':d,
+             'complete_source_groups':sorted(FACT_GROUPS),'padding':'я'*1500} for d in dates}}}
+        self.insert('2026-09-07',dates=dates,metadata=meta)
+        self.fixture.plan['scope']['dates']=dates
+        with ready.readonly(self.db) as conn:
+            size=conn.execute(f'SELECT length(CAST(plan_json AS BLOB)) FROM {ready.TABLE} WHERE as_of_date=?',('2026-09-07',)).fetchone()[0]
+        with patch.object(publication,'MAX_BYTES',size+1):
+            rows,selected=self.select()
+        self.assertEqual(len(rows),1)
+        self.assertEqual(set(selected.values()),{('fixture-v1','2026-09-07')})
+
+    def test_legacy_dates_are_inferred_from_native_header(self):
+        for legacy in ('missing','null'):
+            with closing(sqlite3.connect(self.db)) as conn,conn:
+                raw=json.loads(conn.execute(f'SELECT plan_json FROM {ready.TABLE}').fetchone()[0])
+                if legacy=='missing':raw.pop('date_columns',None)
+                else:raw['date_columns']=None
+                conn.execute(f'UPDATE {ready.TABLE} SET plan_json=?',(canonical(raw),))
+            rows,selected=self.select()
+            self.assertEqual(len(rows),1)
+            self.assertEqual(set(selected),set(self.fixture.plan['scope']['dates']))
+
+    def rollover_fixture(self):
+        from dataclasses import replace
+        from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+        self.fixture=HistoricalPublication();self.fixture.fixture_now=datetime.fromisoformat('2026-09-12T14:00:00+00:00')
+        self.fixture.saved_last='2026-09-09';self.fixture.setUp();self.addCleanup(self.fixture.doCleanups);self.db=self.fixture.db
+        self.insert('2026-09-09',dates=['2026-09-08','2026-09-09','2026-09-10'],
+                    metadata={'server_cell_presentation':{'SKU:1|sales':{'2026-09-10':{'quality':'partial','value':None,'source':'saved-only','reason':'missing_input'}}}})
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute(f'DELETE FROM {ready.TABLE} WHERE as_of_date=?',('2026-09-12',))
+            raw=json.loads(conn.execute(f'SELECT plan_json FROM {ready.TABLE}').fetchone()[0])
+            sheet=next(s for s in raw['sheets'] if s['sheet_name']=='DATA_VITRINA')
+            sheet['rows'].append(['sales','SKU:1|sales',4,5,None]);sheet['row_count']=len(sheet['rows'])
+            conn.execute(f'UPDATE {ready.TABLE} SET plan_json=?',(canonical(raw),))
+        authority=ready.capture_authority(self.fixture.runtime)
+        with ready.readonly(self.db) as conn:
+            donor=ready.capture_expected(conn,bundle_version='fixture-v1',as_of_date='2026-09-09',authority=authority)
+            expected=ready.capture_expected(conn,bundle_version='fixture-v1',as_of_date='2026-09-11',authority=authority)
+        env=_deserialize_sheet_vitrina_plan(donor.plan_json)
+        dates=['2026-09-11','2026-09-12'];sheets=[replace(s,header=['label','key',*dates],rows=[r[:2]+[999]*len(dates) for r in s.rows],column_count=2+len(dates)) if s.sheet_name=='DATA_VITRINA' else s for s in env.sheets]
+        overlay=replace(env,as_of_date='2026-09-11',date_columns=dates,sheets=sheets,
+                        temporal_slots=[SheetVitrinaV1TemporalSlot(d,d,d) for d in dates],metadata={'publication_inputs':{}})
+        self.fixture.manifest=publication.prepare_publication(self.fixture.plan,runtime_dir=self.fixture.runtime,
+            owner_generation='local-owned-generation',operation_id='local-late-publication',now=self.fixture.now,current_envelope=(overlay,expected))
+        return donor
+
+    def test_rollover_promotes_accepted_partial_column_and_recovers_exact_intent(self):
+        donor=self.rollover_fixture()
+        promoted=next(t for t in self.fixture.manifest['targets'] if t['expected']['as_of_date']=='2026-09-10')
+        self.assertEqual(promoted['donor_expected']['plan_json'],donor.plan_json)
+        self.assertIsNone(promoted['expected']['plan_json'])
+        before=json.loads(donor.plan_json);after=json.loads(promoted['after_json'])
+        self.assertEqual(after['metadata']['server_cell_presentation']['SKU:1|sales'],before['metadata']['server_cell_presentation']['SKU:1|sales'])
+        def row(p):return next(r for s in p['sheets'] if s['sheet_name']=='DATA_VITRINA' for r in s['rows'] if r[1]=='SKU:1|sales')
+        self.assertEqual(row(after),row(before))
+        stored=json.loads(canonical(publication.compact_manifest(self.fixture.manifest)))
+        self.assertEqual(publication.expand_manifest(stored),self.fixture.manifest)
+        stored_promoted=next(t for t in stored['targets'] if t['expected']['as_of_date']=='2026-09-10')
+        self.assertEqual(stored['targets'][stored_promoted['donor_expected_target']]['expected'],promoted['donor_expected'])
+        self.assertEqual(stored_promoted['before_envelope_source'],'donor_promoted')
+        def crash(boundary):
+            if boundary=='after_book':raise RuntimeError('LOCAL promotion crash')
+        with self.assertRaisesRegex(RuntimeError,'promotion crash'):self.fixture.publish(fault_injector=crash)
+        with ready.readonly(self.db) as conn:
+            self.fixture.manifest=publication.expand_manifest(json.loads(conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id='local-late-publication'").fetchone()[0]))
+        self.assertTrue(self.fixture.publish()['ready'])
+        self.assertTrue(self.fixture.publish()['ready'])
+        with ready.readonly(self.db) as conn:
+            saved=json.loads(ready.capture_expected(conn,bundle_version='fixture-v1',as_of_date='2026-09-10').plan_json)
+        self.assertEqual(row(saved),row(before))
+
+    def test_rollover_donor_change_blocks_before_book(self):
+        self.rollover_fixture()
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute(f'UPDATE {ready.TABLE} SET plan_json=plan_json||? WHERE as_of_date=?',(' ','2026-09-09'))
+        with self.assertRaisesRegex(ValueError,'ready_target_changed'):self.fixture.publish()
+        self.assertEqual(accounting.load(self.fixture.runtime)[1],self.fixture.before)
+
+    def test_compact_intent_rejects_ambiguous_or_recursive_references(self):
+        from copy import deepcopy
+        self.rollover_fixture()
+        stored=json.loads(canonical(publication.compact_manifest(self.fixture.manifest)))
+        promoted_index=next(i for i,t in enumerate(stored['targets']) if 'donor_expected_target' in t)
+        for index in (-1,True,promoted_index,len(stored['targets'])):
+            corrupt=deepcopy(stored);corrupt['targets'][promoted_index]['donor_expected_target']=index
+            with self.subTest(index=index),self.assertRaisesRegex(ValueError,'donor_reference_invalid'):
+                publication.expand_manifest(corrupt)
+        corrupt=deepcopy(stored);corrupt['storage_encoding']='unknown'
+        with self.assertRaisesRegex(ValueError,'encoding_unknown'):publication.expand_manifest(corrupt)
+        corrupt=deepcopy(stored);corrupt['candidate']['candidate_book']={}
+        with self.assertRaisesRegex(ValueError,'duplicate_book'):publication.expand_manifest(corrupt)
+        corrupt=deepcopy(stored);corrupt['targets'][0]['before_envelope_source']='unknown'
+        with self.assertRaisesRegex(ValueError,'before_reference_invalid'):publication.expand_manifest(corrupt)
+        corrupt=deepcopy(stored);corrupt['candidate']['candidate_book_overlay']['fields']['historical_revision']['native_stage_editions']['2026-09-08']='forged'
+        with self.assertRaisesRegex(ValueError,'manifest_corrupt'):publication._verify(publication.expand_manifest(corrupt))
+
+    def test_compact_reference_amplification_is_bounded_before_reconstruction(self):
+        from copy import deepcopy
+        self.rollover_fixture()
+        stored=json.loads(canonical(publication.compact_manifest(self.fixture.manifest)))
+        promoted=next(t for t in stored['targets'] if 'donor_expected_target' in t)
+        donor=stored['targets'][promoted['donor_expected_target']]
+        promoted['donor_expected_target']=0
+        stored['targets']=[donor,*[deepcopy(promoted) for _ in range(40)]]
+        limit=len(canonical(stored).encode())+len(canonical(stored['plan']['candidate_book']).encode())+1
+        with patch.object(publication,'MAX_EXPANDED_BYTES',limit),patch.object(publication,'_promoted_envelope',side_effect=AssertionError('large reconstruction before budget')):
+            with self.assertRaisesRegex(ValueError,'expanded_size_limit'):publication.expand_manifest(stored)
+
+    def test_final_manifest_budget_still_applies(self):
+        limit=len(canonical(self.fixture.manifest).encode())//2
+        with patch.object(publication,'MAX_BYTES',limit):
+            with self.assertRaisesRegex(ValueError,'historical_publication_size_limit'):self.fixture.prepare()
+        self.assertEqual(accounting.load(self.fixture.runtime)[1],self.fixture.before)
+
+    def test_overlay_replaces_header_but_preserves_persisted_before(self):
+        from dataclasses import replace
+        from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+        authority=ready.capture_authority(self.fixture.runtime)
+        with ready.readonly(self.db) as conn:expected=ready.capture_expected(conn,bundle_version='fixture-v1',as_of_date='2026-09-10',authority=authority)
+        env=_deserialize_sheet_vitrina_plan(expected.plan_json)
+        env=replace(env,metadata={**env.metadata,'publication_inputs':{}},snapshot_id='new-overlay')
+        rows,_=self.select(overlay=(env,expected))
+        self.assertEqual(rows[0]['_expected']['plan_json'],expected.plan_json)
+        self.assertNotEqual(rows[0]['plan_json'],expected.plan_json)
+        self.assertEqual(json.loads(rows[0]['plan_json'])['snapshot_id'],'new-overlay')
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute(f'UPDATE {ready.TABLE} SET plan_json=plan_json||? WHERE as_of_date=?',(' ','2026-09-10'))
+        with self.assertRaisesRegex(ValueError,'ready_target_changed'):self.select(overlay=(env,expected))
+
+    def test_first_overlay_has_absent_before_and_preserves_all_dates(self):
+        from dataclasses import replace
+        from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+        authority=ready.capture_authority(self.fixture.runtime)
+        with ready.readonly(self.db) as conn:
+            old=ready.capture_expected(conn,bundle_version='fixture-v1',as_of_date='2026-09-10')
+            expected=ready.capture_expected(conn,bundle_version='fixture-v1',as_of_date='2026-09-11',authority=authority)
+        env=replace(_deserialize_sheet_vitrina_plan(old.plan_json),as_of_date='2026-09-11',metadata={'publication_inputs':{}})
+        rows,selected=self.select(overlay=(env,expected))
+        row=next(r for r in rows if r['as_of_date']=='2026-09-11')
+        self.assertIsNone(row['_expected']['plan_json'])
+        self.assertEqual(selected['2026-09-10'],('fixture-v1','2026-09-10'))
 
 
 if __name__=="__main__":unittest.main()
