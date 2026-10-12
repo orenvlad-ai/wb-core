@@ -3090,9 +3090,11 @@ class RegistryUploadHttpEntrypoint:
         del as_of_date
         raise LegacyGoogleSheetsContourArchivedError(LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE)
 
-    def handle_business_data_cycle_dispatch_request(self, payload=None):
-        from packages.application.business_data_cycle_dispatch import dispatch, prepare
+    def handle_business_data_cycle_dispatch_request(self, payload=None, *, manual_request_id=None):
+        from packages.application.business_data_cycle_dispatch import dispatch, prepare, prepare_manual
         if payload is None:
+            if manual_request_id is not None:
+                return prepare_manual(self.runtime.runtime_dir, self.now_factory(), manual_request_id)
             return prepare(self.runtime.runtime_dir, self.now_factory())
         return dispatch(self, payload)
 
@@ -3100,7 +3102,7 @@ class RegistryUploadHttpEntrypoint:
         from packages.application.business_data_cycle_dispatch import readback_fenced
         return readback_fenced(self, dispatch_id)
 
-    def _start_sheet_cycle_job(self, *, request_key: str, slot_utc: str, history_config, _dispatch_guard=None) -> dict:
+    def _start_sheet_cycle_job(self, *, request_key: str, slot_utc: str, history_config, _dispatch_guard=None, _dispatch_id=None) -> dict:
         """Same-daemon full-cycle acceptance; selected-profile route stays readiness-blocked."""
         from packages.application.business_data_procedure_admission import admitted_write, thread_start_is_proven_absent
         from packages.application.sheet_vitrina_v1_cycle import CycleReceiptStore, HEAVY_OPERATIONS, run_cycle
@@ -3137,7 +3139,7 @@ class RegistryUploadHttpEntrypoint:
                     heavy.close()
                     return {'status': 'not_accepted', 'accepted': False, 'source_effects_started': False}
                 receipt, slot = store.accept(request_key=request_key, slot_utc=slot_utc,
-                    config=history_config, now=self.now_factory())
+                    config=history_config, now=self.now_factory(), dispatch_id=_dispatch_id)
             except BaseException:
                 heavy.close()
                 raise

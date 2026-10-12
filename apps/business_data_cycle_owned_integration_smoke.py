@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 import sys
 import json
+import os
 import sqlite3
 import threading
 import traceback
@@ -29,6 +30,7 @@ from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog
 from packages.application.business_data_heavy_admission import heavy_admission_status
 from packages.application.business_data_procedure_admission import admission_idle
 from packages.application.web_vitrina_history_store import HistoryStore
+from packages.application import business_data_cycle_dispatch as dispatch
 
 
 class OwnedEntry(wiring.FixedDomainEntry):
@@ -115,7 +117,7 @@ class OwnedCycleIntegration(unittest.TestCase):
         self.assertTrue(heavy_admission_status(runtime.runtime_dir)['idle'])
         self.assertTrue(admission_idle(runtime.runtime_dir)['idle'])
 
-    def test_actual_operator_thread_full_sources_ready_owned_child_and_exact_readback(self):
+    def test_manual_dispatch_actual_operator_thread_ready_owned_child_and_exact_readback(self):
         case = wiring.WiringTests()
         # Seed disposable sources without retaining setup's main-thread heavy
         # lease. The actual operator thread must acquire and own the real lease.
@@ -129,13 +131,21 @@ class OwnedCycleIntegration(unittest.TestCase):
         config = replace(case.config, max_recomputes=2, budget_seconds=60)
         with patch('apps.web_vitrina_history_candidate_build.runtime_storage_admission'), \
              patch('apps.web_vitrina_finished_snapshot_build.systemd_admission', return_value='idle'), \
+             patch.dict(os.environ, {'WB_CORE_WEB_AUTH_SESSION_SECRET':'offline-manual-cycle'}), \
+             patch.object(dispatch, '_identity', return_value='c'*40), \
+             patch.object(dispatch, 'selected', return_value=True), \
+             patch.object(dispatch, '_readiness', return_value=None), \
+             patch.object(dispatch, 'history_config', return_value=config), \
              patch.object(entry.source_adapter, 'collect_sources', wraps=entry.source_adapter.collect_sources) as collect:
-            accepted = entry._start_sheet_cycle_job(request_key='owned-union-fixture',
-                slot_utc=fixture.NOW.isoformat(), history_config=config)
-            thread = entry.operator_jobs._threads[accepted['job_id']]
+            identity = dispatch.prepare_manual(entry.runtime.runtime_dir, fixture.NOW, 'owned-manual-fixture')['dispatch_id']
+            accepted = dispatch.dispatch(entry, {'dispatch_id':identity})
+            self.assertTrue(accepted['accepted'])
+            thread = entry.operator_jobs._threads[accepted['receipt']['job_id']]
             thread.join(240)
             self.assertFalse(thread.is_alive(), 'actual owned cycle did not terminate')
-            receipt = CycleReceiptStore(entry.runtime.runtime_dir, lambda: fixture.STAMP).read(accepted['cycle_id'])
+            receipt = CycleReceiptStore(entry.runtime.runtime_dir, lambda: fixture.STAMP).read(accepted['receipt']['cycle_id'])
+            self.assertEqual(receipt['trigger_kind'], 'manual')
+            self.assertEqual(receipt['dispatch_id'], identity)
             self.assertIn(receipt['status'], {'complete', 'degraded'},
                 getattr(entry, 'history_error', receipt))
             self.assertEqual(tuple(item['stage'] for item in receipt['stages']), STAGES)
@@ -154,9 +164,9 @@ class OwnedCycleIntegration(unittest.TestCase):
             self.assertEqual(case.case.counters['seller_funnel_block'].request_dates,
                 [*wiring.OLD, '2026-04-20'])
             before = list(entry.events)
-            repeated = entry._start_sheet_cycle_job(request_key='owned-union-fixture',
-                slot_utc=fixture.NOW.isoformat(), history_config=config)
-            self.assertEqual(repeated['cycle_id'], receipt['cycle_id'])
+            repeated = dispatch.dispatch(entry, {'dispatch_id':identity})
+            self.assertEqual(repeated['receipt']['cycle_id'], receipt['cycle_id'])
+            self.assertEqual(repeated['status'], receipt['status'])
             self.assertEqual(entry.events, before)
         self.assertTrue(heavy_admission_status(entry.runtime.runtime_dir)['idle'])
         self.assertTrue(admission_idle(entry.runtime.runtime_dir)['idle'])
