@@ -45,11 +45,23 @@ the barrier held and requires exact same-operation status/readback.
 Loaded configuration comparison parses the COMPLETE native serialization.
 ExecStart preserves ordered `path`, `argv[]`, `ignore_errors`; only recognized
 `start_time`, `stop_time`, `pid`, `code`, `status` execution tails are separated.
-Recorded terminated PID/time is not a live process: current MainPID, service
-state, processes and authenticated admission still prove idle. Timers preserve
+Only the original pre-pause baseline may retain a canonical running tail:
+positive bounded PID, valid UTC start, stop `n/a`, code `(null)`, status `0/0`.
+This bounded subtype requires `is_active=ActiveState=activating`, `LoadState=loaded`,
+`SubState=start`, the same positive MainPID and ExecMainStartTimestamp, and
+ExecMainCode/ExecMainStatus both `0` in that original observation. Pause must
+already have drained that invocation; the saved hold and fresh current service
+enabled/activity pairs must still match, with no live MainPID, jobs or writers.
+Recognizing that historical tail does not authorize a currently running service
+or recreate its old activity state. Current, held, and committed comparisons
+remain strict; a running tail with contradictory idle/MainPID0 fields refuses.
+Reset and terminated tails remain supported;
+mixed or partial running/reset tails refuse. No baseline field is rewritten.
+Recorded execution PID/time is not current liveness proof: current MainPID,
+service state, processes and authenticated admission still prove idle. Timers preserve
 ordered exact OnCalendar (including timezone) or known On*USec interval operands;
 only recognized `next_elapse` is separated. Valid UTC timestamps/durations,
-execution numbers and terminated/reset states are checked. This narrow grammar
+execution numbers and context-bound running/terminated/reset states are checked. This narrow grammar
 does not support arbitrary systemd serializations: unknown/partial/duplicate
 records, extra fields/tokens, delimiter/control injection, invalid values or
 missing-versus-empty config evidence fail closed, even when raw strings match.

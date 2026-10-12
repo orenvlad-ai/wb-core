@@ -108,7 +108,7 @@ def _validate_calendar(value):
                 raise RuntimeError('formula resume invalid loaded calendar range')
 
 
-def _loaded_records(value, property_name):
+def _loaded_records(value, property_name, *, running_baseline=None):
     """Parse the complete native serialization, retaining every static operand.
 
     Only documented runtime tails are separated. Unknown shapes do not fall
@@ -153,7 +153,19 @@ def _loaded_records(value, property_name):
                     len(v) > 3 or int(v) > 255 for v in fields['status'].split('/')):
                 raise RuntimeError('formula resume invalid loaded execution number')
             if fields['code'] == '(null)':
-                if (fields['pid'], fields['start'], fields['stop'], fields['status']) != ('0', 'n/a', 'n/a', '0/0'):
+                reset = (fields['pid'], fields['start'], fields['stop'], fields['status']) == ('0', 'n/a', 'n/a', '0/0')
+                # Only an immutable pre-pause activating/start observation may
+                # retain this tail. Current/held/committed comparisons never
+                # supply this context, even if their other fields claim idle.
+                observed = (running_baseline or {}).get('properties') or {}
+                running = (fields['pid'] != '0' and fields['start'] != 'n/a'
+                    and fields['stop'] == 'n/a' and fields['status'] == '0/0'
+                    and (running_baseline or {}).get('is_active') == 'activating'
+                    and all(observed.get(key) == expected for key, expected in {
+                        'LoadState': 'loaded', 'ActiveState': 'activating', 'SubState': 'start',
+                        'MainPID': fields['pid'], 'ExecMainStartTimestamp': fields['start'],
+                        'ExecMainCode': '0', 'ExecMainStatus': '0'}.items()))
+                if not (reset or running):
                     raise RuntimeError('formula resume unproven loaded execution state')
             elif (fields['pid'] == '0' or 'n/a' in (fields['start'], fields['stop'])
                     or datetime.strptime(fields['stop'], '%a %Y-%m-%d %H:%M:%S UTC') < datetime.strptime(fields['start'], '%a %Y-%m-%d %H:%M:%S UTC')):
@@ -179,18 +191,18 @@ def _loaded_records(value, property_name):
     return tuple(result)
 
 
-def _loaded_configuration(properties):
+def _loaded_configuration(properties, *, running_baseline=None):
     result = {}
     for key in CONFIG_PROPERTIES:
         present = key in properties
         value = properties.get(key)
         if present and key in {'ExecStart', 'TimersCalendar', 'TimersMonotonic'}:
-            value = _loaded_records(value, key)
+            value = _loaded_records(value, key, running_baseline=running_baseline)
         result[key] = (present, value)  # Missing and empty are different evidence.
     return result
 
 
-def _same_unit_configuration(original, actual):
+def _same_unit_configuration(original, actual, *, original_is_baseline=False):
     left, right = original.get('properties') or {}, actual.get('properties') or {}
     digest = left.get('UnitContentDigest')
     if not isinstance(digest, str) or re.fullmatch(r'sha256:[0-9a-f]{64}', digest) is None:
@@ -199,7 +211,9 @@ def _same_unit_configuration(original, actual):
         if (not isinstance(properties.get('FragmentPath'), str) or not properties['FragmentPath'].startswith('/')
                 or not isinstance(properties.get('DropInPaths'), str)):
             raise RuntimeError('formula resume loaded fragment/dropin evidence absent')
-    return digest == right.get('UnitContentDigest') and _loaded_configuration(left) == _loaded_configuration(right)
+    return (digest == right.get('UnitContentDigest')
+        and _loaded_configuration(left, running_baseline=original if original_is_baseline else None)
+        == _loaded_configuration(right))
 
 
 def _bytes(path: Path, bound: int = 1024 * 1024) -> bytes:
@@ -346,11 +360,12 @@ def _delta(baseline, current, app, unit_directory, epoch):
         raise RuntimeError('formula resume requires exactly one changed loaded epoch')
     old = old_matches[0]
     try:
-        _loaded_records(original['ExecStart'], 'ExecStart')
+        _loaded_records(original['ExecStart'], 'ExecStart', running_baseline=baseline['units'][UNIT])
         _loaded_records(actual['ExecStart'], 'ExecStart')
     except RuntimeError as exc:
         raise RuntimeError('formula resume loaded ExecStart has another delta') from exc
-    before_config, after_config = _loaded_configuration(original), _loaded_configuration(actual)
+    before_config = _loaded_configuration(original, running_baseline=baseline['units'][UNIT])
+    after_config = _loaded_configuration(actual)
     restored = tuple((path, argv.replace(epoch, old, 1), ignore)
                      for path, argv, ignore in after_config['ExecStart'][1])
     if restored != before_config['ExecStart'][1]:
@@ -617,7 +632,7 @@ def _observe(runtime, plan, systemd, activity_reader, proc_root, *, final=False)
         actual = current['units'][unit]
         if unit != UNIT:
             try:
-                same = _same_unit_configuration(original, actual)
+                same = _same_unit_configuration(original, actual, original_is_baseline=True)
             except RuntimeError as exc:
                 raise RuntimeError('formula resume foreign unit configuration differs: ' + unit) from exc
             if not same:

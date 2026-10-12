@@ -53,6 +53,16 @@ finished-snapshot service после exact completed deploy предусмотр
 точную before/after конфигурацию и сохраняет исходный baseline. Во всех остальных
 случаях действует прежний exact resume; редактирование baseline не разрешено.
 
+Начальный baseline может застать сервис в `activating`, а сохранённый hold — уже
+после его завершения. Formula resume распознаёт строгий native ExecStart tail
+ещё работающего на момент baseline процесса только при согласованных
+`activating/start`, MainPID, времени старта и нулевых ExecMainCode/Status;
+это не изменение конфигурации. К текущему, held или committed состоянию этот
+допуск не применяется, даже если другие поля ошибочно утверждают inactive/PID0.
+Текущий quiet proof и точное совпадение service pairs с drained hold остаются
+обязательными. Исходный baseline и его fingerprint не редактируют; иной command,
+fragment/drop-in digest или живой текущий процесс по-прежнему блокирует resume.
+
 ## Диагностика и неопределённость
 
 Owner можно прочитать без изменения через:
