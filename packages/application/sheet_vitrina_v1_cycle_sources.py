@@ -116,7 +116,7 @@ class SheetVitrinaCycleSources:
             raise ReadyPublicationConflict("ready_collection_context_changed")
         return invocation
 
-    def _compose_closed(self, handle, day, accepted):
+    def _compose_closed(self, handle, day, accepted, *, retained_only=False):
         """Owned old-date local invocation; never collect or mutate the main handle.
 
         Every supported old slot is hydrated from its exact canonical cache.
@@ -137,9 +137,19 @@ class SheetVitrinaCycleSources:
             raise ClosedBacklogConflict('closed_date_must_precede_main')
         composed = _CollectedBuildSources(scope=(main.scope[0], day, *deepcopy(main.scope[2:])),
             effects=deepcopy(main.effects), capital_reader=main.capital_reader)
+        selected, metrics = [], []
+        if retained_only:
+            selected = sorted(accepted)
+            if not selected or not set(selected) <= {'sales_funnel_history', 'fin_report_daily'}:
+                raise ClosedBacklogConflict('closed_retained_source_scope_invalid')
+            from packages.application.sheet_vitrina_v1_closed_ready_repair import retained_metric_keys
+            metrics = retained_metric_keys(selected, day)
+            composed.scope = (*composed.scope[:4], selected, metrics)
         with capture_build_inputs(self.block.runtime.db_path, runtime_dir=self.block.runtime.runtime_dir) as inputs:
             for identity, outcome in main.slots.items():
                 key, slot, _, nm_ids, scope_error = identity
+                if selected and key not in selected:
+                    continue
                 if slot == live.TEMPORAL_SLOT_TODAY_CURRENT:
                     composed.slots[identity] = deepcopy(outcome)
                     continue
@@ -204,7 +214,8 @@ class SheetVitrinaCycleSources:
         diagnostics = composed.effects['collection_diagnostics']
         diagnostics['as_of_date'] = day
         diagnostics['source_slots'] = [deepcopy(item) for item in diagnostics['source_slots']
-            if item['slot_kind'] == live.TEMPORAL_SLOT_TODAY_CURRENT]
+            if item['slot_kind'] == live.TEMPORAL_SLOT_TODAY_CURRENT
+                and (not selected or item['source_key'] in selected)]
         for identity, (status, payload) in composed.slots.items():
             if identity[1] == live.TEMPORAL_SLOT_YESTERDAY_CLOSED:
                 started = live._start_source_slot_diagnostic(source_key=identity[0], temporal_slot=identity[1],
@@ -214,12 +225,13 @@ class SheetVitrinaCycleSources:
         # Canonical derive generates its own unsupported gaps; retain their
         # diagnostic identities without inventing a captured cache operand.
         for item in main.effects['collection_diagnostics']['source_slots']:
-            if item['slot_kind'] == live.TEMPORAL_SLOT_YESTERDAY_CLOSED and item.get('origin') == 'not_supported':
+            if (item['slot_kind'] == live.TEMPORAL_SLOT_YESTERDAY_CLOSED and item.get('origin') == 'not_supported'
+                    and (not selected or item['source_key'] in selected)):
                 copied = deepcopy(item); copied['requested_date'] = day
                 diagnostics['source_slots'].append(copied)
         new_handle = CollectedLivePlanSources()
         self._source_collections[new_handle] = _Invocation(composed, (),
-            dict(as_of_date=day, execution_mode='auto_daily'), invocation.runtime_context)
+            dict(as_of_date=day, execution_mode='auto_daily', source_keys=selected, metric_keys=metrics), invocation.runtime_context)
         return new_handle
 
     def collected_source_summary(self, handle: CollectedLivePlanSources) -> dict:

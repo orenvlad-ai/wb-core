@@ -494,6 +494,11 @@ def publish(manifest, *, runtime_dir, fault_injector=None):
     with warehouse_functional_write_lock(Path(runtime_dir),timeout_seconds=5),accounting.writer_lock(runtime_dir):
         with historical_sqlite.connection(db,phase_name="publication_connection") as conn:
             conn.row_factory=sqlite3.Row
+            existing=conn.execute("SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?",(manifest["operation_id"],manifest["attempt_id"])).fetchone()
+            if existing:
+                stored=json.loads(existing["inputs_json"])
+                stages.require(stored["manifest_digest"]==manifest["manifest_digest"],"historical_publication_retry_identity_conflict")
+                if existing["state"]=="complete":return publication_receipt(manifest,runtime_dir=runtime_dir)
             # This additive bootstrap may use executescript (implicit COMMIT).
             # Complete it before the intent/Ready transactions, including when
             # Ready was created after the warehouse projection schema.
@@ -501,11 +506,6 @@ def publish(manifest, *, runtime_dir, fault_injector=None):
             with historical_sqlite.phase(db,"publication_schema"):
                 ensure_warehouse_business_projection_schema(conn)
                 conn.commit()
-            existing=conn.execute("SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?",(manifest["operation_id"],manifest["attempt_id"])).fetchone()
-            if existing:
-                stored=json.loads(existing["inputs_json"])
-                stages.require(stored["manifest_digest"]==manifest["manifest_digest"],"historical_publication_retry_identity_conflict")
-                if existing["state"]=="complete":return publication_receipt(manifest,runtime_dir=runtime_dir)
             with historical_sqlite.transaction(conn,db_path=db,phase_name="publication_intent"):
                 _fence(conn,manifest,runtime_dir,recovering=recovering)
                 if not existing:

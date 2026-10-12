@@ -18,7 +18,7 @@ DOMAIN = 'cny_account_document'
 ACTIONS = frozenset({'cny_upload', 'cny_opening', 'cny_exclude', 'cny_restore', 'cny_relink'})
 
 
-def _project(result, *, db_path=None, request_scope=''):
+def _project(result, *, db_path=None, request_scope='', connection=None):
     result['domain'] = DOMAIN
     receipt = result.get('acceptance')
     if not receipt:
@@ -38,7 +38,7 @@ def _project(result, *, db_path=None, request_scope=''):
         child['source_ref']['domain'] = DOMAIN
         child['detail_path'] = '/sheet-vitrina-v1/operator?embedded_tab=factory-order&operation_id=' + child['operation_id']
         replacement = child.get('processing', {}).get('superseded_by')
-        if replacement and db_path and operation_action(db_path, replacement['operation_id'], request_scope=request_scope) in ACTIONS:
+        if replacement and db_path and operation_action(db_path, replacement['operation_id'], request_scope=request_scope, connection=connection) in ACTIONS:
             replacement['domain'] = DOMAIN
             replacement['detail_path'] = '/sheet-vitrina-v1/operator?embedded_tab=factory-order&operation_id=' + replacement['operation_id']
         # Source-only is a cost fact. It does not prove monetary application.
@@ -61,16 +61,17 @@ def read_request(runtime_dir, db_path, request_id, *, request_scope):
         request_scope=request_scope, allowed_actions=ACTIONS), db_path=db_path, request_scope=request_scope)
 
 
-def read_operation(runtime_dir, db_path, operation_id, *, request_scope):
+def read_operation(runtime_dir, db_path, operation_id, *, request_scope, connection=None):
     return _project(financial.read_operation(runtime_dir, db_path, operation_id,
-        request_scope=request_scope, allowed_actions=ACTIONS), db_path=db_path, request_scope=request_scope)
+        request_scope=request_scope, allowed_actions=ACTIONS, connection=connection),
+        db_path=db_path, request_scope=request_scope, connection=connection)
 
 
-def operation_action(db_path, operation_id, *, request_scope):
+def operation_action(db_path, operation_id, *, request_scope, connection=None):
     """Resolve retained action before selecting a public domain; foreign is unknown."""
     if not Path(db_path).is_file():
         return None
-    with closing(source.readonly(db_path)) as conn:
+    with source.read_session(db_path, connection) as conn:
         if not source._exists(conn, financial.REQUESTS):
             return None
         row = conn.execute(f'SELECT action FROM {financial.REQUESTS} WHERE request_scope=? AND operation_id=?',

@@ -233,11 +233,11 @@ def accept(entry, shipment_id, payload, *, actor, request_scope):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def read(db_path, request_id, *, shipment_id, request_scope):
+def read(db_path, request_id, *, shipment_id, request_scope, connection=None):
     unknown = {"domain": DOMAIN, "request_id": request_id, "status": "unknown", "acceptance": None}
     if not Path(db_path).is_file():
         return unknown
-    with closing(source.readonly(db_path)) as conn:
+    with source.read_session(db_path, connection) as conn:
         row = conn.execute(f"SELECT * FROM {TABLE} WHERE request_scope=? AND request_id=? AND shipment_id=?", (request_scope, request_id, shipment_id)).fetchone() if source._exists(conn, TABLE) else None
         if not row:
             return unknown
@@ -289,13 +289,13 @@ def read(db_path, request_id, *, shipment_id, request_scope):
         return {**result, "acceptance": receipt, "shipment": projected}
 
 
-def read_operation(db_path, operation_id, *, request_scope):
+def read_operation(db_path, operation_id, *, request_scope, connection=None):
     unknown = {"domain": DOMAIN, "operation_id": operation_id, "status": "unknown", "acceptance": None}
     if not Path(db_path).is_file():
         return unknown
-    with closing(source.readonly(db_path)) as conn:
+    with source.read_session(db_path, connection) as conn:
         row = conn.execute(f"SELECT request_id,shipment_id FROM {TABLE} WHERE correction_id=? AND request_scope=? AND status='accepted' ORDER BY accepted_at,request_id LIMIT 1", (operation_id, request_scope)).fetchone() if source._exists(conn, TABLE) else None
     if not row:
         return unknown
-    result = read(db_path, row["request_id"], shipment_id=row["shipment_id"], request_scope=request_scope)
+    result = read(db_path, row["request_id"], shipment_id=row["shipment_id"], request_scope=request_scope, connection=connection)
     return result if result["acceptance"] and result["acceptance"]["operation_id"] == operation_id else unknown

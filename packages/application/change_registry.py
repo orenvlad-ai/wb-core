@@ -2878,36 +2878,56 @@ class ChangeRegistryRepository:
             "related_fact_id": str(row["related_fact_id"] or ""),
         }
 
-    def read_operation(self, operation_id: str) -> dict[str, Any]:
+    def read_operation(
+        self, operation_id: str, *, connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        """Read the native receipt, optionally inside the caller's pinned RO view.
+
+        Opening a second connection while the caller holds a DELETE-journal
+        reader can deadlock against a pending writer. A borrowed connection
+        remains entirely caller-owned: no transaction, close, or schema writes.
+        """
         exact_id = _identifier(operation_id, "operation_id")
+        if connection is not None:
+            databases = connection.execute("PRAGMA database_list").fetchall()
+            main = next((row[2] for row in databases if row[1] == "main"), "")
+            if (not main or Path(main).resolve() != self.store_registry.resolve("operational").resolve()
+                    or not connection.in_transaction
+                    or connection.execute("PRAGMA query_only").fetchone()[0] != 1):
+                raise ChangeRegistryError("borrowed operation reader requires the pinned query-only operational store")
+            _require_initialized_schema(connection)
+            return self._read_operation_conn(connection, exact_id)
         with self._read_session("read_operation") as conn:
-            operation = self._required_row(
-                conn, OPERATIONS_TABLE, "operation_id", exact_id
-            )
-            items = conn.execute(
-                f"""SELECT * FROM {ITEMS_TABLE} WHERE operation_id=?
-                    ORDER BY created_at,change_item_id""",
+            return self._read_operation_conn(conn, exact_id)
+
+    def _read_operation_conn(self, conn: sqlite3.Connection, exact_id: str) -> dict[str, Any]:
+        operation = self._required_row(
+            conn, OPERATIONS_TABLE, "operation_id", exact_id
+        )
+        items = conn.execute(
+            f"""SELECT * FROM {ITEMS_TABLE} WHERE operation_id=?
+                ORDER BY created_at,change_item_id""",
+            (exact_id,),
+        ).fetchall()
+        annotations = conn.execute(
+            f"""SELECT * FROM {ANNOTATION_REVISIONS_TABLE}
+                WHERE subject_kind='operation' AND subject_id=?
+                ORDER BY revision_no,annotation_revision_id""",
+            (exact_id,),
+        ).fetchall()
+        return {
+            "operation": _registry_payload(operation),
+            "items": [_registry_payload(row) for row in items],
+            "annotations": [_registry_payload(row) for row in annotations],
+            "latest_attempts": [_registry_payload(row) for row in conn.execute(
+                f"""SELECT event.* FROM {ATTEMPT_EVENTS_TABLE} event
+                    JOIN {ITEMS_TABLE} item ON item.change_item_id=event.change_item_id
+                    WHERE item.operation_id=? AND event.sequence_no=(
+                        SELECT MAX(latest.sequence_no) FROM {ATTEMPT_EVENTS_TABLE} latest
+                        WHERE latest.change_item_id=event.change_item_id)""",
                 (exact_id,),
-            ).fetchall()
-            annotations = conn.execute(
-                f"""SELECT * FROM {ANNOTATION_REVISIONS_TABLE}
-                    WHERE subject_kind='operation' AND subject_id=?
-                    ORDER BY revision_no,annotation_revision_id""",
-                (exact_id,),
-            ).fetchall()
-            return {
-                "operation": _registry_payload(operation),
-                "items": [_registry_payload(row) for row in items],
-                "annotations": [_registry_payload(row) for row in annotations],
-                "latest_attempts": [_registry_payload(row) for row in conn.execute(
-                    f"""SELECT event.* FROM {ATTEMPT_EVENTS_TABLE} event
-                        JOIN {ITEMS_TABLE} item ON item.change_item_id=event.change_item_id
-                        WHERE item.operation_id=? AND event.sequence_no=(
-                            SELECT MAX(latest.sequence_no) FROM {ATTEMPT_EVENTS_TABLE} latest
-                            WHERE latest.change_item_id=event.change_item_id)""",
-                    (exact_id,),
-                ).fetchall()],
-            }
+            ).fetchall()],
+        }
 
     def find_operation_by_receipt_reference(
         self, receipt_reference: str

@@ -50,7 +50,7 @@ def get_only_connect(connect, *args, **kwargs):
     def authorize(action, one, two, database, trigger):
         if action == sqlite3.SQLITE_PRAGMA:
             if one == 'query_only': return sqlite3.SQLITE_OK if two is None or str(two).upper() in ('ON', '1') else sqlite3.SQLITE_DENY
-            return sqlite3.SQLITE_OK if one in {'table_info', 'table_xinfo', 'foreign_key_list', 'foreign_key_check', 'index_list', 'index_info', 'schema_version', 'data_version', 'integrity_check'} else sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK if one in {'database_list', 'table_info', 'table_xinfo', 'foreign_key_list', 'foreign_key_check', 'index_list', 'index_info', 'schema_version', 'data_version', 'integrity_check'} else sqlite3.SQLITE_DENY
         if action == sqlite3.SQLITE_ATTACH:
             return sqlite3.SQLITE_OK if parse_qs(urlparse(str(one)).query).get('mode') == ['ro'] else sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK if action in {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_RECURSIVE} else sqlite3.SQLITE_DENY

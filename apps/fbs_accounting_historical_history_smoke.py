@@ -310,7 +310,10 @@ class HistoricalHistory(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform=='linux','genuine inherited FD authority requires Linux')
     def test_delete_readers_wait_for_genuine_history_ack_and_completion_commit(self):
-        self._owned_history_then_native_service_retention(end='2026-09-10',with_delete_readers=True)
+        # The real worker always derives rolling14. Keep that entire range in
+        # the fixture's accepted source days (starting 8 September), so this
+        # regression reaches ACK/COMMIT instead of unrelated missing-date input.
+        self._owned_history_then_native_service_retention(end='2026-09-21',with_delete_readers=True)
 
     def _owned_history_then_native_service_retention(self,*,end,with_delete_readers=False):
         from apps.owned_history_worker_smoke import ownership
@@ -320,6 +323,7 @@ class HistoricalHistory(unittest.TestCase):
         from packages.application.fbs_accounting_historical_cycle import finalize
         from packages.application import fbs_accounting_historical_sqlite as historical_sqlite
         from packages.application.operator_warehouse_documents import read_acceptance
+        from packages.application.owned_history_worker_capability import HistoryDelegationError
         from packages.business_time import default_business_as_of_date
         import hashlib
         fixture,runtime=self.service_fixture(end=end)
@@ -333,7 +337,7 @@ class HistoricalHistory(unittest.TestCase):
                 return
             # The reader remains live until COMMIT starts, so slow proof work
             # cannot release it early and accidentally turn this into a no-op.
-            with fixture.held_reader(db_path) as release:
+            with fixture.held_reader(db_path,hold_seconds=120) as release:
                 commit_started=[]
                 timer=threading.Timer(.15,release.set)
                 def trace(statement):
@@ -361,7 +365,10 @@ class HistoricalHistory(unittest.TestCase):
                     contract['formula_code_hashes']={p:hashlib.sha256((repo/p).read_bytes()).hexdigest() for p in contract['formula_code_hashes']}
                     contract['formula_epoch']='wbc0069k16-reviewed-native-v1:'+hashlib.sha256(json.dumps(contract['formula_code_hashes'],sort_keys=True,separators=(',',':')).encode()).hexdigest()
                     worker.config.formula_epoch=contract['formula_epoch'];worker.config.runtime_contract.write_text(json.dumps(contract))
-                    result=worker.complete(fixture.now,backfill_dates=tuple(d for d in receipt.dates if d<default_business_as_of_date(fixture.now)),historical_receipt=receipt,total_seconds=240)
+                    try:
+                        result=worker.complete(fixture.now,backfill_dates=tuple(d for d in receipt.dates if d<default_business_as_of_date(fixture.now)),historical_receipt=receipt,total_seconds=240)
+                    except HistoryDelegationError as exc:
+                        self.fail(json.dumps(exc.diagnostic(),sort_keys=True))
                     self.assertTrue(result['historical_ack']);config=worker.config
                 # Context exit reaps the actual child and releases History
                 # locks; reacquire a genuine warehouse owner before finalize.

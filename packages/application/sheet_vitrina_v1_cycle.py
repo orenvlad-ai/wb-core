@@ -139,9 +139,14 @@ class CycleReceiptStore:
         if slot.tzinfo is None or slot.utcoffset() != timedelta(0):
             raise ValueError('cycle_slot_requires_utc')
         slot_utc = slot.astimezone(timezone.utc).isoformat()
-        fingerprint = digest(canonical({'slot': slot_utc, 'history': config.fingerprint(), 'scope': 'full_auto_daily'}))
+        manual = request_key.startswith('manual-cycle:')
+        fingerprint = digest(canonical({'slot': slot_utc, 'history': config.fingerprint(),
+                                        'scope': 'full_manual_daily' if manual else 'full_auto_daily'}))
         cycle_id = digest(request_key).removeprefix('sha256:')[:32]
-        slot_path = self.root / ('slot-' + digest(slot_utc).removeprefix('sha256:')[:32] + '.json')
+        # Explicit manual operations have their own durable identity. They never
+        # overwrite or consume the scheduled slot's receipt/index.
+        slot_path = self.root / (('manual-' + cycle_id if manual else
+                                 'slot-' + digest(slot_utc).removeprefix('sha256:')[:32]) + '.json')
         return slot_utc, fingerprint, cycle_id, slot_path
 
     def matching(self, *, request_key, slot_utc, config):
@@ -155,7 +160,7 @@ class CycleReceiptStore:
             raise CycleConflict('cycle_request_conflict')
         return prior
 
-    def accept(self, *, request_key, slot_utc, config, now):
+    def accept(self, *, request_key, slot_utc, config, now, dispatch_id=None):
         slot_utc, fingerprint, cycle_id, slot_path = self._request_identity(
             request_key=request_key, slot_utc=slot_utc, config=config)
         def same_request_or_slot():
@@ -205,6 +210,9 @@ class CycleReceiptStore:
                 job_id='', status='accepted', current_stage='', started_at=self.timestamp_factory(),
                 finished_at=None, stages=[dict(stage=name, status='pending', versions={}, warnings=[]) for name in STAGES],
                 final_versions={}, error_code='')
+            if dispatch_id is not None:
+                receipt['dispatch_id'] = dispatch_id
+            receipt['trigger_kind'] = 'manual' if request_key.startswith('manual-cycle:') else 'scheduled'
             self.write(receipt)
             _atomic(slot_path, {'cycle_id': cycle_id})
             _atomic(latest, {'cycle_id': cycle_id})
@@ -314,7 +322,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
     finance = None
     fbs = None
     def closed_sources():
-        value = closed.collect(receipt['cycle_id'])
+        value = closed.collect(receipt['cycle_id'], include_retained=False)
         warnings = []
         for day, item in value['dates'].items():
             if item.get('deferred_reason'):
@@ -354,7 +362,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         return proof
     def closed_ready():
         nonlocal backfill_dates
-        warnings, proofs = [], []
+        warnings, proofs = list(closed.prepare_retained(receipt['cycle_id'])), []
         value = closed.status()
         for day, item in (value['dates'].items() if value else ()):
             if item['state'] == 'acknowledged' or item.get('deferred_reason') or not all(source['anchor'] for source in item['sources'].values()):
@@ -368,10 +376,14 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
                 try:
                     proof = closed.record_ready(day)
                 except ClosedBacklogConflict as exc:
-                    if not str(exc).startswith('closed_ready_missing:'):
+                    if not str(exc).startswith('closed_ready_missing:') and not closed.can_replace_retained_ready(day, exc):
                         raise
                     plan = source_adapter.derive_collected(closed.compose(handle, day))
-                    _, result = entrypoint._cycle_publish_dated_ready(plan)
+                    if closed.retained_replay(day):
+                        plan = closed.merge_retained_ready(day, plan)
+                        _, result = entrypoint._cycle_publish_dated_ready(plan, retained_only=True)
+                    else:
+                        _, result = entrypoint._cycle_publish_dated_ready(plan)
                     warnings.extend(result.warnings)
                     proof = closed.record_ready(day)
                 proofs.append(proof)

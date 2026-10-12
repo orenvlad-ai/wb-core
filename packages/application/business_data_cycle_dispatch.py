@@ -110,12 +110,61 @@ def _decode(dispatch_id):
         value = json.loads(base64.urlsafe_b64decode(body + '=' * (-len(body) % 4)))
     except (ValueError, UnicodeError) as exc:
         raise ValueError('invalid cycle dispatch envelope') from exc
-    if (not isinstance(value, dict) or set(value) != {'schema', 'profile', 'deployed_sha', 'slot', 'history', 'request_key', 'request_fingerprint', 'cycle_id'}
-            or value['schema'] != 1 or value['profile'] != profile.fingerprint(profile.PROFILE)
+    fields = {'schema', 'profile', 'deployed_sha', 'slot', 'history', 'request_key', 'request_fingerprint', 'cycle_id'}
+    manual = isinstance(value, dict) and value.get('schema') == 2
+    if (not isinstance(value, dict) or set(value) != fields | ({'manual_request_id'} if manual else set())
+            or value['schema'] not in {1, 2} or value['profile'] != profile.fingerprint(profile.PROFILE)
             or re.fullmatch('[0-9a-f]{40}', str(value['deployed_sha'])) is None
             or re.fullmatch('[0-9a-f]{32}', str(value['cycle_id'])) is None):
         raise ValueError('invalid fixed cycle dispatch envelope')
+    if manual and value['request_key'] != _manual_key(value['manual_request_id']):
+        raise ValueError('invalid manual cycle request binding')
     return value
+
+
+def _manual_key(request_id):
+    if not isinstance(request_id, str) or re.fullmatch(r'[a-z0-9][a-z0-9_-]{7,63}', request_id) is None:
+        raise ValueError('manual request ID must be 8-64 lowercase letters, digits, hyphens or underscores')
+    return 'manual-cycle:' + request_id
+
+
+def _readiness(runtime):
+    if not selected(runtime):
+        return {'status': 'legacy_profile', 'accepted': False}
+    readiness = profile.activation_readiness(Path(runtime))
+    states = profile.effective_core(Path(runtime))
+    if not readiness['ready'] or states[profile.WAREHOUSE_TIMER][0] != 'enabled':
+        return {'status': 'blocked', 'accepted': False, 'blockers': readiness['blockers'] or ['master_owner_disabled']}
+    return None
+
+
+def prepare_manual(runtime, now, request_id):
+    """Read-only explicit full-cycle request; no scheduled-slot claim or clock override."""
+    key = _manual_key(request_id)
+    sha = _identity(runtime)
+    from packages.application.sheet_vitrina_v1_cycle import CycleReceiptStore
+    store = CycleReceiptStore(runtime, lambda: '')
+    cycle_id = hashlib.sha256(key.encode()).hexdigest()[:32]
+    prior = store.read(cycle_id)
+    if prior is not None:
+        # A repeated operation remains the SAME operation after deploy/rollover,
+        # including failure. Return its original signed identity and provenance.
+        identity = prior.get('dispatch_id')
+        value = _decode(identity)
+        if prior.get('trigger_kind') != 'manual' or value.get('manual_request_id') != request_id:
+            raise RuntimeError('manual cycle receipt identity changed')
+        return readback(runtime, identity)
+    refusal = _readiness(runtime)
+    if refusal:
+        return refusal
+    config = history_config()
+    slot = latest_slot(now)
+    _, request_fp, cycle_id, _ = store._request_identity(request_key=key, slot_utc=slot, config=config)
+    scope = dict(schema=2, profile=profile.fingerprint(profile.PROFILE), deployed_sha=sha,
+                 slot=slot, history=config.fingerprint(), request_key=key,
+                 request_fingerprint=request_fp, cycle_id=cycle_id, manual_request_id=request_id)
+    body = _encode(_canonical(scope).encode())
+    return {'status': 'prepared', 'accepted': False, 'dispatch_id': body + '.' + _encode(hmac.digest(_secret(), body.encode(), 'sha256'))}
 
 
 def prepare(runtime, now):
@@ -129,12 +178,9 @@ def prepare(runtime, now):
 def _prepare(runtime, now):
     """No lock, directory, receipt, constructor or source acceptance."""
     sha = _identity(runtime)
-    if not selected(runtime):
-        return {'status': 'legacy_profile', 'accepted': False}
-    readiness = profile.activation_readiness(Path(runtime))
-    states = profile.effective_core(Path(runtime))
-    if not readiness['ready'] or states[profile.WAREHOUSE_TIMER][0] != 'enabled':
-        return {'status': 'blocked', 'accepted': False, 'blockers': readiness['blockers'] or ['master_owner_disabled']}
+    refusal = _readiness(runtime)
+    if refusal:
+        return refusal
     from packages.application.business_data_cycle_wakeup import policy, catchup_slot
     refusal = policy(runtime, now)
     if refusal:
@@ -177,7 +223,9 @@ def readback(runtime, dispatch_id):
         return {'status': 'unknown', 'accepted': None, 'dispatch_id': dispatch_id}
     if receipt['request_key'] != value['request_key'] or receipt['request_fingerprint'] != value['request_fingerprint']:
         raise RuntimeError('cycle dispatch receipt identity changed')
-    return {'status': receipt['status'], 'accepted': True, 'dispatch_id': dispatch_id, 'receipt': {key: receipt.get(key) for key in ('cycle_id', 'request_key', 'request_fingerprint', 'job_id', 'status', 'current_stage', 'error_code')}}
+    if value['schema'] == 2 and (receipt.get('dispatch_id') != dispatch_id or receipt.get('trigger_kind') != 'manual'):
+        raise RuntimeError('manual cycle dispatch receipt differs')
+    return {'status': receipt['status'], 'accepted': True, 'dispatch_id': dispatch_id, 'receipt': {key: receipt.get(key) for key in ('cycle_id', 'request_key', 'request_fingerprint', 'job_id', 'status', 'current_stage', 'error_code', 'trigger_kind', 'slot_utc', 'business_date', 'started_at', 'finished_at')}}
 
 
 def _still_current(entrypoint, value):
@@ -234,15 +282,17 @@ def dispatch(entrypoint, payload):
     prior = readback(runtime, payload['dispatch_id'])
     if prior['accepted'] is True:
         return prior
-    current = prepare(runtime, entrypoint.now_factory())
+    manual = value['schema'] == 2
+    current = (prepare_manual(runtime, entrypoint.now_factory(), value['manual_request_id']) if manual
+               else prepare(runtime, entrypoint.now_factory()))
     if current.get('dispatch_id') != payload['dispatch_id']:
         return {'status': 'not_accepted', 'accepted': False, 'reason': current['status'], 'dispatch_id': payload['dispatch_id']}
     def admission_guard():
         from packages.application.business_data_cycle_wakeup import policy
         return (_still_current(entrypoint, value)
-                and policy(runtime, entrypoint.now_factory, expected_slot=value['slot']) is None)
+                and (manual or policy(runtime, entrypoint.now_factory, expected_slot=value['slot']) is None))
     result = entrypoint._start_sheet_cycle_job(request_key=value['request_key'], slot_utc=value['slot'], history_config=history_config(),
-        _dispatch_guard=admission_guard)
+        _dispatch_guard=admission_guard, _dispatch_id=payload['dispatch_id'])
     # Actual acceptance is proved by the canonical receipt, not a matching job name.
     proof = readback(runtime, payload['dispatch_id'])
     if proof['accepted'] is True:
@@ -307,13 +357,18 @@ def _launcher_lock(runtime):
         os.close(fd)
 
 
-def _request(method, dispatch_id=None):
+def _request(method, dispatch_id=None, *, manual_request_id=None):
     from urllib.request import Request, urlopen
     from urllib.parse import urlencode
     from apps.sheet_vitrina_v1_auto_refresh_tick import _build_web_auth_cookie
     url = BASE_URL + PATH
     data = None
-    if method == 'POST':
+    if manual_request_id is not None:
+        _manual_key(manual_request_id)
+        if method != 'GET' or dispatch_id is not None:
+            raise ValueError('manual preparation requires a read-only request')
+        url += '?' + urlencode({'manual_request_id': manual_request_id})
+    elif method == 'POST':
         data = _canonical({'dispatch_id': dispatch_id}).encode()
     elif dispatch_id:
         url += '?' + urlencode({'dispatch_id': dispatch_id})
@@ -328,10 +383,26 @@ def _request(method, dispatch_id=None):
     return value
 
 
-def launch(runtime, *, expected_slot=None):
+def manual_status(runtime, request_id):
+    """Same-operation readback, including uncertain pre-acceptance transport."""
+    _identity(runtime)
+    _manual_key(request_id)
+    record = _read_record(Path(runtime))
+    if record and _decode(record['dispatch_id']).get('manual_request_id') == request_id:
+        if record['phase'] == 'terminal' and record['last_status'] == 'not_accepted':
+            return {'status': 'not_accepted', 'accepted': False, 'dispatch_id': record['dispatch_id']}
+        return _request('GET', record['dispatch_id'])
+    return _request('GET', manual_request_id=request_id)
+
+
+def launch(runtime, *, expected_slot=None, manual_request_id=None):
     """Fixed launcher; a maintenance wakeup may bind its one exact debt slot."""
     runtime = Path(runtime).resolve()
     _identity(runtime)
+    if manual_request_id is not None:
+        _manual_key(manual_request_id)
+        if expected_slot is not None:
+            raise ValueError('manual launch cannot select a scheduled slot')
     if not selected(runtime):
         raise RuntimeError('selected cycle launcher cannot dispatch the legacy profile')
     if expected_slot is not None and latest_slot(datetime.fromisoformat(expected_slot)) != expected_slot:
@@ -354,11 +425,19 @@ def launch(runtime, *, expected_slot=None):
                 record = dict(record, phase=phase, last_status=result.get('status', 'unknown'))
                 _write_record(runtime, record)
                 if not terminal:
+                    if manual_request_id is not None and _decode(record['dispatch_id']).get('manual_request_id') != manual_request_id:
+                        return {'status': 'blocked_by_previous_cycle', 'accepted': False,
+                                'blocking_status': result.get('status'), 'blocking_dispatch_id': record['dispatch_id']}
                     return result
                 # A positively terminal old operation must not consume the
                 # sole next 3h timer invocation. Prepare once below, then at
                 # most one POST for a different server-issued slot identity.
-            prepared = _request('GET')
+            prepared = (_request('GET', manual_request_id=manual_request_id) if manual_request_id is not None
+                        else _request('GET'))
+            if manual_request_id is not None and (prepared.get('dispatch_id') is not None or prepared.get('accepted') is True):
+                value = _decode(prepared.get('dispatch_id'))
+                if value['schema'] != 2 or value['manual_request_id'] != manual_request_id:
+                    raise RuntimeError('manual preparation differs from requested operation')
             if prepared.get('status') != 'prepared':
                 return prepared
             identity = prepared['dispatch_id']
@@ -369,6 +448,8 @@ def launch(runtime, *, expected_slot=None):
                 return {'status': 'wait_next_slot', 'accepted': False, 'source_effects_started': False,
                         'reason': 'prepared_slot_differs_from_maintenance_debt', 'expected_slot': expected_slot}
             if record and record['dispatch_id'] == identity:
+                if manual_request_id is not None and record['phase'] == 'terminal' and record['last_status'] == 'not_accepted':
+                    return {'status': 'not_accepted', 'accepted': False, 'dispatch_id': identity}
                 return _request('GET', identity)
             # Durable write precedes send; process death before send is conservatively uncertain.
             record = {'schema': 1, 'dispatch_id': identity, 'phase': 'uncertain', 'last_status': 'unknown'}

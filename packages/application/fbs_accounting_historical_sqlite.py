@@ -23,8 +23,9 @@ def phase(db_path, name, statement_kind=None):
     try:
         yield
     except sqlite3.Error as exc:
-        if isinstance(exc, SQLiteContentionExhausted):
+        if isinstance(exc, SQLiteContentionExhausted) or getattr(exc, "historical_phase_recorded", False):
             raise
+        exc.historical_phase_recorded = True
         code = getattr(exc, 'sqlite_errorcode', None)
         elapsed_ms = round((time.monotonic() - started) * 1000)
         # No SQL, parameters, document payloads or database contents in logs.

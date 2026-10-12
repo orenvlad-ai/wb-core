@@ -515,7 +515,264 @@ with patch.object(profile,'load_selector',return_value={'offline':True}), \
             for worker in list(fake.operator_jobs._threads.values()):worker.join(5)
             from urllib.parse import urlencode
             code,read=request(url=base+'?'+urlencode({'dispatch_id':prepared['dispatch_id']}));self.assertEqual(code,200);self.assertTrue(read['accepted'])
+            manual_url=base+'?'+urlencode({'manual_request_id':'26gn723-http-manual'})
+            self.assertEqual(request(cookie=False,url=manual_url)[0],401)
+            self.assertEqual(request(url=manual_url+'&slot=2000')[0],409)
+            self.assertEqual(request(url=manual_url+'&manual_request_id=duplicate')[0],409)
+            self.assertEqual(request(url=base+'?manual_request_id=../outside')[0],409)
+            code,manual=request(url=manual_url);self.assertEqual(code,200)
+            self.assertEqual(d._decode(manual['dispatch_id'])['schema'],2)
+            self.assertEqual(request('POST',{'dispatch_id':manual['dispatch_id'],'manual_request_id':'caller-override'})[0],409)
+            code,accepted=request('POST',{'dispatch_id':manual['dispatch_id']});self.assertTrue(accepted['accepted'])
+            for worker in list(fake.operator_jobs._threads.values()):worker.join(5)
+            before=list(fake.events)
+            code,repeated=request(url=manual_url);self.assertEqual(repeated['status'],'complete')
+            self.assertEqual(repeated['dispatch_id'],manual['dispatch_id'])
+            self.assertEqual(request('POST',{'dispatch_id':manual['dispatch_id']})[1]['status'],'complete')
+            self.assertEqual(before,fake.events)
             with patch.dict(os.environ,{'WB_CORE_WEB_AUTH_PASSWORD_HASH':''}):self.assertNotEqual(request()[0],200)
+
+class ManualDispatchSmoke(unittest.TestCase):
+    setUp = DispatchSmoke.setUp
+    REQUEST = '26gn723-after-release'
+
+    def entry(self, **kwargs):
+        entry = CycleFake(self.root, **kwargs)
+        entry.now_factory = lambda: NOW
+        return entry
+
+    def finish(self, entry):
+        for worker in list(entry.operator_jobs._threads.values()):
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+
+    def manual(self, request_id=None):
+        return d.prepare_manual(self.root, NOW, request_id or self.REQUEST)['dispatch_id']
+
+    def transport(self, entry, calls):
+        def request(method, identity=None, *, manual_request_id=None):
+            calls.append((method, identity, manual_request_id))
+            if method == 'POST': return d.dispatch(entry, {'dispatch_id': identity})
+            if identity: return d.readback_fenced(entry, identity)
+            return (d.prepare_manual(self.root, entry.now_factory(), manual_request_id)
+                    if manual_request_id else d.prepare(self.root, entry.now_factory()))
+        return request
+
+    def test_after_failed_old_deploy_runs_all_stages_without_overwriting_schedule(self):
+        from packages.application.sheet_vitrina_v1_cycle import STAGES
+        old = self.entry(fail='warehouse')
+        auto = d.prepare(self.root, NOW)['dispatch_id']
+        d.dispatch(old, {'dispatch_id': auto}); self.finish(old)
+        schedule = {x.name:x.read_bytes() for x in (self.root/'sheet-vitrina-cycles').glob('slot-*.json')}
+        entry = self.entry()
+        with patch.object(d, '_identity', return_value='d'*40):
+            self.assertEqual(d.prepare(self.root, NOW)['status'], 'blocked')
+            before = sorted(x.name for x in self.root.rglob('*'))
+            identity = self.manual()
+            self.assertEqual(before, sorted(x.name for x in self.root.rglob('*')))
+            result = d.dispatch(entry, {'dispatch_id': identity}); self.finish(entry)
+            self.assertTrue(result['accepted'])
+            receipt = d.readback(self.root, identity)['receipt']
+            self.assertEqual(receipt['status'], 'complete')
+            self.assertEqual(receipt['trigger_kind'], 'manual')
+            self.assertEqual(entry.events, list(STAGES[:7])+['derive']+list(STAGES[7:]))
+            self.assertEqual(schedule, {x.name:x.read_bytes() for x in (self.root/'sheet-vitrina-cycles').glob('slot-*.json')})
+            self.assertEqual(d.readback(self.root, auto)['status'], 'failed')
+
+    def test_duplicate_failed_manual_is_readonly_even_after_rollover_and_deploy(self):
+        entry = self.entry(fail='warehouse'); calls=[]
+        with patch.object(d, '_request', side_effect=self.transport(entry, calls)):
+            first = d.launch(self.root, manual_request_id=self.REQUEST); self.finish(entry)
+            before = list(entry.events)
+            entry.now_factory = lambda: NOW + timedelta(hours=4)
+            with patch.object(d, '_identity', return_value='e'*40):
+                second = d.launch(self.root, manual_request_id=self.REQUEST)
+                status = d.manual_status(self.root, self.REQUEST)
+            self.assertEqual(second['dispatch_id'], first['dispatch_id'])
+            self.assertEqual(second['status'], 'failed'); self.assertEqual(status['status'], 'failed')
+            self.assertEqual(entry.events, before)
+            self.assertEqual(sum(c[0]=='POST' for c in calls), 1)
+        fresh = self.entry()
+        result = d.dispatch(fresh, {'dispatch_id': self.manual('26gn723-second-attempt')})
+        self.finish(fresh); self.assertTrue(result['accepted'])
+
+    def test_old_envelope_cannot_borrow_new_deploy_ack_for_same_operation(self):
+        old = self.manual(); entry = self.entry()
+        with patch.object(d, '_identity', return_value='d'*40):
+            new = self.manual(); self.assertNotEqual(old, new)
+            d.dispatch(entry, {'dispatch_id': new}); self.finish(entry)
+            with self.assertRaisesRegex(RuntimeError, 'receipt differs'): d.readback(self.root, old)
+            with self.assertRaisesRegex(RuntimeError, 'receipt differs'): d.dispatch(entry, {'dispatch_id': old})
+            self.assertEqual(d.prepare_manual(self.root, NOW, self.REQUEST)['dispatch_id'], new)
+
+    def test_manual_first_does_not_consume_scheduled_slot(self):
+        entry = self.entry(); identity = self.manual()
+        d.dispatch(entry, {'dispatch_id': identity}); self.finish(entry)
+        self.assertEqual(list((self.root/'sheet-vitrina-cycles').glob('slot-*.json')), [])
+        auto = d.prepare(self.root, NOW)['dispatch_id']
+        accepted = d.dispatch(entry, {'dispatch_id': auto}); self.finish(entry)
+        self.assertTrue(accepted['accepted']); self.assertEqual(entry.events.count('warehouse'), 2)
+
+    def test_manual_and_scheduled_and_other_manual_cannot_overlap(self):
+        for first_manual in (False, True):
+            with self.subTest(first_manual=first_manual):
+                entered, release = threading.Event(), threading.Event()
+                entry = self.entry(blocking=(entered, release))
+                manual = self.manual('race-manual-' + str(int(first_manual)))
+                auto = d.prepare(self.root, NOW+timedelta(hours=3*int(first_manual)))['dispatch_id']
+                entry.now_factory = lambda: NOW+timedelta(hours=3*int(first_manual))
+                # Prepare manual in the same current slot as this subcase.
+                manual = d.prepare_manual(self.root, entry.now_factory(), 'race-manual-'+str(int(first_manual)))['dispatch_id']
+                first, other = (manual, auto) if first_manual else (auto, manual)
+                try:
+                    d.dispatch(entry, {'dispatch_id': first}); self.assertTrue(entered.wait(3))
+                    self.assertFalse(d.dispatch(entry, {'dispatch_id': other})['accepted'])
+                    second_manual = d.prepare_manual(self.root, entry.now_factory(), 'race-other-'+str(int(first_manual)))['dispatch_id']
+                    self.assertFalse(d.dispatch(entry, {'dispatch_id': second_manual})['accepted'])
+                    sibling = self.entry(); sibling.now_factory = entry.now_factory
+                    from packages.application.business_data_heavy_admission import HeavyAdmissionBusy
+                    with self.assertRaises(HeavyAdmissionBusy): d.dispatch(sibling, {'dispatch_id': second_manual})
+                    self.assertEqual(sibling.events, [])
+                finally:
+                    release.set(); self.finish(entry)
+
+    def test_lost_post_blocks_new_manual_and_scheduled_without_resend(self):
+        identity = self.manual(); calls=[]
+        def request(method, key=None, *, manual_request_id=None):
+            calls.append((method,key,manual_request_id))
+            if method == 'POST': raise TimeoutError('lost response')
+            if key: return {'status':'unknown','accepted':None,'dispatch_id':key}
+            return {'status':'prepared','accepted':False,'dispatch_id':identity}
+        with patch.object(d, '_request', side_effect=request):
+            self.assertEqual(d.launch(self.root, manual_request_id=self.REQUEST)['status'], 'unknown')
+            before=(self.root/d.RECORD).read_bytes()
+            self.assertEqual(d.manual_status(self.root, self.REQUEST)['status'], 'unknown')
+            self.assertEqual(before,(self.root/d.RECORD).read_bytes())
+            self.assertEqual(d.launch(self.root, manual_request_id='another-explicit-request')['status'], 'blocked_by_previous_cycle')
+            self.assertEqual(d.launch(self.root)['status'], 'unknown')
+            self.assertEqual(d.launch(self.root, manual_request_id=self.REQUEST)['status'], 'unknown')
+        self.assertEqual(sum(c[0]=='POST' for c in calls),1)
+        script="""
+import os,json,sys
+from pathlib import Path
+from packages.application import business_data_cycle_dispatch as d
+r=Path(sys.argv[1]);d._identity=lambda r:'c'*40;d.selected=lambda r:True
+def req(method,identity=None,**kwargs):
+ assert method=='GET' and identity and not kwargs
+ return {'status':'unknown','accepted':None,'dispatch_id':identity}
+d._request=req
+print(json.dumps(d.launch(r,manual_request_id='26gn723-after-release')))
+"""
+        result=subprocess.run([sys.executable,'-c',script,str(self.root)],cwd=ROOT,
+            env=dict(os.environ),capture_output=True,text=True,check=True,timeout=10)
+        self.assertEqual(json.loads(result.stdout)['dispatch_id'],identity)
+        self.assertEqual(d._read_record(self.root)['phase'],'uncertain')
+
+    def test_simultaneous_duplicate_requests_start_one_worker(self):
+        entered,release=threading.Event(),threading.Event();start=threading.Barrier(3)
+        entry=self.entry(blocking=(entered,release));identity=self.manual();results=[]
+        def submit():
+            start.wait(3);results.append(d.dispatch(entry,{'dispatch_id':identity}))
+        clients=[threading.Thread(target=submit) for _ in range(2)]
+        try:
+            for client in clients:client.start()
+            start.wait(3)
+            for client in clients:client.join(3);self.assertFalse(client.is_alive())
+            self.assertTrue(entered.wait(3));self.assertEqual(len(results),2)
+            self.assertTrue(all(r['accepted'] for r in results))
+            self.assertEqual(len(entry.operator_jobs._threads),1)
+        finally:release.set();self.finish(entry)
+        self.assertEqual(entry.events.count('warehouse'),1)
+
+    def test_clock_or_sha_change_at_actual_admission_cannot_start_stale_manual(self):
+        for change in ('clock','sha','history'):
+            with self.subTest(change=change):
+                entry=self.entry();identity=self.manual();original=entry._start_sheet_cycle_job
+                def changed(**kwargs):
+                    if change=='clock':entry.now_factory=lambda:NOW+timedelta(hours=4)
+                    context=(patch.object(d,'_identity',return_value='e'*40) if change=='sha' else
+                             patch.object(d,'history_config',return_value=CycleHistoryConfig(self.root/'other',self.contract,'other'))
+                             if change=='history' else patch.object(entry,'now_factory',entry.now_factory))
+                    with context:return original(**kwargs)
+                entry._start_sheet_cycle_job=changed
+                self.assertFalse(d.dispatch(entry,{'dispatch_id':identity})['accepted'])
+                self.assertEqual(entry.events,[])
+                self.assertFalse((self.root/'sheet-vitrina-cycles').exists())
+
+    def test_accepted_lost_response_reads_same_receipt_and_does_not_recollect(self):
+        entry=self.entry(); calls=[]; transport=self.transport(entry,calls)
+        def request(method,key=None,**kwargs):
+            result=transport(method,key,**kwargs)
+            if method=='POST':raise TimeoutError('response lost after accept')
+            return result
+        with patch.object(d,'_request',side_effect=request):
+            self.assertEqual(d.launch(self.root,manual_request_id=self.REQUEST)['status'],'unknown')
+            self.finish(entry)
+            self.assertEqual(d.launch(self.root,manual_request_id=self.REQUEST)['status'],'complete')
+        self.assertEqual(entry.events.count('warehouse'),1)
+        self.assertEqual(sum(c[0]=='POST' for c in calls),1)
+
+    def test_manual_request_and_prepared_response_must_match_before_journal(self):
+        before=sorted(x.name for x in self.root.iterdir())
+        for invalid in ('../outside','UPPERCASE','short','x'*65,None):
+            with self.assertRaises(ValueError): d.prepare_manual(self.root,NOW,invalid)
+        self.assertEqual(before,sorted(x.name for x in self.root.iterdir()))
+        for wrong in (d.prepare(self.root,NOW)['dispatch_id'],self.manual('different-request')):
+            with patch.object(d,'_request',return_value={'status':'prepared','dispatch_id':wrong}) as request:
+                with self.assertRaisesRegex(RuntimeError,'requested operation'):
+                    d.launch(self.root,manual_request_id=self.REQUEST)
+                self.assertEqual(request.call_count,1)
+                self.assertFalse((self.root/d.RECORD).exists())
+
+    def test_manual_stale_identity_and_backup_priority_refuse_without_sources(self):
+        entry=self.entry();identity=self.manual()
+        entry.now_factory=lambda:NOW+timedelta(hours=4)
+        self.assertFalse(d.dispatch(entry,{'dispatch_id':identity})['accepted'])
+        self.assertEqual(d.readback_fenced(entry,identity)['status'],'expired_not_accepted')
+        entry.now_factory=lambda:NOW
+        with patch('packages.application.finance_backup_handoff.cycle_backup_priority',return_value={'priority':True}), \
+             patch('packages.application.finance_backup_handoff.handoff_cycle_backup',return_value={'status':'backup_priority','accepted':False}):
+            self.assertFalse(d.dispatch(entry,{'dispatch_id':identity})['accepted'])
+        self.assertEqual(entry.events,[])
+
+    def test_manual_preserves_master_readiness_and_maintenance(self):
+        from packages.application.business_data_write_barrier import acquire_barrier
+        from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+        identity=self.manual(); entry=self.entry()
+        with patch.object(p,'activation_readiness',return_value={'ready':False,'blockers':['disabled']}):
+            self.assertEqual(d.prepare_manual(self.root,NOW,self.REQUEST)['status'],'blocked')
+            self.assertFalse(d.dispatch(entry,{'dispatch_id':identity})['accepted'])
+        acquire_barrier(self.root,window_id='manual-test',window_kind='maintenance_pause',
+            plan_fingerprint='sha256:'+'a'*64,approval_reference='offline-test',actor='fixture',reason='test')
+        with self.assertRaises(MaintenanceAdmissionBlocked): d.dispatch(entry,{'dispatch_id':identity})
+        self.assertEqual(entry.events,[])
+
+    def test_status_cli_reads_during_maintenance_but_start_stays_guarded(self):
+        from apps import warehouse_functional_runner as runner
+        from packages.application.business_data_write_barrier import acquire_barrier
+        acquire_barrier(self.root,window_id='manual-test',window_kind='maintenance_pause',
+            plan_fingerprint='sha256:'+'a'*64,approval_reference='offline-test',actor='fixture',reason='test')
+        args=['--runtime-dir',str(self.root)]
+        with patch.object(d,'manual_status',return_value={'status':'failed','accepted':True}) as read, \
+             patch.object(d,'launch',side_effect=AssertionError('write during pause')),redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(runner.main(args+['full-cycle-status','--request-id',self.REQUEST]),0)
+            read.assert_called_once_with(self.root,self.REQUEST)
+            self.assertEqual(json.loads(output.getvalue())['status'],'failed')
+            output.seek(0);output.truncate(0)
+            self.assertEqual(runner.main(args+['full-cycle-start','--request-id',self.REQUEST]),0)
+            self.assertEqual(json.loads(output.getvalue())['status'],'skipped_maintenance')
+
+    def test_known_nonaccept_keeps_honest_status_without_resend(self):
+        identity=self.manual(); calls=[]
+        def request(method,key=None,**kwargs):
+            calls.append(method)
+            return ({'status':'not_accepted','accepted':False,'dispatch_id':identity} if method=='POST'
+                    else {'status':'prepared','accepted':False,'dispatch_id':identity})
+        with patch.object(d,'_request',side_effect=request):
+            for _ in range(2):self.assertEqual(d.launch(self.root,manual_request_id=self.REQUEST)['status'],'not_accepted')
+            self.assertEqual(d.manual_status(self.root,self.REQUEST)['status'],'not_accepted')
+        self.assertEqual(calls.count('POST'),1)
+
 
 class MaintenanceWakeupSmoke(unittest.TestCase):
     SLOT = datetime(2026, 9, 28, 22, tzinfo=timezone.utc)

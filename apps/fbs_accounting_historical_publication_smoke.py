@@ -91,7 +91,7 @@ class HistoricalPublication(unittest.TestCase):
         self.assertEqual(self.publish()["manifest_digest"],result["manifest_digest"])
 
     @contextmanager
-    def held_reader(self, path):
+    def held_reader(self, path, *, hold_seconds=10):
         with closing(sqlite3.connect(path)) as conn:
             self.assertEqual(conn.execute('PRAGMA journal_mode=DELETE').fetchone()[0], 'delete')
         acquired, release = threading.Event(), threading.Event()
@@ -103,7 +103,8 @@ class HistoricalPublication(unittest.TestCase):
                     conn.execute('BEGIN')
                     conn.execute('SELECT name FROM sqlite_master').fetchall()
                     acquired.set()
-                    release.wait(10)
+                    if not release.wait(hold_seconds):
+                        raise AssertionError('test reader expired before explicit release')
                     conn.rollback()
             except BaseException as exc:
                 errors.append(exc)

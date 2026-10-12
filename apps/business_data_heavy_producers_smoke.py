@@ -263,7 +263,8 @@ class HeavyProducersTests(unittest.TestCase):
             self.assertEqual(effects, []); self.assert_idle()
 
     def test_cli_guards_precede_constructors_and_readback_stays_available(self):
-        commands = set(cli.build_parser()._subparsers._group_actions[0].choices) - {'readback'}
+        commands = set(cli.build_parser()._subparsers._group_actions[0].choices) - {
+            'readback', 'full-cycle-start', 'full-cycle-status'}
         with busy(self.root), patch.object(cli, '_run_admitted') as work:
             for command in commands:
                 args = SimpleNamespace(command=command, runtime_dir=str(self.root))
@@ -273,6 +274,25 @@ class HeavyProducersTests(unittest.TestCase):
             args.command = 'readback'; work.return_value = {'status': 'ready'}
             self.assertEqual(cli._run(args, sqlite_busy_timeout_ms=None), {'status': 'ready'})
             self.assertEqual(work.call_count, 1)
+        self.assert_idle()
+
+        # Full-cycle commands are transport clients: the server acquires the
+        # real cycle owner. Taking local heavy EX here would deadlock admission;
+        # status must remain available while another owner is running.
+        from packages.application import business_data_cycle_dispatch as dispatch
+        with busy(self.root), patch.object(cli, '_run_admitted') as work, \
+             patch.object(dispatch, 'launch', return_value={'status': 'busy', 'accepted': False}) as start, \
+             patch.object(dispatch, 'manual_status', return_value={'status': 'running', 'accepted': True}) as status:
+            common = ['--runtime-dir', str(self.root)]
+            args = cli.build_parser().parse_args(common + ['full-cycle-start', '--request-id', 'guard-manual-cycle'])
+            self.assertEqual(cli._run(args, sqlite_busy_timeout_ms=None), {'status': 'busy', 'accepted': False})
+            start.assert_called_once_with(self.root.resolve(), manual_request_id='guard-manual-cycle')
+            status.assert_not_called()
+            args = cli.build_parser().parse_args(common + ['full-cycle-status', '--request-id', 'guard-manual-cycle'])
+            self.assertEqual(cli._run(args, sqlite_busy_timeout_ms=None), {'status': 'running', 'accepted': True})
+            status.assert_called_once_with(self.root.resolve(), 'guard-manual-cycle')
+            self.assertEqual(start.call_count, 1)
+            work.assert_not_called()
         self.assert_idle()
 
     def test_raw_auto_schedule_resolver_cannot_consume_due_while_busy(self):

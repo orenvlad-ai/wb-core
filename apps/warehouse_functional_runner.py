@@ -157,6 +157,10 @@ def build_parser() -> argparse.ArgumentParser:
     backup = commands.add_parser("backup")
     backup.add_argument("--backup-dir", required=True)
     commands.add_parser("hourly-sync")
+    for command in ('full-cycle-start', 'full-cycle-status'):
+        manual_cycle = commands.add_parser(command)
+        manual_cycle.add_argument('--request-id', required=True,
+            help='Stable operation ID; reuse it for every retry/readback of this full cycle')
     manual_sync = commands.add_parser("manual-sync")
     manual_sync.add_argument("--backup-dir", required=True)
     sync_dry_run = commands.add_parser("sync-dry-run")
@@ -238,7 +242,11 @@ def _run(
 ) -> dict[str, Any]:
     if args.command == 'readback':
         return _run_admitted(args, sqlite_busy_timeout_ms=sqlite_busy_timeout_ms)
-    from packages.application.business_data_cycle_dispatch import legacy_refusal, launch
+    from packages.application.business_data_cycle_dispatch import legacy_refusal, launch, manual_status
+    if args.command in {'full-cycle-start', 'full-cycle-status'}:
+        runtime = Path(str(args.runtime_dir)).resolve()
+        return (manual_status(runtime, args.request_id) if args.command == 'full-cycle-status'
+                else launch(runtime, manual_request_id=args.request_id))
     managed = legacy_refusal(Path(str(args.runtime_dir)).resolve())
     if managed and args.command in WAREHOUSE_SYNC_COMMANDS:
         return launch(Path(str(args.runtime_dir)).resolve()) if args.command == 'hourly-sync' else managed
@@ -1223,9 +1231,9 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
 
 
-def main() -> int:
+def _report(args) -> int:
     try:
-        result = run(build_parser().parse_args())
+        result = run(args)
     except HeavyAdmissionBusy as exc:
         print(_json({'status': 'busy', 'reason': str(exc), 'retryable': True, 'effects_started': False}))
         return 0
@@ -1236,9 +1244,15 @@ def main() -> int:
     return 0
 
 
-from packages.application.business_data_procedure_admission import guard_cli
+def main(argv=None) -> int:
+    # Parsing creates no runtime. Only this bounded status path can read through
+    # maintenance; every start and existing writer keeps the original admission.
+    args = build_parser().parse_args(argv)
+    if args.command == 'full-cycle-status':
+        return _report(args)
+    from packages.application.business_data_procedure_admission import guarded_cli
+    return guarded_cli(lambda: _report(args), default_runtime='.runtime/registry_upload', argv=argv)
 
-main = guard_cli(default_runtime='.runtime/registry_upload')(main)
 
 
 if __name__ == "__main__":

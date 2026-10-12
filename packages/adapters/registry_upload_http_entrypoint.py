@@ -3411,6 +3411,8 @@ def _build_handler(
                         result = entrypoint.handle_business_data_cycle_dispatch_request()
                     elif set(query) == {'dispatch_id'} and len(query['dispatch_id']) == 1:
                         result = entrypoint.handle_business_data_cycle_readback_request(query['dispatch_id'][0])
+                    elif set(query) == {'manual_request_id'} and len(query['manual_request_id']) == 1:
+                        result = entrypoint.handle_business_data_cycle_dispatch_request(manual_request_id=query['manual_request_id'][0])
                     else:
                         raise ValueError('cycle dispatch query is forbidden')
                     _write_json_response(self, HTTPStatus.OK, result, extra_headers={"Cache-Control": "private, no-store"})

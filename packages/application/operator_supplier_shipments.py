@@ -5,7 +5,7 @@ This is an audit/read projection, never a second supplier or financial ledger.
 """
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 from decimal import Decimal
 import hashlib
 import fcntl
@@ -97,6 +97,21 @@ def readonly(db_path):
     conn.execute("PRAGMA query_only=ON")
     conn.execute("BEGIN")
     return conn
+
+
+@contextmanager
+def read_session(db_path, connection=None):
+    """Borrow an exact pinned RO reader without resetting or closing its view."""
+    if connection is None:
+        with closing(readonly(db_path)) as owned:
+            yield owned
+        return
+    main = next((row[2] for row in connection.execute('PRAGMA database_list') if row[1] == 'main'), '')
+    if (not main or Path(main).resolve() != Path(db_path).resolve()
+            or not connection.in_transaction
+            or connection.execute('PRAGMA query_only').fetchone()[0] != 1):
+        raise ValueError('borrowed operator reader requires the exact pinned query-only store')
+    yield connection
 
 
 def capture(conn, shipment_id):

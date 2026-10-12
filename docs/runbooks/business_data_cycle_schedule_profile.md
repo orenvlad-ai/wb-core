@@ -227,6 +227,61 @@ duration, mount pressure and backup conflict still require controlled measuremen
 
 ## First cutover and controlled pilot
 
+### Explicit manual full cycle after a release
+
+The selected profile also supports an explicit manual **full** cycle. Use the
+canonical deployed CLI after maintenance has been restored, with a stable ID
+for this one requested operation (8–64 lowercase letters/digits/`-`/`_`):
+
+```sh
+cd /opt/wb-core-runtime/app
+python3 apps/warehouse_functional_runner.py --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env full-cycle-start --request-id 26gn723-postrelease-20261011
+python3 apps/warehouse_functional_runner.py --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env full-cycle-status --request-id 26gn723-postrelease-20261011
+```
+
+This runs the existing closed sources → API → Finance → FBS → warehouse → daily
+projection → dated/current Ready → owned History chain with the same source and
+publication rules. It is not a warehouse-only retry. An already completed or
+failed scheduled slot, including a slot from the previous deployed SHA/formula,
+does not prevent a new manual operation. Manual receipts have `trigger_kind=manual`
+and their own request index; scheduled slot receipts/timers are not rewritten.
+
+The existing authenticated Settings/admin loopback endpoint accepts read-only
+`GET /v1/business-data-cycle/dispatch?manual_request_id=<ID>`. It returns a signed
+schema2 identity bound to that ID, deployed SHA, current server time slot and
+fixed History configuration. A repeated ID returns its original durable receipt
+and exact signed identity, even after failure, restart, rollover or later deploy.
+Clients cannot choose source dates, roots, formulas, or skip stages. The one POST
+still accepts only `dispatch_id`; admission rechecks its current authority under
+the existing real heavy lock and operator serialization.
+
+Use the CLI for submission: manual and timer launchers share the same private
+transport lock/journal. An active or uncertain predecessor blocks a different
+manual ID. Unknown response means same-ID status/readback, never another POST;
+the status command is read-only and remains available during maintenance. A
+positive `not_accepted` result remains such on repeated same-token calls; a new
+explicit attempt may use a new ID only after that outcome is known. Reusing an
+accepted ID never retries a failed/interrupted cycle. A new ID requests a new
+full collection and must not be used to work around an unknown outcome.
+
+Maintenance admission, enabled master/mandatory phases, backup priority, and
+single heavy ownership remain required. A manual request is independent of the
+missed-scheduled-slot catch-up deadline; it cannot bypass these writer guards.
+If manual work overlaps a timer firing, parallel collection is refused. Manual
+completion does not consume a future scheduled slot or enqueue an extra retry.
+An accepted response proves admission only: require terminal receipt, published
+Ready/CURRENT and the document's native History/Finance acknowledgement to claim
+the business result.
+
+The manual dispatch smoke covers duplicate requests, same-slot old-deploy failure,
+changed envelope authority, concurrent manual/timer requests, lost responses and
+fresh-process readback, maintenance/status, and backup refusal. The Linux owned
+integration exercises manual dispatch through the actual operator thread and
+History child to dated/current Ready and History acknowledgement, with disposable
+sources and fixed Finance/FBS/warehouse domain fixtures; it is not production proof.
+
+### Initial profile cutover
+
 After the current full backup has terminal proof, obtain one fresh held
 maintenance window with its immutable old baseline. Release the reviewed code
 union while the selector is absent, then prove the exact installed SHA/completed
