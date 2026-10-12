@@ -121,12 +121,27 @@ class HistoricalPublication(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             if errors: raise errors[0]
 
+    @contextmanager
+    def held_commit_reader(self, conn, path):
+        cache_size = conn.execute('PRAGMA cache_size').fetchone()[0]
+        cache_spill = conn.execute('PRAGMA cache_spill').fetchone()[0]
+        # A small cache may otherwise request EXCLUSIVE during the INSERT,
+        # before this fixture's COMMIT-triggered release can ever run.
+        conn.execute('PRAGMA cache_size=8')
+        conn.execute('PRAGMA cache_spill=OFF')
+        try:
+            with self.held_reader(path) as release:
+                yield release
+        finally:
+            conn.execute(f'PRAGMA cache_size={cache_size}')
+            conn.execute(f'PRAGMA cache_spill={cache_spill}')
+
     def test_delete_reader_waits_same_intent_book_and_ready_commit_without_duplicates(self):
         original = historical_sqlite.transaction
         boundaries = []
         @contextmanager
         def observed(conn, *, db_path, phase_name):
-            with self.held_reader(db_path) as release:
+            with self.held_commit_reader(conn, db_path) as release:
                 timer = threading.Timer(.15,release.set)
                 commits = []
                 def trace(statement):
@@ -158,7 +173,7 @@ class HistoricalPublication(unittest.TestCase):
             if phase_name != 'ready_activation':
                 with original(conn,db_path=db_path,phase_name=phase_name): yield conn
                 return
-            with self.held_reader(db_path):
+            with self.held_commit_reader(conn, db_path):
                 with original(conn,db_path=db_path,phase_name=phase_name): yield conn
         with patch.object(historical_sqlite,'BUSY_TIMEOUT_SECONDS',.03), patch.object(historical_sqlite,'transaction',observed):
             with self.assertLogs(historical_sqlite.__name__,level='ERROR') as logs:
@@ -173,6 +188,36 @@ class HistoricalPublication(unittest.TestCase):
         result=self.publish()
         self.assertEqual(result['status'],'published')
         self.assertEqual(self.publish()['manifest_digest'],result['manifest_digest'])
+
+    def test_delete_cache_spill_waits_in_same_insert_before_commit(self):
+        with historical_sqlite.connection(self.db,phase_name='spill_fixture') as conn:
+            conn.execute('CREATE TABLE spill_wait (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)')
+            conn.commit()
+            conn.execute('PRAGMA cache_size=8')
+            conn.execute('PRAGMA cache_spill=ON')
+            self.assertGreater(conn.execute('PRAGMA cache_spill').fetchone()[0],0)
+            with self.held_reader(self.db) as release:
+                timer=threading.Timer(.15,release.set)
+                inserts,commits=[],[]
+                def trace(statement):
+                    sql=statement.strip().upper()
+                    if sql.startswith('INSERT INTO SPILL_WAIT'):
+                        inserts.append(time.monotonic())
+                        if len(inserts)==1: timer.start()
+                    elif sql=='COMMIT':
+                        commits.append(time.monotonic())
+                conn.set_trace_callback(trace)
+                try:
+                    with historical_sqlite.transaction(conn,db_path=self.db,phase_name='spill_body'):
+                        conn.execute('INSERT INTO spill_wait VALUES(1,?)',(b'x'*(1024*1024),))
+                        self.assertEqual(len(inserts),1)
+                        self.assertGreaterEqual(time.monotonic()-inserts[0],.1)
+                        self.assertEqual(commits,[])
+                        self.assertTrue(release.is_set())
+                    self.assertEqual(len(commits),1)
+                finally:
+                    conn.set_trace_callback(None);timer.cancel()
+            self.assertEqual(conn.execute('SELECT id,length(payload) FROM spill_wait').fetchall(),[(1,1024*1024)])
 
     def test_delete_schema_context_commit_waits_for_reader(self):
         with self.held_reader(self.db) as release:
