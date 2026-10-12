@@ -7,7 +7,7 @@ quantity/capital operand already comes from its archived official generations,
 posted native receipt, six saved stage payloads and accepted book. No Linux FD
 capability is mocked and no completed operator/service recovery is claimed.
 """
-from contextlib import closing
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import json
 import sqlite3
 import sys
+import threading
 import time
 import unittest
 import zlib
@@ -305,27 +306,62 @@ class HistoricalHistory(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform=='linux','genuine inherited FD authority requires Linux')
     def test_genuine_owned_history_then_native_service_retention_completes(self):
+        self._owned_history_then_native_service_retention(end='2026-10-08')
+
+    @unittest.skipUnless(sys.platform=='linux','genuine inherited FD authority requires Linux')
+    def test_delete_readers_wait_for_genuine_history_ack_and_completion_commit(self):
+        self._owned_history_then_native_service_retention(end='2026-09-10',with_delete_readers=True)
+
+    def _owned_history_then_native_service_retention(self,*,end,with_delete_readers=False):
         from apps.owned_history_worker_smoke import ownership
+        from unittest.mock import patch
         from packages.application.business_data_heavy_admission import heavy_admitted
         from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
         from packages.application.fbs_accounting_historical_cycle import finalize
+        from packages.application import fbs_accounting_historical_sqlite as historical_sqlite
         from packages.application.operator_warehouse_documents import read_acceptance
+        from packages.business_time import default_business_as_of_date
         import hashlib
-        fixture,runtime=self.service_fixture(end='2026-10-08')
+        fixture,runtime=self.service_fixture(end=end)
         receipt=history.HistoricalReceipt(runtime,'local-late-publication','1');root=self.root/'owned-real'
+        original_transaction=historical_sqlite.transaction
+        waited=[]
+        @contextmanager
+        def observed_transaction(conn,*,db_path,phase_name):
+            if not with_delete_readers or phase_name not in {'history_ack','completion_receipt'}:
+                with original_transaction(conn,db_path=db_path,phase_name=phase_name):yield conn
+                return
+            # The reader remains live until COMMIT starts, so slow proof work
+            # cannot release it early and accidentally turn this into a no-op.
+            with fixture.held_reader(db_path) as release:
+                commit_started=[]
+                timer=threading.Timer(.15,release.set)
+                def trace(statement):
+                    if statement.strip().upper()=='COMMIT':
+                        commit_started.append(time.monotonic());timer.start()
+                conn.set_trace_callback(trace)
+                try:
+                    with original_transaction(conn,db_path=db_path,phase_name=phase_name):yield conn
+                    self.assertEqual(len(commit_started),1)
+                    self.assertGreaterEqual(time.monotonic()-commit_started[0],.1)
+                    waited.append(phase_name)
+                finally:
+                    conn.set_trace_callback(None);timer.cancel()
         with closing(sqlite3.connect(fixture.db)) as keeper:
-            keeper.execute('PRAGMA journal_mode=WAL');ready.ensure_publication_schema(keeper);keeper.commit();keeper.execute('SELECT 1 FROM sqlite_master').fetchone()
+            self.assertEqual(keeper.execute('PRAGMA journal_mode='+('DELETE' if with_delete_readers else 'WAL')).fetchone()[0],
+                             'delete' if with_delete_readers else 'wal')
+            ready.ensure_publication_schema(keeper);keeper.commit();keeper.execute('SELECT 1 FROM sqlite_master').fetchone()
             # The production mount admission is the standard LOCAL test seam;
             # kernel inherited descriptors, owner/capability, actual fixed
             # child, source proof and acknowledgment are never mocked.
-            with heavy_admitted(runtime.runtime_dir,operation='cycle'):
+            with patch.object(historical_sqlite,'transaction',observed_transaction),heavy_admitted(runtime.runtime_dir,operation='cycle'):
                 with ownership(runtime,root,seconds=120) as worker:
                     contract=json.loads(worker.config.runtime_contract.read_text())
                     repo=Path(__file__).resolve().parents[1]
                     contract['formula_code_hashes']={p:hashlib.sha256((repo/p).read_bytes()).hexdigest() for p in contract['formula_code_hashes']}
                     contract['formula_epoch']='wbc0069k16-reviewed-native-v1:'+hashlib.sha256(json.dumps(contract['formula_code_hashes'],sort_keys=True,separators=(',',':')).encode()).hexdigest()
                     worker.config.formula_epoch=contract['formula_epoch'];worker.config.runtime_contract.write_text(json.dumps(contract))
-                    result=worker.complete(fixture.now,backfill_dates=tuple(d for d in receipt.dates if d<'2026-10-07'),historical_receipt=receipt,total_seconds=240)
+                    result=worker.complete(fixture.now,backfill_dates=tuple(d for d in receipt.dates if d<default_business_as_of_date(fixture.now)),historical_receipt=receipt,total_seconds=240)
                     self.assertTrue(result['historical_ack']);config=worker.config
                 # Context exit reaps the actual child and releases History
                 # locks; reacquire a genuine warehouse owner before finalize.
@@ -335,8 +371,9 @@ class HistoricalHistory(unittest.TestCase):
             self.assertEqual(accepted['state'],'completed')
             self.assertEqual(accepted['processing_receipt']['native_recovery']['lifecycle_state'],'retained')
             self.assertTrue(accepted['processing_receipt']['publication_verified'])
-            self.assertEqual(len(accepted['processing_receipt']['historical_publication']['history_ack']['native']),30)
+            self.assertEqual(len(accepted['processing_receipt']['historical_publication']['history_ack']['native']),len(receipt.dates))
             self.assertIsNone(history.pending_receipt(runtime))
+            self.assertEqual(waited,['history_ack','completion_receipt'] if with_delete_readers else [])
 
 
 if __name__=='__main__':unittest.main()

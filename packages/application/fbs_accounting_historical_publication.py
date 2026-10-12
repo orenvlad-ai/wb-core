@@ -6,7 +6,6 @@ An actual ready target owns the recovery intent; staging intents never enter
 this path. The runner must hold its real live warehouse job owner.
 """
 from __future__ import annotations
-from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
@@ -17,6 +16,7 @@ from pathlib import Path
 import sqlite3
 import time
 
+from packages.application import fbs_accounting_historical_sqlite as historical_sqlite
 from packages.application import fbs_accounting_runtime as accounting
 from packages.application import ready_publication as ready
 from packages.application import fbs_accounting_historical_revision_writer as staging
@@ -462,8 +462,8 @@ def _independent_rebuild(manifest,runtime_dir,*,recovering=False):
 
 
 def _append_and_activate(runtime_dir,manifest):
-    with closing(sqlite3.connect(accounting.path(runtime_dir).as_uri()+"?mode=rw",uri=True,timeout=0)) as conn,conn:
-        conn.execute("BEGIN IMMEDIATE");accounting.admit(conn)
+    with historical_sqlite.connection(accounting.path(runtime_dir),phase_name="book_connection") as conn, historical_sqlite.transaction(conn,db_path=accounting.path(runtime_dir),phase_name="book_activation"):
+        accounting.admit(conn)
         current=conn.execute("SELECT version FROM accounting_current WHERE singleton=1").fetchone()[0]
         prior=conn.execute("SELECT version,payload,previous_version FROM accounting_revisions WHERE operation_id=?",(manifest["book_operation_id"],)).fetchone()
         stages.require(current in {manifest["expected_book"],manifest["after_book"]},"historical_book_current_cas_failed")
@@ -492,21 +492,28 @@ def publish(manifest, *, runtime_dir, fault_injector=None):
     recovering=bool(status and status['state']!='complete' and current_book in {manifest['expected_book'],manifest['after_book']})
     if not status or status["state"]!="complete":_independent_rebuild(manifest,runtime_dir,recovering=recovering)
     with warehouse_functional_write_lock(Path(runtime_dir),timeout_seconds=5),accounting.writer_lock(runtime_dir):
-        with closing(sqlite3.connect(db.as_uri()+"?mode=rw",uri=True,timeout=0)) as conn:
+        with historical_sqlite.connection(db,phase_name="publication_connection") as conn:
             conn.row_factory=sqlite3.Row
+            # This additive bootstrap may use executescript (implicit COMMIT).
+            # Complete it before the intent/Ready transactions, including when
+            # Ready was created after the warehouse projection schema.
+            from packages.application.warehouse_business_projection import ensure_warehouse_business_projection_schema
+            with historical_sqlite.phase(db,"publication_schema"):
+                ensure_warehouse_business_projection_schema(conn)
+                conn.commit()
             existing=conn.execute("SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?",(manifest["operation_id"],manifest["attempt_id"])).fetchone()
             if existing:
                 stored=json.loads(existing["inputs_json"])
                 stages.require(stored["manifest_digest"]==manifest["manifest_digest"],"historical_publication_retry_identity_conflict")
                 if existing["state"]=="complete":return publication_receipt(manifest,runtime_dir=runtime_dir)
-            with conn:
-                conn.execute("BEGIN IMMEDIATE");_fence(conn,manifest,runtime_dir,recovering=recovering)
+            with historical_sqlite.transaction(conn,db_path=db,phase_name="publication_intent"):
+                _fence(conn,manifest,runtime_dir,recovering=recovering)
                 if not existing:
                     ready.record_intent(conn,operation_id=manifest["operation_id"],attempt_id=manifest["attempt_id"],kind=CONTRACT,
                         expected=ready.ExpectedReady(**manifest["targets"][-1]["expected"]),inputs=stored_manifest,expected_book=manifest["expected_book"],book_required=True,ready_required=True,created_at=manifest["created_at"],book_operation_id=manifest["book_operation_id"])
             inject("after_intent")
-            with conn:
-                conn.execute("BEGIN IMMEDIATE");_fence(conn,manifest,runtime_dir,recovering=recovering)
+            with historical_sqlite.transaction(conn,db_path=db,phase_name="ready_activation"):
+                _fence(conn,manifest,runtime_dir,recovering=recovering)
                 _append_and_activate(runtime_dir,manifest);inject("after_book")
                 stages.publish_dated_stages(conn,manifest=manifest["candidate"]);inject("after_stages")
                 for target in manifest["targets"]:

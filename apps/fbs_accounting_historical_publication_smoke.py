@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Local real special book/ready publication, exact retry and crash recovery."""
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
 import sqlite3
 import sys
+import threading
+import time
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from apps.fbs_accounting_historical_stages_smoke import native_stages_fixture
 from packages.application import fbs_accounting_historical_publication as publication
+from packages.application import fbs_accounting_historical_sqlite as historical_sqlite
+from packages.application.sqlite_contention import SQLiteContentionExhausted
 from packages.application import fbs_accounting_historical_revision_writer as staging
 from packages.application import fbs_accounting_runtime as accounting
 from packages.application import ready_publication as ready
@@ -85,6 +89,124 @@ class HistoricalPublication(unittest.TestCase):
         self.assertEqual(revised['presentations']['2026-09-08']['rows']['2']['stages']['WB']['quantity'],'0')
         self.assertIsNone(self.book['retained_days']['2026-09-08']['rows']['2']['stages']['WB']['quantity'])
         self.assertEqual(self.publish()["manifest_digest"],result["manifest_digest"])
+
+    @contextmanager
+    def held_reader(self, path):
+        with closing(sqlite3.connect(path)) as conn:
+            self.assertEqual(conn.execute('PRAGMA journal_mode=DELETE').fetchone()[0], 'delete')
+        acquired, release = threading.Event(), threading.Event()
+        errors = []
+        def hold():
+            try:
+                with closing(sqlite3.connect(Path(path).as_uri()+'?mode=ro',uri=True)) as conn:
+                    conn.execute('PRAGMA query_only=ON')
+                    conn.execute('BEGIN')
+                    conn.execute('SELECT name FROM sqlite_master').fetchall()
+                    acquired.set()
+                    release.wait(10)
+                    conn.rollback()
+            except BaseException as exc:
+                errors.append(exc)
+                acquired.set()
+        thread = threading.Thread(target=hold)
+        thread.start()
+        try:
+            self.assertTrue(acquired.wait(5))
+            if errors: raise errors[0]
+            yield release
+        finally:
+            release.set()
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+            if errors: raise errors[0]
+
+    def test_delete_reader_waits_same_intent_book_and_ready_commit_without_duplicates(self):
+        original = historical_sqlite.transaction
+        boundaries = []
+        @contextmanager
+        def observed(conn, *, db_path, phase_name):
+            with self.held_reader(db_path) as release:
+                timer = threading.Timer(.15,release.set)
+                commits = []
+                def trace(statement):
+                    if statement.strip().upper() == 'COMMIT':
+                        commits.append(time.monotonic());timer.start()
+                conn.set_trace_callback(trace)
+                try:
+                    with original(conn,db_path=db_path,phase_name=phase_name):
+                        yield conn
+                    self.assertEqual(len(commits),1)
+                    self.assertGreaterEqual(time.monotonic()-commits[0],.1)
+                    boundaries.append(phase_name)
+                finally:
+                    conn.set_trace_callback(None);timer.cancel()
+        with patch.object(historical_sqlite,'transaction',observed):
+            result = self.publish()
+        self.assertEqual(set(boundaries),{'publication_intent','book_activation','ready_activation'})
+        self.assertEqual(self.publish()['manifest_digest'],result['manifest_digest'])
+        with closing(sqlite3.connect(accounting.path(self.runtime))) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM accounting_revisions WHERE operation_id=?',
+                (self.manifest['book_operation_id'],)).fetchone()[0],1)
+        with ready.readonly(self.db) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM sheet_vitrina_v1_ready_publications').fetchone()[0],1)
+
+    def test_delete_exhaustion_after_book_retains_intent_and_exact_recovery(self):
+        original = historical_sqlite.transaction
+        @contextmanager
+        def observed(conn, *, db_path, phase_name):
+            if phase_name != 'ready_activation':
+                with original(conn,db_path=db_path,phase_name=phase_name): yield conn
+                return
+            with self.held_reader(db_path):
+                with original(conn,db_path=db_path,phase_name=phase_name): yield conn
+        with patch.object(historical_sqlite,'BUSY_TIMEOUT_SECONDS',.03), patch.object(historical_sqlite,'transaction',observed):
+            with self.assertLogs(historical_sqlite.__name__,level='ERROR') as logs:
+                with self.assertRaises(SQLiteContentionExhausted) as error:
+                    self.publish()
+        self.assertEqual(error.exception.phase,'ready_activation')
+        self.assertIn('SQLITE_BUSY',' '.join(logs.output))
+        self.assertIn('\"statement_kind\": \"commit\"',' '.join(logs.output))
+        self.assertEqual(accounting.load(self.runtime)[1],self.manifest['after_book'])
+        self.assertNotEqual(ready.publication_status(self.db,operation_id=self.manifest['operation_id'],
+            attempt_id=self.manifest['attempt_id'])['state'],'complete')
+        result=self.publish()
+        self.assertEqual(result['status'],'published')
+        self.assertEqual(self.publish()['manifest_digest'],result['manifest_digest'])
+
+    def test_delete_schema_context_commit_waits_for_reader(self):
+        with self.held_reader(self.db) as release:
+            timer=threading.Timer(.15,release.set);timer.start()
+            try:
+                with historical_sqlite.connection(self.db,phase_name='schema_bootstrap') as conn:
+                    from packages.application.sheet_vitrina_v1_inventory_history import ensure_inventory_history_schema
+                    ensure_inventory_history_schema(conn)
+                    ready.ensure_publication_schema(conn);conn.commit()
+                    staging.ensure_staging_schema(conn)
+                    self.assertFalse(conn.in_transaction)
+            finally: timer.cancel()
+
+    def test_stage_failure_rolls_back_projection_and_preserves_exact_intent(self):
+        def crash(boundary):
+            if boundary == 'after_stages': raise RuntimeError('local crash after stages')
+        with self.assertRaisesRegex(RuntimeError,'local crash after stages'):
+            self.publish(fault_injector=crash)
+        with ready.readonly(self.db) as conn:
+            for edition in self.manifest['candidate']['editions'].values():
+                self.assertIsNone(conn.execute('SELECT 1 FROM '+publication.stages.P+'functional_versions WHERE version_id=?',
+                    (edition['version_id'],)).fetchone())
+        self.assertEqual(accounting.load(self.runtime)[1],self.manifest['after_book'])
+        self.assertEqual(self.publish()['status'],'published')
+
+    def test_constraint_failure_is_not_retried_and_rolls_back(self):
+        with historical_sqlite.connection(self.db,phase_name='test_connection') as conn:
+            with self.assertLogs(historical_sqlite.__name__,level='ERROR'):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    with historical_sqlite.transaction(conn,db_path=self.db,phase_name='constraint_test'):
+                        conn.execute('CREATE TABLE constraint_test (id INTEGER PRIMARY KEY)')
+                        conn.execute('INSERT INTO constraint_test VALUES(1)')
+                        conn.execute('INSERT INTO constraint_test VALUES(1)')
+            self.assertFalse(conn.in_transaction)
+            self.assertIsNone(conn.execute("SELECT 1 FROM sqlite_master WHERE name='constraint_test'").fetchone())
 
     def test_live_owner_required(self):
         with self.assertRaises(Exception):publication.publish(self.manifest,runtime_dir=self.runtime)

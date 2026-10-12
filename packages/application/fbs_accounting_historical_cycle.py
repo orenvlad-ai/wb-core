@@ -6,14 +6,13 @@ History runs only after the warehouse owner exits. Finalization reacquires the
 real domain owner and retains the posting/readback rules of the native service.
 """
 from __future__ import annotations
-from contextlib import closing
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import sqlite3
 from contextvars import ContextVar
 _FINALIZING = ContextVar("historical_receipt_finalizing",default=None)
 
+from packages.application import fbs_accounting_historical_sqlite as historical_sqlite
 from packages.application import fbs_accounting_runtime as accounting
 from packages.application import ready_publication as ready
 from packages.application import fbs_accounting_historical_publication as publication
@@ -77,7 +76,7 @@ def refresh(runtime, *, now=None):
         current_envelope=(envelope,expected)
     operation_id='historical-receipt:'+fingerprint([version,plan['plan_fingerprint']])[7:]
     with warehouse_functional_write_lock(runtime.runtime_dir,timeout_seconds=2):
-        with closing(sqlite3.connect(Path(runtime.db_path).as_uri()+'?mode=rw',uri=True,timeout=0)) as schema_conn:
+        with historical_sqlite.connection(runtime.db_path,phase_name="schema_bootstrap") as schema_conn:
             from packages.application.sheet_vitrina_v1_inventory_history import ensure_inventory_history_schema
             ensure_inventory_history_schema(schema_conn)
             ready.ensure_publication_schema(schema_conn);schema_conn.commit()
@@ -145,8 +144,7 @@ def finalize(runtime, *, config, now=None):
     with ready.readonly(runtime.db_path) as conn:
         require(all(conn.execute(f'SELECT state FROM {TABLE} WHERE request_id=?',(identity,)).fetchone()[0]=='completed' for identity in identities),'historical_completion_native_posted_readback_pending')
     with warehouse_functional_write_lock(runtime.runtime_dir,timeout_seconds=2):
-        with closing(sqlite3.connect(Path(runtime.db_path).as_uri()+'?mode=rw',uri=True,timeout=0)) as conn,conn:
-            conn.execute('BEGIN IMMEDIATE')
+        with historical_sqlite.connection(runtime.db_path,phase_name="completion_connection") as conn, historical_sqlite.transaction(conn,db_path=runtime.db_path,phase_name="completion_receipt"):
             row=conn.execute('SELECT diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(receipt.operation_id,receipt.attempt_id)).fetchone()
             actual=json.loads(row[0]);require(actual.get('historical_history_ack')==ack,'historical_completion_ack_changed')
             actual.update(historical_operator_complete=True,historical_finance=finance,historical_completed_requests=identities)

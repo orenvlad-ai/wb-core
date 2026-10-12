@@ -5,14 +5,13 @@ existing authenticated History supervisor owns compilation and the one-use
 acknowledgment. Durable evidence lives with the actual publication intent.
 """
 from __future__ import annotations
-from contextlib import closing
 from copy import deepcopy
 from datetime import datetime
 import json
 from pathlib import Path
-import sqlite3
 import time
 
+from packages.application import fbs_accounting_historical_sqlite as historical_sqlite
 from packages.application import ready_publication as ready
 from packages.application import fbs_accounting_runtime as accounting
 from packages.application.fbs_snapshot_cost import canonical, fingerprint
@@ -185,8 +184,7 @@ class HistoricalReceipt:
         native=consume_historical_history_ack(proof,self.runtime.runtime_dir,self.manifest['manifest_digest'],self.dates)
         # The live supervisor still owns every history descriptor. A short CAS
         # appends evidence to this real publication, never changes its inputs.
-        with closing(sqlite3.connect(Path(self.runtime.db_path).as_uri()+'?mode=rw',uri=True,timeout=0)) as conn,conn:
-            conn.execute('BEGIN IMMEDIATE')
+        with historical_sqlite.connection(self.runtime.db_path,phase_name='history_ack_connection') as conn, historical_sqlite.transaction(conn,db_path=self.runtime.db_path,phase_name='history_ack'):
             row=conn.execute('SELECT inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND state=\'complete\'',(self.operation_id,self.attempt_id)).fetchone()
             require(row and expand_manifest(json.loads(row[0]))==self.manifest,'historical_history_receipt_changed')
             diagnostics=json.loads(row[1]);diagnostics['historical_history_ack']=dict(manifest_digest=self.manifest['manifest_digest'],native={d:dict(v) for d,v in native.items()})
