@@ -433,6 +433,7 @@ class RegistryUploadDbBackedRuntime:
         expected,
         build_inputs=None,
         _prepared_book=None,
+        _retained_closed_replay=False,
     ) -> SheetVitrinaV1RefreshResult:
         _validate_timestamp(refreshed_at, field_name="refreshed_at")
         from packages.application.web_vitrina_official_fbs import (
@@ -468,6 +469,13 @@ class RegistryUploadDbBackedRuntime:
         # ready-only writes remain valid, but cannot carry a new current book.
         if _prepared_book is not None and publication_date not in plan.date_columns:
             raise ReadyPublicationConflict("ready_current_book_target_missing_date")
+        if _retained_closed_replay:
+            if not build_inputs or build_inputs != plan.metadata.get('publication_inputs'):
+                raise ReadyPublicationConflict('closed_retained_build_inputs_required')
+            if _prepared_book is not None:
+                raise ReadyPublicationConflict('closed_retained_book_write_forbidden')
+            from packages.application.sheet_vitrina_v1_closed_ready_repair import validate_retained_candidate
+            validate_retained_candidate(plan, expected, business_date=publication_date, runtime=self)
         book, expected_book = load(self.runtime_dir) if _prepared_book is None else _prepared_book
         active_inventory = inventory_from_book(book, now=publication_now, runtime_dir=self.runtime_dir) if book and book["active"] else None
         if active_inventory is not None and publication_date in plan.date_columns and active_inventory.payload()["quality"] == "unavailable":
@@ -483,42 +491,44 @@ class RegistryUploadDbBackedRuntime:
             if _prepared_book is not None:
                 check_pinned_authority(conn, book["publication_authority"])
                 check_material(conn, book["publication_inputs"])
-            estimate = {"available": False} if active_inventory is not None else build_current_official_fbs_estimate(
-                self.db_path, nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
-                now=publication_now, connection=conn,
-            )
-            plan = materialize_current_official_fbs_estimate(
-                plan,
-                estimate=estimate,
-                previous_presentation=load_materialized_official_fbs_presentation(
+            if not _retained_closed_replay:
+                estimate = {"available": False} if active_inventory is not None else build_current_official_fbs_estimate(
+                    self.db_path, nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
+                    now=publication_now, connection=conn,
+                )
+                plan = materialize_current_official_fbs_estimate(
+                    plan,
+                    estimate=estimate,
+                    previous_presentation=load_materialized_official_fbs_presentation(
+                        conn, bundle_version=current_state.bundle_version, dates=plan.date_columns,
+                    ),
+                )
+                plan = carry_forward(plan, presentation=load_presentations(
                     conn, bundle_version=current_state.bundle_version, dates=plan.date_columns,
-                ),
-            )
-            plan = carry_forward(plan, presentation=load_presentations(
-                conn, bundle_version=current_state.bundle_version, dates=plan.date_columns,
-            ), business_date=publication_date)
-            plan = materialize(plan, runtime_dir=self.runtime_dir, now=publication_now,
-                               book=book, book_version=(fingerprint(book) if _prepared_book else expected_book),
-                               ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
-            plan = recalculate_current_envelope(plan, business_date=publication_date,
-                parameters=dated_parameters(conn, publication_date) if estimate.get('available') or active_inventory is not None else None)
-            plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
-                parameters=dated_parameters(conn, yesterday_date(publication_date)))
+                ), business_date=publication_date)
+                plan = materialize(plan, runtime_dir=self.runtime_dir, now=publication_now,
+                                   book=book, book_version=(fingerprint(book) if _prepared_book else expected_book),
+                                   ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
+                plan = recalculate_current_envelope(plan, business_date=publication_date,
+                    parameters=dated_parameters(conn, publication_date) if estimate.get('available') or active_inventory is not None else None)
+                plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
+                    parameters=dated_parameters(conn, yesterday_date(publication_date)))
             _assert_finance_daily_recovery_values_preserved(
                 conn,
                 bundle_version=current_state.bundle_version,
                 as_of_date=plan.as_of_date,
                 plan=plan,
             )
-            from packages.application.warehouse_business_projection import reconcile_warehouse_business_projection
-            reconciliation = reconcile_warehouse_business_projection(conn, ready_candidate={
-                "bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date,
-                "plan_json": _serialize_sheet_vitrina_plan(plan)})
-            from packages.application.sheet_vitrina_v1_inventory_history import prepare_inventory_history_from_ready_plan
-            inventory_history = prepare_inventory_history_from_ready_plan(conn, plan=plan,
-                bundle_version=current_state.bundle_version, refreshed_at=refreshed_at,
-                generation_identity=current_state.bundle_version, runtime_dir=self.runtime_dir, prepared_book=book,
-                ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
+            if not _retained_closed_replay:
+                from packages.application.warehouse_business_projection import reconcile_warehouse_business_projection
+                reconciliation = reconcile_warehouse_business_projection(conn, ready_candidate={
+                    "bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date,
+                    "plan_json": _serialize_sheet_vitrina_plan(plan)})
+                from packages.application.sheet_vitrina_v1_inventory_history import prepare_inventory_history_from_ready_plan
+                inventory_history = prepare_inventory_history_from_ready_plan(conn, plan=plan,
+                    bundle_version=current_state.bundle_version, refreshed_at=refreshed_at,
+                    generation_identity=current_state.bundle_version, runtime_dir=self.runtime_dir, prepared_book=book,
+                    ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
         plan = replace(plan, metadata={**dict(plan.metadata or {}), "ready_publication_target": {
             "bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date}})
         serialized_plan = _serialize_sheet_vitrina_plan(plan)
@@ -560,22 +570,23 @@ class RegistryUploadDbBackedRuntime:
             replace_ready(conn, expected=expected, activated_at=current_state.activated_at,
                 snapshot_id=plan.snapshot_id, plan_version=plan.plan_version, refreshed_at=refreshed_at,
                 plan_json=serialized_plan)
-            capture_inventory_history_from_ready_plan(
-                conn,
-                plan=plan,
-                bundle_version=current_state.bundle_version,
-                refreshed_at=refreshed_at,
-                generation_identity=current_state.bundle_version,
-                prepared=inventory_history,
-            )
-            # The ready-snapshot writer owns exact warehouse-history bindings.
-            # Persist the already prepared reconciliation; no exhaustive history
-            # scan or domain rebuild is allowed under this writer.
-            materialize_warehouse_business_projection_reconciliation(
-                conn,
-                materialized_at=refreshed_at,
-                prepared_result=reconciliation,
-            )
+            if not _retained_closed_replay:
+                capture_inventory_history_from_ready_plan(
+                    conn,
+                    plan=plan,
+                    bundle_version=current_state.bundle_version,
+                    refreshed_at=refreshed_at,
+                    generation_identity=current_state.bundle_version,
+                    prepared=inventory_history,
+                )
+                # The ready-snapshot writer owns exact warehouse-history bindings.
+                # Persist the already prepared reconciliation; no exhaustive history
+                # scan or domain rebuild is allowed under this writer.
+                materialize_warehouse_business_projection_reconciliation(
+                    conn,
+                    materialized_at=refreshed_at,
+                    prepared_result=reconciliation,
+                )
             complete_publication(conn, operation_id=operation_id, attempt_id=attempt_id,
                 book_version=book_version, after_digest=digest(serialized_plan), finished_at=refreshed_at)
             check_pinned_authority(conn, expected.authority)

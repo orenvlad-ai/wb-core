@@ -32,6 +32,193 @@ class ExternalTests(unittest.TestCase):
     def read(self,op,allowed={'wb_prices'},**kw):
         return journal.read_acceptance(self.db,op.operation_id,allowed_domains=allowed,external_scope=self.scope,**kw)
 
+    def test_delete_journal_pending_writer_does_not_deadlock_nested_receipt_reads(self):
+        import threading,time
+        from unittest.mock import patch
+        from packages.application.operator_external_operations import read_native
+        from packages.application.sqlite_contention import connect_sqlite
+        op=self.price()
+        with closing(sqlite3.connect(self.db)) as setup, setup:
+            self.assertEqual(setup.execute('PRAGMA journal_mode=DELETE').fetchone()[0],'delete')
+            setup.execute('CREATE TABLE journal_writer_probe(id INTEGER PRIMARY KEY,value INTEGER NOT NULL)')
+            setup.execute('INSERT INTO journal_writer_probe VALUES(1,0)')
+        original=ChangeRegistryRepository.read_operation
+        readers=(
+            lambda:journal.journal(self.db,allowed_domains={'wb_prices'},external_scope=self.scope)['items'][0],
+            lambda:self.read(op),
+            lambda:read_native(self.db,domain='wb_prices',native_id='one',allowed_domains={'wb_prices'},scope=self.scope),
+        )
+        for index,reader in enumerate(readers,start=1):
+            with self.subTest(reader=index):
+                started=threading.Event();outcomes=[];threads=[]
+                def write():
+                    conn=connect_sqlite(self.db,timeout_ms=1500)
+                    try:
+                        conn.execute('UPDATE journal_writer_probe SET value=value+1 WHERE id=1')
+                        started.set()
+                        conn.commit();outcomes.append('committed')
+                    except BaseException as exc:
+                        outcomes.append(type(exc).__name__);conn.rollback()
+                    finally:conn.close()
+                def read_after_writer_pending(repository,identity,**kwargs):
+                    worker=threading.Thread(target=write);threads.append(worker);worker.start()
+                    self.assertTrue(started.wait(2))
+                    deadline=time.monotonic()+1;pending=False
+                    while time.monotonic()<deadline:
+                        with closing(sqlite3.connect(self.db.as_uri()+'?mode=ro',uri=True,timeout=0)) as probe:
+                            probe.execute('PRAGMA query_only=ON')
+                            try:probe.execute('SELECT value FROM journal_writer_probe').fetchone()
+                            except sqlite3.OperationalError as exc:
+                                if 'locked' not in str(exc):raise
+                                pending=True;break
+                        time.sleep(.005)
+                    self.assertTrue(pending,'writer never reached pending COMMIT')
+                    return original(repository,identity,**kwargs)
+                try:
+                    with patch.object(ChangeRegistryRepository,'read_operation',read_after_writer_pending):
+                        value=reader()
+                    self.assertEqual(value['operation_id'],op.operation_id)
+                    self.assertEqual(value['state'],'accepted')
+                finally:
+                    for worker in threads:worker.join(3)
+                self.assertEqual(outcomes,['committed'])
+                with closing(sqlite3.connect(self.db.as_uri()+'?mode=ro',uri=True)) as check:
+                    check.execute('PRAGMA query_only=ON')
+                    self.assertEqual(check.execute('SELECT value FROM journal_writer_probe').fetchone()[0],index)
+
+    def test_supplier_journal_families_reuse_outer_reader_with_pending_commit(self):
+        import threading, time
+        from contextlib import contextmanager
+        from unittest.mock import patch
+        from apps.operator_supplier_financial_native_smoke import setup, document, execute
+        from apps.operator_supplier_factual_dates_smoke import fixture, SHIPMENT_ID
+        from packages.application import operator_supplier_shipments as source
+        from packages.application import operator_supplier_financial as financial
+        from packages.application import operator_cny_documents as cny
+        from packages.application import operator_supplier_factual_dates as facts
+        from packages.application.sqlite_contention import connect_sqlite
+
+        def check(runtime, identity, domain):
+            db=runtime.db_path
+            # Legacy fixture constructors leave context-managed connections for GC.
+            # Close those before switching the disposable database to production DELETE.
+            import gc
+            gc.collect()
+            with closing(sqlite3.connect(db)) as setup_conn, setup_conn:
+                self.assertEqual(setup_conn.execute('PRAGMA journal_mode=DELETE').fetchone()[0], 'delete')
+                setup_conn.execute('CREATE TABLE IF NOT EXISTS journal_writer_probe(value INTEGER NOT NULL)')
+                setup_conn.execute('DELETE FROM journal_writer_probe')
+                setup_conn.execute('INSERT INTO journal_writer_probe VALUES(0)')
+            args=dict(allowed_domains={domain}, request_scope='alice-key', runtime_dir=runtime.runtime_dir)
+            readers=(lambda: journal.journal(db, **args)['items'][0],
+                     lambda: journal.read_acceptance(db, identity, **args))
+            original=source.read_session
+            for index, reader in enumerate(readers, 1):
+                started=threading.Event(); outcomes=[]; workers=[]; borrowed=[]
+                def write():
+                    conn=connect_sqlite(db,timeout_ms=1500)
+                    try:
+                        conn.execute('UPDATE journal_writer_probe SET value=value+1')
+                        started.set();conn.commit();outcomes.append('committed')
+                    except BaseException as exc:
+                        outcomes.append(type(exc).__name__);conn.rollback()
+                    finally:conn.close()
+                @contextmanager
+                def observe(path, connection=None):
+                    self.assertIsNotNone(connection, 'journal opens a second source reader')
+                    borrowed.append(connection)
+                    if not workers:
+                        worker=threading.Thread(target=write);workers.append(worker);worker.start()
+                        self.assertTrue(started.wait(2))
+                        deadline=time.monotonic()+1; pending=False
+                        while time.monotonic()<deadline:
+                            with closing(sqlite3.connect(db.as_uri()+'?mode=ro',uri=True,timeout=0)) as probe:
+                                probe.execute('PRAGMA query_only=ON')
+                                try:probe.execute('SELECT value FROM journal_writer_probe').fetchone()
+                                except sqlite3.OperationalError as exc:
+                                    if 'locked' not in str(exc):raise
+                                    pending=True;break
+                            time.sleep(.005)
+                        self.assertTrue(pending, 'writer never reached pending COMMIT')
+                    with original(path, connection) as conn:
+                        yield conn
+                    self.assertTrue(connection.in_transaction, 'borrower reset the journal snapshot')
+                try:
+                    with patch.object(source,'read_session',observe):
+                        receipt=reader()
+                    self.assertEqual(receipt['operation_id'],identity)
+                    self.assertTrue(borrowed)
+                    self.assertTrue(all(conn is borrowed[0] for conn in borrowed))
+                finally:
+                    for worker in workers:worker.join(3)
+                self.assertEqual(outcomes,['committed'])
+                with closing(sqlite3.connect(db.as_uri()+'?mode=ro',uri=True)) as readback:
+                    readback.execute('PRAGMA query_only=ON')
+                    self.assertEqual(readback.execute('SELECT value FROM journal_writer_probe').fetchone()[0],index)
+
+        with TemporaryDirectory() as raw:
+            runtime,ledger=setup(raw)
+            result=execute(runtime,'pending-financial-reader',
+                [dict(child_key='one',kind='financial',subject_id='one')],lambda child:document(runtime,child))
+            check(runtime,result['acceptance']['operation_id'],financial.DOMAIN)
+            payload=dict(request_id='pending-cny-reader',operation_date='2026-07-24',cny_amount='100',rub_value='1400')
+            result=cny.execute(ledger,action='cny_opening',payload=payload,request_scope='alice-key',actor='alice',
+                native_write=lambda:ledger.create_opening_balance(payload))
+            check(runtime,result['acceptance']['operation_id'],cny.DOMAIN)
+        with TemporaryDirectory() as raw:
+            runtime,entry=fixture(raw)
+            preview=entry.handle_supplier_factual_dates_preview_request(SHIPMENT_ID,{'actual_shipment_date':'2026-06-26'})
+            result=entry.handle_supplier_factual_dates_confirm_request(SHIPMENT_ID,
+                dict(request_id='pending-factual-reader',confirmation_token=preview['confirmation_token']),
+                actor='alice',request_scope='alice-key')
+            check(runtime,result['acceptance']['operation_id'],facts.DOMAIN)
+
+    def test_borrowed_financial_view_never_infers_missing_outcome_is_not_saved(self):
+        from apps.operator_supplier_financial_native_smoke import setup, document, execute
+        from packages.application import operator_supplier_financial as financial
+        from packages.application import operator_supplier_shipments as source
+        with TemporaryDirectory() as raw:
+            runtime,_=setup(raw)
+            def write(child):
+                if child['child_key']=='two':raise RuntimeError('lost before outcome')
+                return document(runtime,child)
+            result=execute(runtime,'partial-pinned-reader',[dict(child_key=k,kind='financial',subject_id=k) for k in ('one','two')],write)
+            self.assertTrue(result['settled'])
+            with source.read_session(runtime.db_path) as conn:
+                retained=financial.read_operation(runtime.runtime_dir,runtime.db_path,result['acceptance']['operation_id'],
+                    request_scope='alice-key',connection=conn)
+                self.assertEqual(retained['results'][1]['status'],'processing')
+                self.assertFalse(retained['settled'])
+                self.assertTrue(conn.in_transaction)
+            latest=financial.read_request(runtime.runtime_dir,runtime.db_path,'partial-pinned-reader',request_scope='alice-key')
+            self.assertEqual(latest['results'][1]['status'],'not_saved')
+            self.assertTrue(latest['settled'])
+
+    def test_borrowed_receipt_connection_requires_exact_query_only_transaction(self):
+        from packages.application.change_registry import ChangeRegistryError
+        op=self.price()
+        with closing(sqlite3.connect(self.db.as_uri()+'?mode=ro',uri=True)) as conn:
+            conn.row_factory=sqlite3.Row
+            conn.execute('PRAGMA query_only=ON')
+            with self.assertRaises(ChangeRegistryError):self.repo.read_operation(op.operation_id,connection=conn)
+            conn.execute('BEGIN')
+            conn.execute('SELECT 1 FROM sqlite_master').fetchone()
+            value=self.repo.read_operation(op.operation_id,connection=conn)
+            self.assertEqual(value['operation']['operation_id'],op.operation_id)
+            self.assertTrue(conn.in_transaction)
+            self.assertEqual(conn.execute('PRAGMA query_only').fetchone()[0],1)
+            conn.rollback()
+        with closing(sqlite3.connect(self.db)) as writable:
+            writable.execute('BEGIN')
+            with self.assertRaises(ChangeRegistryError):self.repo.read_operation(op.operation_id,connection=writable)
+            self.assertTrue(writable.in_transaction)
+        other=self.root/'foreign.sqlite3'
+        with closing(sqlite3.connect(other)) as setup:setup.execute('CREATE TABLE marker(id INTEGER)')
+        with closing(sqlite3.connect(other.as_uri()+'?mode=ro',uri=True)) as foreign:
+            foreign.row_factory=sqlite3.Row;foreign.execute('PRAGMA query_only=ON');foreign.execute('BEGIN')
+            with self.assertRaises(ChangeRegistryError):self.repo.read_operation(op.operation_id,connection=foreign)
+            self.assertTrue(foreign.in_transaction)
+
     def test_created_submitted_unknown_and_confirmed_are_distinct(self):
         op=self.price();value=self.read(op);self.assertEqual(value['state'],'accepted');self.assertFalse(value['external_confirmed'])
         self.writer.submitted(op,receipt_reference='native-upload:1',receipt_basis={'id':1})

@@ -3371,7 +3371,7 @@ class RegistryUploadHttpEntrypoint:
             'policy': 'truthful_report_degraded', 'semantic_status': result['semantic_status']},)
         return versions, StageProof(versions, warnings)
 
-    def _cycle_publish_dated_ready(self, plan):
+    def _cycle_publish_dated_ready(self, plan, *, retained_only=False):
         from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
         from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
         require_heavy_owner(self.runtime.runtime_dir)
@@ -3381,20 +3381,25 @@ class RegistryUploadHttpEntrypoint:
         state, expected = bind_local_derive_publication(self.runtime, plan, state, expected)
         refreshed = self.refreshed_at_factory()
         previous, previous_time = _load_existing_ready_snapshot_for_preservation(self.runtime, as_of_date=plan.as_of_date)
-        plan = _with_full_refresh_metadata(plan, refreshed_at=refreshed, previous_plan=previous,
-            previous_refreshed_at=previous_time, business_date=current_business_date_iso(self.now_factory()), runtime=self.runtime)
+        if not retained_only:
+            plan = _with_full_refresh_metadata(plan, refreshed_at=refreshed, previous_plan=previous,
+                previous_refreshed_at=previous_time, business_date=current_business_date_iso(self.now_factory()), runtime=self.runtime)
         result = self.runtime.save_sheet_vitrina_ready_snapshot(current_state=state, refreshed_at=refreshed,
-            plan=plan, expected=expected, build_inputs=dict(plan.metadata or {}).get('publication_inputs'))
+            plan=plan, expected=expected, build_inputs=dict(plan.metadata or {}).get('publication_inputs'),
+            _retained_closed_replay=retained_only)
         result = {key: getattr(result, key, '') for key in
             ('snapshot_id','plan_version','bundle_version','as_of_date','refreshed_at','publication_operation_id','publication_attempt_id','semantic_status')}
-        if result['semantic_status'] == 'error' or not result.get('publication_operation_id') or not result.get('publication_attempt_id'):
+        if (result['semantic_status'] == 'error' and not retained_only) or not result.get('publication_operation_id') or not result.get('publication_attempt_id'):
             raise CycleStageFailure('dated_ready_publication_unproven')
         versions = {key: str(result.get(key) or '') for key in
             ('snapshot_id','plan_version','bundle_version','as_of_date','refreshed_at','publication_operation_id','publication_attempt_id')}
         versions['ready_fingerprint'] = self.runtime.prepare_sheet_vitrina_ready_publication(
             bundle_version=versions['bundle_version'], as_of_date=versions['as_of_date']).fingerprint
         self._cycle_verify_ready(versions)
-        return versions, StageProof(versions)
+        warnings = () if not retained_only or result['semantic_status'] == 'success' else ({
+            'code': 'dated_ready_report_degraded', 'date': plan.as_of_date,
+            'policy': 'truthful_report_degraded', 'semantic_status': result['semantic_status']},)
+        return versions, StageProof(versions, warnings)
 
     def _cycle_verify_ready(self, versions):
         from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure

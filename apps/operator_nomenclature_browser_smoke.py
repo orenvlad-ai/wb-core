@@ -3,7 +3,7 @@ import json,os,sys,threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlparse
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect,sync_playwright
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from apps.ff_pool_surfaces_browser_smoke import _reserve_free_port
 from apps.nomenclature_activation_intents_smoke import fixture
@@ -36,6 +36,19 @@ def run():
                 finally:browser.close()
         finally:server.shutdown();server.server_close();thread.join(timeout=5)
     print('operator_nomenclature_browser_smoke: OK (real HTTP source, tiny CNY, lost response, reload exact GET, foreign domain, no resubmit, actor scope, two-tab lock/closed-tab recovery/negative retry, queued CAS/options/FormData snapshot)')
+
+
+def close_acceptance(page,operation_id,writes):
+    """A restored receipt is modal too; dismiss the exact saved operation."""
+    page.wait_for_load_state('networkidle')
+    before=list(writes)
+    dialog=page.locator('dialog.ff-operation-popup[open]')
+    expect(dialog).to_be_visible()
+    expect(dialog.locator('#nomenclatureAcceptance [data-ff-operation-receipt]')).to_have_attribute('data-ff-operation-receipt',operation_id)
+    dialog.get_by_role('button',name='Закрыть',exact=True).click()
+    expect(dialog).to_have_count(0)
+    expect(page.locator('#nomenclatureAcceptance')).to_be_hidden()
+    assert writes==before  # Dismissal never repeats the accepted source write.
 
 
 def scenario(browser,base,entry):
@@ -84,12 +97,13 @@ def scenario(browser,base,entry):
     assert 'Принято' in page.locator('#nomenclatureAcceptance').inner_text()
     identity=writes[0]
     assert page.locator('#nomenclatureAcceptance [data-state="processing"]').count()==1
-    page.get_by_role('button',name='Закрыть',exact=True).click();assert page.locator('#nomenclatureAcceptance').is_hidden()
+    close_acceptance(page,identity,writes)
     page.reload();page.wait_for_selector('#nomenclatureAcceptance .ff-operation-receipt')
     assert writes==[identity] and reads[-1]==identity
     stored=page.evaluate("Object.entries(localStorage).filter(([key])=>key.startsWith('wbc.nomenclature.operations.'))")
     assert len(stored)==1 and json.loads(stored[0][1])==[identity]
     assert '0.00001' not in stored[0][1] and 'Synthetic' not in stored[0][1]
+    close_acceptance(page,identity,writes)
     # Foreign receipt with right ID may not produce green; exact read only.
     control['lose']=False;control['foreign']=True
     row=page.locator('#nomenclatureRows tr[data-item-id]').first
@@ -104,6 +118,7 @@ def scenario(browser,base,entry):
     control['unknown']=True;page.reload();page.wait_for_selector('#nomenclatureAcceptance [data-state="unknown"]')
     page.wait_for_load_state('networkidle')
     assert len(writes)==2 and reads[-1]==second
+    expect(page.locator('dialog.ff-operation-popup[open]')).to_have_count(0)
     page.click('#addItemButton');page.locator('#nomenclatureRows tr[data-item-id=""]').first.locator('[data-save-item]').click()
     assert len(writes)==2
     control['unknown']=False;control['foreign']=False
@@ -111,6 +126,7 @@ def scenario(browser,base,entry):
     page.wait_for_selector('#nomenclatureAcceptance .ff-operation-receipt')
     page.wait_for_load_state('networkidle')
     assert len(writes)==2
+    close_acceptance(page,second,writes)
     # Explicit CAS rejection proves unsaved; it permits corrected new input,
     # and must clear the previous receipt instead of displaying false green.
     page.wait_for_function("document.querySelector('#nomenclatureMessage').textContent.indexOf('Читаем')<0")
@@ -118,7 +134,10 @@ def scenario(browser,base,entry):
     entry.handle_nomenclature_patch_request(current['item_id'],{'comment':'concurrent edit'},actor='local_operator')
     row=page.locator('#nomenclatureRows tr[data-item-id="'+current['item_id']+'"]')
     row.locator('[data-field="purchase_price_yuan"]').fill('0.00003');row.locator('[data-save-item]').click()
-    page.wait_for_selector('#nomenclatureAcceptance',state='hidden')
+    # The prior dialog is already dismissed; wait for this request's native
+    # rejection, not that old hidden state, before checking its no-write proof.
+    expect(page.locator('#nomenclatureMessage')).to_contain_text('operator_nomenclature_source_version_changed')
+    expect(page.locator('#nomenclatureAcceptance')).to_be_hidden()
     assert page.locator('#nomenclatureMessage').get_attribute('class').split().count('error')==1
     assert len(writes)==3
     assert writes[-1] not in json.loads(page.evaluate("Object.entries(localStorage).find(([key])=>key.startsWith('wbc.nomenclature.operations.'))[1]"))
@@ -253,12 +272,14 @@ def two_tabs_scenario(browser,base,entry):
     b.get_by_role('button',name='Проверить сохранение',exact=True).click()
     b.wait_for_selector('#nomenclatureAcceptance .ff-operation-receipt');b.wait_for_load_state('networkidle')
     assert writes==[first]
+    close_acceptance(b,first,writes)
     fill(b,202).locator('[data-save-item]').click()
     b.wait_for_function("JSON.parse(Object.entries(localStorage).find(([key])=>key.startsWith('wbc.nomenclature.operations.'))[1]).length===2")
     b.wait_for_function("document.querySelector('#nomenclatureMessage').classList.contains('success')")
     b.wait_for_load_state('networkidle')
     second=writes[-1];assert len(writes)==2 and second!=first and stored(b)==[first,second]
     assert len(entry.runtime.list_nomenclature_items())==baseline+2
+    close_acceptance(b,second,writes)
     # Definitive native validation removes only its own refused ID; correction
     # is an explicit new identity, without replaying any accepted command.
     current=next(item for item in entry.runtime.list_nomenclature_items() if item['nm_id']==202)
@@ -270,6 +291,7 @@ def two_tabs_scenario(browser,base,entry):
     assert len(writes)==3 and stored(b)==[first,second]
     assert len(entry.runtime.list_nomenclature_items())==baseline+2
     loaded(b);b.wait_for_selector('#nomenclatureAcceptance .ff-operation-receipt')
+    close_acceptance(b,second,writes)
     row=b.locator('#nomenclatureRows tr[data-item-id="'+current['item_id']+'"]')
     row.locator('[data-field="purchase_price_yuan"]').fill('2');row.locator('[data-save-item]').click()
     b.wait_for_function("document.querySelector('#nomenclatureMessage').classList.contains('success')")

@@ -22,7 +22,7 @@ def financial_acceptance(conn, runtime_dir, db_path, identity, *, request_scope,
         (request_scope, identity, identity, request_scope)).fetchone()
     if row is None or row['action'] not in actions:
         return None
-    value = reader(runtime_dir, db_path, identity, request_scope=request_scope).get('acceptance')
+    value = reader(runtime_dir, db_path, identity, request_scope=request_scope, connection=conn).get('acceptance')
     return value if value and value['domain'] == domain and value['operation_id'] == identity else None
 
 
@@ -41,7 +41,7 @@ def sources(conn, *, selected, request_scope, supplier_safe, db_path, runtime_di
                  f"AND alias.request_scope={factual.TABLE}.request_scope AND alias.status='accepted')")
         result.append((factual.TABLE, 'correction_id', '*', where, (request_scope,),
             lambda connection, row: factual.read_operation(db_path, row['correction_id'],
-                request_scope=request_scope)['acceptance']))
+                request_scope=request_scope, connection=connection)['acceptance']))
     if (not supplier_safe and runtime_dir is not None
             and shipments._exists(conn, financial.REQUESTS) and shipments._exists(conn, financial.CHILDREN)):
         # Native action separates CNY and supplier documents BEFORE counts/search.

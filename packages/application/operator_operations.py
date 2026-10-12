@@ -105,6 +105,7 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
         raise ValueError('invalid_operation_search')
     selected = allowed if domain in ('', 'all') else allowed.intersection({domain})
     file_items = facilities.journal_entries(db_path, request_scope=request_scope) if request_scope and not supplier_safe and facilities.DOMAIN in selected else []
+    file_items.extend(spp_jobs.items(selected=selected,scope=spp_scope,db_path=db_path))
     with closing(overhead.readonly(db_path)) as conn:
         sources=supplier_journal.sources(conn, selected=selected, request_scope=request_scope, supplier_safe=supplier_safe, db_path=db_path, runtime_dir=runtime_dir)
         sources.extend(_trade_sources(conn, selected=selected, request_scope=request_scope, supplier_safe=supplier_safe))
@@ -114,7 +115,6 @@ def journal(db_path, *, page=1, limit=25, allowed_domains=None, allowed_sections
         file_items.extend(analysis_settings.items(selected=selected,scope=analysis_settings_scope))
         file_items.extend(complaint_schedules.items(selected=selected,scope=complaint_schedules_scope))
         file_items.extend(complaint_runs.items(selected=selected,scope=complaint_runs_scope))
-        file_items.extend(spp_jobs.items(selected=selected,scope=spp_scope,db_path=db_path))
         external_source=external.source(conn,selected=selected,scope=external_scope,db_path=db_path)
         if external_source:sources.append(external_source)
         settings_source=business_settings.source(conn,selected=selected,scope=settings_scope)
@@ -214,13 +214,13 @@ def read_acceptance(db_path, identity, *, allowed_domains=None, allowed_sections
         allowed.intersection_update({domain})
     spp_receipt=spp_jobs.read(identity=identity,selected=allowed,scope=spp_scope,db_path=db_path)
     if spp_receipt:return _common(spp_receipt)
+    if request_scope and not supplier_safe and facilities.DOMAIN in allowed:
+        result = facilities.read(db_path, request_scope=request_scope, operation_id=identity)
+        if result.get('status') == 'accepted' and result.get('acceptance'):
+            return _common(result['acceptance'])
     with closing(overhead.readonly(db_path)) as conn:
         for item in analysis_settings.items(selected=allowed,scope=analysis_settings_scope):
             if item['operation_id']==identity:return _common(item)
-        if request_scope and not supplier_safe and facilities.DOMAIN in allowed:
-            result = facilities.read(db_path, request_scope=request_scope, operation_id=identity)
-            if result.get('status') == 'accepted' and result.get('acceptance'):
-                return _common(result['acceptance'])
         spec=balance_jobs.source(conn,selected=allowed,scope=balance_scope,db_path=db_path)
         if spec:
             table,key,columns,where,values,reader=spec

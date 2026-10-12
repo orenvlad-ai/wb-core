@@ -86,6 +86,14 @@ class ClosedBacklog:
                 if ('deferred_reason' in item and (type(item['deferred_reason']) is not str or not item['deferred_reason'])
                         or 'previous_ready' in item and not isinstance(item['previous_ready'], dict)):
                     raise ClosedBacklogConflict('closed_receipt_invalid')
+                if 'retained_replay' in item:
+                    repair = item['retained_replay']
+                    if (not isinstance(repair, dict) or set(repair) != {'before_ready_digest'}
+                            or not isinstance(repair['before_ready_digest'], str)
+                            or not repair['before_ready_digest'].startswith('sha256:')
+                            or len(repair['before_ready_digest']) != 71
+                            or not set(item['sources']) <= {'sales_funnel_history', 'fin_report_daily'}):
+                        raise ClosedBacklogConflict('closed_receipt_invalid')
                 count += len(item['sources'])
                 for key, source in item['sources'].items():
                     if key not in live.SOURCE_TEMPORAL_POLICIES or key in {live.OWN_PRODUCT_CAPITAL_SOURCE_KEY, 'cost_price', live.SKU_ACTION_SOURCE_KEY}:
@@ -269,7 +277,7 @@ class ClosedBacklog:
         self._write(value)
         return True
 
-    def collect(self, cycle_id):
+    def collect(self, cycle_id, *, include_retained=True, retained_only=False):
         """Reconcile the sole prior obligation before enrolling a new finite batch.
 
         Canonical accepted rows discharge acquisition, never publication. An
@@ -288,13 +296,24 @@ class ClosedBacklog:
             else sorted((v for v in current.config_v2 if v.enabled), key=lambda v: v.display_order))
         value = self.status()
         if value is None or all(item['state'] == 'acknowledged' for item in value['dates'].values()):
-            selected = self._due()
+            selected = {} if retained_only else self._due()
+            from packages.application.sheet_vitrina_v1_closed_ready_repair import retained_candidates
+            yesterday = (date.fromisoformat(live.current_business_date_iso(now)) - timedelta(days=1)).isoformat()
+            repairs = retained_candidates(self, yesterday=yesterday) if include_retained else {}
+            selected = dict(list({**{day: list(item['anchors']) for day, item in repairs.items()},
+                **{day: keys for day, keys in selected.items() if day not in repairs}}.items())[:2])
             value = dict(schema_version=1, cycle_id=cycle_id, bundle_version=current.bundle_version,
                 collection_bundle_version=current.bundle_version,
                 authority=capture_authority(self.runtime.runtime_dir, db_path=self.runtime.db_path),
                 dates={day: dict(state='planned', sources={key: dict(anchor=None, before=None,
                     attempt_before=None, outcome='planned') for key in sorted(live._expand_selected_source_keys_for_dependencies(set(keys)))})
                     for day, keys in selected.items()})
+            for day, repair in repairs.items():
+                item = value['dates'][day]
+                item['retained_replay'] = dict(before_ready_digest=repair['before_ready_digest'])
+                item['state'] = 'accepted'
+                for key, anchor in repair['anchors'].items():
+                    item['sources'][key].update(anchor=anchor, before=anchor, outcome='accepted_retained')
             if not selected:
                 return value
             self._write(value)  # Demand precedes any source capture.
@@ -361,6 +380,49 @@ class ClosedBacklog:
             self._write(value)
         return deepcopy(value)
 
+    def prepare_retained(self, cycle_id):
+        """Late source-free admission, after warehouse ownership has settled.
+
+        First recover an already committed Ready. Only an unpublished current
+        column may take a fresher before-image; its accepted sources never rebase.
+        """
+        require_cycle_owner(self.runtime)
+        value = self.status()
+        if value is None or all(v['state'] == 'acknowledged' for v in value['dates'].values()):
+            value = self.collect(cycle_id, retained_only=True)
+        selected = [(day, item) for day,item in value['dates'].items()
+            if 'retained_replay' in item and item['state'] not in {'ready','acknowledged'}]
+        if not selected:
+            return ()
+        from packages.application.fbs_accounting_historical_history import pending_receipt
+        pending = pending_receipt(self.runtime)
+        warnings = []
+        from packages.application.sheet_vitrina_v1_closed_ready_repair import retained_candidates
+        yesterday = (date.fromisoformat(live.current_business_date_iso(self.sources.block.now_factory())) - timedelta(days=1)).isoformat()
+        candidates = retained_candidates(self, yesterday=yesterday)
+        for day, item in selected:
+            item.pop('deferred_reason', None)
+            try:
+                proof = self._ready_proof(value, day)
+            except ClosedBacklogConflict as exc:
+                if not str(exc).startswith('closed_ready_source_not_consumed:'):
+                    raise
+            else:
+                item.update(state='ready', ready=proof)
+                continue
+            if pending is not None:
+                item['deferred_reason'] = 'closed_retained_historical_pending'
+                warnings.append(dict(source_key='closed_ready', date=day, policy=item['deferred_reason']))
+                continue
+            candidate = candidates.get(day)
+            if (candidate is None or candidate['anchors'] != {key: source['anchor'] for key,source in item['sources'].items()}):
+                raise ClosedBacklogConflict('closed_retained_ready_changed:' + day)
+            # This is still the stale current column (not a completed replay).
+            # Every subsequent derive/write retains its exact native CAS.
+            item['retained_replay']['before_ready_digest'] = candidate['before_ready_digest']
+        self._write(value)
+        return tuple(warnings)
+
     def compose(self, main_handle, day):
         require_cycle_owner(self.runtime)
         value = self.status()
@@ -369,7 +431,26 @@ class ClosedBacklog:
             raise ClosedBacklogConflict('closed_sources_not_accepted')
         if item.get('deferred_reason'):
             raise ClosedBacklogConflict(item['deferred_reason'])
-        return self.sources._compose_closed(main_handle, day, {key: v['anchor'] for key, v in item['sources'].items()})
+        if 'retained_replay' in item:
+            from packages.application.sheet_vitrina_v1_closed_ready_repair import check_original_ready
+            check_original_ready(self, day, item)
+        return self.sources._compose_closed(main_handle, day, {key: v['anchor'] for key, v in item['sources'].items()},
+            retained_only='retained_replay' in item)
+
+    def retained_replay(self, day):
+        value = self.status()
+        return bool(value and 'retained_replay' in value['dates'].get(day, {}))
+
+    def can_replace_retained_ready(self, day, error):
+        if not self.retained_replay(day) or not str(error).startswith('closed_ready_source_not_consumed:'):
+            return False
+        from packages.application.sheet_vitrina_v1_closed_ready_repair import check_original_ready
+        check_original_ready(self, day, self.status()['dates'][day])
+        return True
+
+    def merge_retained_ready(self, day, plan):
+        from packages.application.sheet_vitrina_v1_closed_ready_repair import merge_retained_plan
+        return merge_retained_plan(self, day, plan)
 
     def _defer_publication(self, day, reason):
         """Persist only a known cache refusal, never a success or source retry."""

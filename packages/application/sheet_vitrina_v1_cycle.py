@@ -322,7 +322,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
     finance = None
     fbs = None
     def closed_sources():
-        value = closed.collect(receipt['cycle_id'])
+        value = closed.collect(receipt['cycle_id'], include_retained=False)
         warnings = []
         for day, item in value['dates'].items():
             if item.get('deferred_reason'):
@@ -362,7 +362,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         return proof
     def closed_ready():
         nonlocal backfill_dates
-        warnings, proofs = [], []
+        warnings, proofs = list(closed.prepare_retained(receipt['cycle_id'])), []
         value = closed.status()
         for day, item in (value['dates'].items() if value else ()):
             if item['state'] == 'acknowledged' or item.get('deferred_reason') or not all(source['anchor'] for source in item['sources'].values()):
@@ -376,10 +376,14 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
                 try:
                     proof = closed.record_ready(day)
                 except ClosedBacklogConflict as exc:
-                    if not str(exc).startswith('closed_ready_missing:'):
+                    if not str(exc).startswith('closed_ready_missing:') and not closed.can_replace_retained_ready(day, exc):
                         raise
                     plan = source_adapter.derive_collected(closed.compose(handle, day))
-                    _, result = entrypoint._cycle_publish_dated_ready(plan)
+                    if closed.retained_replay(day):
+                        plan = closed.merge_retained_ready(day, plan)
+                        _, result = entrypoint._cycle_publish_dated_ready(plan, retained_only=True)
+                    else:
+                        _, result = entrypoint._cycle_publish_dated_ready(plan)
                     warnings.extend(result.warnings)
                     proof = closed.record_ready(day)
                 proofs.append(proof)

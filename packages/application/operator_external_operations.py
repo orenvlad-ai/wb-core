@@ -39,7 +39,7 @@ def source(conn, *, selected, scope, db_path):
     values=(scope.seller_id,scope.account_scope,*surfaces)
     repository=ChangeRegistryRepository(scope.runtime_dir)
     return (TABLE,'operation_id','*',where,values,
-        lambda connection,row: public(repository.read_operation(row['operation_id']),scope=scope,surfaces=surfaces))
+        lambda connection,row: public(repository.read_operation(row['operation_id'],connection=connection),scope=scope,surfaces=surfaces))
 
 
 def public(native, *, scope, surfaces):

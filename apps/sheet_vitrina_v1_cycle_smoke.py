@@ -103,10 +103,11 @@ class EmptyClosedFixture:
     """Fault harness only; real finite/source/native paths have separate tests."""
     def __init__(self, adapter):
         self.entry = adapter.collect_sources.__self__
-    def collect(self, cycle_id):
+    def collect(self, cycle_id, *, include_retained=True):
         self.entry.mark('closed_sources')
         return {'dates': {}}
     def status(self):return None
+    def prepare_retained(self, cycle_id):return ()
     def publication_dates(self):
         self.entry.mark('closed_ready')
         return ()

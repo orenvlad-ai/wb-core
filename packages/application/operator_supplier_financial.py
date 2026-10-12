@@ -266,12 +266,12 @@ def public_child(conn, row, *, account_proof=None):
     return receipt
 
 
-def read_request(runtime_dir, db_path, request_id, *, request_scope, shipment_id='', allowed_actions=FINANCIAL_ACTIONS):
+def read_request(runtime_dir, db_path, request_id, *, request_scope, shipment_id='', allowed_actions=FINANCIAL_ACTIONS, connection=None):
     unknown = {'domain':DOMAIN,'request_id':request_id,'status':'unknown','acceptance':None}
     if not Path(db_path).is_file():
         return unknown
     with ExitStack() as stack:
-        conn=stack.enter_context(closing(source.readonly(db_path)))
+        conn=stack.enter_context(source.read_session(db_path, connection))
         row = conn.execute(f'SELECT * FROM {REQUESTS} WHERE request_scope=? AND request_id=?', (request_scope,request_id)).fetchone() if source._exists(conn,REQUESTS) else None
         if row is None or row['action'] not in allowed_actions or (shipment_id and row['shipment_id']!=shipment_id):
             return unknown
@@ -280,8 +280,13 @@ def read_request(runtime_dir, db_path, request_id, *, request_scope, shipment_id
             fcntl.flock(lock,fcntl.LOCK_SH | fcntl.LOCK_NB);inflight=False
             # Writer has released its one-shot lock. Refresh the pinned RO
             # snapshot under this observer lock before proving missing children.
-            conn.rollback();conn.execute('BEGIN')
-            row=conn.execute(f'SELECT * FROM {REQUESTS} WHERE request_scope=? AND request_id=?',(request_scope,request_id)).fetchone()
+            if connection is None:
+                conn.rollback();conn.execute('BEGIN')
+                row=conn.execute(f'SELECT * FROM {REQUESTS} WHERE request_scope=? AND request_id=?',(request_scope,request_id)).fetchone()
+            else:
+                # This view may predate a just-finished writer. Missing outcomes
+                # cannot prove not_saved until a fresh standalone read.
+                inflight=True
         except BlockingIOError:
             inflight=True
         manifest = json.loads(row['manifest_json']);results=[];accepted=[];pending=False
@@ -515,11 +520,11 @@ def child_superseded(conn,op):
     return bool(latest and source.digest(snapshot(conn,latest['kind'],latest['subject_id']))==latest['source_digest'])
 
 
-def read_operation(runtime_dir, db_path, operation_id, *, request_scope, allowed_actions=FINANCIAL_ACTIONS):
+def read_operation(runtime_dir, db_path, operation_id, *, request_scope, allowed_actions=FINANCIAL_ACTIONS, connection=None):
     unknown={'domain':DOMAIN,'operation_id':operation_id,'status':'unknown','acceptance':None}
     if not Path(db_path).is_file():
         return unknown
-    with closing(source.readonly(db_path)) as conn:
+    with source.read_session(db_path, connection) as conn:
         row=conn.execute(f'SELECT request_id FROM {REQUESTS} WHERE operation_id=? AND request_scope=?',(operation_id,request_scope)).fetchone() if source._exists(conn,REQUESTS) else None
         child=None
         if row is None and source._exists(conn,CHILDREN):
@@ -527,7 +532,7 @@ def read_operation(runtime_dir, db_path, operation_id, *, request_scope, allowed
             row=child
     if row is None:
         return unknown
-    result=read_request(runtime_dir,db_path,row['request_id'],request_scope=request_scope,allowed_actions=allowed_actions)
+    result=read_request(runtime_dir,db_path,row['request_id'],request_scope=request_scope,allowed_actions=allowed_actions,connection=connection)
     if child is not None:
         receipt=next((r.get('acceptance') for r in result.get('results',[]) if r.get('operation_id')==operation_id),None)
         result['acceptance']=receipt
