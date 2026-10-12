@@ -25,6 +25,9 @@ from packages.application import business_data_cycle_wakeup as wake
 
 SHA = 'a' * 40
 OP = 'formula-deploy-001'
+DRAINED_UNIT = 'wb-core-autoanswers-readonly-sync.service'
+RUNNING_TAIL = 'start_time=[Mon 2026-10-12 13:47:37 UTC] ; stop_time=[n/a] ; pid=1234 ; code=(null) ; status=0/0'
+RESET_TAIL = 'start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0'
 
 
 class FileSystemd(FakeSystemd):
@@ -148,6 +151,21 @@ class FormulaResumeTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.object(pause, '_cron_entries', return_value=[]).start()
         patch.object(deploy, '_selected', return_value=True).start()
+        if self._testMethodName.startswith('test_drained_running_'):
+            service = self.systemd.states[DRAINED_UNIT]
+            service.update(is_active='activating')
+            service['properties'].update(MainPID='1234', SubState='start',
+                ExecMainStartTimestamp='Mon 2026-10-12 13:47:37 UTC', ExecMainCode='0', ExecMainStatus='0')
+            service['properties']['ExecStart'] = re.sub(r' ; start_time=.*',
+                ' ; ' + RUNNING_TAIL + ' }', service['properties']['ExecStart'])
+            disable = self.systemd.disable_now
+            def drain_after_timer_stops(unit):
+                disable(unit)
+                if service['is_active'] == 'activating':
+                    service.update(is_active='inactive')
+                    service['properties'].update(MainPID='0', SubState='dead', ExecMainStartTimestamp='')
+                    service['properties']['ExecStart'] = service['properties']['ExecStart'].replace(RUNNING_TAIL, RESET_TAIL)
+            self.systemd.disable_now = drain_after_timer_stops
         pause.pause(self.runtime, **self.pause_options)
         self.baseline = deepcopy(pause.load_state(self.runtime)['baseline'])
         deploy.claim(self.runtime, OP, quiet_reader=lambda: pause.readback(self.runtime, **self.options))
@@ -548,6 +566,98 @@ class FormulaResumeTests(unittest.TestCase):
         self.apply(plan)
         self.assertEqual(calls, self.systemd.calls)
         self.assertEqual(self.baseline, pause.load_state(self.runtime)['baseline'])
+
+    def test_drained_running_baseline_resumes_without_rewriting_proof(self):
+        old = pause.load_state(self.runtime)
+        original = self.baseline['units'][DRAINED_UNIT]
+        held = old['hold_readback']['units'][DRAINED_UNIT]
+        self.assertEqual(original['is_active'], 'activating')
+        self.assertIn(RUNNING_TAIL, original['properties']['ExecStart'])
+        self.assertEqual(held['is_active'], 'inactive')
+        self.assertIn(RESET_TAIL, held['properties']['ExecStart'])
+        self.assertTrue(formula._same_unit_configuration(original, held, original_is_baseline=True))
+        with self.assertRaisesRegex(RuntimeError, 'unproven loaded execution state'):
+            formula._same_unit_configuration(original, held)
+        baseline_fingerprint = old['baseline_fingerprint']
+        calls = list(self.systemd.calls)
+        plan = self.prepare()
+        self.assertEqual(self.systemd.calls, calls)
+        self.assertFalse((self.runtime / formula.DIRECTORY).exists())
+        self.assertEqual(plan['held_service_states'][DRAINED_UNIT], ['static', 'inactive'])
+        receipt = self.apply(plan)
+        self.assertTrue(receipt['exact_target_state_restored'])
+        self.assertFalse(receipt['exact_prior_state_restored'])
+        self.assertEqual(pause.load_state(self.runtime)['baseline'], self.baseline)
+        self.assertEqual(pause.load_state(self.runtime)['baseline_fingerprint'], baseline_fingerprint)
+        self.assertEqual(pause.load_state(self.runtime)['hold_readback'], old['hold_readback'])
+        self.assertEqual(self.systemd.states[DRAINED_UNIT]['is_active'], 'inactive')
+        self.assertFalse(any(unit == DRAINED_UNIT for action, unit in self.systemd.calls[len(calls):]))
+        calls = list(self.systemd.calls)
+        self.assertEqual(self.apply(plan), receipt)
+        self.assertEqual(self.systemd.calls, calls)
+
+    def test_drained_running_current_live_or_held_pair_drift_still_refuses(self):
+        plan = self.prepare(); calls = list(self.systemd.calls)
+        original = deepcopy(self.systemd.states[DRAINED_UNIT])
+        for active, pid, substate in [('activating', '1234', 'start'), ('inactive', '1234', 'dead'),
+                ('inactive', '0', 'dead'), ('failed', '0', 'dead')]:
+            service = self.systemd.states[DRAINED_UNIT]
+            service.update(is_active=active)
+            service['properties'].update(MainPID=pid, SubState=substate)
+            service['properties']['ExecStart'] = original['properties']['ExecStart'].replace(
+                RESET_TAIL, RESET_TAIL if active == 'failed' else RUNNING_TAIL)
+            with self.subTest(active=active, pid=pid), self.assertRaisesRegex(RuntimeError, 'quiet|idle|held service|foreign unit'):
+                self.apply(plan)
+            self.assertEqual(self.systemd.calls, calls)
+            self.assertFalse((self.runtime / formula.DIRECTORY).exists())
+            self.assertTrue(barrier.barrier_status(self.runtime)['active'])
+            self.systemd.states[DRAINED_UNIT] = deepcopy(original)
+
+    def test_drained_running_static_and_fragment_drift_still_refuses(self):
+        plan = self.prepare(); calls = list(self.systemd.calls)
+        props = self.systemd.states[DRAINED_UNIT]['properties']; original = props['ExecStart']
+        for before, after in [('path=/usr/bin/python3', 'path=/usr/bin/python4'),
+                ('apps/synthetic.py', 'apps/foreign.py'), ('ignore_errors=no', 'ignore_errors=yes')]:
+            props['ExecStart'] = original.replace(before, after)
+            with self.subTest(before=before), self.assertRaisesRegex(RuntimeError, 'foreign unit configuration'):
+                self.apply(plan)
+            props['ExecStart'] = original
+        fragment = self.units / DRAINED_UNIT
+        fragment.write_bytes(fragment.read_bytes() + b'# static foreign change\n')
+        with self.assertRaisesRegex(RuntimeError, 'foreign unit configuration'):
+            self.apply(plan)
+        self.assertEqual(self.systemd.calls, calls)
+        self.assertFalse((self.runtime / formula.DIRECTORY).exists())
+        self.assertTrue(barrier.barrier_status(self.runtime)['active'])
+
+    def test_running_native_tail_rejects_partial_malformed_and_unknown_shapes(self):
+        unit = self.systemd.unit_state(DRAINED_UNIT)
+        running = unit['properties']['ExecStart'].replace(RESET_TAIL, RUNNING_TAIL)
+        baseline = deepcopy(unit); baseline['is_active'] = 'activating'
+        baseline['properties'].update(ExecStart=running, ActiveState='activating', SubState='start', MainPID='1234',
+            ExecMainStartTimestamp='Mon 2026-10-12 13:47:37 UTC', ExecMainCode='0', ExecMainStatus='0')
+        self.assertEqual(formula._loaded_records(running, 'ExecStart', running_baseline=baseline),
+            formula._loaded_records(unit['properties']['ExecStart'], 'ExecStart'))
+        with self.assertRaisesRegex(RuntimeError, 'unproven loaded execution state'):
+            formula._loaded_records(running, 'ExecStart')
+        for raw in (running.replace('pid=1234', 'pid=0'), running.replace('pid=1234', 'pid=2147483648'),
+                running.replace('start_time=[Mon 2026-10-12 13:47:37 UTC]', 'start_time=[n/a]'),
+                running.replace('stop_time=[n/a]', 'stop_time=[Mon 2026-10-12 13:47:54 UTC]'),
+                running.replace('Mon 2026-10-12', 'Tue 2026-10-12'),
+                running.replace('status=0/0', 'status=0'), running.replace('status=0/0', 'status=1/0'),
+                running.replace('code=(null)', 'code=exited'), running.replace('code=(null)', 'code=running'),
+                running.replace(' ; pid=', ' ; unknown=1 ; pid='), running + ' extra', running + '\x00'):
+            malformed = deepcopy(baseline); malformed['properties']['ExecStart'] = raw
+            with self.subTest(raw=raw), self.assertRaises(RuntimeError):
+                formula._same_unit_configuration(malformed, unit, original_is_baseline=True)
+        for key, value in [('LoadState', 'not-found'), ('ActiveState', 'inactive'), ('SubState', 'running'),
+                ('MainPID', '0'), ('MainPID', '1235'), ('ExecMainStartTimestamp', ''),
+                ('ExecMainCode', '1'), ('ExecMainStatus', '1')]:
+            malformed = deepcopy(baseline); malformed['properties'][key] = value
+            with self.subTest(field=key), self.assertRaisesRegex(RuntimeError, 'unproven loaded execution state'):
+                formula._same_unit_configuration(malformed, unit, original_is_baseline=True)
+        with self.assertRaisesRegex(RuntimeError, 'unproven loaded execution state'):
+            formula._same_unit_configuration(unit, baseline, original_is_baseline=True)
 
     def test_unknown_or_malformed_full_native_shapes_never_get_equality_fallback(self):
         exec_raw = self.systemd.unit_state(formula.UNIT)['properties']['ExecStart']
