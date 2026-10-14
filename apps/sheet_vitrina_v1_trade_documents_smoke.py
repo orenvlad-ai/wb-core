@@ -584,10 +584,19 @@ def main() -> None:
                 )
                 if (
                     legacy_detail_code != 200
-                    or not legacy_detail.get("invoice_document_id")
-                    or legacy_detail.get("contract_document_id") != contract_id
+                    or legacy_detail.get("invoice_document_id")
+                    or legacy_detail.get("contract_document_id")
+                    or legacy_detail.get("contract_link_status") != "single_candidate"
                 ):
-                    raise AssertionError(f"legacy migration must create and link invoice document, got {legacy_detail_code} {legacy_detail}")
+                    raise AssertionError(f"legacy GET must preserve unmaterialized source and candidates, got {legacy_detail_code} {legacy_detail}")
+                unchanged_code, unchanged_docs = _opener_json(operator, f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}")
+                if unchanged_code != 200 or len(unchanged_docs.get("documents", [])) != before_count:
+                    raise AssertionError("legacy GET must not add native invoice records")
+                link_code, linked_legacy = _opener_patch_json(operator,
+                    f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_legacy_doc/contract",
+                    {"contract_document_id": contract_id})
+                if link_code != 200 or linked_legacy.get("shipment", {}).get("contract_document_id") != contract_id:
+                    raise AssertionError(f"explicit legacy contract mutation must materialize its invoice, got {link_code} {linked_legacy}")
                 after_docs_code, after_docs = _opener_json(operator, f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}")
                 second_legacy_code, _ = _opener_json(operator, f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_legacy_doc")
                 final_docs_code, final_docs = _opener_json(operator, f"{base_url}{DEFAULT_TRADE_DOCUMENTS_PATH}")
@@ -598,7 +607,7 @@ def main() -> None:
                     or len(after_docs.get("documents", [])) != before_count + 1
                     or len(final_docs.get("documents", [])) != len(after_docs.get("documents", []))
                 ):
-                    raise AssertionError("legacy migration must be idempotent")
+                    raise AssertionError("targeted invoice materialization must remain stable across GETs")
                 delete_legacy_code, _ = _opener_delete_json(
                     operator,
                     f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_legacy_doc",

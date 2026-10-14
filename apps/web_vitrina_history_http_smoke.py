@@ -98,7 +98,8 @@ def _browser(base, edition, expected_summary):
           target.dispatchEvent(new DragEvent('drop', {bubbles: true, cancelable: true,
             dataTransfer: transfer, clientY: target.getBoundingClientRect().top}));
         }""", {"moved": moved_key, "first": first_key})
-        page.locator("[data-metrics-settings-close]").last.click()
+        # Closing cancels the current draft; persist the actual user changes.
+        page.locator("[data-metrics-settings-save]").click()
         expected_order = [moved_key] + [key for key in original_order if key not in {moved_key, hidden_key}]
         assert total_order() == expected_order, "user hide/reorder controls did not change TOTAL as intended"
 
@@ -150,6 +151,111 @@ def _browser(base, edition, expected_summary):
         if evidence:
             page.screenshot(path=str(Path(evidence) / "history-sku-fixture-180.png"))
         assert all("history_snapshot=1" in url for url in requests), requests
+        before_details = len(requests)
+        page.evaluate("async () => { await loadSourceStatusDetails({force:true}); }")
+        assert len(requests) == before_details, "finished snapshot source details invoked a legacy business route"
+        assert page.evaluate("loadingTableBlock().rows[0].today_reason") == start + " — 2026-04-20"
+        assert page.evaluate("loadingTableBlock().updated_at === state.composition.history_snapshot.saved_at")
+        # A failed refresh must retain the last fully painted edition, including
+        # lazy SKU blocks; an admitted catalog alone is never a painted edition.
+        visible = page.evaluate("""() => ({edition:historySnapshotState.edition,
+            table:JSON.stringify(state.composition.table_surface),
+            selection:JSON.stringify(historySnapshotState.selection)})""")
+        failure = {"phase": "catalog"}
+        held = []
+        def failed_refresh(route):
+            query = parse_qs(urlsplit(route.request.url).query)
+            if query.get("history_snapshot") != ["1"]:
+                route.continue_(); return
+            scope = query.get("scope", [""])[0]
+            if failure["phase"] == "deny_sku" and scope == "sku":
+                route.fulfill(status=403, content_type="text/html", body="<html>Access denied</html>"); return
+            if failure["phase"] == "held":
+                held.append(route); return
+            if failure["phase"] in {"denied_html", "denied_empty"}:
+                route.fulfill(status=401 if failure["phase"] == "denied_empty" else 403,
+                    content_type="text/html", body="" if failure["phase"] == "denied_empty" else "<html>Access denied</html>")
+                return
+            if failure["phase"] == "catalog" or failure["phase"] == "denied":
+                route.fulfill(status=403 if failure["phase"] == "denied" else 503,
+                    json={"error":"synthetic_history_unavailable"}); return
+            if failure["phase"] == "rows":
+                if scope == "catalog":
+                    response = route.fetch(); payload = response.json()
+                    payload["history_snapshot"]["edition_id"] = "f" * 64
+                    route.fulfill(status=200, json=payload)
+                else:
+                    route.fulfill(status=503, json={"error":"synthetic_row_read_unavailable"})
+                return
+            route.continue_()
+        page.route("**/v1/sheet-vitrina-v1/web-vitrina?*", failed_refresh)
+        def refresh():
+            page.evaluate("async () => { await loadPageComposition({awaitTable:true}); }")
+        def retained():
+            assert page.evaluate("historySnapshotState.busy === false")
+            actual = page.evaluate("""() => ({edition:historySnapshotState.edition,
+                table:JSON.stringify(state.composition.table_surface),
+                selection:JSON.stringify(historySnapshotState.selection)})""")
+            assert actual == visible, "failed refresh replaced a complete painted edition"
+            assert page.locator('[data-table-body]').is_visible()
+            assert "Показан сохранённый снимок" in page.locator('[data-history-current-unavailable]').inner_text()
+        refresh(); retained()
+        page.evaluate("async () => { await loadSourceStatusDetails({force:true}); }")
+        assert page.evaluate("loadingTableBlock().updated_at === historySnapshotState.displayed.composition.history_snapshot.saved_at")
+        failure["phase"] = "held"
+        refresh(); retained()
+        assert len(held) == 1, "a timed-out read was retried automatically"
+        for route in held: route.abort("failed")
+        failure["phase"] = "rows"
+        refresh(); retained()
+        # The warning survives filtering the retained edition; this does not
+        # claim that its source has become fresh after a failed refresh.
+        page.evaluate("async () => { await applyHistoryBlockSelection(); }")
+        retained()
+        failure["phase"] = ""
+        refresh()
+        assert page.evaluate("historySnapshotState.refreshError === ''")
+        assert page.locator('[data-history-current-unavailable]').is_hidden()
+        # The cache cannot cross periods or override an explicit access denial.
+        page.evaluate("history.replaceState(null,'','?history_mode=explicit&date_from=2025-01-01&date_to=2025-01-03')")
+        failure["phase"] = "catalog"
+        refresh()
+        assert page.evaluate("historySnapshotState.summary === null && state.composition === null")
+        assert page.locator('[data-table-body]').is_hidden()
+        page.evaluate("async () => { await loadSourceStatusDetails({force:true}); }")
+        assert page.evaluate("state.sourceStatus.loaded === false")
+        page.evaluate("history.replaceState(null,'','?history_mode=explicit&date_from=" + start + "&date_to=2026-04-20')")
+        failure["phase"] = ""
+        refresh()
+        failure["phase"] = "denied"
+        refresh()
+        assert page.evaluate("historySnapshotState.displayed === null && state.composition === null")
+        assert page.locator('[data-table-body]').is_hidden()
+        for denial in ("denied_html", "denied_empty"):
+            failure["phase"] = ""
+            refresh()
+            assert page.evaluate("historySnapshotState.displayed !== null")
+            failure["phase"] = denial
+            refresh()
+            assert page.evaluate("historySnapshotState.displayed === null && state.composition === null")
+            assert page.locator('[data-table-body]').is_hidden()
+        failure["phase"] = ""
+        refresh()
+        page.locator("[data-filters-toggle]").click()
+        page.locator('[data-block-kind="skus"][data-block-group="' + group_value + '"]').uncheck()
+        page.locator("[data-filters-apply]").click()
+        page.wait_for_function("historySnapshotState.busy === false")
+        refresh()  # Fresh edition read with TOTAL only; no lazy SKU cache.
+        failure["phase"] = "deny_sku"
+        page.locator("[data-filters-toggle]").click()
+        page.locator('[data-block-kind="skus"][data-block-group="' + group_value + '"]').check()
+        page.locator("[data-filters-apply]").click()
+        page.wait_for_function("historySnapshotState.displayed === null && state.composition === null")
+        assert page.locator('[data-table-body]').is_hidden()
+        failure["phase"] = "catalog"
+        refresh()
+        assert page.evaluate("historySnapshotState.displayed === null && state.composition === null"), "refresh resurrected an access-denied lazy edition"
+        page.unroute("**/v1/sheet-vitrina-v1/web-vitrina?*", failed_refresh)
         # Unavailable ranges terminate, without native/window/finished fallback.
         before = len(requests)
         page.goto(base + "/sheet-vitrina-v1/vitrina?history_mode=explicit&date_from=2025-01-01&date_to=2025-01-03")
@@ -190,11 +296,15 @@ def main(browser_only=False):
         if browser_only:
             summary = read_history_page(store, date_from=dates[0], date_to=dates[-1])
             _browser(base, edition, summary["history_snapshot"]["total_rows"])
+            after_browser = {str(p.relative_to(store.root)): (p.stat().st_size, p.stat().st_mtime_ns) for p in store.root.rglob("*") if p.is_file()}
+            assert before == after_browser
             print(json.dumps({"status": "pass", "fixture_only": True,
                 "synthetic_180_transport_only": True, "complete_sku_tail_and_cache": True,
                 "transport_sku_page_cap_override": 2, "same_edition_full_range": True,
                 "total_order_and_user_hidden_preserved": True, "cached_group_human_label": True,
-                "no_heavy_fallback": True}))
+                "no_heavy_fallback": True, "bounded_failed_refresh_retains_complete_edition": True,
+                "same_range_only": True, "json_html_empty_access_denial_clears_cache": True,
+                "readonly_history": True}))
             return
         for count in (1, 3, 14, 31, 180):
             start = dates[-count]
