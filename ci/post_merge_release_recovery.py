@@ -177,7 +177,7 @@ def _worker_health_precheck_failure_matches(text: str, gate_run_id: int) -> bool
 
 
 def _activation_case_from_log(raw_log: bytes, gate_run_id: int) -> RecoveryCase:
-    text = raw_log.decode("utf-8", errors="replace")
+    text = _bound_gate_log_text(raw_log, gate_run_id)
     registry = _registry_precheck_failure_matches(text, gate_run_id)
     worker = _worker_health_precheck_failure_matches(text, gate_run_id)
     storage = 'run_stage("readback", root_storage_commands["status_artifact_readback"])' in text
@@ -339,7 +339,7 @@ def _prove_failed_stage(
     raw_log: bytes, gate_run_id: int, job_name: str, *, case: RecoveryCase = RecoveryCase.STORAGE_TAIL,
     release_run_id: int = EXPECTED_ACTIVATION_RELEASE_RUN_ID,
 ) -> dict[str, Any]:
-    text = raw_log.decode("utf-8", errors="replace")
+    text = _bound_gate_log_text(raw_log, gate_run_id)
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
         required = (
             "deploy_current_checkout", "line 1206, in deploy_current_checkout",
@@ -415,6 +415,18 @@ def _prove_failed_stage(
             "stage": "root-storage-status-artifact-readback", "exit_status": 3}
 
 
+def _bound_gate_log_text(raw_log: bytes, gate_run_id: int) -> str:
+    text = raw_log.decode("utf-8", errors="replace")
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    variable = '--workflow-run-id "$GATE_RUN_ID"'
+    if variable in text:
+        values = re.findall(r"(?m)^[^\n]*\bGATE_RUN_ID:\s*(\S+)\s*$", text)
+        if values != [str(gate_run_id)]:
+            raise RecoveryError("gate-run-log-binding-invalid")
+        text = text.replace(variable, f'--workflow-run-id "{gate_run_id}"')
+    return text
+
+
 def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, Any]:
     case = recovery_case(release_run_id)
     run = client.get(f"/actions/runs/{release_run_id}")
@@ -423,7 +435,8 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
         reasons.append("repository-mismatch")
     if run.get("name") != RELEASE_WORKFLOW or run.get("path") != RELEASE_WORKFLOW_PATH:
         reasons.append("release-workflow-mismatch")
-    if run.get("event") != "workflow_run" or run.get("run_attempt") != 1:
+    if (run.get("event") not in {"workflow_run", "workflow_dispatch"} or run.get("run_attempt") != 1
+            or (run.get("event") == "workflow_dispatch" and run.get("head_branch") != "main")):
         reasons.append("release-provenance-invalid")
     if run.get("status") != "completed" or run.get("conclusion") != "failure":
         reasons.append("release-not-failed")
@@ -490,6 +503,7 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
             raise RecoveryError("release-job-time-invalid") from exc
     if exact_sha(run.get("head_sha"), "release-run-head") != original["base_sha"]:
         raise RecoveryError("release-run-trusted-source-mismatch")
+    tested_base = exact_sha(original.get("tested_base_sha", original["base_sha"]), "tested-base")
     gate_run, gate_plan = release.collect_plan(client, gate_id)
     if (
         gate_run.get("name") != release.WORKFLOW_NAME
@@ -503,12 +517,14 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
         raise RecoveryError("original-gate-invalid")
     if (
         gate_plan.get("pull_request") != original["pull_request"]
-        or gate_plan.get("base_sha") != original["base_sha"]
+        or gate_plan.get("base_sha") != tested_base
         or gate_plan.get("head_sha") != original["head_sha"]
         or gate_plan.get("release_kind") != "live_runtime"
         or exact_sha(gate_run.get("head_sha"), "gate-head") != original["head_sha"]
     ):
         raise RecoveryError("original-gate-binding-invalid")
+    if "gate_plan_sha256" in original and original["gate_plan_sha256"] != gate_plan["plan_sha256"]:
+        raise RecoveryError("original-gate-plan-hash-mismatch")
     expected_operation = release.operation_id(
         gate_id,
         int(original["pull_request"]),
@@ -534,6 +550,16 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
     parents = commit.get("parents") if isinstance(commit, Mapping) else None
     if not isinstance(parents, list) or [item.get("sha") for item in parents] != [original["base_sha"]]:
         raise RecoveryError("merge-parent-binding-invalid")
+    if tested_base != original["base_sha"]:
+        if original.get("gate_plan_sha256") != gate_plan["plan_sha256"]:
+            raise RecoveryError("original-gate-plan-hash-mismatch")
+        _git(["fetch", "--no-tags", "origin", tested_base, original["base_sha"], original["head_sha"]])
+        try:
+            tree = release.documentation_merge_tree(tested_base, original["base_sha"], original["head_sha"])
+        except (release.RunnerError, subprocess.CalledProcessError) as exc:
+            raise RecoveryError("original-documentation-reuse-invalid") from exc
+        if commit.get("tree", {}).get("sha") != tree:
+            raise RecoveryError("original-merge-tree-mismatch")
 
     original_marker = f"<!-- {release.RECEIPT_MARKER} operation={original['operation_id']} -->"
     original_comments = _matching_comments(client, original["pull_request"], original_marker)

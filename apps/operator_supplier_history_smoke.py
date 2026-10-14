@@ -633,4 +633,6 @@ class LinuxTests(unittest.TestCase):
                 self.assertTrue(saved['processing']['complete']);self.assertEqual(saved['state'],'completed')
 
 
-if __name__=='__main__':unittest.main()
+if __name__=='__main__':
+    from ci.parallel_unittest import main
+    main(sys.modules[__name__])
