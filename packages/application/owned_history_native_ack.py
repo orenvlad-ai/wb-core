@@ -48,6 +48,27 @@ def source_stamp(runtime_dir, db_path):
             result[str(path)] = [value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns]
     return result
 
+
+def stamp_after_derived_read(runtime_dir, db_path, before):
+    """Re-arm the full fence after immutable History objects, not native reads.
+
+    Operational contents may change during that interval: anchored native
+    captures still prove the exact dependencies and monotonic revision alarms.
+    The operational generation and every other physical source stay fixed.
+    The returned full stamp fences all subsequent native receipt validation,
+    final capture and parent consumption; it is never a semantic ACK token.
+    """
+    after = source_stamp(runtime_dir, db_path)
+    operational = str(Path(db_path).resolve())
+    if (set(before) != set(after) or before.get(operational) is None
+            or after.get(operational) is None
+            or before[operational][:2] != after[operational][:2]
+            or any(before[path] != after[path] for path in before
+                   if path not in {operational, operational + '-wal'})):
+        raise HistoryDelegationError('history_source_changed_during_readback')
+    return after
+
+
 def _object(store, day, ref, catalog_id, deadline):
     from packages.application.web_vitrina_history_compiler import digest
     if any(not isinstance(value, str) or re.fullmatch(r'[0-9a-f]{64}', value) is None for value in (ref, catalog_id)):
