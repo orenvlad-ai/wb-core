@@ -49,7 +49,7 @@ def execute(cap):
     from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter, capture_initial_proofs, update_live_history
     from packages.application.web_vitrina_history_store import HistoryStore, _atomic
     from packages.application.web_vitrina_history_compiler import digest, dates_between
-    from packages.application.owned_history_native_ack import verified_derived_state, source_stamp
+    from packages.application.owned_history_native_ack import verified_derived_state, source_stamp, stamp_after_derived_read
     _bound(cap)
     contract = read_json(cap["runtime_contract"], limit=1024 * 1024)
     repo = Path(__file__).resolve().parents[1]
@@ -161,6 +161,10 @@ def execute(cap):
         observed = verified_derived_state(store, anchor, cap.get("target"), deadline)
         if observed["terminal"] and store.start_dates_changed(store.edition(), contract.get("metric_start_dates", {})):
             observed["terminal"] = False
+        # Immutable object hashing does not consume the operational DB. Fence
+        # native receipt reads and the final anchored capture with a fresh full
+        # stamp, retaining generation/book/policy guards over the whole verify.
+        stamp = stamp_after_derived_read(runtime_dir, runtime.db_path, stamp)
         if observed["terminal"] and cap.get("closed_receipt") is not None:
             from types import SimpleNamespace
             from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog

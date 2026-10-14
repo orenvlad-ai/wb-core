@@ -64,8 +64,16 @@ The live supervisor constructs a private single-use proof tied to its actual
 terminal invocation, receipt digest, tuple and CURRENT. Only that same supervisor
 may authorize the parent receipt write while domain/heavy/SH remain held. A
 caller dictionary, boolean, copied proof, subclass or fork supplies no authority.
-Before/after physical stamps cover operational/book main+WAL, manifest and two
-policy files, including absent/present transitions and nanosecond stat fields.
+Physical stamps cover operational/book main+WAL, manifest and two policy files,
+including absent/present transitions and nanosecond stat fields. During the
+immutable History-object readback only, unrelated operational commits are
+allowed: initial/final native captures must retain the exact vector and revision
+fence, while operational device/inode and all book/manifest/policy stamps remain
+unchanged throughout. A single fresh full stamp is taken before the native receipt
+validators and final bounded capture, then compared after all of them. This avoids
+treating a cleaner journal commit during object hashing as a source revision;
+it does not normalize arbitrary writers or permit dependency/Ready revision ABA.
+Concurrent writes in the final strict interval still refuse; there is no retry.
 Parent consumption compares the same bounded metadata without a database open
 or native capture. Stamps supplement exact native digests; they do not replace
 them or make source plus receipt one atomic transaction. Receipt proofs describe

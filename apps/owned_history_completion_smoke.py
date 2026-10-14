@@ -1,5 +1,5 @@
-"""Linux synthetic completion, exact dated progress and no source replay."""
-from contextlib import ExitStack
+"""Native readback fences plus Linux completion, without source replay."""
+from contextlib import ExitStack, closing
 from copy import deepcopy
 from pathlib import Path
 import json
@@ -17,6 +17,220 @@ from packages.application import owned_history_worker as supervisor
 from packages.application.owned_history_worker_capability import HistoryDelegationError
 from packages.application.web_vitrina_history_store import HistoryStore
 from packages.application.business_data_heavy_admission import heavy_admission_status, current_heavy_owner
+
+
+class DerivedReadbackFenceTests(unittest.TestCase):
+    """Real native capture/compiler/object reads; kernel authentication is separate."""
+
+    def fixture(self, journal_mode='DELETE'):
+        from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import BUNDLE_FIXTURE, _build_plan
+        from apps.ready_publication_fixture import save_ready_fixture
+        from datetime import timedelta
+        from apps import web_vitrina_owned_history_worker as child
+        from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+        from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+        from packages.application.ready_publication import ensure_publication_schema
+        from packages.application.search_cluster_cleaner_store import install_schema
+        from packages.application.owned_history_worker_capability import file_digest
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        runtime = RegistryUploadDbBackedRuntime(directory / 'runtime')
+        accepted = runtime.ingest_bundle(json.loads(BUNDLE_FIXTURE.read_text()), activated_at='2026-04-21T15:00:00Z')
+        self.assertEqual(accepted.status, 'accepted')
+        RegistryUploadHttpEntrypoint(runtime_dir=runtime.runtime_dir, runtime=runtime)
+        current = runtime.load_current_state()
+        enabled = [item for item in current.config_v2 if item.enabled]
+        for offset in range(14):
+            day = (NOW.date() - timedelta(days=13-offset)).isoformat()
+            save_ready_fixture(runtime, current_state=current, refreshed_at=day + 'T15:05:00Z',
+                plan=_build_plan(as_of_date=day, first_nm_id=enabled[0].nm_id,
+                    second_nm_id=enabled[1].nm_id, first_group=enabled[0].group))
+        keeper = self.enterContext(closing(sqlite3.connect(runtime.db_path)))
+        self.assertEqual(keeper.execute('PRAGMA journal_mode=' + journal_mode).fetchone()[0], journal_mode.lower())
+        ensure_publication_schema(keeper)
+        install_schema(keeper)
+        keeper.execute("""INSERT INTO cleaner_runs(run_id,account,kind,trigger,state,phase,
+            created_at,captured_versions,targets) VALUES('fixture','fixture','scan','manual',
+            'running','scan',?,'{}','[]')""", (NOW.isoformat(),))
+        # An accepted publication is also consumed by the canonical adapter but
+        # is intentionally not covered by the input-revision alarm table.
+        key = keeper.execute('SELECT bundle_version,as_of_date FROM sheet_vitrina_v1_ready_snapshots ORDER BY as_of_date DESC LIMIT 1').fetchone()
+        keeper.execute("""INSERT INTO sheet_vitrina_v1_ready_publications
+            (operation_id,attempt_id,kind,bundle_version,as_of_date,expected_digest,
+             inputs_json,book_required,ready_required,state,book_version,after_digest,created_at,finished_at)
+            VALUES('fixture-publication','fixture','fixture',?,?,'expected','{}',0,1,
+                'complete',NULL,'fixture-after','created','finished')""", key)
+        keeper.commit()
+        keeper.execute('SELECT 1 FROM sqlite_master').fetchone()  # Keep WAL family open.
+        root = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'candidate'
+        root.mkdir(mode=0o700)
+        contract = json.loads((ROOT / 'artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json').read_text())
+        contract['candidate_root'] = str(root)
+        contract_path = root / 'contract.json'
+        contract_path.write_text(json.dumps(contract))
+        cap = dict(runtime_dir=str(runtime.runtime_dir), candidate_root=str(root),
+            runtime_contract=str(contract_path), runtime_contract_digest=file_digest(contract_path),
+            formula_epoch=contract['formula_epoch'], inner_seconds=60, max_recomputes=31,
+            now=NOW.isoformat(), source=supervisor.source_binding(runtime.runtime_dir),
+            anchor=None, mode='capture', invocation='fixture-capture')
+        # execute() itself and its real source/store checks run unchanged. Only
+        # inherited Linux FDs are outside this portable test's authority scope.
+        self.enterContext(patch.object(child, '_bound'))
+        cap['anchor'] = child.execute(cap)['anchor']
+        cap.update(mode='portion', invocation='fixture-portion')
+        result = child.execute(cap)
+        self.assertEqual(result['status'], 'published')
+        intent = json.loads((root / 'proofs' / 'owned-portion-fixture-portion.json').read_text())
+        cap.update(mode='verify', invocation='fixture-verify',
+            target={key: intent[key] for key in ('fresh_catalog', 'merged_catalog', 'target')})
+        return runtime, root, cap
+
+    def cleaner_commit(self, runtime):
+        # The production journal/phase writes, with real native schema, finish
+        # independently of the readback. DELETE must not retain an outer SH.
+        with closing(sqlite3.connect(runtime.db_path, timeout=.2)) as writer:
+            writer.execute("""INSERT INTO cleaner_events(event_id,account,run_id,kind,created_at,facts)
+                VALUES('fixture-event','fixture','fixture','self_service_finished',?,'{}')""", (NOW.isoformat(),))
+            writer.execute("UPDATE cleaner_runs SET state='finished',phase='finished' WHERE run_id='fixture'")
+            writer.commit()
+
+    def during_first_object(self, mutation):
+        from packages.application import owned_history_native_ack as ack
+        native = ack._object
+        calls = []
+        def read(*args):
+            result = native(*args)
+            if not calls:
+                mutation()
+            calls.append(args[1])
+            return result
+        return patch.object(ack, '_object', side_effect=read), calls
+
+    def test_cleaner_commit_during_native_object_readback_delete_and_wal(self):
+        from apps import web_vitrina_owned_history_worker as child
+        from packages.application.owned_history_native_ack import source_stamp
+        for mode in ('DELETE', 'WAL'):
+            with self.subTest(journal_mode=mode):
+                runtime, root, cap = self.fixture(mode)
+                before = source_stamp(runtime.runtime_dir, runtime.db_path)
+                pointer = (root / 'history' / 'CURRENT.json').read_bytes()
+                hook, calls = self.during_first_object(lambda: self.cleaner_commit(runtime))
+                with hook:
+                    observed = child.execute(cap)
+                self.assertEqual(observed['status'], 'verified')
+                self.assertTrue(observed['terminal'])
+                self.assertEqual(len(calls), 14)
+                self.assertEqual(len(observed['completed']), 14)
+                self.assertEqual((root / 'history' / 'CURRENT.json').read_bytes(), pointer)
+                self.assertNotEqual(observed['source_stamp'], before)
+                self.assertEqual(observed['source_stamp'], source_stamp(runtime.runtime_dir, runtime.db_path))
+                with closing(sqlite3.connect(runtime.db_path)) as conn:
+                    self.assertEqual(conn.execute('SELECT count(*) FROM cleaner_events').fetchone()[0], 1)
+                    self.assertEqual(conn.execute("SELECT phase FROM cleaner_runs WHERE run_id='fixture'").fetchone()[0], 'finished')
+
+    def test_actual_ready_dependency_and_revision_aba_refuse(self):
+        from apps import web_vitrina_owned_history_worker as child
+        for restore in (False, True):
+            with self.subTest(restore_original_value=restore):
+                runtime, root, cap = self.fixture()
+                pointer = (root / 'history' / 'CURRENT.json').read_bytes()
+                def change():
+                    with closing(sqlite3.connect(runtime.db_path, timeout=.2)) as conn:
+                        old = conn.execute('SELECT bundle_version,as_of_date,refreshed_at FROM sheet_vitrina_v1_ready_snapshots ORDER BY as_of_date LIMIT 1').fetchone()
+                        rows = conn.execute('SELECT * FROM sheet_vitrina_v1_ready_snapshots ORDER BY bundle_version,as_of_date').fetchall()
+                        revision = conn.execute('SELECT revision FROM sheet_vitrina_v1_ready_revisions WHERE bundle_version=? AND as_of_date=?', old[:2]).fetchone()[0]
+                        conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET refreshed_at='2099-01-01T00:00:00Z' WHERE bundle_version=? AND as_of_date=?", old[:2])
+                        conn.commit()
+                        if restore:
+                            conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET refreshed_at=? WHERE bundle_version=? AND as_of_date=?', (old[2], *old[:2]))
+                            conn.commit()
+                            self.assertEqual(conn.execute('SELECT * FROM sheet_vitrina_v1_ready_snapshots ORDER BY bundle_version,as_of_date').fetchall(), rows)
+                            self.assertGreater(conn.execute('SELECT revision FROM sheet_vitrina_v1_ready_revisions WHERE bundle_version=? AND as_of_date=?', old[:2]).fetchone()[0], revision)
+                hook, calls = self.during_first_object(change)
+                with hook, self.assertRaisesRegex(HistoryDelegationError, 'history_worker_anchor_changed'):
+                    child.execute(cap)
+                self.assertEqual(len(calls), 14)
+                self.assertEqual((root / 'history' / 'CURRENT.json').read_bytes(), pointer)
+
+    def test_unalarmed_consumed_publication_change_refuses(self):
+        from apps import web_vitrina_owned_history_worker as child
+        runtime, root, cap = self.fixture()
+        def change():
+            with closing(sqlite3.connect(runtime.db_path, timeout=.2)) as conn:
+                alarms = conn.execute('SELECT * FROM sheet_vitrina_v1_ready_input_revisions ORDER BY source_table').fetchall()
+                conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET after_digest='changed' WHERE operation_id='fixture-publication'")
+                conn.commit()
+                self.assertEqual(conn.execute('SELECT * FROM sheet_vitrina_v1_ready_input_revisions ORDER BY source_table').fetchall(), alarms)
+        hook, calls = self.during_first_object(change)
+        with hook, self.assertRaisesRegex(HistoryDelegationError, 'history_worker_anchor_changed'):
+            child.execute(cap)
+        self.assertEqual(len(calls), 14)
+
+    def test_cleaner_in_final_capture_and_parent_handoff_still_refuses(self):
+        from apps import web_vitrina_owned_history_worker as child
+        from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter
+        runtime, root, cap = self.fixture()
+        native = LiveNativeAdapter.capture
+        calls = []
+        def capture(adapter):
+            result = native(adapter)
+            calls.append(result)
+            if len(calls) == 2:
+                self.cleaner_commit(runtime)
+            return result
+        with patch.object(LiveNativeAdapter, 'capture', new=capture), \
+                self.assertRaisesRegex(HistoryDelegationError, 'history_source_changed_during_readback'):
+            child.execute(cap)
+        self.assertEqual(calls, [cap['anchor']['vector']] * 2)
+        # A genuine verified result cannot be consumed after even an unrelated
+        # subsequent write. The parent keeps its existing no-database guard.
+        observed = child.execute(cap)
+        with closing(sqlite3.connect(runtime.db_path)) as conn:
+            conn.execute("UPDATE cleaner_runs SET summary='{} ' WHERE run_id='fixture'")
+            conn.commit()
+        from types import SimpleNamespace
+        owner = SimpleNamespace(runtime=runtime)
+        with self.assertRaisesRegex(HistoryDelegationError, 'history_source_changed_after_readback'):
+            supervisor._OwnedHistoryWorker._finish_completion(owner, observed, None, portions=1)
+
+    def test_current_pointer_change_during_object_readback_refuses(self):
+        from apps import web_vitrina_owned_history_worker as child
+        runtime, root, cap = self.fixture()
+        path = root / 'history' / 'CURRENT.json'
+        def change():
+            value = json.loads(path.read_text())
+            value['previous'] = 'f' * 64
+            path.write_text(json.dumps(value))
+        hook, calls = self.during_first_object(change)
+        with hook, self.assertRaisesRegex(HistoryDelegationError, 'history_readback_changed_during_verify'):
+            child.execute(cap)
+        self.assertEqual(len(calls), 14)
+
+    def test_other_physical_sources_and_operational_replacement_stay_strict(self):
+        from packages.application.owned_history_native_ack import source_stamp, stamp_after_derived_read
+        from packages.application.storage_registry import MANIFEST_FILENAME
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / 'operational.sqlite3'
+            db.write_bytes(b'fixture')
+            for name in ('fbs-snapshot-accounting.sqlite3', 'fbs-snapshot-accounting.sqlite3-wal',
+                         MANIFEST_FILENAME, '.auto-updates-policy.json', '.web-vitrina-fbs-lifecycle-last-good.json'):
+                with self.subTest(source=name):
+                    path = root / name
+                    before = source_stamp(root, db)
+                    path.write_bytes(b'new')
+                    with self.assertRaisesRegex(HistoryDelegationError, 'history_source_changed_during_readback'):
+                        stamp_after_derived_read(root, db, before)
+                    before = source_stamp(root, db)
+                    path.write_bytes(b'ABA')
+                    path.write_bytes(b'new')
+                    with self.assertRaisesRegex(HistoryDelegationError, 'history_source_changed_during_readback'):
+                        stamp_after_derived_read(root, db, before)
+            before = source_stamp(root, db)
+            replacement = root / 'replacement'
+            replacement.write_bytes(db.read_bytes())
+            replacement.replace(db)
+            with self.assertRaisesRegex(HistoryDelegationError, 'history_source_changed_during_readback'):
+                stamp_after_derived_read(root, db, before)
 
 
 @unittest.skipUnless(sys.platform == 'linux', 'actual inherited kernel authority required')
