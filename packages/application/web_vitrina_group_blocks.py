@@ -72,12 +72,12 @@ def accepted_order_price_lookup(rows, members, day):
     accepted = {(row.nm_id, row.metric_key): row for row in rows}
     result = {}
     for item in members:
-        pair = {key: accepted_number(accepted.get((item.nm_id, key)), day)
-                for key in ('orderSum', 'orderCount')}
-        # The native order-price contract distinguishes an absent observation
-        # from an invalid present pair. Keep a one-sided pair so it still blocks.
-        if any(value is not None for value in pair.values()):
-            result[item.nm_id] = pair
+        pair_rows = {key: accepted.get((item.nm_id, key)) for key in ('orderSum', 'orderCount')}
+        # Check absence before numeric normalization: invalid or unavailable
+        # present values must remain a blocking pair in the native formula.
+        if any(row is not None and row.values_by_date.get(day) not in (None, '')
+               for row in pair_rows.values()):
+            result[item.nm_id] = {key: accepted_number(row, day) for key, row in pair_rows.items()}
     return result
 
 

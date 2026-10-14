@@ -552,9 +552,12 @@ def weighted_missing_group_checks(runtime):
     observed = [row('SKU', metric, 11, {day: value})
                 for metric, value in [('orderSum', 1000), ('orderCount', 10)]]
 
-    def project(amount, count, *, first=observed):
+    def project(amount, count, *, first=observed, presentation=None):
         sku = first + [row('SKU', metric, 12, {day: value})
                        for metric, value in [('orderSum', amount), ('orderCount', count)]]
+        if presentation:
+            sku = [replace(r, presentation_by_date={day: presentation}) if r.nm_id == 12 else r
+                   for r in sku]
         result = include_group_rows([total, *sku], groups=groups, config=config,
             metrics=metrics, formulas={f.formula_id: f for f in state.formulas_v2},
             dates=[day], runtime=runtime, today=day,
@@ -569,9 +572,16 @@ def weighted_missing_group_checks(runtime):
     assert project(0, 0).values_by_date[day] == 100
     for amount, count in [(None, 2), (100, None), (100, 0), (100, 1.5), (-100, 2)]:
         assert project(amount, count).values_by_date[day] == '', (amount, count)
+    for amount, count in [(True, False), (float('nan'), float('nan')),
+                          (float('inf'), float('-inf')), ('invalid', 'invalid'),
+                          (float('nan'), None), (None, 'invalid'), (False, None), (None, True)]:
+        assert project(amount, count).values_by_date[day] == '', (amount, count)
+    assert project(100, 1, presentation={'state': 'unavailable'}).values_by_date[day] == ''
+    assert project(None, '', presentation={'state': 'unavailable'}).values_by_date[day] == 100
     assert project(None, None, first=[]).values_by_date[day] == ''
     return {'absent_pair_is_partial_observation': True,
-            'invalid_present_pair_blocks': True, 'zero_and_no_orders_preserved': True,
+            'invalid_present_pair_blocks': True, 'both_invalid_and_unavailable_present_block': True,
+            'zero_and_no_orders_preserved': True,
             'total_and_sku_rows_unchanged': True}
 
 
