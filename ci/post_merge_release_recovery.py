@@ -415,6 +415,20 @@ def _prove_failed_stage(
             "stage": "root-storage-status-artifact-readback", "exit_status": 3}
 
 
+def _canonical_manual_release(run: Mapping[str, Any], release_run_id: int) -> bool:
+    """Manual Runner origin only; receipt/Gate/merge/operation proofs still follow."""
+    repository = run.get("repository")
+    head_repository = run.get("head_repository")
+    return (
+        run.get("event") == "workflow_dispatch"
+        and type(run.get("id")) is int and run["id"] == release_run_id
+        and type(run.get("run_attempt")) is int and run["run_attempt"] == 1
+        and run.get("head_branch") == "main"
+        and isinstance(repository, Mapping) and repository.get("full_name") == REPOSITORY
+        and isinstance(head_repository, Mapping) and head_repository.get("full_name") == REPOSITORY
+    )
+
+
 def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, Any]:
     case = recovery_case(release_run_id)
     run = client.get(f"/actions/runs/{release_run_id}")
@@ -423,7 +437,8 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
         reasons.append("repository-mismatch")
     if run.get("name") != RELEASE_WORKFLOW or run.get("path") != RELEASE_WORKFLOW_PATH:
         reasons.append("release-workflow-mismatch")
-    if run.get("event") != "workflow_run" or run.get("run_attempt") != 1:
+    manual_release = _canonical_manual_release(run, release_run_id)
+    if (run.get("event") != "workflow_run" and not manual_release) or run.get("run_attempt") != 1:
         reasons.append("release-provenance-invalid")
     if run.get("status") != "completed" or run.get("conclusion") != "failure":
         reasons.append("release-not-failed")
@@ -454,6 +469,12 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
 
     jobs_payload = client.get(f"/actions/runs/{release_run_id}/jobs?filter=latest&per_page=100")
     jobs = jobs_payload.get("jobs") if isinstance(jobs_payload, Mapping) else None
+    if manual_release:
+        route_jobs = [item for item in (jobs or []) if isinstance(item, Mapping)
+                      and item.get("name") == "Route successful exact PR Gate plan"]
+        if (len(route_jobs) != 1 or route_jobs[0].get("status") != "completed"
+                or route_jobs[0].get("conclusion") != "success"):
+            raise RecoveryError("manual-release-route-invalid")
     deployed_jobs = [
         item
         for item in (jobs or [])
