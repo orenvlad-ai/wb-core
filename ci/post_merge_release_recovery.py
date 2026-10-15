@@ -335,6 +335,33 @@ def _validate_original_receipt(
     return normalized
 
 
+def _storage_tail_gate_argument_matches(text: str, gate_run_id: int) -> bool:
+    if f'--workflow-run-id "{gate_run_id}"' in text:
+        return True
+    # GitHub logs the canonical command before shell expansion. Bind its variable
+    # to the single env value in that same immutable step, not elsewhere in output.
+    command = ('python3 apps/github_release_runner.py run --workflow-run-id '
+               '"$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"')
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    clean = re.sub(r"(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z ", "", clean)
+    lines = clean.splitlines()
+    starts = [i for i, line in enumerate(lines) if line == "##[group]Run " + command]
+    if len(starts) != 1 or clean.count(command) != 2:
+        return False
+    start = starts[0]
+    ends = [i for i in range(start + 1, min(start + 65, len(lines)))
+            if lines[i] == "##[endgroup]"]
+    if not ends:
+        return False
+    group = lines[start + 1:ends[0]]
+    bindings = re.findall(r"(?m)^  GATE_RUN_ID: (.*)$", clean)
+    return (bool(group) and group[0] == command
+            and "shell: /usr/bin/bash -e {0}" in group and "env:" in group
+            and not any(line.startswith("##[group]") for line in group)
+            and bindings == [str(gate_run_id)]
+            and group.count(f"  GATE_RUN_ID: {gate_run_id}") == 1)
+
+
 def _prove_failed_stage(
     raw_log: bytes, gate_run_id: int, job_name: str, *, case: RecoveryCase = RecoveryCase.STORAGE_TAIL,
     release_run_id: int = EXPECTED_ACTIVATION_RELEASE_RUN_ID,
@@ -404,9 +431,8 @@ def _prove_failed_stage(
                 "stage": "autoanswers-prepare-deploy-worker-health-precheck", "exit_status": 1,
                 "unit": "wb-core-autoanswers-worker.service"}
     required = ("deploy_current_checkout", 'run_stage("readback", root_storage_commands["status_artifact_readback"])',
-                "apps/root_storage_policy.py", "status-readback", "returned non-zero exit status 3",
-                f'--workflow-run-id "{gate_run_id}"')
-    if any(item not in text for item in required):
+                "apps/root_storage_policy.py", "status-readback", "returned non-zero exit status 3")
+    if any(item not in text for item in required) or not _storage_tail_gate_argument_matches(text, gate_run_id):
         raise RecoveryError("failed-stage-not-root-storage-readback-exit3")
     failures = re.findall(r"subprocess\.CalledProcessError: Command .*?returned non-zero exit status (\d+)", text, re.DOTALL)
     if failures != ["3"] or "exit status 255" in text:

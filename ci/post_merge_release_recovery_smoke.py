@@ -113,6 +113,31 @@ def test_failure_evidence() -> None:
     proof = recovery._prove_failed_stage(failure_log(), 77, "One-shot deployed release")
     assert proof["stage"] == "root-storage-status-artifact-readback"
     assert proof["exit_status"] == 3
+    command = ('python3 apps/github_release_runner.py run --workflow-run-id '
+               '"$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"')
+    step = (f'##[group]Run {command}\n\x1b[36;1m{command}\x1b[0m\n'
+            'shell: /usr/bin/bash -e {0}\nenv:\n  GITHUB_TOKEN: ***\n'
+            '  GATE_RUN_ID: 77\n##[endgroup]\n')
+    tail = failure_log().decode().split('\n', 2)[2]
+    variable_log = (step + tail).encode()
+    assert recovery._prove_failed_stage(variable_log, 77, "One-shot deployed release")["exit_status"] == 3
+    timestamped = ''.join('2026-10-15T02:08:14.5338243Z ' + line + '\n'
+                          for line in variable_log.decode().splitlines()).encode()
+    assert recovery._prove_failed_stage(timestamped, 77, "One-shot deployed release")["job_log_sha256"] == recovery.digest(timestamped)
+    for bad in (
+        variable_log.replace(b'  GATE_RUN_ID: 77', b'  GATE_RUN_ID: 78'),
+        variable_log.replace(b'  GATE_RUN_ID: 77\n', b''),
+        variable_log.replace(b'  GATE_RUN_ID: 77', b'  GATE_RUN_ID: 77\n  GATE_RUN_ID: 77'),
+        variable_log.replace(b'  GATE_RUN_ID: 77', b'  GATE_RUN_ID: 077'),
+        variable_log.replace(b'  GATE_RUN_ID: 77\n', b'') + b'  GATE_RUN_ID: 77\n',
+        step.encode() + variable_log,
+        variable_log.replace(b'"$GATE_RUN_ID"', b'"$OTHER_RUN_ID"'),
+        variable_log.replace(b'--output "$RUNNER_TEMP/release-receipt.json"', b'--output wrong.json'),
+        variable_log.replace(b'env:\n', b'env:\n##[group]nested\n'),
+        variable_log.replace(b'##[endgroup]', b''),
+    ):
+        expect_reason('failed-stage-not-root-storage-readback-exit3',
+                      lambda bad=bad: recovery._prove_failed_stage(bad, 77, "One-shot deployed release"))
     expect_reason(
         "failed-stage-not-root-storage-readback-exit3",
         lambda: recovery._prove_failed_stage(failure_log(255), 77, "One-shot deployed release"),
