@@ -541,6 +541,50 @@ def promo_composite_reason_scope_checks(runtime):
             'existing_partial_reason_preserved':True}
 
 
+def weighted_missing_group_checks(runtime):
+    day = '2026-09-20'
+    state = runtime.load_current_state()
+    metrics = {m.metric_key: m for m in _effective_web_vitrina_metrics(state.metrics_v2)}
+    key = 'weighted_price_seller_discounted'
+    config = [ConfigV2Item(nm, True, str(nm), 'a', nm) for nm in (11, 12)]
+    groups = [{'group_key': 'a', 'label': 'A', 'is_active': True}]
+    total = row('TOTAL', key, values={day: 777})
+    observed = [row('SKU', metric, 11, {day: value})
+                for metric, value in [('orderSum', 1000), ('orderCount', 10)]]
+
+    def project(amount, count, *, first=observed, presentation=None):
+        sku = first + [row('SKU', metric, 12, {day: value})
+                       for metric, value in [('orderSum', amount), ('orderCount', count)]]
+        if presentation:
+            sku = [replace(r, presentation_by_date={day: presentation}) if r.nm_id == 12 else r
+                   for r in sku]
+        result = include_group_rows([total, *sku], groups=groups, config=config,
+            metrics=metrics, formulas={f.formula_id: f for f in state.formulas_v2},
+            dates=[day], runtime=runtime, today=day,
+            parameters3=lambda _: None, parameters4=lambda _: None)
+        assert result[:len(sku)+1] == [total, *sku]
+        return next(r for r in result if r.scope_kind == 'GROUP')
+
+    missing = project('', None)
+    assert missing.values_by_date[day] == 100, missing.values_by_date
+    assert missing.presentation_by_date[day]['completeness_state'] == 'partial'
+    assert missing.presentation_by_date[day]['missing_sku_count'] == 1
+    assert project(0, 0).values_by_date[day] == 100
+    for amount, count in [(None, 2), (100, None), (100, 0), (100, 1.5), (-100, 2)]:
+        assert project(amount, count).values_by_date[day] == '', (amount, count)
+    for amount, count in [(True, False), (float('nan'), float('nan')),
+                          (float('inf'), float('-inf')), ('invalid', 'invalid'),
+                          (float('nan'), None), (None, 'invalid'), (False, None), (None, True)]:
+        assert project(amount, count).values_by_date[day] == '', (amount, count)
+    assert project(100, 1, presentation={'state': 'unavailable'}).values_by_date[day] == ''
+    assert project(None, '', presentation={'state': 'unavailable'}).values_by_date[day] == 100
+    assert project(None, None, first=[]).values_by_date[day] == ''
+    return {'absent_pair_is_partial_observation': True,
+            'invalid_present_pair_blocks': True, 'both_invalid_and_unavailable_present_block': True,
+            'zero_and_no_orders_preserved': True,
+            'total_and_sku_rows_unchanged': True}
+
+
 def main():
     started=time.monotonic()
     server=LocalWebVitrinaFixtureServer(with_ready_snapshot=True,ready_days=1)
@@ -572,6 +616,7 @@ def main():
             assert period.metadata['group_source_statuses']==[
                 {'source_key':'ads_compact','kind':'incomplete','temporal_slot':'2026-04-21'}]
             semantic=semantic_checks(runtime)
+            weighted_missing=weighted_missing_group_checks(runtime)
             promo_reason_scope=promo_composite_reason_scope_checks(runtime)
             integrity=integrity_checks(runtime)
             normal=NativeDatedCompiler(runtime,datetime(2026,4,20,12,tzinfo=timezone.utc),'2026-04-20','2026-04-20')
@@ -583,6 +628,6 @@ def main():
                 if r['row_kind']=='group' and rid.startswith('GROUP:clean|'):
                     assert r['group_id']=='group:clean' and r['values']['group'][0]=='Clean renamed'
         assert before==hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
-    print(json.dumps({'status':'PASS','semantics':semantic,'promo_reason_scope':promo_reason_scope,'integrity':integrity,'native_compiler_all16_unchanged':True,'stable_label_identity_order':True,'source_RO':True,'accepted_basis':basis_binding_checks(),'migration':migration_checks(),'membership':membership_checks(),'CLI':cli_checks(),'seconds':round(time.monotonic()-started,3)}))
+    print(json.dumps({'status':'PASS','semantics':semantic,'weighted_missing':weighted_missing,'promo_reason_scope':promo_reason_scope,'integrity':integrity,'native_compiler_all16_unchanged':True,'stable_label_identity_order':True,'source_RO':True,'accepted_basis':basis_binding_checks(),'migration':migration_checks(),'membership':membership_checks(),'CLI':cli_checks(),'seconds':round(time.monotonic()-started,3)}))
 
 if __name__=='__main__':main()

@@ -68,6 +68,19 @@ def accepted_number(row, day):
     return numeric(row.values_by_date.get(day))
 
 
+def accepted_order_price_lookup(rows, members, day):
+    accepted = {(row.nm_id, row.metric_key): row for row in rows}
+    result = {}
+    for item in members:
+        pair_rows = {key: accepted.get((item.nm_id, key)) for key in ('orderSum', 'orderCount')}
+        # Check absence before numeric normalization: invalid or unavailable
+        # present values must remain a blocking pair in the native formula.
+        if any(row is not None and row.values_by_date.get(day) not in (None, '')
+               for row in pair_rows.values()):
+            result[item.nm_id] = {key: accepted_number(row, day) for key, row in pair_rows.items()}
+    return result
+
+
 def input_incomplete(presentation):
     return (presentation.get('state') == 'unavailable'
             or presentation.get('quality_state') in {'missing', 'partial', 'stale', 'historical_repair_required'}
@@ -327,8 +340,7 @@ def include_group_rows(rows, *, groups, config, metrics, formulas, dates,
         group_rows = [r for r in rows if r.scope_kind == 'SKU' and r.nm_id in selected_ids]
         lookups = {day: SimpleNamespace(column_date=day, our_wb_cost_lookup={},
             own_product_capital_lookup=own[day], fin_storage_fee_total=None,
-            order_price_lookup={x.nm_id: {'orderSum': accepted_number(next((r for r in group_rows if r.nm_id == x.nm_id and r.metric_key == 'orderSum'), None), day),
-                'orderCount': accepted_number(next((r for r in group_rows if r.nm_id == x.nm_id and r.metric_key == 'orderCount'), None), day)} for x in selected}) for day in dates}
+            order_price_lookup=accepted_order_price_lookup(group_rows, selected, day)) for day in dates}
         evaluator = AcceptedGroupEvaluator(rows=group_rows, cost_basis=cost_basis, enabled_config=selected,
             metrics_by_key=metrics, formulas_by_id=formulas,
             live_sources=TemporalLiveSources([], [SimpleNamespace(**s) for s in source_statuses], lookups, {}),
