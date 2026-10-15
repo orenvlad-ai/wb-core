@@ -8,6 +8,7 @@ from copy import deepcopy
 import io
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import tempfile
@@ -1613,6 +1614,206 @@ def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = F
         recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant, recovery._predependency_diff_proof = originals
 
 
+def test_existing_started_owner_real_state() -> None:
+    from apps.business_data_maintenance_pause_smoke import fixture
+    from packages.application import business_data_deploy_protection as deploy
+    from packages.application import business_data_maintenance_pause as pause
+
+    namespace = {}
+    exec(recovery._existing_started_owner_proof_source(), namespace)
+    read = namespace['existing_started_owner_proof']
+    with tempfile.TemporaryDirectory() as directory, \
+            patch.object(pause, '_cron_entries', return_value=[]), \
+            patch.object(deploy, '_selected', return_value=True):
+        runtime = Path(directory)
+        systemd, activity = fixture(runtime)
+        proc = runtime / 'proc'; proc.mkdir()
+        unit = 'wb-core-web-vitrina-finished-snapshot.service'
+        before_command = 'python3 build.py --formula-epoch wbc0069k16-reviewed-native-v1:' + '1' * 64
+        systemd.states[unit]['properties']['ExecStart'] = before_command
+        pause.pause(runtime, window_id='existing-owner-test', actor='test', reason='recovery test',
+                    systemd=systemd, activity_reader=activity, proc_root=proc)
+        quiet = lambda: pause.readback(runtime, systemd=systemd, activity_reader=activity, proc_root=proc)
+        operation = 'release-v3-existing'
+        deploy.claim(runtime, operation, quiet_reader=quiet)
+        deploy.start(runtime, operation, M)
+        owner_file = runtime / deploy.FILENAME
+        owner_raw = owner_file.read_bytes()
+        baseline_raw = (runtime / pause.STATE_FILENAME).read_bytes()
+        systemd.states[unit]['properties']['ExecStart'] = before_command.replace('1' * 64, '2' * 64)
+        with patch.object(deploy, '_clients', return_value=(systemd, quiet)):
+            proof = read(runtime, operation, M, runtime / 'unused.env')
+            assert read(runtime, operation, M, runtime / 'unused.env') == proof
+            assert proof['quiet'] and proof['owner']['phase'] == 'mutation_started'
+            assert set(proof['baseline_unit_changes']) == {unit}
+            assert proof['units'][unit]['configuration'] != pause._unit_fingerprint(
+                pause.load_state(runtime)['baseline']['units'][unit])
+            try:
+                deploy.claim(runtime, operation, quiet_reader=quiet)
+            except RuntimeError as exc:
+                assert 'unit configuration changed' in str(exc)
+            else:
+                raise AssertionError('regression must reproduce the original reclaim refusal')
+
+            def rejected(call):
+                try:
+                    call()
+                except RuntimeError:
+                    return
+                raise AssertionError('existing owner proof accepted invalid state')
+
+            rejected(lambda: read(runtime, 'release-v3-foreign', M, runtime / 'unused.env'))
+            rejected(lambda: read(runtime, operation, C1, runtime / 'unused.env'))
+            with patch.object(deploy, 'admission_idle', return_value={'ready': True, 'idle': False}):
+                rejected(lambda: read(runtime, operation, M, runtime / 'unused.env'))
+            systemd.states[unit]['properties']['MainPID'] = '123'
+            rejected(lambda: read(runtime, operation, M, runtime / 'unused.env'))
+            systemd.states[unit]['properties']['MainPID'] = '0'
+            policy = runtime / pause.POLICY_FILENAME
+            policy_raw = policy.read_bytes()
+            policy.write_text(json.dumps({'master_desired': False, 'revision': 8}))
+            rejected(lambda: read(runtime, operation, M, runtime / 'unused.env'))
+            policy.write_bytes(policy_raw)
+            original_owner = deploy.load(runtime)
+            deploy._save(runtime, {**original_owner, 'baseline_fingerprint': 'sha256:' + '9' * 64})
+            rejected(lambda: read(runtime, operation, M, runtime / 'unused.env'))
+            owner_file.write_bytes(owner_raw)
+            deploy._save(runtime, {**original_owner, 'window_id': 'foreign-window'})
+            rejected(lambda: read(runtime, operation, M, runtime / 'unused.env'))
+            owner_file.write_bytes(owner_raw)
+            deploy._save(runtime, {**original_owner, 'phase': 'prepared', 'expected_sha': ''})
+            assert read(runtime, operation, M, runtime / 'unused.env') is None
+            owner_file.unlink()
+            assert read(runtime, operation, M, runtime / 'unused.env') is None
+            owner_file.write_bytes(owner_raw)
+            owner_file.chmod(0o600)
+
+            # Execute the generated native commands against the same private
+            # state. Both guards must retain owner/baseline bytes after deploy.
+            calls = []
+            def run(command, **_kwargs):
+                words = shlex.split(command[-1])
+                action = words[words.index('packages.application.business_data_deploy_protection') + 1]
+                calls.append(action)
+                value = (deploy.require_owner(runtime, operation, M) if action == 'check'
+                         else deploy.start(runtime, operation, M, recovery=True))
+                return subprocess.CompletedProcess(command, 0, stdout=json.dumps(value), stderr='')
+            target = SimpleNamespace(target_dir=str(ROOT), ssh_destination='offline',
+                runtime_env={'REGISTRY_UPLOAD_RUNTIME_DIR': str(runtime)}, environment_file=str(runtime / 'unused.env'))
+            with patch.object(recovery, '_run_stage', side_effect=run):
+                recovery._resume_started_deploy_protection(target,
+                    {'original_operation_id': operation, 'merge_sha': M})
+            assert calls == ['check', 'recovery-start']
+        assert owner_file.read_bytes() == owner_raw
+        assert (runtime / pause.STATE_FILENAME).read_bytes() == baseline_raw
+        value = preview()
+        without = recovery.preview_fingerprint(value)
+        value['existing_started_owner'] = proof
+        bound = recovery.preview_fingerprint(value)
+        assert bound != without
+        proof['units'][unit]['configuration'] = 'changed'
+        assert recovery.preview_fingerprint(value) != bound
+
+
+def test_existing_started_owner_full_native_tail() -> None:
+    from apps.hosted_runtime_deploy_barrier_protection_smoke import ProtectionTests, OP, SHA
+    from packages.application import business_data_deploy_protection as deploy
+    from packages.application import business_data_maintenance_pause as pause
+    from packages.application import business_data_write_barrier as barrier
+
+    fixture = ProtectionTests()
+    fixture.setUp()
+    try:
+        unit = 'wb-core-web-vitrina-finished-snapshot.service'
+        before_command = 'python3 build.py --formula-epoch wbc0069k16-reviewed-native-v1:' + '1' * 64
+        fixture.systemd.states[unit]['properties']['ExecStart'] = before_command
+        _recovery, value, client, target, effects, calls, flags, original, fp, stack = fixture.recovery_fixture(
+            recovery.RecoveryCase.STORAGE_TAIL)
+        deploy.claim(fixture.runtime, OP, quiet_reader=fixture.quiet)
+        deploy.start(fixture.runtime, OP, SHA)
+        owner_before = deploy.load(fixture.runtime)
+        baseline_raw = (fixture.runtime / pause.STATE_FILENAME).read_bytes()
+        fixture.systemd.states[unit]['properties']['ExecStart'] = before_command.replace('1' * 64, '2' * 64)
+        namespace = {}
+        exec(recovery._existing_started_owner_proof_source(), namespace)
+        def read(_target, source):
+            return namespace['existing_started_owner_proof'](fixture.runtime,
+                source['original_operation_id'], source['merge_sha'], fixture.runtime / 'unused.env')
+        with patch.object(deploy, '_clients', return_value=(fixture.systemd, fixture.quiet)), \
+                patch.object(recovery, 'collect_existing_started_owner', side_effect=read):
+            value['existing_started_owner'] = read(target, value['source'])
+            result = recovery.apply_recovery(client, value, fp, target)
+        assert result['state'] == 'complete', result
+        assert 'claim' not in calls
+        applied = effects.read_text().splitlines()
+        assert applied == ['activation', 'completion'], applied
+        assert deploy.load(fixture.runtime)['phase'] == 'complete'
+        assert deploy.load(fixture.runtime)['operation_id'] == owner_before['operation_id']
+        assert barrier.barrier_status(fixture.runtime)['active']
+        assert (fixture.runtime / pause.STATE_FILENAME).read_bytes() == baseline_raw
+        assert sum(recovery.CLAIM_MARKER in body for body in client.values) == 1
+        assert sum(recovery.RECEIPT_MARKER in body for body in client.values) == 1
+    finally:
+        fixture.doCleanups()
+
+
+def test_existing_started_owner_apply_binding() -> None:
+    proof = {'owner': {'phase': 'mutation_started', 'operation_id': 'release-v3-old'},
+             'quiet': True, 'controls': {}, 'units': {'snapshot.service': {'configuration': 'deployed'}}}
+    value = preview()
+    original = {**value['source'], 'operation_id': value['source']['original_operation_id']}
+    evidence = {'original_receipt': original, 'recovery_case': 'storage-tail',
+                'failure': value['failure'], 'original_receipt_sha256': '3' * 64,
+                'gate_plan': {'plan_sha256': '4' * 64}}
+    target = SimpleNamespace(target_id='target', ssh_destination='host', target_dir='/runtime')
+    with patch.object(recovery, 'collect_evidence', return_value=evidence), \
+            patch.object(recovery, 'prove_repo_only_descendant', return_value=value['runner']), \
+            patch.object(recovery, 'collect_prestate', return_value=value['prestate']), \
+            patch.object(recovery, 'collect_existing_started_owner', return_value=proof) as collect:
+        bound = recovery.build_preview(CommentsClient(), 9, target)
+        assert bound['existing_started_owner'] == proof
+        assert bound['preview_fingerprint'] == recovery.preview_fingerprint(bound)
+        collect.assert_called_once_with(target, bound['source'])
+    for drift in ('none', 'before', 'after'):
+        calls, originals = patch_apply()
+        client = CommentsClient()
+        value = preview(); value['existing_started_owner'] = proof
+        reads = [None] if drift == 'before' else [proof, None] if drift == 'after' else [proof, proof]
+        try:
+            with patch.object(recovery, 'collect_existing_started_owner', side_effect=reads), \
+                    patch.object(recovery, '_resume_started_deploy_protection', return_value=[]) as resume, \
+                    patch.object(recovery, '_protect_deploy_command', side_effect=lambda _t, _s, command: command), \
+                    patch.object(recovery, '_finish_deploy_protection', return_value={}), \
+                    patch.object(recovery, '_claim_deploy_protection', side_effect=AssertionError('must not reclaim')):
+                if drift == 'before':
+                    expect_reason('existing-started-owner-drift-before-stages',
+                        lambda: recovery.apply_recovery(client, value, FINGERPRINT, object()))
+                    assert not client.values and not calls and not resume.called
+                else:
+                    result = recovery.apply_recovery(client, value, FINGERPRINT, object())
+                    resume.assert_called_once()
+                    if drift == 'after':
+                        assert result['state'] == 'ambiguous'
+                        assert result['reason'] == 'existing-started-owner-drift-after-claim'
+                        assert 'activation' not in calls and 'completion' not in calls
+                    else:
+                        assert result['state'] == 'complete', result
+                        assert calls.count('activation') == calls.count('completion') == 1
+        finally:
+            restore_apply(originals)
+    # Old previews/fresh-owner cases keep the same existing claim entrypoint.
+    calls, originals = patch_apply()
+    try:
+        with patch.object(recovery, '_claim_deploy_protection', return_value=[]) as claim, \
+                patch.object(recovery, '_protect_deploy_command', side_effect=lambda _t, _s, command: command), \
+                patch.object(recovery, '_finish_deploy_protection', return_value={}), \
+                patch.object(recovery, '_resume_started_deploy_protection', side_effect=AssertionError('no reviewed owner')):
+            assert recovery.apply_recovery(CommentsClient(), preview(), FINGERPRINT, object())['state'] == 'complete'
+            claim.assert_called_once()
+    finally:
+        restore_apply(originals)
+
+
 def legacy_tail_regressions() -> None:
     test_manual_release_full_evidence_chain()
     test_predependency_exact_source_and_dependency_proofs()
@@ -1649,6 +1850,9 @@ def legacy_tail_regressions() -> None:
 
 
 def main() -> None:
+    test_existing_started_owner_real_state()
+    test_existing_started_owner_apply_binding()
+    test_existing_started_owner_full_native_tail()
     # These existing fixtures represent pre-protection runtimes and intentionally
     # use opaque object() targets/one-word stage commands. Owner phase, guarded
     # command and completion failures have separate real-state coverage in the

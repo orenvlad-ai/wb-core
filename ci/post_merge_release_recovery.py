@@ -756,6 +756,63 @@ def _run_remote_json(target: Any, script: str) -> dict[str, Any]:
     return value
 
 
+def _existing_started_owner_proof_source() -> str:
+    return '''
+def existing_started_owner_proof(runtime, operation, expected_sha, env_file):
+    from packages.application import business_data_deploy_protection as deploy
+    from packages.application import business_data_maintenance_pause as pause
+    owner = deploy.load(runtime)
+    if owner is None or owner['phase'] != 'mutation_started':
+        return None
+    owner = deploy.require_owner(runtime, operation, expected_sha)
+    state = pause.load_state(runtime)
+    _systemd, quiet_reader = deploy._clients(runtime, env_file)
+    current = quiet_reader()
+    if current.get('quiet') is not True:
+        raise RuntimeError('existing deploy owner requires fresh quiet proof')
+    if current['controls'] != state['baseline']['controls']:
+        raise RuntimeError('existing deploy owner controls changed during pause')
+    # The deployed unit configuration may intentionally differ from the initial
+    # pause. Bind its current exact configuration to the reviewed preview while
+    # preserving the original owner, raw controls and pause baseline.
+    units = {unit: {'configuration': pause._unit_fingerprint(value),
+                    'enabled': value['is_enabled'], 'active': value['is_active']}
+             for unit, value in sorted(current['units'].items())}
+    if units.keys() != state['baseline']['units'].keys():
+        raise RuntimeError('existing deploy owner unit inventory changed')
+    changes = {unit: {'before': pause._unit_fingerprint(state['baseline']['units'][unit]),
+                      'after': value['configuration']}
+               for unit, value in units.items()
+               if pause._unit_fingerprint(state['baseline']['units'][unit]) != value['configuration']}
+    if deploy.require_owner(runtime, operation, expected_sha) != owner:
+        raise RuntimeError('existing deploy owner changed during readback')
+    return {'owner': owner, 'quiet': True, 'controls': current['controls'], 'units': units,
+            'baseline_unit_changes': changes}
+'''
+
+
+def collect_existing_started_owner(target: Any, source: Mapping[str, Any]) -> dict[str, Any] | None:
+    identity = _deploy_protection_identity(target, source)
+    script = f'''import sys, json
+from pathlib import Path
+sys.path.insert(0, {identity['app_dir']!r})
+{_existing_started_owner_proof_source()}
+try:
+    proof = existing_started_owner_proof(Path({identity['runtime_dir']!r}),
+        {identity['operation']!r}, {identity['expected_sha']!r}, Path({identity['env_file']!r}))
+except Exception:
+    raise SystemExit(40)
+print(json.dumps({{'existing_started_owner': proof}}, sort_keys=True))
+'''
+    result = _run_remote_json(target, script)
+    if set(result) != {'existing_started_owner'} or (
+        result['existing_started_owner'] is not None
+        and not isinstance(result['existing_started_owner'], dict)
+    ):
+        raise RecoveryError('existing-started-owner-proof-invalid')
+    return result['existing_started_owner']
+
+
 def _finance_pilot_validator_source() -> str:
     """Return the exact validator embedded in the remote prestate program."""
 
@@ -1277,6 +1334,7 @@ def preview_fingerprint(payload: Mapping[str, Any]) -> str:
         "selective_previous_recovery": payload.get("selective_previous_recovery"),
         "prestate": payload["prestate"],
         "finance_acceptance": payload.get("finance_acceptance"),
+        "existing_started_owner": payload.get("existing_started_owner"),
         "stages": payload["stages"],
         "forbidden_stages": payload["forbidden_stages"],
     }
@@ -1509,6 +1567,10 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
             result["stages"].insert(result["stages"].index("autoanswers-prepare-deploy"), "locked-npm-dependencies-once-and-readback")
         result["forbidden_stages"] = ["merge", "rsync", "chown", "os-pip-browser-dependency-install"]
         result["stages"].insert(result["stages"].index("deployment-metadata-cas-complete"), "cleaner-before-complete-probe")
+    result['existing_started_owner'] = (
+        collect_existing_started_owner(target, result['source'])
+        if case is RecoveryCase.STORAGE_TAIL else None
+    )
     result["preview_fingerprint"] = preview_fingerprint(result)
     return result
 
@@ -1540,6 +1602,15 @@ def _claim_deploy_protection(target, source):
     return [_must_succeed('deploy-owner-' + action,
         hosted._remote_shell_command(target, remote_shell(action, **identity)))
         for action in ('claim', 'recovery-start')]
+
+
+def _resume_started_deploy_protection(target, source):
+    from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+    from packages.application.business_data_deploy_protection import remote_shell
+    identity = _deploy_protection_identity(target, source)
+    return [_must_succeed('deploy-owner-' + action,
+        hosted._remote_shell_command(target, remote_shell(action, **identity)))
+        for action in ('check', 'recovery-start')]
 
 
 def _protect_deploy_command(target, source, command):
@@ -1675,7 +1746,16 @@ def apply_recovery(
     # Every supported mutating tail owns the original deploy, including the
     # status artifact, activation and stdin completion CAS. A missing old helper
     # refuses recovery-start before any of those mutations.
-    stages: list[dict[str, Any]] = _claim_deploy_protection(target, preview['source'])
+    started_owner = preview.get('existing_started_owner')
+    if started_owner is not None:
+        if case is not RecoveryCase.STORAGE_TAIL:
+            raise RecoveryError('existing-started-owner-case-invalid')
+        current_owner = collect_existing_started_owner(target, preview['source'])
+        if canonical_bytes(current_owner) != canonical_bytes(started_owner):
+            raise RecoveryError('existing-started-owner-drift-before-stages')
+        stages = _resume_started_deploy_protection(target, preview['source'])
+    else:
+        stages = _claim_deploy_protection(target, preview['source'])
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
         stages.append(_must_succeed("root-storage-status-refresh", protected(commands["root_storage_status"])))
     stages.extend([
@@ -1709,6 +1789,10 @@ def apply_recovery(
         fresh_runner = prove_repo_only_descendant(client, preview["source"])
         if canonical_bytes(fresh_runner) != canonical_bytes(preview["runner"]):
             raise RecoveryError("trusted-main-drift-after-claim")
+        if started_owner is not None and canonical_bytes(
+            collect_existing_started_owner(target, preview['source'])
+        ) != canonical_bytes(started_owner):
+            raise RecoveryError('existing-started-owner-drift-after-claim')
         if case is RecoveryCase.SQLITE_ACTIVATION:
             current_proof = collect_sqlite_activation_failure(target, preview["failure"], int(preview["release_run_id"]))
             if canonical_bytes(current_proof) != canonical_bytes(preview.get("activation_failure_proof")):
