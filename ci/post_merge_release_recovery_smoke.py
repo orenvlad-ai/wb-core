@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import ast
+from copy import deepcopy
+import io
 import json
 import os
 import sqlite3
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -114,6 +117,7 @@ def test_failure_evidence() -> None:
         "failed-stage-not-root-storage-readback-exit3",
         lambda: recovery._prove_failed_stage(failure_log(255), 77, "One-shot deployed release"),
     )
+
     bad_receipt = {
         "schema": recovery.release.RECEIPT_SCHEMA,
         "state": "done",
@@ -131,6 +135,127 @@ def test_failure_evidence() -> None:
             failure_log(exact_stage=False), 77, "One-shot deployed release"
         ),
     )
+
+
+class ReleaseEvidenceClient:
+    """Serve immutable GitHub evidence; any non-GET action is a test failure."""
+    repository = recovery.REPOSITORY
+
+    def __init__(self, event="workflow_dispatch"):
+        self.plan = {"schema": "wb-core.check-plan/v1", "pull_request": 7,
+            "base_sha": "1" * 40, "head_sha": "2" * 40, "changed_paths": ["apps/runtime.py"],
+            "commands": [], "release_kind": "live_runtime"}
+        self.seal_plan()
+        self.receipt = {"schema": recovery.release.RECEIPT_SCHEMA, "state": "blocked",
+            "reason": "CalledProcessError", "release_kind": "live_runtime", "deployed_sha": None,
+            "pull_request": 7, "gate_run_id": 77, "base_sha": "1" * 40, "head_sha": "2" * 40,
+            "merge_sha": M, "operation_id": recovery.release.operation_id(77, 7, "1" * 40,
+                "2" * 40, self.plan["plan_sha256"])}
+        self.run = {"id": 9, "name": recovery.RELEASE_WORKFLOW, "path": recovery.RELEASE_WORKFLOW_PATH,
+            "event": event, "run_attempt": 1, "status": "completed", "conclusion": "failure",
+            "head_branch": "main", "head_sha": "1" * 40,
+            "repository": {"full_name": self.repository}, "head_repository": {"full_name": self.repository}}
+        self.gate = {"name": recovery.release.WORKFLOW_NAME, "path": recovery.release.WORKFLOW_PATH,
+            "event": "pull_request", "run_attempt": 1, "status": "completed", "conclusion": "success",
+            "head_sha": "2" * 40}
+        self.pr = {"state": "closed", "merged": True, "base": {"ref": "main", "repo": {"full_name": self.repository}},
+            "head": {"sha": "2" * 40, "repo": {"full_name": self.repository}}, "merge_commit_sha": M}
+        self.parents = [{"sha": "1" * 40}]
+        self.artifacts = [{"id": 91, "name": "release-receipt-77", "expired": False}]
+        self.jobs = [{"id": 93, "name": "Route successful exact PR Gate plan", "status": "completed", "conclusion": "success"},
+            {"id": 94, "name": "One-shot deployed release", "status": "completed", "conclusion": "failure",
+             "steps": [{"name": "Admit once, merge expected head once, deploy exact merge once, emit one receipt", "conclusion": "failure"}]}]
+        self.gate_jobs = [{"name": n, "status": "completed", "conclusion": "success"}
+            for n in ("Core", "Plan", "Checks", "pr-gate")]
+        self.comment = None
+        self.log = failure_log()
+        self.calls = []
+
+    def seal_plan(self):
+        self.plan.pop("plan_sha256", None)
+        self.plan["plan_sha256"] = recovery.digest(recovery.canonical_bytes(self.plan))
+
+    def get(self, path):
+        return self.request("GET", path)
+
+    def request(self, method, path, *_args, raw=False):
+        assert method == "GET", (method, path)
+        self.calls.append((method, path))
+        if path == "/actions/jobs/94/logs":
+            return self.log
+        if path in ("/actions/artifacts/91/zip", "/actions/artifacts/92/zip"):
+            assert raw
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, "w") as archive:
+                archive.writestr("release-receipt.json" if path.endswith("91/zip") else "check-plan.json",
+                    json.dumps(self.receipt if path.endswith("91/zip") else self.plan))
+            return stream.getvalue()
+        if path.startswith("/issues/7/comments?"):
+            marker = f"<!-- {recovery.release.RECEIPT_MARKER} operation={self.receipt['operation_id']} -->"
+            return [{"body": marker + "\n```json\n" + json.dumps(self.comment or self.receipt) + "\n```"}]
+        values = {"/actions/runs/9": self.run, "/actions/runs/77": self.gate,
+            "/actions/runs/9/artifacts?per_page=100": {"artifacts": self.artifacts},
+            "/actions/runs/77/artifacts?per_page=100": {"artifacts": [{"id": 92, "name": "check-plan-77", "expired": False}]},
+            "/actions/runs/9/jobs?filter=latest&per_page=100": {"jobs": self.jobs},
+            "/actions/runs/77/jobs?filter=latest&per_page=100": {"jobs": self.gate_jobs},
+            "/pulls/7": self.pr, f"/git/commits/{M}": {"parents": self.parents}}
+        assert path in values, path
+        return deepcopy(values[path])
+
+
+def test_manual_release_full_evidence_chain() -> None:
+    for event in ("workflow_dispatch", "workflow_run"):
+        client = ReleaseEvidenceClient(event)
+        proof = recovery.collect_evidence(client, 9)
+        assert proof["original_receipt"] == client.receipt
+        assert proof["failure"]["stage"] == "root-storage-status-artifact-readback"
+        assert all(method == "GET" for method, _path in client.calls)
+
+    cases = [
+        ("release-provenance-invalid", lambda c: c.run.update(event="push")),
+        ("release-provenance-invalid", lambda c: c.run.update(event="pull_request_target")),
+        ("release-provenance-invalid", lambda c: c.run.update(event="repository_dispatch")),
+        ("release-provenance-invalid", lambda c: c.run.update(run_attempt=2)),
+        ("release-provenance-invalid", lambda c: c.run.update(run_attempt=True)),
+        ("release-provenance-invalid", lambda c: c.run.update(id=10)),
+        ("release-provenance-invalid", lambda c: c.run.update(id="9")),
+        ("release-provenance-invalid", lambda c: c.run.update(id=True)),
+        ("release-provenance-invalid", lambda c: c.run.update(head_branch="feature")),
+        ("release-provenance-invalid", lambda c: c.run.update(repository={"full_name": "fork/wb-core"})),
+        ("release-provenance-invalid", lambda c: c.run.update(repository=[])),
+        ("release-provenance-invalid", lambda c: c.run.update(head_repository=None)),
+        ("release-provenance-invalid", lambda c: c.run.update(head_repository={"full_name": "fork/wb-core"})),
+        ("release-workflow-mismatch", lambda c: c.run.update(path=".github/workflows/foreign.yml")),
+        ("release-not-failed", lambda c: c.run.update(conclusion="success")),
+        ("manual-release-route-invalid", lambda c: c.jobs.pop(0)),
+        ("manual-release-route-invalid", lambda c: c.jobs.append(deepcopy(c.jobs[0]))),
+        ("manual-release-route-invalid", lambda c: c.jobs[0].update(conclusion="failure")),
+        ("original-receipt-artifact-count-invalid", lambda c: c.artifacts[0].update(expired=True)),
+        ("original-receipt-artifact-binding-invalid", lambda c: c.artifacts[0].update(name="release-receipt-78")),
+        ("release-run-trusted-source-mismatch", lambda c: c.run.update(head_sha=C1)),
+        ("release-run-trusted-source-mismatch", lambda c: c.receipt.update(base_sha=C1)),
+        ("original-receipt-artifact-binding-invalid", lambda c: c.receipt.update(gate_run_id=78)),
+        ("original-gate-invalid", lambda c: c.gate.update(event="workflow_dispatch")),
+        ("original-gate-invalid", lambda c: c.gate.update(run_attempt=2)),
+        ("original-gate-invalid", lambda c: c.gate_jobs[0].update(conclusion="failure")),
+        ("original-gate-binding-invalid", lambda c: c.gate.update(head_sha=C1)),
+        ("original-gate-binding-invalid", lambda c: c.receipt.update(head_sha=C1)),
+        ("original-gate-binding-invalid", lambda c: (c.plan.update(pull_request=8), c.seal_plan())),
+        ("original-gate-binding-invalid", lambda c: (c.plan.update(base_sha=C1), c.seal_plan())),
+        ("original-gate-binding-invalid", lambda c: (c.plan.update(release_kind="repo_only"), c.seal_plan())),
+        ("original-operation-binding-invalid", lambda c: c.receipt.update(operation_id="release-v3-foreign")),
+        ("merged-pr-binding-invalid", lambda c: c.pr.update(merged=False)),
+        ("merged-pr-binding-invalid", lambda c: c.pr["head"]["repo"].update(full_name="fork/wb-core")),
+        ("merged-pr-binding-invalid", lambda c: c.pr.update(merge_commit_sha=C1)),
+        ("merge-parent-binding-invalid", lambda c: c.parents.append({"sha": C1})),
+        ("original-blocked-receipt-comment-invalid", lambda c: setattr(c, "comment", {**c.receipt, "merge_sha": C1})),
+        ("failed-stage-not-root-storage-readback-exit3", lambda c: setattr(c, "log", failure_log(255))),
+    ]
+    for reason, mutate in cases:
+        client = ReleaseEvidenceClient()
+        mutate(client)
+        expect_reason(reason, lambda: recovery.collect_evidence(client, 9))
+    print(f"manual_release_full_evidence_chain: 2 positive, {len(cases)} negative cases; GET only")
 
 
 def _completed(args: list[str], *, stdout: str = "") -> subprocess.CompletedProcess[str]:
@@ -1464,6 +1589,7 @@ def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = F
 
 
 def legacy_tail_regressions() -> None:
+    test_manual_release_full_evidence_chain()
     test_predependency_exact_source_and_dependency_proofs()
     test_predependency_previous_success_receipt()
     test_predependency_npm_once_then_tail()
