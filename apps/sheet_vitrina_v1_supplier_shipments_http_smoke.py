@@ -747,6 +747,12 @@ def _canonical_supplier_cost_signature(payload: dict[str, object]) -> tuple[obje
 def _assert_blocked_canonical_cost_suppresses_legacy_aggregate() -> None:
     with TemporaryDirectory(prefix="supplier-canonical-cost-guard-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        # The isolated projection fixture owns schema setup; a GET cannot.
+        from packages.application.registry_upload_db_backed_runtime import _connect, _ensure_schema
+        runtime.runtime_dir.mkdir(parents=True)
+        with _connect(runtime.db_path) as conn:
+            _ensure_schema(conn)
+            conn.commit()
         block = SupplierShipmentsBlock(runtime=runtime)
         payload = {
             "shipment_id": "blocked-canonical-cost",
@@ -788,7 +794,7 @@ def _assert_blocked_canonical_cost_suppresses_legacy_aggregate() -> None:
             "invoice_no": "BLOCKED-LIST",
         }
         with (
-            patch.object(block, "migrate_existing_supplier_shipments_into_trade_documents"),
+            patch.object(block, "migrate_existing_supplier_shipments_into_trade_documents", side_effect=AssertionError("GET migration")),
             patch.object(runtime, "list_supplier_shipments", return_value=[registry_row]),
             patch.object(block, "_with_document_fields", side_effect=lambda value: value),
             patch.object(block, "_with_approx_cost_fields", side_effect=lambda value: value),
