@@ -171,6 +171,32 @@ class RuntimeTests(unittest.TestCase):
                     result = runtime.load_shared(self.root)
                 self.assertEqual({period["date"] for period in result}, expected)
 
+    def test_record_prepare_failure_handles_legacy_error_and_preserves_date_boundary(self):
+        from contextlib import nullcontext
+        from packages.application import warehouse_functional_lock
+
+        class InvalidFromError(ValueError):
+            invalid_from_date = "2026-09-10"
+
+        for previous_error, expected_boundary in (
+            ("finance_handoff_exhausted", "2026-09-10"),
+            (None, "2026-09-10"),
+            ({"invalid_from_date": "2026-09-08"}, "2026-09-08"),
+        ):
+            with self.subTest(previous_error=previous_error):
+                book = {"active": True, "publication_error": previous_error}
+                saved = []
+                with patch.object(runtime, "load", return_value=(book, "version")), \
+                     patch.object(warehouse_functional_lock, "warehouse_functional_write_lock",
+                                  return_value=nullcontext()), \
+                     patch.object(runtime, "writer_lock", return_value=nullcontext()), \
+                     patch.object(runtime, "_commit_book_intent", side_effect=lambda _root, candidate, **_kw:
+                                  saved.append(candidate)):
+                    runtime._record_prepare_failure(self.root, expected="version", error=InvalidFromError("source_gap"))
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(saved[0]["publication_error"]["reason"], "source_gap")
+                self.assertEqual(saved[0]["publication_error"]["invalid_from_date"], expected_boundary)
+
     def test_refused_new_gap_does_not_invalidate_previously_valid_closed_bridge(self):
         self.image = gap_capture()
         self.opening()
