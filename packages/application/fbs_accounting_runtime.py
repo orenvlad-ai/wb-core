@@ -210,8 +210,11 @@ def _record_prepare_failure(runtime_dir, *, expected, error):
             return  # A newer successful attempt/pause owns its own quality.
         failed = {**prior, "publication_error": {"reason": str(error)[:500],
                   "at": datetime.now(timezone.utc).isoformat()}}
+        previous_error = prior.get("publication_error")
+        previous_invalid_from = (previous_error.get("invalid_from_date")
+                                 if isinstance(previous_error, dict) else None)
         boundaries = [day for day in (
-            prior.get("publication_error", {}).get("invalid_from_date"),
+            previous_invalid_from,
             getattr(error, "invalid_from_date", None)) if day]
         if boundaries:
             failed["publication_error"]["invalid_from_date"] = min(boundaries)
@@ -454,7 +457,7 @@ def load_shared(runtime_dir):
     if book is None or not book["active"]:
         return None
     error = book.get("publication_error") or {}
-    invalid_from = error.get("invalid_from_date")
+    invalid_from = error.get("invalid_from_date") if isinstance(error, dict) else None
     periods = [p for day, p in book["shared_days"].items()
                if (not error or p["status"] == "closed") and (not invalid_from or day < invalid_from)]
     return ActiveSharedCostSnapshot(periods, effective_date=book["effective_date"])

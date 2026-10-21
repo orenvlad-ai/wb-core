@@ -522,6 +522,11 @@ with patch.object(profile,'load_selector',return_value={'offline':True}), \
             self.assertEqual(request(url=base+'?manual_request_id=../outside')[0],409)
             code,manual=request(url=manual_url);self.assertEqual(code,200)
             self.assertEqual(d._decode(manual['dispatch_id'])['schema'],2)
+            dated_url=base+'?'+urlencode({'manual_request_id':'26gn723-http-dated','recovery_as_of_date':'2026-09-16'})
+            code,dated=request(url=dated_url);self.assertEqual(code,200)
+            self.assertEqual(d._decode(dated['dispatch_id'])['recovery_as_of_date'],'2026-09-16')
+            self.assertEqual(request(url=dated_url+'&recovery_as_of_date=2026-09-17')[0],409)
+            self.assertEqual(request(url=base+'?recovery_as_of_date=2026-09-16')[0],409)
             self.assertEqual(request('POST',{'dispatch_id':manual['dispatch_id'],'manual_request_id':'caller-override'})[0],409)
             code,accepted=request('POST',{'dispatch_id':manual['dispatch_id']});self.assertTrue(accepted['accepted'])
             for worker in list(fake.operator_jobs._threads.values()):worker.join(5)
@@ -1249,6 +1254,121 @@ class MaintenanceWakeupSmoke(unittest.TestCase):
         self.assertEqual(self.wake.load(self.root)['phase'], 'superseded')
         self.resume()
         self.assertEqual(self.wake.load(self.root)['phase'], 'superseded')
+
+
+class DatedManualDispatchSmoke(ManualDispatchSmoke):
+    DAY = '2026-10-16'
+
+    def envelope(self, day=None):
+        import hashlib
+        key=d._manual_key(self.REQUEST)
+        value=dict(schema=3,profile=p.fingerprint(p.PROFILE),deployed_sha=SHA,
+            slot=d.latest_slot(NOW),history=self.config.fingerprint(),request_key=key,
+            request_fingerprint='sha256:'+'b'*64,cycle_id=hashlib.sha256(key.encode()).hexdigest()[:32],
+            manual_request_id=self.REQUEST,recovery_as_of_date=day or self.DAY)
+        body=d._encode(d._canonical(value).encode())
+        return body+'.'+d._encode(__import__('hmac').digest(d._secret(),body.encode(),'sha256'))
+
+    def test_schema_three_signature_date_binding_and_legacy_schema_two(self):
+        import base64
+        identity=self.envelope();self.assertEqual(d._decode(identity)['recovery_as_of_date'],self.DAY)
+        body,signature=identity.split('.')
+        raw=base64.urlsafe_b64decode(body+'='*(-len(body)%4))
+        tampered=raw.replace(self.DAY.encode(),b'2026-10-17')
+        with self.assertRaisesRegex(ValueError,'signature'):
+            d._decode(d._encode(tampered)+'.'+signature)
+        value=d._decode(self.manual());self.assertEqual(value['schema'],2)
+
+    def test_dispatch_passes_dated_identity_into_full_cycle_acceptance(self):
+        day='2026-09-16'
+        identity=d.prepare_manual(self.root,NOW,self.REQUEST,recovery_as_of_date=day)['dispatch_id']
+        entry=self.entry()
+        result=d.dispatch(entry,{'dispatch_id':identity});self.finish(entry)
+        self.assertTrue(result['accepted'])
+        receipt=d.readback(self.root,identity)['receipt']
+        self.assertEqual(receipt['recovery_as_of_date'],day)
+        self.assertEqual(receipt['trigger_kind'],'manual')
+
+    def test_preparation_wires_date_into_root_receipt_identity(self):
+        from packages.application import sheet_vitrina_v1_cycle as cycle
+        observed={}
+        class Store:
+            def __init__(self,*_args):pass
+            def read(self,_cycle_id):return None
+            def _request_identity(self,**kwargs):
+                observed.update(kwargs)
+                import hashlib
+                key=kwargs['request_key']
+                return kwargs['slot_utc'],'sha256:'+'b'*64,hashlib.sha256(key.encode()).hexdigest()[:32],None
+        with patch.object(cycle,'CycleReceiptStore',Store), \
+             patch.object(cycle,'validate_recovery_as_of_date',side_effect=lambda day,now:day):
+            prepared=d.prepare_manual(self.root,NOW,self.REQUEST,recovery_as_of_date=self.DAY)
+        identity=d._decode(prepared['dispatch_id'])
+        self.assertEqual(identity['schema'],3)
+        self.assertEqual(identity['recovery_as_of_date'],self.DAY)
+        self.assertEqual(observed['recovery_as_of_date'],self.DAY)
+
+    def test_old_dated_receipt_replays_after_range_without_revalidation(self):
+        from packages.application import sheet_vitrina_v1_cycle as cycle
+        identity=self.envelope()
+        class Store:
+            def __init__(self,*_args):pass
+            def read(self,_cycle_id):return {'dispatch_id':identity,'trigger_kind':'manual'}
+        with patch.object(cycle,'CycleReceiptStore',Store), \
+             patch.object(cycle,'validate_recovery_as_of_date',side_effect=AssertionError('old readback revalidated')):
+            with patch.object(d,'readback',return_value={'status':'complete','accepted':True,'dispatch_id':identity}) as read:
+                result=d.prepare_manual(self.root,NOW+timedelta(days=100),self.REQUEST,recovery_as_of_date=self.DAY)
+        self.assertEqual(result['dispatch_id'],identity)
+        read.assert_called_once_with(self.root,identity)
+        current=datetime(2026,10,22,8,tzinfo=timezone.utc)
+        with patch.object(d,'_identity',return_value=SHA), patch.object(cycle,'CycleReceiptStore',Store), \
+             self.assertRaisesRegex(RuntimeError,'date conflicts'):
+            d.prepare_manual(self.root,current,self.REQUEST,recovery_as_of_date='2026-10-17')
+
+    def test_same_manual_id_different_date_conflicts_before_transport(self):
+        identity=self.envelope()
+        d._write_record(self.root,{'schema':1,'dispatch_id':identity,'phase':'terminal','last_status':'failed'})
+        with patch.object(d,'_launcher_lock'),patch.object(d,'_request',side_effect=AssertionError('conflict contacted server')):
+            result=d.launch(self.root,manual_request_id=self.REQUEST,recovery_as_of_date='2026-10-17')
+        self.assertEqual(result['status'],'request_conflict')
+        self.assertFalse(result['accepted'])
+
+    def test_status_finds_prior_dated_receipt_when_transport_tracks_new_request(self):
+        import hashlib
+        identity=self.envelope()
+        value=d._decode(identity)
+        receipt_root=self.root/'sheet-vitrina-cycles'
+        receipt_root.mkdir(exist_ok=True)
+        (receipt_root/(value['cycle_id']+'.json')).write_text(json.dumps({
+            'cycle_id':value['cycle_id'],'dispatch_id':identity,'trigger_kind':'manual','status':'failed'}))
+        newer_value={**value,'schema':2,'request_key':d._manual_key('history-new-oct'),
+                     'manual_request_id':'history-new-oct'}
+        newer_value.pop('recovery_as_of_date')
+        newer_value['cycle_id']=hashlib.sha256(newer_value['request_key'].encode()).hexdigest()[:32]
+        newer_body=d._encode(d._canonical(newer_value).encode())
+        newer=newer_body+'.'+d._encode(__import__('hmac').digest(d._secret(),newer_body.encode(),'sha256'))
+        d._write_record(self.root,{'schema':1,'dispatch_id':newer,'phase':'terminal','last_status':'failed'})
+        calls=[]
+        with patch.object(d,'_request',side_effect=lambda method,dispatch_id=None,**kw:
+                          calls.append((method,dispatch_id,kw)) or {'status':'failed','accepted':True,'dispatch_id':dispatch_id}):
+            result=d.manual_status(self.root,self.REQUEST)
+        self.assertEqual(result['dispatch_id'],identity)
+        self.assertEqual(calls,[('GET',identity,{})])
+
+    def test_http_prepare_query_binds_explicit_date_and_requires_request_id(self):
+        from urllib.parse import parse_qs,urlparse
+        class Response:
+            def read(self,_n):return b'{"status":"prepared"}'
+            def __enter__(self):return self
+            def __exit__(self,*_args):return None
+        response=Response()
+        with patch('apps.sheet_vitrina_v1_auto_refresh_tick._build_web_auth_cookie',return_value='cookie'), \
+             patch('urllib.request.urlopen',return_value=response),patch('urllib.request.Request') as request:
+            d._request('GET',manual_request_id=self.REQUEST,recovery_as_of_date=self.DAY)
+        query=parse_qs(urlparse(request.call_args.args[0]).query)
+        self.assertEqual(query,{'manual_request_id':[self.REQUEST],'recovery_as_of_date':[self.DAY]})
+        with self.assertRaisesRegex(ValueError,'manual request ID'):
+            d._request('GET',recovery_as_of_date=self.DAY)
 
 
 if __name__=='__main__':unittest.main()

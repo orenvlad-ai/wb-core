@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from packages.application.sheet_vitrina_v1_cycle import (
     CycleHistoryConfig, CycleReceiptStore, CycleStageFailure, FbsGenerationFailure, CycleConflict,
-    StageProof, STAGES, run_cycle, validate_collection, daily_report_proof,
+    StageProof, STAGES, run_cycle, validate_collection, daily_report_proof, validate_recovery_as_of_date,
 )
 from packages.application.registry_upload_http_entrypoint import (
     RegistryUploadHttpEntrypoint as Entry, SheetVitrinaV1OperatorJobStore,
@@ -130,6 +130,60 @@ class CycleTests(unittest.TestCase):
             return history.build_owned_cycle_history(runtime=runtime,config=config,cycle_owner={},now=NOW)
     def accepted(self, key='slot-request', config=None, slot=SLOT):
         return self.store.accept(request_key=key,slot_utc=slot,config=config or self.config,now=NOW)
+    def test_dated_manual_cycle_keeps_backlog_and_runs_all_fresh_stages(self):
+        day = '2026-09-25'
+        path = self.root / 'sheet-vitrina-closed-backlog.json'
+        before = b'private old obligation, including an uncertain source attempt'
+        path.write_bytes(before)
+        receipt, lock = self.store.accept(request_key='manual-cycle:dated-test-0925', slot_utc=SLOT,
+            config=self.config, now=NOW, recovery_as_of_date=day)
+        fake = CycleFake(self.root)
+        def collect(**kwargs):
+            self.assertEqual(kwargs, dict(as_of_date=day, execution_mode='manual_operator', log=log))
+            fake.mark('api_sources')
+            return fake.handle
+        fake.sheet_plan_block.collect_sources = collect
+        fake.sheet_plan_block.collected_source_summary = lambda handle, **kwargs: (
+            self.assertEqual(kwargs, {'allow_manual_full_scope': True}) or summary())
+        original_publish = fake._cycle_publish_ready
+        def publish(plan, **kwargs):
+            self.assertEqual(kwargs, {'execution_mode': 'manual_operator'})
+            return original_publish(plan)
+        fake._cycle_publish_ready = publish
+        log = lambda _: None
+        try:
+            with heavy_admitted(self.root, operation='cycle'), patch(
+                    'packages.application.sheet_vitrina_v1_cycle.ClosedBacklog', side_effect=AssertionError('old backlog touched')):
+                result = run_cycle(fake, self.store, receipt, self.config, log)
+        finally:
+            lock.close()
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(fake.events, ['api_sources', 'finance_sources', 'fbs_generation', 'warehouse',
+            'daily_projection', 'derive', 'final_ready', 'rolling14'])
+        self.assertEqual(result['recovery_as_of_date'], day)
+        again, lock = self.store.accept(request_key='manual-cycle:dated-test-0925', slot_utc=SLOT,
+            config=self.config, now=NOW + timedelta(days=30), recovery_as_of_date=day)
+        self.assertIsNone(lock)
+        self.assertEqual(again['cycle_id'], result['cycle_id'])
+        with self.assertRaises(CycleConflict):
+            self.store.matching(request_key='manual-cycle:dated-test-0925', slot_utc=SLOT,
+                config=self.config, recovery_as_of_date='2026-09-24')
+
+    def test_recovery_date_bounds_and_fresh_acceptance(self):
+        self.assertEqual(validate_recovery_as_of_date('2026-09-16', NOW), '2026-09-16')
+        self.assertEqual(validate_recovery_as_of_date('2026-09-27', NOW), '2026-09-27')
+        for day in ('2026-09-15', '2026-09-28', '2026-09-29', '20260925', '2026-09-31', '', None):
+            with self.subTest(day=day), self.assertRaises(ValueError):
+                validate_recovery_as_of_date(day, NOW)
+        with self.assertRaisesRegex(ValueError, 'outside_closed_rolling14'):
+            self.store.accept(request_key='manual-cycle:expired-test', slot_utc=SLOT,
+                config=self.config, now=NOW + timedelta(days=1), recovery_as_of_date='2026-09-16')
+        self.assertFalse(list(self.store.root.glob('*.json')))
+        with self.assertRaisesRegex(ValueError, 'recovery_requires_manual_cycle'):
+            self.store.accept(request_key='scheduled-test', slot_utc=SLOT,
+                config=self.config, now=NOW, recovery_as_of_date='2026-09-25')
+
     def test_fixed_order_and_no_repeat_after_finish(self):
         receipt,lock=self.accepted();fake=CycleFake(self.root)
         try:
@@ -706,6 +760,39 @@ class SourceAndAdmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(CycleStageFailure,'unproved_success_payload'):
                 validate_collection(case.sources.collected_source_summary(handle))
         finally:case.doCleanups()
+    def test_dated_full_manual_retries_exhaustion_and_publishes_native_partial_history(self):
+        from apps import sheet_vitrina_v1_closed_backlog_smoke as full_fixture
+        from packages.application.web_vitrina_history_live_adapter import update_live_history
+        case = full_fixture.BacklogTests(); case.setUp()
+        try:
+            day = full_fixture.DAYS[0]
+            # A newer normal Ready stays the default after old-date publication.
+            case.publish(case.main())
+            case.pending(day, state=live.CLOSURE_STATE_EXHAUSTED, attempt_count=9,
+                last_attempt_at=full_fixture.STAMP)
+            counter = case.counters['seller_funnel_block']
+            counter.request_dates.clear()
+            handle = case.sources.collect_sources(as_of_date=day, execution_mode='manual_operator')
+            self.assertEqual(counter.request_dates.count(day), 1)
+            self.assertFalse(case.sources.collected_source_summary(handle)['full_scope'])
+            observed = case.sources.collected_source_summary(handle, allow_manual_full_scope=True)
+            self.assertTrue(validate_collection(observed, require_full_scope=True).versions)
+            plan = case.publish(handle)
+            self.assertEqual(plan.as_of_date, day)
+            self.assertEqual(case.runtime.load_sheet_vitrina_ready_snapshot().as_of_date, '2026-04-19')
+            self.assertTrue(any(slot['policy'] == 'archive_only' for slot in observed['slots']))
+            adapter, store, config = case.native()
+            result = update_live_history(adapter=adapter, runtime=case.runtime, store=store, rolling14=True)
+            self.assertEqual(result['status'], 'published', result)
+            self.assertIn(day, store.edition()['days'])
+            # Full manual still refuses omitted or selector-limited sources.
+            sources = case.sources._owned_collection(handle).sources
+            sources.effects['collection_diagnostics']['source_slots'].pop(0)
+            with self.assertRaisesRegex(CycleStageFailure, 'collection_capture_incomplete|collection_full_scope_incomplete'):
+                case.sources.collected_source_summary(handle, allow_manual_full_scope=True)
+        finally:
+            case.doCleanups()
+
     def test_real_full_capture_missing_spp_and_partial_stock_display_publish_truthful_error(self):
         from apps import sheet_vitrina_v1_closed_backlog_smoke as full_fixture
         case=full_fixture.BacklogTests();case.setUp()

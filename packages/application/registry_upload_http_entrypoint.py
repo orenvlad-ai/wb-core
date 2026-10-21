@@ -3090,11 +3090,12 @@ class RegistryUploadHttpEntrypoint:
         del as_of_date
         raise LegacyGoogleSheetsContourArchivedError(LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE)
 
-    def handle_business_data_cycle_dispatch_request(self, payload=None, *, manual_request_id=None):
+    def handle_business_data_cycle_dispatch_request(self, payload=None, *, manual_request_id=None, recovery_as_of_date=None):
         from packages.application.business_data_cycle_dispatch import dispatch, prepare, prepare_manual
         if payload is None:
             if manual_request_id is not None:
-                return prepare_manual(self.runtime.runtime_dir, self.now_factory(), manual_request_id)
+                return prepare_manual(self.runtime.runtime_dir, self.now_factory(), manual_request_id, **(
+                    {'recovery_as_of_date': recovery_as_of_date} if recovery_as_of_date is not None else {}))
             return prepare(self.runtime.runtime_dir, self.now_factory())
         return dispatch(self, payload)
 
@@ -3102,7 +3103,7 @@ class RegistryUploadHttpEntrypoint:
         from packages.application.business_data_cycle_dispatch import readback_fenced
         return readback_fenced(self, dispatch_id)
 
-    def _start_sheet_cycle_job(self, *, request_key: str, slot_utc: str, history_config, _dispatch_guard=None, _dispatch_id=None) -> dict:
+    def _start_sheet_cycle_job(self, *, request_key: str, slot_utc: str, history_config, _dispatch_guard=None, _dispatch_id=None, recovery_as_of_date=None) -> dict:
         """Same-daemon full-cycle acceptance; selected-profile route stays readiness-blocked."""
         from packages.application.business_data_procedure_admission import admitted_write, thread_start_is_proven_absent
         from packages.application.sheet_vitrina_v1_cycle import CycleReceiptStore, HEAVY_OPERATIONS, run_cycle
@@ -3110,7 +3111,7 @@ class RegistryUploadHttpEntrypoint:
         store = CycleReceiptStore(self.runtime.runtime_dir, self.activated_at_factory)
         with admitted_write(self.runtime.runtime_dir), self.operator_jobs._lock:
             # Matching accepted/terminal requests read the same receipt even if another job is active.
-            prior = store.matching(request_key=request_key, slot_utc=slot_utc, config=history_config)
+            prior = store.matching(request_key=request_key, slot_utc=slot_utc, config=history_config, recovery_as_of_date=recovery_as_of_date)
             if prior is not None:
                 return prior
             active = self.operator_jobs.active_job(operations=HEAVY_OPERATIONS)
@@ -3139,7 +3140,7 @@ class RegistryUploadHttpEntrypoint:
                     heavy.close()
                     return {'status': 'not_accepted', 'accepted': False, 'source_effects_started': False}
                 receipt, slot = store.accept(request_key=request_key, slot_utc=slot_utc,
-                    config=history_config, now=self.now_factory(), dispatch_id=_dispatch_id)
+                    config=history_config, now=self.now_factory(), dispatch_id=_dispatch_id, recovery_as_of_date=recovery_as_of_date)
             except BaseException:
                 heavy.close()
                 raise
@@ -3349,15 +3350,15 @@ class RegistryUploadHttpEntrypoint:
                 or digest(canonical(days)) != material['daily_projection_digest']):
             raise CycleStageFailure('cycle_material_version_changed')
 
-    def _cycle_publish_ready(self, plan):
+    def _cycle_publish_ready(self, plan, *, execution_mode=EXECUTION_MODE_AUTO_DAILY):
         from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
         current = self.runtime.load_current_state()
         expected = self.runtime.prepare_sheet_vitrina_ready_publication(bundle_version=current.bundle_version, as_of_date=plan.as_of_date)
         started = self.activated_at_factory()
-        diagnostics = _new_operator_refresh_diagnostics(job_id=SHEET_OPERATOR_JOB_ID.get(), execution_mode=EXECUTION_MODE_AUTO_DAILY, started_at=started)
+        diagnostics = _new_operator_refresh_diagnostics(job_id=SHEET_OPERATOR_JOB_ID.get(), execution_mode=execution_mode, started_at=started)
         phase = _start_operator_phase('build_plan_total', started_at=started)
         result = self._publish_sheet_refresh_plan(plan=plan, current_state=current, expected_ready=expected, emit=_noop_log,
-            execution_mode=EXECUTION_MODE_AUTO_DAILY, refresh_diagnostics=diagnostics, build_plan_phase=phase,
+            execution_mode=execution_mode, refresh_diagnostics=diagnostics, build_plan_phase=phase,
             refresh_started_at=started, refresh_started_perf=time.perf_counter())
         if (result.get('status') != 'success' or result.get('semantic_status') not in {'success', 'warning', 'error'}
                 or not result.get('publication_operation_id') or not result.get('publication_attempt_id')):
