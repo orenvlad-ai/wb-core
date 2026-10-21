@@ -549,10 +549,16 @@ def _assert_unavailable_acceptance_recovery() -> None:
         legacy.execute(f"INSERT INTO sheet_vitrina_v1_wb_supply_cost_layers ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})", [row[k] for k in cols])
         from packages.application.warehouse_domain_write_guard import ensure_warehouse_domain_write_guard_schema, EVENTS_TABLE
         ensure_warehouse_domain_write_guard_schema(legacy)
+        legacy.execute("PRAGMA foreign_keys=ON")
+        legacy.execute("CREATE VIEW finance_raw_current_rows AS SELECT * FROM finance_raw_batch_rows")
+        view_sql = legacy.execute("SELECT sql FROM sqlite_master WHERE name='finance_raw_current_rows'").fetchone()[0]
         guard_sql = [tuple(r) for r in legacy.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='sheet_vitrina_v1_wb_supply_cost_layers' ORDER BY name")]
         assert len(guard_sql) == 3
         _ensure_nullable_wb_transit_cost(legacy)
         _ensure_nullable_wb_transit_cost(legacy)
+        assert legacy.execute("SELECT sql FROM sqlite_master WHERE name='finance_raw_current_rows'").fetchone()[0] == view_sql
+        assert legacy.execute("PRAGMA legacy_alter_table").fetchone()[0] == 0
+        assert legacy.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert dict(legacy.execute("SELECT * FROM sheet_vitrina_v1_wb_supply_cost_layers").fetchone()) == row
         legacy.execute("UPDATE sheet_vitrina_v1_wb_supply_cost_layers SET wb_acceptance_amount_total=NULL,wb_acceptance_per_accepted_unit_rub=NULL")
         assert len(legacy.execute("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('sheet_vitrina_v1_wb_supply_cost_layers_current','sheet_vitrina_v1_wb_supply_cost_layers_by_date_nm')").fetchall()) == 2

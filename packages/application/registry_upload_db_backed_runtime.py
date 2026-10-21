@@ -14134,6 +14134,10 @@ def _ensure_nullable_wb_transit_cost(conn: sqlite3.Connection) -> None:
         "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? ORDER BY name",
         (table_name,),
     )]
+    legacy_alter = int(conn.execute("PRAGMA legacy_alter_table").fetchone()[0])
+    # Split storage can retain views of raw tables in another database.
+    # Rename only this table; leave those unrelated view definitions intact.
+    conn.execute("PRAGMA legacy_alter_table=ON")
     conn.execute("SAVEPOINT migrate_nullable_wb_transit")
     try:
         conn.execute(f"ALTER TABLE {table_name} RENAME TO {legacy_name}")
@@ -14195,6 +14199,8 @@ def _ensure_nullable_wb_transit_cost(conn: sqlite3.Connection) -> None:
         conn.execute("ROLLBACK TO SAVEPOINT migrate_nullable_wb_transit")
         conn.execute("RELEASE SAVEPOINT migrate_nullable_wb_transit")
         raise
+    finally:
+        conn.execute(f"PRAGMA legacy_alter_table={legacy_alter}")
 
 
 def _optional_float(value: Any) -> float | None:
