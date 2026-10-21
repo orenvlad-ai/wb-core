@@ -88,7 +88,9 @@ def captured(day, facts=(), basis=BASIS, fbo=(), quantities=None):
     result = dict(contract="fbs_snapshot_cost_sources_v2", business_date=day, captured_at=day + "T20:00:00Z",
                   documents_complete=True, documents_reason="", documents=[v[0] for v in items],
                   quantity_snapshot=dict(complete=True, date=day, id="stock:" + day,
-                      digest=fingerprint(rows), captured_at=day + "T19:00:00Z", rows=rows),
+                      digest=fingerprint(rows), captured_at=day + "T19:00:00Z", rows=rows,
+                      facility_evidence={f: dict(seller_warehouse_id=i + 1, mapping_id="map:" + f)
+                                         for i, f in enumerate(sorted({r["facility_id"] for r in rows}))}),
                   baseline_costs=dict(available=True, version_id="accepted-initial",
                       document_manifest={v[0]["document_id"]: v[0]["fingerprint"] for v in items},
                       rows=[dict(facility_id=f, nm_id=nm, wac_rub=w, source={"version": "accepted-initial"}) for f, nm, _q, w in basis],
@@ -139,7 +141,7 @@ def dated_sources(day, basis):
     return wb, retained
 
 
-def saved_book(*, end=END, facts=(), basis=BASIS, fbo=(), quantities=None, native_capture=None):
+def saved_book(*, end=END, facts=(), basis=BASIS, fbo=(), quantities=None, native_capture=None, missing_days=()):
     initial = captured(BASE, [v for v in facts if v["business_date"] <= BASE], basis, fbo,
                        (quantities or {}).get(BASE))
     if native_capture is not None:
@@ -154,6 +156,9 @@ def saved_book(*, end=END, facts=(), basis=BASIS, fbo=(), quantities=None, nativ
     current = date.fromisoformat(BASE)
     while current.isoformat() <= end:
         day = current.isoformat()
+        if day in missing_days:
+            current += timedelta(days=1)
+            continue
         if state["periods"]:
             prior = max(state["periods"])
             state = close_candidate_period(state, prior, today=day)
@@ -167,7 +172,7 @@ def saved_book(*, end=END, facts=(), basis=BASIS, fbo=(), quantities=None, nativ
             cap["posted_manifest_json_by_id"] = {v["document_id"]: native_capture["posted_manifest_json_by_id"][v["document_id"]]
                                                  for v in cap["documents"]}
             rehash_capture(cap)
-        state = evaluate_candidate(state, cap)
+        state = evaluate_candidate(state, cap, allow_cost_continuity_gap=bool(missing_days))
         wb, retained = dated_sources(day, basis)
         book["wb_days"][day], book["retained_days"][day] = wb, retained
         book["shared_days"][day] = build_shared_cost_day(state, wb, day)
@@ -307,6 +312,16 @@ class HistoricalRevisionTests(unittest.TestCase):
         self.assertNotIn("candidate_book", plan)
         self.assertEqual((book, cap), before)
         return plan
+
+    def test_later_receipt_revision_preserves_proved_missing_prefix(self):
+        book, _ = saved_book(end="2026-09-12", missing_days=("2026-09-08", "2026-09-09"))
+        plan = self.ready(book, late(end="2026-09-12", day="2026-09-11"))
+        candidate = plan["candidate_book"]
+        self.assertEqual(set(candidate["state"]["periods"]),
+                         {"2026-09-07", "2026-09-10", "2026-09-11", "2026-09-12"})
+        self.assertEqual(candidate["state"]["periods"]["2026-09-10"], book["state"]["periods"]["2026-09-10"])
+        self.assertEqual(candidate["state"]["periods"]["2026-09-11"]["rows"]["A:1"]["wac_rub"], "150")
+        self.blocked(book, late(end="2026-09-12", day="2026-09-08"), "receipt_closed_date_required")
 
     def test_saved_quantities_shared_cost_presentation_and_immutable_inputs(self):
         quantities = {DAY: {("A", 1): 1500}, END: {("A", 1): 900}}

@@ -201,7 +201,7 @@ def _commit_book_intent(runtime_dir, book, *, expected, operation_id, inputs, ki
 
 
 def _record_prepare_failure(runtime_dir, *, expected, error):
-    """Invalidate open operands without replacing ready or replaying old inputs."""
+    """Invalidate affected operands without replacing saved display/history."""
     from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
     from uuid import uuid4
     with warehouse_functional_write_lock(Path(runtime_dir), timeout_seconds=5), writer_lock(runtime_dir):
@@ -210,6 +210,11 @@ def _record_prepare_failure(runtime_dir, *, expected, error):
             return  # A newer successful attempt/pause owns its own quality.
         failed = {**prior, "publication_error": {"reason": str(error)[:500],
                   "at": datetime.now(timezone.utc).isoformat()}}
+        boundaries = [day for day in (
+            prior.get("publication_error", {}).get("invalid_from_date"),
+            getattr(error, "invalid_from_date", None)) if day]
+        if boundaries:
+            failed["publication_error"]["invalid_from_date"] = min(boundaries)
         _commit_book_intent(runtime_dir, failed, expected=expected, operation_id="failure-" + uuid4().hex,
                             inputs={}, kind="book_quality_failure")
 
@@ -243,7 +248,7 @@ def _prepare_from_snapshot(runtime_dir, *, db, conn, now, opening, before, expec
     state = initialize_candidate(capture, open_initial_day=True) if opening else before["state"]
     book = {"schema": SCHEMA, "active": True, "effective_date": day,
             "shared_days": {}, "wb_days": {}, "retained_days": {}, "presentations": {}} if opening else deepcopy(before)
-    state = evaluate_candidate(state, capture)
+    state = evaluate_candidate(state, capture, allow_cost_continuity_gap=not opening)
     # A new-day capture first reconciles documents against the saved prior-day
     # quantity, then closes that day and starts the current one. No gap filling.
     target = state["last_attempt"].get("target_date", day)
@@ -254,7 +259,7 @@ def _prepare_from_snapshot(runtime_dir, *, db, conn, now, opening, before, expec
         book["shared_days"][target] = build_shared_cost_day(state, book["wb_days"][target], target)
         book["presentations"][target] = FbsInventorySnapshot(fbs_state=state,
             wb_capture=book["wb_days"][target], retained=book["retained_days"][target], day=target).payload()
-        state = evaluate_candidate(state, capture)
+        state = evaluate_candidate(state, capture, allow_cost_continuity_gap=True)
     view = candidate_period_view(state, day)
     if not view["available"]:
         raise ValueError("current_fbs_period_missing:" + str(state["last_attempt"]))
@@ -448,7 +453,10 @@ def load_shared(runtime_dir):
     book, _ = load(runtime_dir)
     if book is None or not book["active"]:
         return None
-    periods = [p for p in book["shared_days"].values() if not book.get("publication_error") or p["status"] == "closed"]
+    error = book.get("publication_error") or {}
+    invalid_from = error.get("invalid_from_date")
+    periods = [p for day, p in book["shared_days"].items()
+               if (not error or p["status"] == "closed") and (not invalid_from or day < invalid_from)]
     return ActiveSharedCostSnapshot(periods, effective_date=book["effective_date"])
 
 

@@ -8,7 +8,7 @@ ConditionPathIsMountPoint=/mnt/wb-core-extra100
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/wb-core-runtime/app
-ExecStart=/usr/bin/python3 apps/web_vitrina_history_candidate_build.py --runtime-dir /opt/wb-core-runtime/state --candidate-root /mnt/wb-core-extra100/web-vitrina-history --date-from 2026-03-01 --date-to business-today --formula-epoch wbc0069k16-reviewed-native-v1:b394375ea9b672d680f9d4bf9275f456d9feaa18a131d3d60c1fa8721c1f8017 --runtime-contract artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json --budget-seconds 240 --max-recomputes 31
+ExecStart=/usr/bin/python3 apps/web_vitrina_history_candidate_build.py --runtime-dir /opt/wb-core-runtime/state --candidate-root /mnt/wb-core-extra100/web-vitrina-history --date-from 2026-03-01 --date-to business-today --formula-epoch wbc0069k16-reviewed-native-v1:92c3d4ef9ab37c9833eb5000be26d250b828a0b3e3cc7b877e928af447aca4e5 --runtime-contract artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json --budget-seconds 240 --max-recomputes 31
 TimeoutStartSec=240
 KillMode=control-group
 User=root

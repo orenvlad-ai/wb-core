@@ -26,7 +26,7 @@ from typing import Iterable
 
 from packages.application.fbs_snapshot_cost import (
     POLICY, SCHEMA, _capture, canonical, close_candidate_period,
-    evaluate_candidate, fingerprint,
+    cost_continuity_missing_dates, evaluate_candidate, fingerprint,
 )
 from packages.application.fbs_snapshot_cost_sources import _events, _verified_manifest
 from packages.application.fbs_inventory_presentation import FbsInventorySnapshot
@@ -436,8 +436,10 @@ def _build(book, capture, receipt_ids, observation, current_ids=(), auxiliary_id
     prefix_start = start or (date.fromisoformat(baseline["business_date"]) + timedelta(days=1)).isoformat()
     expected_prefix = (date.fromisoformat(first) - date.fromisoformat(prefix_start)).days
     _require(0 <= expected_prefix <= MAX_DAYS, "historical_prefix_scope_limit")
-    _require(sorted(d for d in periods if d < first) == [
-        (date.fromisoformat(prefix_start) + timedelta(days=n)).isoformat() for n in range(expected_prefix)],
+    proved_missing = cost_continuity_missing_dates(state)
+    prefix_days = [(date.fromisoformat(prefix_start) + timedelta(days=n)).isoformat()
+                   for n in range(expected_prefix)]
+    _require(sorted(d for d in periods if d < first) == [d for d in prefix_days if d not in proved_missing],
         "historical_prefix_gap")
     inputs = {}
     snapshots, wb_inputs, retained_inputs = {}, {}, {}
