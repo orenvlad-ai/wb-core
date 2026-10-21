@@ -171,9 +171,8 @@ def _worker_health_precheck_failure_matches(text: str, gate_run_id: int) -> bool
         "RuntimeError: systemd quiesce unit is unhealthy: wb-core-autoanswers-worker.service",
         "subprocess.CalledProcessError: Command",
         "returned non-zero exit status 1",
-        f'--workflow-run-id "{gate_run_id}"',
     )
-    return all(item in text for item in required)
+    return all(item in text for item in required) and _storage_tail_gate_argument_matches(text, gate_run_id)
 
 
 def _activation_case_from_log(raw_log: bytes, gate_run_id: int) -> RecoveryCase:
