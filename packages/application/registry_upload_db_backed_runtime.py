@@ -14130,6 +14130,10 @@ def _ensure_nullable_wb_transit_cost(conn: sqlite3.Connection) -> None:
     legacy_name = table_name + "__legacy_notnull_transit"
     columns = [str(row["name"]) for row in info]
     quoted = ",".join('"' + value.replace('"', '""') + '"' for value in columns)
+    triggers = [str(row["sql"]) for row in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? ORDER BY name",
+        (table_name,),
+    )]
     conn.execute("SAVEPOINT migrate_nullable_wb_transit")
     try:
         conn.execute(f"ALTER TABLE {table_name} RENAME TO {legacy_name}")
@@ -14184,6 +14188,8 @@ def _ensure_nullable_wb_transit_cost(conn: sqlite3.Connection) -> None:
             f"""CREATE INDEX sheet_vitrina_v1_wb_supply_cost_layers_by_date_nm
                 ON {table_name}(supply_date,nm_id,source_status)"""
         )
+        for trigger_sql in triggers:
+            conn.execute(trigger_sql)
         conn.execute("RELEASE SAVEPOINT migrate_nullable_wb_transit")
     except Exception:
         conn.execute("ROLLBACK TO SAVEPOINT migrate_nullable_wb_transit")

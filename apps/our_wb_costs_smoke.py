@@ -547,11 +547,27 @@ def _assert_unavailable_acceptance_recovery() -> None:
                             .replace("wb_acceptance_per_accepted_unit_rub REAL DEFAULT", "wb_acceptance_per_accepted_unit_rub REAL NOT NULL DEFAULT"))
         cols = list(row)
         legacy.execute(f"INSERT INTO sheet_vitrina_v1_wb_supply_cost_layers ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})", [row[k] for k in cols])
+        from packages.application.warehouse_domain_write_guard import ensure_warehouse_domain_write_guard_schema, EVENTS_TABLE
+        ensure_warehouse_domain_write_guard_schema(legacy)
+        guard_sql = [tuple(r) for r in legacy.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='sheet_vitrina_v1_wb_supply_cost_layers' ORDER BY name")]
+        assert len(guard_sql) == 3
         _ensure_nullable_wb_transit_cost(legacy)
         _ensure_nullable_wb_transit_cost(legacy)
         assert dict(legacy.execute("SELECT * FROM sheet_vitrina_v1_wb_supply_cost_layers").fetchone()) == row
         legacy.execute("UPDATE sheet_vitrina_v1_wb_supply_cost_layers SET wb_acceptance_amount_total=NULL,wb_acceptance_per_accepted_unit_rub=NULL")
         assert len(legacy.execute("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('sheet_vitrina_v1_wb_supply_cost_layers_current','sheet_vitrina_v1_wb_supply_cost_layers_by_date_nm')").fetchall()) == 2
+        assert [tuple(r) for r in legacy.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='sheet_vitrina_v1_wb_supply_cost_layers' ORDER BY name")] == guard_sql
+        legacy.execute(f"INSERT INTO {EVENTS_TABLE}(epoch_id,phase,manifest_digest,deployed_sha,event_at,actor) VALUES (?,?,?,?,?,?)",
+                       ("migration-guard-test", "held", "sha256:" + "a" * 64, "b" * 40, NOW, "smoke"))
+        for statement in ("UPDATE sheet_vitrina_v1_wb_supply_cost_layers SET wb_acceptance_amount_total=0",
+                          "DELETE FROM sheet_vitrina_v1_wb_supply_cost_layers",
+                          "INSERT INTO sheet_vitrina_v1_wb_supply_cost_layers SELECT * FROM sheet_vitrina_v1_wb_supply_cost_layers"):
+            try:
+                legacy.execute(statement)
+            except sqlite3.IntegrityError as exc:
+                assert "warehouse domain write barrier active" in str(exc)
+            else:
+                raise AssertionError("migration lost the existing warehouse write guard")
         legacy.close()
 
 
