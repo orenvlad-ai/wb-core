@@ -1111,6 +1111,27 @@ def test_worker_health_precheck_is_log_bound_and_normal_tail() -> None:
     assert proof["stage"] == "autoanswers-prepare-deploy-worker-health-precheck"
     assert proof["unit"] == "wb-core-autoanswers-worker.service"
     assert proof["exit_status"] == 1 and proof["job_log_sha256"] == recovery.digest(log)
+    command = ('python3 apps/github_release_runner.py run --workflow-run-id '
+               '"$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"')
+    step = (f'##[group]Run {command}\n{command}\nshell: /usr/bin/bash -e {{0}}\nenv:\n'
+            '  GATE_RUN_ID: 36274008618\n##[endgroup]\n').encode()
+    variable_log = step + log.split(b'\n', 1)[1]
+    assert recovery._activation_case_from_log(variable_log, 36274008618) is case
+    assert recovery._prove_failed_stage(variable_log, 36274008618,
+        "One-shot deployed release", case=case)["stage"] == proof["stage"]
+    timestamped = b'\n'.join(b'2026-10-21T07:47:58.1234567Z ' + line
+        for line in variable_log.splitlines())
+    assert recovery._activation_case_from_log(timestamped, 36274008618) is case
+    for bad_binding in (
+        variable_log.replace(b'GATE_RUN_ID: 36274008618', b'GATE_RUN_ID: 1'),
+        variable_log.replace(b'  GATE_RUN_ID: 36274008618\n', b''),
+        variable_log + b'  GATE_RUN_ID: 36274008618\n',
+        variable_log.replace(b'  GATE_RUN_ID: 36274008618\n', b'') + b'  GATE_RUN_ID: 36274008618\n',
+        variable_log.replace(b'"$GATE_RUN_ID"', b'"$OTHER_RUN_ID"'),
+    ):
+        assert recovery._activation_case_from_log(bad_binding, 36274008618) is recovery.RecoveryCase.STORAGE_TAIL
+        expect_reason("failed-stage-not-worker-health-precheck-exit1", lambda bad_binding=bad_binding:
+            recovery._prove_failed_stage(bad_binding, 36274008618, "One-shot deployed release", case=case))
     for bad_log, reason in (
         (worker_health_precheck_log(exact_stage=False), "failed-stage-not-worker-health-precheck-exit1"),
         (worker_health_precheck_log(exit_status=2), "failed-stage-not-worker-health-precheck-exit1"),
