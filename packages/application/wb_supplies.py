@@ -2871,6 +2871,10 @@ def _normalize_supply_row(
         status_id=status_id,
     )
     acceptance_cost, acceptance_cost_evidence = _first_number_from_sources(list_sources, "acceptanceCost", "acceptance_cost")
+    acceptance_cost_raw = acceptance_cost
+    acceptance_unavailable = acceptance_cost == -1
+    if acceptance_unavailable:
+        acceptance_cost = None
     transit_cost, transit_cost_evidence = _first_number_from_sources(
         list_sources,
         "transitCost",
@@ -2893,6 +2897,8 @@ def _normalize_supply_row(
         status_id=status_id,
         acceptance_coefficient=acceptance_coefficient,
     )
+    if acceptance_unavailable:
+        cost_total, cost_evidence = None, "acceptance_cost_unavailable"
     create_date = _first_string_from_sources(list_sources, "createDate", "createdAt", "created_at")[0]
     supply_date = _first_string_from_sources(list_sources, "supplyDate", "supply_date")[0]
     fact_date = _first_string_from_sources(list_sources, "factDate", "fact_date")[0]
@@ -2985,6 +2991,8 @@ def _normalize_supply_row(
         "packed_quantity_evidence": packed_quantity_evidence,
         "acceptance_coefficient": acceptance_coefficient,
         "acceptance_cost": acceptance_cost,
+        **({"acceptance_cost_raw": acceptance_cost_raw, "acceptance_cost_status": "unavailable"}
+           if acceptance_unavailable else {}),
         "transit_cost": transit_cost,
         "cost_total": cost_total,
         "cost_display": _cost_display(cost_total),

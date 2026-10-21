@@ -72,7 +72,7 @@ def validate_wb_projection(conn, queue_ref):
         expected, overlay = {}, overlays.get(str(supply["supply_id"]))
         normalized = native._normalized_wb_row(supply)
         transit = native.classify_wb_supply_transit(normalized, denominator=denominator)
-        acceptance = native._number_or_zero(normalized.get("acceptance_cost") if normalized.get("acceptance_cost") is not None else normalized.get("acceptanceCost"))
+        acceptance = native.wb_supply_acceptance_cost(normalized)
         accepted_denominator = native._sum_positive(native._number_or_zero(item.get("acceptedQuantity") if item.get("acceptedQuantity") is not None else item.get("accepted_quantity")) for item in goods)
         services = native._number_or_zero((overlay or {}).get("service_amount_with_vat_without_storage_total"))
         storage = native._number_or_zero((overlay or {}).get("storage_allocated_amount_with_vat_total"))
@@ -95,7 +95,7 @@ def validate_wb_projection(conn, queue_ref):
                 denominator=denominator, ff_line=current_ff.get(nm), transit=transit,
                 services_total=services, services_per_unit=services/denominator,
                 storage_total=storage, storage_per_unit=storage/denominator,
-                acceptance_total=acceptance, acceptance_per_accepted_unit=acceptance/accepted_denominator if accepted_denominator > 0 else 0,
+                acceptance_total=acceptance, acceptance_per_accepted_unit=(None if acceptance is None else acceptance/accepted_denominator if accepted_denominator > 0 else 0),
                 overlay=overlay)
         actual = {r["nm_id"]: dict(r) for r in conn.execute("SELECT * FROM sheet_vitrina_v1_wb_supply_cost_layers WHERE wb_supply_id=? AND is_current=1", (str(supply["supply_id"]),))}
         if set(actual) != set(expected):
