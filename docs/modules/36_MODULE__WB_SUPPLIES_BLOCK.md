@@ -475,7 +475,8 @@ Quantity fields:
 - `quantity_for_size_filter` follows `quantity_added` before accepted/unloading fallbacks.
 
 Cost fields:
-- `acceptance_cost` preserves raw `acceptanceCost`;
+- `acceptance_cost` preserves valid raw `acceptanceCost`; the observed `-1` amount is treated conservatively as unavailable (its exact upstream meaning has not been established). The original value remains in raw evidence and `acceptance_cost_raw`, while `acceptance_cost` and `cost_total` are `null`, with `acceptance_cost_status = unavailable`. This is distinct from an acceptance coefficient and must not be interpreted as a refund or free acceptance;
+- for this unavailable amount, derived acceptance totals/per-unit costs and the full WB unit cost remain SQL `NULL`; known supplier/FF inputs are retained. Physical quantities continue through the existing pending-downstream-cost path with provisional provenance. A later valid zero/positive amount rematerializes the same supply without duplicating quantity movements;
 - `transit_cost` preserves explicit transit cost fields if the upstream ever returns them;
 - `cost_total` is the user-visible amount only when raw evidence provides a total, explicit transit cost, or a non-transit `acceptanceCost`;
 - for transit rows with `acceptanceCost = 0` and no explicit total/transit cost, `cost_total = null`, `cost_display = —`, and `has_transit_cost_marker = true`;
