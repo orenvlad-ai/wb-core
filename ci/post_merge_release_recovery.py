@@ -1337,6 +1337,8 @@ def preview_fingerprint(payload: Mapping[str, Any]) -> str:
         "stages": payload["stages"],
         "forbidden_stages": payload["forbidden_stages"],
     }
+    if payload.get('pr1483_preparation_continuation') is not None:
+        stable['pr1483_preparation_continuation'] = payload['pr1483_preparation_continuation']
     return digest(canonical_bytes(stable))
 
 
@@ -1792,6 +1794,9 @@ def apply_recovery(
             collect_existing_started_owner(target, preview['source'])
         ) != canonical_bytes(started_owner):
             raise RecoveryError('existing-started-owner-drift-after-claim')
+        if preview.get('pr1483_preparation_continuation') is not None:
+            from ci.pr1483_preparation_continuation import clear_stopped_sync_health
+            stages.append(clear_stopped_sync_health(client, target, preview))
         if case is RecoveryCase.SQLITE_ACTIVATION:
             current_proof = collect_sqlite_activation_failure(target, preview["failure"], int(preview["release_run_id"]))
             if canonical_bytes(current_proof) != canonical_bytes(preview.get("activation_failure_proof")):
@@ -1917,7 +1922,10 @@ def main() -> int:
     target = hosted.load_hosted_runtime_target(TARGET_FILE)
     with tempfile.TemporaryDirectory(prefix="wb-core-release-recovery-") as directory:
         release.configure_ssh(Path(directory))
-        if args.command == "preview":
+        if args.release_run_id == 39568090548:
+            from ci.pr1483_preparation_continuation import run
+            result = run(client, target, args.command, args.preview_fingerprint)
+        elif args.command == "preview":
             result = build_preview(client, args.release_run_id, target)
         else:
             existing = existing_recovery_readback(
