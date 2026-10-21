@@ -60,6 +60,17 @@ readback требуют установленного pinned npm closure. Sync, m
 OS/Python/browser installation не повторяются. Это разрешение не применяется
 к другим выпускам или другим стадиям отказа.
 
+Точный выпуск 39635174275 (PR 1486, Gate 39630567883, merge
+`3689f51ede065489120f0d199115bfb309490d9a`) поддерживает продолжение после
+отказа финального cleaner `before_complete` probe с ConnectionRefusedError.
+Исходный immutable log должен доказывать единственный exit 1 на строке 1282,
+точную команду и уже завершённую activation с `skipped_maintenance`.
+Preview требует восстановленный сервис, успешный cleaner probe и исходного
+`mutation_started` owner с прежним held/quiet окном. Apply сохраняет этот owner,
+читает activation без повторного запуска, проверяет cleaner и выполняет обычный
+metadata CAS и конечный readback. Повтор sync, restart, activation или миграции
+не допускается; устранение причины сбоя выполняется и проверяется до preview.
+
 Успех подтверждают связанный recovery receipt, завершённая metadata, точная
 версия, сервисы и неизменный изолированный Finance pilot.
 

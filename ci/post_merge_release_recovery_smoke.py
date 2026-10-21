@@ -1736,7 +1736,7 @@ def test_existing_started_owner_real_state() -> None:
         assert recovery.preview_fingerprint(value) != bound
 
 
-def test_existing_started_owner_full_native_tail() -> None:
+def test_existing_started_owner_full_native_tail(*, cleaner=False) -> None:
     from apps.hosted_runtime_deploy_barrier_protection_smoke import ProtectionTests, OP, SHA
     from packages.application import business_data_deploy_protection as deploy
     from packages.application import business_data_maintenance_pause as pause
@@ -1750,6 +1750,10 @@ def test_existing_started_owner_full_native_tail() -> None:
         fixture.systemd.states[unit]['properties']['ExecStart'] = before_command
         _recovery, value, client, target, effects, calls, flags, original, fp, stack = fixture.recovery_fixture(
             recovery.RecoveryCase.STORAGE_TAIL)
+        if cleaner:
+            value['release_run_id'] = recovery.CLEANER_RELEASE_RUN_ID
+            value['activation_completion_proof'] = {'status': 'skipped_maintenance', 'reason': 'skipped_maintenance'}
+            stack.enter_context(patch.object(recovery, 'collect_completed_activation', return_value=value['activation_completion_proof']))
         deploy.claim(fixture.runtime, OP, quiet_reader=fixture.quiet)
         deploy.start(fixture.runtime, OP, SHA)
         owner_before = deploy.load(fixture.runtime)
@@ -1767,7 +1771,7 @@ def test_existing_started_owner_full_native_tail() -> None:
         assert result['state'] == 'complete', result
         assert 'claim' not in calls
         applied = effects.read_text().splitlines()
-        assert applied == ['activation', 'completion'], applied
+        assert applied == (['completion'] if cleaner else ['activation', 'completion']), applied
         assert deploy.load(fixture.runtime)['phase'] == 'complete'
         assert deploy.load(fixture.runtime)['operation_id'] == owner_before['operation_id']
         assert barrier.barrier_status(fixture.runtime)['active']
@@ -1835,7 +1839,69 @@ def test_existing_started_owner_apply_binding() -> None:
         restore_apply(originals)
 
 
+def test_cleaner_completion_exact_evidence_and_no_replay() -> None:
+    case = recovery.RecoveryCase.STORAGE_TAIL
+    run_id = recovery.CLEANER_RELEASE_RUN_ID
+    profile = recovery.CLEANER_PROFILE
+    assert recovery.recovery_case(run_id) is case
+    assert recovery.recovery_case(run_id + 1) is recovery.RecoveryCase.STORAGE_TAIL
+    raw = f'''python3 apps/github_release_runner.py run --workflow-run-id "{profile['gate_run_id']}" --output receipt.json
+line 1282, in deploy_current_checkout
+run_stage("readback",cleaner_precomplete_probe_command,allow_transport_reconciliation=False)
+{{"status": "skipped_maintenance", "reason": "skipped_maintenance"}}
+ConnectionRefusedError
+subprocess.CalledProcessError: Command ['ssh', '{profile['operation_id']}', 'apps/search_cluster_cleaner_release_probe.py --phase before_complete --expected-sha {profile['merge_sha']}'] returned non-zero exit status 1.
+'''.encode()
+    prove = lambda log, selected=run_id: recovery._prove_failed_stage(log, profile['gate_run_id'], 'One-shot deployed release', case=case, release_run_id=selected)
+    assert prove(raw)['stage'] == 'cleaner-before-complete'
+    for bad in (raw.replace(b'1282', b'1281'), raw.replace(b'before_complete', b'after_complete'),
+                raw.replace(b'skipped_maintenance', b'unknown'), raw.replace(b'exit status 1', b'exit status 255'),
+                raw + b'subprocess.CalledProcessError: Command X returned non-zero exit status 1.',
+                raw.replace(profile['merge_sha'].encode(), b'a' * 40),
+                raw.replace(str(profile['gate_run_id']).encode(), b'1')):
+        expect_reason('failed-stage-not-exact-cleaner-completion', lambda bad=bad: prove(bad))
+    expect_reason('failed-stage-not-root-storage-readback-exit3', lambda: prove(raw, run_id + 1))
+    receipt = {'schema': recovery.release.RECEIPT_SCHEMA, 'state': 'blocked', 'reason': 'CalledProcessError',
+               'release_kind': 'live_runtime', 'deployed_sha': None, **profile}
+    recovery._validate_original_receipt(receipt, case=case, release_run_id=run_id)
+    for key in profile:
+        changed = {**receipt, key: (receipt[key] + 1 if isinstance(receipt[key], int) else 'a' * 40 if key.endswith('sha') else 'release-v3-other')}
+        expect_reason('original-receipt-not-exact-cleaner-completion', lambda: recovery._validate_original_receipt(changed, case=case, release_run_id=run_id))
+    from apps.registry_upload_http_entrypoint_hosted_runtime import load_hosted_runtime_target
+    target = load_hosted_runtime_target(recovery.TARGET_FILE)
+    built = recovery.build_stage_commands(target, profile['merge_sha'], 'a' * 64, 123, case=case, release_run_id=run_id)
+    assert 'activation' not in built and 'normal_activation_tail' not in built
+    assert '--phase before_complete' in built['cleaner_precomplete_probe'][-1]
+    proof = {'status': 'skipped_maintenance', 'reason': 'skipped_maintenance'}
+    for status, output, reason in ((1, '', 'existing-activation-readback-failed'),
+            (0, '{}', 'existing-activation-not-skipped-maintenance'), (0, 'bad', 'existing-activation-readback-invalid')):
+        with patch.object(recovery, '_run_stage', return_value=subprocess.CompletedProcess([], status, stdout=output)):
+            expect_reason(reason, lambda: recovery.collect_completed_activation(['readback']))
+    for cleaner_status in (0, 1):
+        value = preview(); value['recovery_case'] = case.value; value['release_run_id'] = run_id
+        value['existing_started_owner'] = {'owner': {'phase': 'mutation_started'}}
+        value['activation_completion_proof'] = proof
+        calls, originals = patch_apply(cleaner_status=cleaner_status)
+        client = CommentsClient()
+        try:
+            with patch.object(recovery, 'collect_existing_started_owner', return_value=value['existing_started_owner']), \
+                    patch.object(recovery, '_resume_started_deploy_protection', return_value=[]), \
+                    patch.object(recovery, 'collect_completed_activation', return_value=proof) as readback:
+                result = recovery.apply_recovery(client, value, FINGERPRINT, object())
+                expect_reason('recovery-identity-already-claimed', lambda: recovery.apply_recovery(client, value, FINGERPRINT, object()))
+            readback.assert_called_once_with(['activation-readback'])
+        finally:
+            restore_apply(originals)
+        assert calls == ['root-readback', 'status', 'auth', 'cleaner-probe'] + ([] if cleaner_status else ['completion'])
+        assert result['state'] == ('ambiguous' if cleaner_status else 'complete'), result
+        assert 'activation' not in calls and 'restart' not in calls
+    value = preview(); value['recovery_case'] = case.value; value['release_run_id'] = run_id
+    with patch.object(recovery, 'build_stage_commands', return_value=commands()):
+        expect_reason('cleaner-completion-started-owner-required', lambda: recovery.apply_recovery(CommentsClient(), value, FINGERPRINT, object()))
+
+
 def legacy_tail_regressions() -> None:
+    test_cleaner_completion_exact_evidence_and_no_replay()
     test_manual_release_full_evidence_chain()
     test_predependency_exact_source_and_dependency_proofs()
     test_predependency_previous_success_receipt()
@@ -1874,6 +1940,7 @@ def main() -> None:
     test_existing_started_owner_real_state()
     test_existing_started_owner_apply_binding()
     test_existing_started_owner_full_native_tail()
+    test_existing_started_owner_full_native_tail(cleaner=True)
     # These existing fixtures represent pre-protection runtimes and intentionally
     # use opaque object() targets/one-word stage commands. Owner phase, guarded
     # command and completion failures have separate real-state coverage in the

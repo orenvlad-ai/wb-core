@@ -79,6 +79,16 @@ EXPECTED_ACTIVATION_GATE_RUN_ID = 36436062816
 EXPECTED_ACTIVATION_PR = 1341
 EXPECTED_ACTIVATION_MERGE_SHA = "7a9196e8af0d2113db7e42f0f4291fc2bc2c528c"
 
+# Exact final cleaner probe failed after activation had already skipped under pause.
+CLEANER_RELEASE_RUN_ID = 39635174275
+CLEANER_PROFILE = {
+    "pull_request": 1486, "gate_run_id": 39630567883,
+    "base_sha": "bde0f6cd47277ae3f44e3ea44b0b29f5629c1fb6",
+    "head_sha": "a8c1f43d2848686f9cfa750790f9ee7c03c67a23",
+    "merge_sha": "3689f51ede065489120f0d199115bfb309490d9a",
+    "operation_id": "release-v3-25425fa6463f2f9f279c3b123cae971b",
+}
+
 # Exact first storage-status refusal after sync/metadata, before dependencies.
 PREDEPENDENCY_RELEASE_RUN_ID = 37598234406
 PREDEPENDENCY_PROFILE = {
@@ -140,6 +150,10 @@ def recovery_case(release_run_id: int) -> RecoveryCase:
     if release_run_id == EXPECTED_SELECTIVE_RUN_ID:
         return RecoveryCase.SELECTIVE_B9_ACTIVATION
     return RecoveryCase.STORAGE_TAIL
+
+
+def cleaner_completion_case(case: RecoveryCase, release_run_id: int) -> bool:
+    return case is RecoveryCase.STORAGE_TAIL and release_run_id == CLEANER_RELEASE_RUN_ID
 
 
 def normal_activation_tail_case(case: RecoveryCase) -> bool:
@@ -325,6 +339,9 @@ def _validate_original_receipt(
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
         if release_run_id != PREDEPENDENCY_RELEASE_RUN_ID or any(normalized.get(key) != expected for key, expected in PREDEPENDENCY_PROFILE.items()):
             raise RecoveryError("original-receipt-not-exact-predependency-storage")
+    if cleaner_completion_case(case, release_run_id):
+        if release_run_id != CLEANER_RELEASE_RUN_ID or any(normalized.get(k) != v for k, v in CLEANER_PROFILE.items()):
+            raise RecoveryError("original-receipt-not-exact-cleaner-completion")
     if case is RecoveryCase.SQLITE_ACTIVATION:
         profile = _sqlite_activation_profile(release_run_id)
         if any(normalized.get(key) != profile[key]
@@ -366,6 +383,24 @@ def _prove_failed_stage(
     release_run_id: int = EXPECTED_ACTIVATION_RELEASE_RUN_ID,
 ) -> dict[str, Any]:
     text = raw_log.decode("utf-8", errors="replace")
+    if cleaner_completion_case(case, release_run_id):
+        required = (
+            "line 1282, in deploy_current_checkout",
+            'run_stage("readback",cleaner_precomplete_probe_command,allow_transport_reconciliation=False)',
+            "apps/search_cluster_cleaner_release_probe.py --phase before_complete",
+            "--expected-sha " + CLEANER_PROFILE["merge_sha"],
+            CLEANER_PROFILE["operation_id"],
+            '{"status": "skipped_maintenance", "reason": "skipped_maintenance"}',
+            "ConnectionRefusedError", "returned non-zero exit status 1.",
+        )
+        failures = re.findall(r"(?:subprocess\.)?CalledProcessError:.*?returned non-zero exit status (\d+)", text, re.DOTALL)
+        if (release_run_id != CLEANER_RELEASE_RUN_ID or gate_run_id != CLEANER_PROFILE["gate_run_id"]
+                or any(item not in text for item in required)
+                or not _storage_tail_gate_argument_matches(text, gate_run_id)
+                or failures != ["1"] or "exit status 255" in text):
+            raise RecoveryError("failed-stage-not-exact-cleaner-completion")
+        return {"job_name": job_name, "job_log_sha256": digest(raw_log),
+                "stage": "cleaner-before-complete", "exit_status": 1}
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
         required = (
             "deploy_current_checkout", "line 1206, in deploy_current_checkout",
@@ -1339,7 +1374,22 @@ def preview_fingerprint(payload: Mapping[str, Any]) -> str:
     }
     if payload.get('pr1483_preparation_continuation') is not None:
         stable['pr1483_preparation_continuation'] = payload['pr1483_preparation_continuation']
+    if "activation_completion_proof" in payload:
+        stable["activation_completion_proof"] = payload["activation_completion_proof"]
     return digest(canonical_bytes(stable))
+
+
+def collect_completed_activation(command: list[str]) -> dict[str, Any]:
+    result = _run_stage(command)
+    if result.returncode != 0:
+        raise RecoveryError("existing-activation-readback-failed")
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RecoveryError("existing-activation-readback-invalid") from exc
+    if value != {"status": "skipped_maintenance", "reason": "skipped_maintenance"}:
+        raise RecoveryError("existing-activation-not-skipped-maintenance")
+    return value
 
 
 def build_stage_commands(
@@ -1404,14 +1454,19 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion": completion,
         "completion_input": completion_script,
     }
-    if case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE}:
-        expected_merge = _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else PREDEPENDENCY_PROFILE["merge_sha"]
+    if (case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE} or cleaner_completion_case(case, release_run_id)):
+        expected_merge = _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILE["merge_sha"] if cleaner_completion_case(case, release_run_id) else PREDEPENDENCY_PROFILE["merge_sha"]
         if target.target_id != "wb_core_eu_hosted_runtime_active" or runtime_dir != "/opt/wb-core-runtime/state" or merge != expected_merge:
             raise RecoveryError("sqlite-activation-target-contract-invalid")
         commands["cleaner_precomplete_probe"] = hosted._remote_shell_command(
             target, f"cd {shlex.quote(target.target_dir)} && /usr/bin/python3 apps/search_cluster_cleaner_release_probe.py "
             f"--phase before_complete --expected-sha {shlex.quote(merge)} --runtime-dir {shlex.quote(runtime_dir)}"
         )
+    if cleaner_completion_case(case, release_run_id):
+        if release_run_id != CLEANER_RELEASE_RUN_ID:
+            raise RecoveryError("cleaner-completion-release-not-exact")
+        # The original log proves successful skipped activation. Never replay it.
+        del commands["activation"]
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
         commands["root_storage_status"] = hosted._build_root_storage_policy_commands(target)["status"]
         commands["npm_dependencies"] = hosted._build_autoanswers_node_dependencies_command(target)
@@ -1572,6 +1627,16 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         collect_existing_started_owner(target, result['source'])
         if case is RecoveryCase.STORAGE_TAIL else None
     )
+    if cleaner_completion_case(case, release_run_id):
+        if result["existing_started_owner"] is None:
+            raise RecoveryError("cleaner-completion-started-owner-required")
+        commands = build_stage_commands(target, original["merge_sha"], prestate["metadata_sha256"],
+                                        int(prestate["main_pid"]), case=case, release_run_id=release_run_id)
+        result["activation_completion_proof"] = collect_completed_activation(commands["activation_readback"])
+        _must_succeed("cleaner-before-complete-preview", commands["cleaner_precomplete_probe"])
+        i = result["stages"].index("change-registry-activation-exact-target")
+        result["stages"][i:i + 1] = ["existing-activation-readback", "cleaner-before-complete-probe"]
+        result["forbidden_stages"].append("change-registry-activation")
     result["preview_fingerprint"] = preview_fingerprint(result)
     return result
 
@@ -1733,6 +1798,7 @@ def apply_recovery(
     receipt_marker = _receipt_marker(operation)
     claim_marker = _claim_marker(operation)
     case = RecoveryCase(str(preview.get("recovery_case") or RecoveryCase.STORAGE_TAIL.value))
+    release_run_id = int(preview["release_run_id"])
     if _matching_comments(client, pr, receipt_marker) or _matching_comments(client, pr, claim_marker):
         raise RecoveryError("recovery-identity-already-claimed")
 
@@ -1748,6 +1814,8 @@ def apply_recovery(
     # status artifact, activation and stdin completion CAS. A missing old helper
     # refuses recovery-start before any of those mutations.
     started_owner = preview.get('existing_started_owner')
+    if cleaner_completion_case(case, release_run_id) and started_owner is None:
+        raise RecoveryError("cleaner-completion-started-owner-required")
     if started_owner is not None:
         if case is not RecoveryCase.STORAGE_TAIL:
             raise RecoveryError('existing-started-owner-case-invalid')
@@ -1843,15 +1911,21 @@ def apply_recovery(
                 raise RecoveryError("normal-tail-post-restart-drift")
             fresh = restarted
             commands = build_stage_commands(target, preview["source"]["merge_sha"], fresh["metadata_sha256"], int(fresh["main_pid"]), case=case, release_run_id=int(preview["release_run_id"]))
-        activation = _run_stage(protected(commands["activation"]))
-        if activation.returncode != 0:
-            readback = _run_stage(commands["activation_readback"])
-            if readback.returncode != 0:
-                raise RecoveryError(f"activation-ambiguous-{activation.returncode}")
-            stages.append({"stage": "activation-readback", "stdout_sha256": digest(readback.stdout.encode())})
+        if cleaner_completion_case(case, release_run_id):
+            proof = collect_completed_activation(commands["activation_readback"])
+            if proof != preview.get("activation_completion_proof"):
+                raise RecoveryError("existing-activation-proof-drift")
+            stages.append({"stage": "existing-activation-readback", "stdout_sha256": digest(canonical_bytes(proof))})
         else:
-            stages.append({"stage": "activation", "stdout_sha256": digest(activation.stdout.encode())})
-        if case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE}:
+            activation = _run_stage(protected(commands["activation"]))
+            if activation.returncode != 0:
+                readback = _run_stage(commands["activation_readback"])
+                if readback.returncode != 0:
+                    raise RecoveryError(f"activation-ambiguous-{activation.returncode}")
+                stages.append({"stage": "activation-readback", "stdout_sha256": digest(readback.stdout.encode())})
+            else:
+                stages.append({"stage": "activation", "stdout_sha256": digest(activation.stdout.encode())})
+        if (case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE} or cleaner_completion_case(case, release_run_id)):
             stages.append(_must_succeed("cleaner-before-complete-probe", protected(commands["cleaner_precomplete_probe"])))
         before_completion = collect_prestate(
             target, preview["source"]["merge_sha"], require_incomplete=True, case=case
