@@ -1812,6 +1812,15 @@ def _test_paid_acceptance_cost_boundary() -> None:
     )
     _assert(accepted == Decimal("120"), "accepted WB inbound includes paid acceptance")
     _assert(pre_acceptance == Decimal("100"), "FF-to-WB and discrepancy exclude paid acceptance")
+    rows[0]["wb_acceptance_per_accepted_unit_rub"] = None
+    _assert(not _supply_downstream_component_index(rows), "unknown acceptance uses existing pending-cost path")
+    rows[0]["wb_acceptance_per_accepted_unit_rub"] = "-2"
+    try:
+        _supply_downstream_component_index(rows)
+    except WarehouseFunctionalError:
+        pass
+    else:
+        raise AssertionError("other negative costs must still fail validation")
 
 
 def _test_financial_document_eligibility() -> None:

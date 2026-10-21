@@ -18,6 +18,7 @@ def main() -> None:
     _check_virtual_type_zero_cost_fixture()
     _check_empty_detail_does_not_overwrite_list_evidence()
     _check_unknown_transit_cost_is_not_zero()
+    _check_unavailable_acceptance_is_not_money()
     print("wb_supplies_normalization_smoke: OK")
 
 
@@ -190,6 +191,22 @@ def _check_unknown_transit_cost_is_not_zero() -> None:
     _assert(row["cost_total"] is None, row)
     _assert(row["acceptance_cost"] == 0, row)
     _assert(row["cost_evidence"] == "transit_total_absent_in_official_supply_detail", row)
+
+
+def _check_unavailable_acceptance_is_not_money() -> None:
+    for transit in (None, 25):
+        row = _normalize_supply_row(
+            raw_list={"supplyID": 9003, "statusID": 4},
+            raw_detail={"acceptanceCost": -1, "paidAcceptanceCoefficient": 0,
+                        "transitCost": transit, "costTotal": -1},
+            raw_goods=None, raw_package=None, warehouse_by_id={},
+            synced_at="2026-10-21T00:00:00Z", warnings=[],
+        )
+        _assert(row["acceptance_cost"] is None, row)
+        _assert(row["acceptance_cost_raw"] == -1, row)
+        _assert(row["acceptance_cost_status"] == "unavailable", row)
+        _assert(row["cost_total"] is None and row["cost_display"] == "—", row)
+        _assert(row["transit_cost"] == transit, row)
 
 
 def _assert(condition: bool, payload: object) -> None:

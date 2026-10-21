@@ -8782,6 +8782,10 @@ def _supply_downstream_component_index(
             raise WarehouseFunctionalError(
                 f"WB supply {supply_id}:{nm_id} has a negative downstream component"
             )
+        if row.get("wb_acceptance_per_accepted_unit_rub") is None:
+            # Existing physical-movement handling retains known FF capital
+            # and marks downstream costs pending, without inventing zero.
+            continue
         result[(supply_id, nm_id)] = {
             "pre_acceptance_addon": transit + services + storage,
             "acceptance_addon": acceptance,

@@ -468,16 +468,13 @@ class OurWbCostBlock:
                     denominator=denominator,
                 )
                 normalized_supply = _normalized_wb_row(supply)
-                acceptance_total = _number_or_zero(
-                    normalized_supply.get("acceptance_cost")
-                    if normalized_supply.get("acceptance_cost") is not None
-                    else normalized_supply.get("acceptanceCost")
-                )
+                acceptance_total = wb_supply_acceptance_cost(normalized_supply)
                 accepted_denominator = _sum_positive(
                     _number_or_zero(item.get("acceptedQuantity") if item.get("acceptedQuantity") is not None else item.get("accepted_quantity"))
                     for item in goods
                 )
                 acceptance_per_accepted_unit = (
+                    None if acceptance_total is None else
                     acceptance_total / accepted_denominator if accepted_denominator > 0 else 0.0
                 )
                 services_total = _number_or_zero(
@@ -1217,8 +1214,8 @@ class OurWbCostBlock:
         services_per_unit: float,
         storage_total: float,
         storage_per_unit: float,
-        acceptance_total: float,
-        acceptance_per_accepted_unit: float,
+        acceptance_total: float | None,
+        acceptance_per_accepted_unit: float | None,
         overlay: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         sku_ff_cost = _optional_float((ff_line or {}).get("sku_ff_unit_cost_rub"))
@@ -1239,13 +1236,17 @@ class OurWbCostBlock:
                     + services_per_unit
                     + storage_per_unit
                 )
-                our_cost = pre_acceptance_cost + acceptance_per_accepted_unit
+                our_cost = (pre_acceptance_cost + acceptance_per_accepted_unit
+                            if acceptance_per_accepted_unit is not None else None)
             if transit.status not in {
                 TRANSIT_CONFIRMED,
                 TRANSIT_DIRECT_ZERO_CONFIRMED,
             }:
                 source_status = WB_COST_STATUS_PENDING
                 missing_reason = transit.missing_reason or "transit_cost_pending"
+            elif acceptance_total is None:
+                source_status = WB_COST_STATUS_PENDING
+                missing_reason = "wb_acceptance_cost_unavailable"
             elif not quantity_is_final_accepted:
                 source_status = WB_COST_STATUS_ESTIMATED
                 missing_reason = "wb_supply_quantity_not_final_accepted"
@@ -1288,7 +1289,8 @@ class OurWbCostBlock:
                 "transit": transit.status,
                 "ff_services": "accepted_upload" if overlay else "missing_or_zero",
                 "ff_storage": "accepted_upload_allocated_storage" if overlay else "missing_or_zero",
-                "wb_acceptance": "accepted_quantity_only" if acceptance_total else "zero_or_absent",
+                "wb_acceptance": ("unavailable" if acceptance_total is None else
+                                  "accepted_quantity_only" if acceptance_total else "zero_or_absent"),
                 "transit_evidence": transit.evidence,
                 "wb_supply_status_id": supply_status_id,
                 "wb_quantity_source": quantity_source,
@@ -1417,6 +1419,21 @@ class OurWbCostBlock:
         return True
 
 
+def wb_supply_acceptance_cost(supply_row: Mapping[str, Any]) -> float | None:
+    """Keep WB's observed -1 amount out of monetary arithmetic.
+
+    Its exact upstream meaning is not established here. Treat it as unavailable,
+    never a refund or free acceptance. Preserve the legacy absent-field policy.
+    Both persisted legacy rows and newly normalized rows must agree.
+    """
+    if supply_row.get("acceptance_cost_status") == "unavailable":
+        return None
+    value = _number_or_zero(supply_row.get("acceptance_cost")
+                            if supply_row.get("acceptance_cost") is not None
+                            else supply_row.get("acceptanceCost"))
+    return None if value == -1 else value
+
+
 def classify_wb_supply_transit(
     supply_row: Mapping[str, Any],
     *,
@@ -1442,7 +1459,8 @@ def classify_wb_supply_transit(
         if supply_row.get("acceptance_cost") is not None
         else supply_row.get("acceptanceCost")
     )
-    if official_cost is None and official_total is not None:
+    if (official_cost is None and official_total is not None
+            and wb_supply_acceptance_cost(supply_row) is not None):
         official_cost = max(official_total - (acceptance_cost or 0.0), 0.0)
     effective_cost = _optional_float(supply_row.get("effective_transit_cost_total"))
     seller_portal_cost = _optional_float(

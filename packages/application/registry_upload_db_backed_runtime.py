@@ -13432,8 +13432,8 @@ def _ensure_schema_uncached(
             ff_storage_amount_total REAL NOT NULL DEFAULT 0,
             ff_storage_per_unit_rub REAL NOT NULL DEFAULT 0,
             pre_acceptance_unit_cost_rub REAL,
-            wb_acceptance_amount_total REAL NOT NULL DEFAULT 0,
-            wb_acceptance_per_accepted_unit_rub REAL NOT NULL DEFAULT 0,
+            wb_acceptance_amount_total REAL DEFAULT 0,
+            wb_acceptance_per_accepted_unit_rub REAL DEFAULT 0,
             our_wb_unit_cost_rub REAL,
             source_status TEXT NOT NULL,
             component_status_json TEXT NOT NULL DEFAULT '{}',
@@ -13919,8 +13919,8 @@ def _ensure_schema_uncached(
         )
     for column_name, column_sql in (
         ("pre_acceptance_unit_cost_rub", "REAL"),
-        ("wb_acceptance_amount_total", "REAL NOT NULL DEFAULT 0"),
-        ("wb_acceptance_per_accepted_unit_rub", "REAL NOT NULL DEFAULT 0"),
+        ("wb_acceptance_amount_total", "REAL DEFAULT 0"),
+        ("wb_acceptance_per_accepted_unit_rub", "REAL DEFAULT 0"),
     ):
         _ensure_column(
             conn,
@@ -14119,15 +14119,13 @@ def _ensure_column(
 
 
 def _ensure_nullable_wb_transit_cost(conn: sqlite3.Connection) -> None:
-    """Remove the legacy false-zero constraint from the small derived table."""
+    """Allow unknown transit/acceptance in the small derived cost table."""
 
     table_name = "sheet_vitrina_v1_wb_supply_cost_layers"
     info = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    transit = next(
-        (row for row in info if str(row["name"]) == "transit_per_unit_rub"),
-        None,
-    )
-    if transit is None or int(transit["notnull"] or 0) == 0:
+    nullable = {"transit_per_unit_rub", "wb_acceptance_amount_total",
+                "wb_acceptance_per_accepted_unit_rub"}
+    if not any(str(row["name"]) in nullable and int(row["notnull"] or 0) for row in info):
         return
     legacy_name = table_name + "__legacy_notnull_transit"
     columns = [str(row["name"]) for row in info]
@@ -14158,8 +14156,8 @@ def _ensure_nullable_wb_transit_cost(conn: sqlite3.Connection) -> None:
                 ff_storage_amount_total REAL NOT NULL DEFAULT 0,
                 ff_storage_per_unit_rub REAL NOT NULL DEFAULT 0,
                 pre_acceptance_unit_cost_rub REAL,
-                wb_acceptance_amount_total REAL NOT NULL DEFAULT 0,
-                wb_acceptance_per_accepted_unit_rub REAL NOT NULL DEFAULT 0,
+                wb_acceptance_amount_total REAL DEFAULT 0,
+                wb_acceptance_per_accepted_unit_rub REAL DEFAULT 0,
                 our_wb_unit_cost_rub REAL,
                 source_status TEXT NOT NULL,
                 component_status_json TEXT NOT NULL DEFAULT '{{}}',

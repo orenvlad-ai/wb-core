@@ -213,7 +213,7 @@ def _overlay_evidence(conn: sqlite3.Connection, request: dict[str, Any]) -> dict
     from packages.application.our_wb_costs import (
         _parse_wb_goods, _wb_supply_row_to_dict, _wb_good_packed_quantity,
         _wb_good_accepted_quantity, _wb_good_quantity_is_final_accepted,
-        _selected_wb_supply_inputs, _stable_hash,
+        _selected_wb_supply_inputs, _stable_hash, _normalized_wb_row, wb_supply_acceptance_cost,
     )
     from packages.application.warehouse_functional import _supply_revision
     overlay = FulfillmentServicesBlock.approved_overlay_in_connection(conn)
@@ -292,8 +292,14 @@ def _overlay_evidence(conn: sqlite3.Connection, request: dict[str, Any]) -> dict
                 raise ValueError("fulfillment_cost_materialization_pending")
             if layer["sku_ff_unit_cost_rub"] is not None and layer["transit_per_unit_rub"] is not None:
                 pre = float(layer["sku_ff_unit_cost_rub"]) + float(layer["transit_per_unit_rub"]) + service / denominator + storage / denominator
-                if (not equal(layer["pre_acceptance_unit_cost_rub"], pre)
-                        or not equal(layer["our_wb_unit_cost_rub"], pre + float(layer["wb_acceptance_per_accepted_unit_rub"]))):
+                acceptance = layer["wb_acceptance_per_accepted_unit_rub"]
+                accepted_matches = (layer["our_wb_unit_cost_rub"] is None
+                                    and layer["wb_acceptance_amount_total"] is None
+                                    and components.get("wb_acceptance") == "unavailable"
+                                    and wb_supply_acceptance_cost(_normalized_wb_row(supply)) is None
+                                    if acceptance is None else
+                                    equal(layer["our_wb_unit_cost_rub"], pre + float(acceptance)))
+                if not equal(layer["pre_acceptance_unit_cost_rub"], pre) or not accepted_matches:
                     raise ValueError("fulfillment_cost_materialization_pending")
         result[supply_id] = {"upload_ids": sorted(expected.get("upload_ids") or []),
             "supply_authority": {"source_revision": _supply_revision(dict(source)),

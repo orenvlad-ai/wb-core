@@ -30,6 +30,7 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
     RegistryUploadDbBackedRuntime,
     _connect,
     _ensure_schema,
+    _ensure_nullable_wb_transit_cost,
 )
 from packages.application.sheet_vitrina_v1_live_plan import (  # noqa: E402
     SlotLookups,
@@ -69,6 +70,7 @@ BUNDLE_FIXTURE = ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input
 
 
 def main() -> None:
+    _assert_unavailable_acceptance_recovery()
     with TemporaryDirectory(prefix="our-wb-costs-smoke-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
         runtime.save_nomenclature_item(
@@ -506,6 +508,51 @@ def _seed_financial_inputs(runtime: RegistryUploadDbBackedRuntime, *, shipment_i
                 shipment_id,
             ),
         )
+
+
+def _assert_unavailable_acceptance_recovery() -> None:
+    import sqlite3
+    with TemporaryDirectory(prefix="wb-acceptance-pending-") as tmp:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
+        _seed_supplier_shipment(runtime)
+        _seed_financial_inputs(runtime)
+        block = OurWbCostBlock(runtime=runtime, timestamp_factory=lambda: NOW)
+        block.materialize_supplier_ff_cost_layer("sup_smoke")
+        _seed_wb_supply(runtime, supply_id="pending", acceptance_cost=-1, cost_total=-1,
+                        transit_cost=20, has_transit_cost_marker=True)
+        assert block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") == 1
+        with _connect(runtime.db_path) as conn:
+            row = dict(conn.execute("SELECT * FROM sheet_vitrina_v1_wb_supply_cost_layers WHERE is_current=1").fetchone())
+            assert row["wb_acceptance_amount_total"] is None
+            assert row["wb_acceptance_per_accepted_unit_rub"] is None
+            assert row["our_wb_unit_cost_rub"] is None
+            assert row["source_status"] == "pending" and row["missing_reason"] == "wb_acceptance_cost_unavailable"
+            assert row["pre_acceptance_unit_cost_rub"] is not None
+            ddl = conn.execute("SELECT sql FROM sqlite_master WHERE name='sheet_vitrina_v1_wb_supply_cost_layers'").fetchone()[0]
+        assert block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") == 0
+        # A later positive WB observation replaces the pending layer once.
+        with _connect(runtime.db_path) as conn:
+            source = json.loads(conn.execute("SELECT normalized_row_json FROM sheet_vitrina_v1_wb_supplies WHERE supply_id='pending'").fetchone()[0])
+            source.update(acceptanceCost=50, cost_total=70)
+            conn.execute("UPDATE sheet_vitrina_v1_wb_supplies SET normalized_row_json=? WHERE supply_id='pending'", (json.dumps(source),))
+        assert block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") == 1
+        assert block.materialize_wb_supply_cost_layers(opening_date="2026-07-01") == 0
+        with _connect(runtime.db_path) as conn:
+            row = dict(conn.execute("SELECT * FROM sheet_vitrina_v1_wb_supply_cost_layers WHERE is_current=1").fetchone())
+            assert row["version"] == 2 and row["wb_acceptance_per_accepted_unit_rub"] == 5
+            assert row["our_wb_unit_cost_rub"] == row["pre_acceptance_unit_cost_rub"] + 5
+        # Upgrade the legacy NOT NULL table without losing historical rows.
+        legacy = sqlite3.connect(":memory:"); legacy.row_factory = sqlite3.Row
+        legacy.executescript(ddl.replace("wb_acceptance_amount_total REAL DEFAULT", "wb_acceptance_amount_total REAL NOT NULL DEFAULT")
+                            .replace("wb_acceptance_per_accepted_unit_rub REAL DEFAULT", "wb_acceptance_per_accepted_unit_rub REAL NOT NULL DEFAULT"))
+        cols = list(row)
+        legacy.execute(f"INSERT INTO sheet_vitrina_v1_wb_supply_cost_layers ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})", [row[k] for k in cols])
+        _ensure_nullable_wb_transit_cost(legacy)
+        _ensure_nullable_wb_transit_cost(legacy)
+        assert dict(legacy.execute("SELECT * FROM sheet_vitrina_v1_wb_supply_cost_layers").fetchone()) == row
+        legacy.execute("UPDATE sheet_vitrina_v1_wb_supply_cost_layers SET wb_acceptance_amount_total=NULL,wb_acceptance_per_accepted_unit_rub=NULL")
+        assert len(legacy.execute("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('sheet_vitrina_v1_wb_supply_cost_layers_current','sheet_vitrina_v1_wb_supply_cost_layers_by_date_nm')").fetchall()) == 2
+        legacy.close()
 
 
 def _seed_wb_supply(
