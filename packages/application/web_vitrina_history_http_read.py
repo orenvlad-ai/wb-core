@@ -94,6 +94,18 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
     marker.update(date_from=date_from, date_to=date_to, group_id=group_id or "",
                   current_preliminary=today in page["dates"], saved_at=saved_at)
     dates = sorted(edition["days"])
+    marker.update(available_date_min=dates[0], available_date_max=dates[-1])
+    missing = page["unmaterialized_dates"]
+    if missing == [today]:
+        status_text = ("За текущий день ещё нет сохранённых данных. Текущий день предварительный."
+            if date_from == date_to else
+            "За текущий день ещё нет сохранённых данных. Прошлые дни показаны из готовой истории.")
+    elif missing:
+        status_text = ("Нет сохранённых данных за " + missing[0] + " — " + missing[-1]
+            + ". Последний сохранённый день — " + dates[-1]
+            + ". Прочерки означают отсутствие данных, а не ноль.")
+    else:
+        status_text = "Готовая история. Качество и полнота указаны в ячейках; текущий день предварительный."
     presentation = deepcopy(catalog["presentation"])
     # Gravity adapter catalogs carry renderer IDs, but not formatter rules.
     # Resolve presentation rules without evaluating or changing stored cells.
@@ -129,11 +141,7 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
             "available_date_min": dates[0], "available_date_max": dates[-1],
             "current_mode": "period", "selected_date_from": date_from, "selected_date_to": date_to,
             "default_as_of_date": today, "default_date_from": date_from, "default_date_to": date_to,
-            "status_text": (("За текущий день ещё нет сохранённых данных. Текущий день предварительный."
-                if date_from == date_to else
-                "За текущий день ещё нет сохранённых данных. Прошлые дни показаны из готовой истории.")
-                if page["unmaterialized_dates"] else
-                "Готовая история. Качество и полнота указаны в ячейках; текущий день предварительный."),
+            "status_text": status_text,
             "preset_options": [], "supported_query_mode": "history_mode_explicit_date_window"},
         "table_surface": {**presentation, "columns": columns, "rows": rows,
             "groupings": groupings, "total_row_count": page["total_rows"], "returned_row_count": len(rows),

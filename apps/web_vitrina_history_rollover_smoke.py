@@ -1,4 +1,4 @@
-"""Small owned rollover reader/UI fixtures, with no native evaluator or sources."""
+"""Saved history survives missed updates, without evaluation or source writes."""
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone, date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -99,9 +99,9 @@ def checks(store, table, edition):
         tiny = HistoryStore(store.root, max_reply_bytes=64)
         refuse(lambda: reader.read_history_page(tiny, date_from=DAYS[0], date_to=TODAY), 'history_reply_limit')
     assert family(store.root) == before
-    # Internal gap and two-day-old edition cannot use the one-day allowance.
+    # Internal gaps cannot be hidden by the missing-tail allowance.
     source = store.edition(edition)
-    for remove in (DAYS[-1], DAYS[4]):
+    for remove in (DAYS[4],):
         changed = deepcopy(source)
         del changed['days'][remove]
         changed_id = digest(changed)
@@ -125,6 +125,43 @@ def checks(store, table, edition):
     finally:
         object_path.write_bytes(raw)
     assert family(store.root) == before
+    # An expired source may stop publication for days or weeks. Preserve all
+    # saved fields, date columns and edition pins; absent days are never zero.
+    stale_today = (date.fromisoformat(TODAY) + timedelta(days=6)).isoformat()
+    missing = [(date.fromisoformat(TODAY) + timedelta(days=i)).isoformat() for i in range(7)]
+    with patch.object(reader, 'current_business_date_iso', return_value=stale_today):
+        for scope in ('catalog', 'total', 'group', 'sku'):
+            page = reader.read_history_page(store, date_from=DAYS[0], date_to=stale_today,
+                scope=scope, edition_id=edition, limit=1)
+            marker = page['history_snapshot']
+            assert marker['unmaterialized_dates'] == missing
+            assert marker['available_date_max'] == DAYS[-1]
+            assert marker['date_from'] == DAYS[0] and marker['date_to'] == stale_today
+            assert marker['edition_id'] == edition
+            assert all(marker['availability'][day] is False for day in missing)
+            old = store.read(date_from=DAYS[0], date_to=DAYS[-1], scope=scope, edition_id=edition, limit=1)
+            expected = {r['row_id']: r['cells'] for r in old['rows']}
+            for row in page['table_surface']['rows']:
+                for cell in row['values']:
+                    key = page['table_surface']['columns'][cell[0]]['id']
+                    if not key.startswith('date:'):
+                        continue
+                    day = key[5:]
+                    if day in missing:
+                        assert len(cell[1:]) == 16 and cell[1] is None and cell[2] == '—'
+                        assert cell[6] == cell[9] == 'unavailable'
+                        assert ('Текущий день' in cell[8]) == (day == stale_today)
+                    else:
+                        assert cell[1:] == expected[row['row_id']][day]
+            empty = reader.read_history_page(store, date_from=TODAY, date_to=stale_today,
+                scope=scope, edition_id=edition)
+            assert empty['table_surface']['rows'] == []
+            assert empty['history_snapshot']['available_date_max'] == DAYS[-1]
+        refuse(lambda: reader.read_history_page(store, date_from=DAYS[0],
+            date_to=(date.fromisoformat(stale_today) + timedelta(days=1)).isoformat()), 'history_date_unavailable')
+        refuse(lambda: reader.read_history_page(HistoryStore(store.root, max_reply_bytes=64),
+            date_from=DAYS[0], date_to=stale_today), 'history_reply_limit')
+    assert family(store.root) == before
     # Published replacement must not change old pinned reads or their saved time.
     full = deepcopy(table)
     for row in full['rows']:
@@ -141,7 +178,7 @@ def checks(store, table, edition):
     return new
 
 
-def browser_check(store, old_edition):
+def browser_check(store, old_edition, business_today=TODAY):
     from playwright.sync_api import sync_playwright
     reads, posts, errors = [], [], []
     config = {'status': 'ok', 'revision': 2, 'config': {}}
@@ -177,33 +214,56 @@ def browser_check(store, old_edition):
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
     try:
-        with patch.object(reader, 'current_business_date_iso', return_value=TODAY), sync_playwright() as playwright:
+        with patch.object(reader, 'current_business_date_iso', return_value=business_today), sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
             page.on('pageerror', lambda error: errors.append(str(error)))
-            page.clock.install(time=datetime(2026, 10, 5, 19, tzinfo=timezone.utc))
+            page.clock.install(time=datetime.fromisoformat(business_today).replace(tzinfo=timezone.utc))
+            period_start = (date.fromisoformat(business_today) - timedelta(days=13)).isoformat()
             base = 'http://127.0.0.1:' + str(server.server_port)
             page.goto(base + '/vitrina')
             page.wait_for_selector('[data-history-summary-load-ms]', state='attached', timeout=15000)
             assert page.locator('[data-table-body] tr').count() > 0
-            current_cells = page.locator('[data-table-body] td[data-col-id="date:' + TODAY + '"]')
+            current_cells = page.locator('[data-table-body] td[data-col-id="date:' + business_today + '"]')
             assert current_cells.count() > 0
             assert all(text.strip() == '—' for text in current_cells.all_inner_texts())
             assert page.locator('[data-history-current-unavailable]').is_visible()
-            assert 'За текущий день ещё нет сохранённых данных' in page.locator('[data-history-current-unavailable]').inner_text()
-            assert page.locator('[data-table-load-status]').get_attribute('data-load-status-text') == 'текущий день ещё не сохранён'
+            if business_today == TODAY:
+                assert 'За текущий день ещё нет сохранённых данных' in page.locator('[data-history-current-unavailable]').inner_text()
+                assert page.locator('[data-table-load-status]').get_attribute('data-load-status-text') == 'текущий день ещё не сохранён'
+            else:
+                assert 'Прочерки означают отсутствие данных, а не ноль' in page.locator('[data-history-current-unavailable]').inner_text()
+                assert page.locator('[data-table-load-status]').get_attribute('data-load-status-text') == 'есть дни без сохранённых данных'
             assert [q['scope'][0] for q in reads] == ['catalog', 'total']
-            assert all(q['date_from'] == [DAYS[0]] and q['date_to'] == [TODAY] for q in reads)
+            assert all(q['date_from'] == [period_start] and q['date_to'] == [business_today] for q in reads)
             page.locator('[data-filters-toggle]').click()
             page.locator('[data-block-kind="skus"][data-block-group="group:clean"]').check()
             page.locator('[data-filters-apply]').click()
             page.wait_for_function("document.querySelector('[data-table-body]').querySelectorAll('tr').length > 1")
             assert [q['scope'][0] for q in reads] == ['catalog', 'total', 'sku']
-            assert reads[-1]['edition_id'] == [old_edition] and reads[-1]['date_to'] == [TODAY]
+            assert reads[-1]['edition_id'] == [old_edition] and reads[-1]['date_to'] == [business_today]
             assert page.locator('[data-history-current-unavailable]').is_visible()
-            page.goto(base + '/vitrina?history_mode=explicit&date_from=' + TODAY + '&date_to=' + TODAY)
+            page.goto(base + '/vitrina?history_mode=explicit&date_from=' + business_today + '&date_to=' + business_today)
             page.wait_for_selector('[data-history-summary-load-ms]', state='attached', timeout=15000)
             assert 'За текущий день ещё нет сохранённых данных' in page.locator('[data-state-title]').inner_text()
+            page.locator('[data-history-saved-period]').click()
+            page.wait_for_function("!document.querySelector('[data-history-current-unavailable]').hidden === false")
+            assert 'date_to=' + DAYS[-1] in page.url
+            assert page.locator('[data-table-body] tr').count() > 0
+            assert not page.locator('[data-history-saved-period]').is_visible()
+            if business_today != TODAY:
+                # Calendar can select unpublished days, with an explicit hint.
+                page.locator('[data-history-toggle]').click()
+                day = page.locator('[data-history-day="' + business_today + '"]')
+                assert day.is_enabled() and 'нет сохранённых данных' in day.get_attribute('title')
+                day.click()
+                page.locator('[data-history-save]').click()
+                page.wait_for_function("document.querySelector('[data-state-title]').textContent.includes('За текущий день')")
+                # A period wholly after the last snapshot offers saved history.
+                page.goto(base + '/vitrina?history_mode=explicit&date_from=' + TODAY + '&date_to=' + business_today)
+                page.wait_for_selector('[data-history-summary-load-ms]', state='attached', timeout=15000)
+                assert 'Нет сохранённых данных за выбранный период' in page.locator('[data-state-title]').inner_text()
+                assert page.locator('[data-history-saved-period]').is_visible()
             assert not errors, errors
             assert not any('user-config' in path for path in posts), posts
             browser.close()
@@ -219,9 +279,10 @@ def main():
         checks(store, table, edition)
         before = family(store.root)
         browser_check(store, edition)
+        browser_check(store, edition, (date.fromisoformat(TODAY) + timedelta(days=6)).isoformat())
         assert family(store.root) == before
     print(json.dumps({'status': 'pass', 'synthetic_read_only': True, 'canonical_rollover': True,
-        'only_one_missing_today': True, 'previous_exact16': True, 'strict_default': True,
+        'unpublished_tail': True, 'previous_exact16': True, 'strict_default': True,
         'pinned_total_group_sku_pages': True, 'new_current_old_pin': True, 'bounds_corruption_quota': True,
         'mixed_and_today_ui': True, 'no_evaluator': True, 'no_config_write': True}))
 

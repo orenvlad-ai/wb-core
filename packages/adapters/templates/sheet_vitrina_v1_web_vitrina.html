@@ -5993,6 +5993,7 @@
       </div>
 
       <p class="panel-meta" data-history-current-unavailable role="status" hidden></p>
+      <button class="button secondary" type="button" data-history-saved-period hidden>Открыть последние сохранённые дни</button>
       <div class="table-shell is-hidden" data-table-shell>
         <div class="window-v3-loading-overlay" data-window-v3-loading-overlay role="status" aria-live="polite" hidden>Загружаем видимые даты…</div>
         <div class="table-scroll" data-table-scroll>
@@ -9232,6 +9233,17 @@
       updatePageHistoryPeriod({
         dateFrom: "",
         dateTo: ""
+      });
+      setHistoryPopoverOpen(false);
+      loadPageComposition();
+    });
+
+    document.querySelector("[data-history-saved-period]").addEventListener("click", function() {
+      const marker = ((historySnapshotState.summary || {}).history_snapshot || {});
+      if (!marker.available_date_min || !marker.available_date_max) return;
+      updatePageHistoryPeriod({
+        dateFrom: maxIsoDate(marker.available_date_min, shiftIsoDate(marker.available_date_max, -13)),
+        dateTo: marker.available_date_max
       });
       setHistoryPopoverOpen(false);
       loadPageComposition();
@@ -16019,9 +16031,20 @@
       }
     }
 
+    function historySelectableDateMax() {
+      const last = state.history.availableDates[state.history.availableDates.length - 1] || "";
+      return historySnapshotEnabled() && last ? maxIsoDate(last, snapshotBusinessToday()) : last;
+    }
+
+    function historyDateSelectable(day) {
+      const last = state.history.availableDates[state.history.availableDates.length - 1] || "";
+      return state.history.availableDateSet.has(day) || (historySnapshotEnabled() && !!last
+        && day > last && day <= snapshotBusinessToday());
+    }
+
     function syncHistoryFieldValues() {
       const minDate = state.history.availableDates[0] || "";
-      const maxDate = state.history.availableDates[state.history.availableDates.length - 1] || "";
+      const maxDate = historySelectableDateMax();
       historyDateFromNode.min = minDate;
       historyDateFromNode.max = maxDate;
       historyDateToNode.min = minDate;
@@ -16174,8 +16197,8 @@
           return "Выбранная дата вне доступного серверного периода.";
         }
       } else {
-        if (!state.history.availableDateSet.has(state.history.draftDateFrom)
-            || !state.history.availableDateSet.has(state.history.draftDateTo)) {
+        if (!historyDateSelectable(state.history.draftDateFrom)
+            || !historyDateSelectable(state.history.draftDateTo)) {
           return "Выбранная дата вне доступного серверного периода.";
         }
         if (!isContinuousAvailableRange(state.history.draftDateFrom, state.history.draftDateTo)) {
@@ -16294,7 +16317,7 @@
         return "";
       }
       const minMonth = startOfMonthIso(state.history.availableDates[0]);
-      const maxMonth = startOfMonthIso(state.history.availableDates[state.history.availableDates.length - 1]);
+      const maxMonth = startOfMonthIso(historySelectableDateMax());
       if (!monthStart || monthStart < minMonth) {
         return minMonth;
       }
@@ -16328,7 +16351,7 @@
         return;
       }
       const minMonth = startOfMonthIso(state.history.availableDates[0]);
-      const maxMonth = startOfMonthIso(state.history.availableDates[state.history.availableDates.length - 1]);
+      const maxMonth = startOfMonthIso(historySelectableDateMax());
       historyPrevMonthButton.disabled = visibleMonthStart <= minMonth;
       historyNextMonthButton.disabled = visibleMonthStart >= maxMonth;
     }
@@ -16348,7 +16371,7 @@
         const isAvailable = windowV3Available
           ? isoDate >= state.history.availableDates[0]
             && isoDate <= state.history.availableDates[state.history.availableDates.length - 1]
-          : state.history.availableDateSet.has(isoDate);
+          : historyDateSelectable(isoDate);
         const dateCoverage = ((state.windowV3.manifest || {}).dates || []).find(function(item) {
           return item.date === isoDate;
         });
@@ -16369,6 +16392,8 @@
         const titleParts = [isoDate];
         if (!isAvailable) {
           titleParts.push("дата вне доступного серверного периода");
+        } else if (historySnapshotEnabled() && !state.history.availableDateSet.has(isoDate)) {
+          titleParts.push("нет сохранённых данных — будут показаны прочерки");
         } else if (dateCoverage && dateCoverage.coverage === "covered") {
           titleParts.push("данные покрыты снимком " + String(dateCoverage.source_as_of_date || ""));
         } else if (dateCoverage && dateCoverage.coverage === "missing") {
@@ -16475,7 +16500,7 @@
       }
       let cursor = dateFrom;
       while (cursor <= dateTo) {
-        if (!state.history.availableDateSet.has(cursor)) {
+        if (!historyDateSelectable(cursor)) {
           return false;
         }
         cursor = shiftIsoDate(cursor, 1);
@@ -17538,6 +17563,12 @@
             && history.date_to === today && (history.availability || {})[today] === false) {
           setStateBox("warning", "За текущий день ещё нет сохранённых данных",
             "Текущий день предварительный. Выберите завершённый день или дождитесь обновления истории.");
+          return;
+        }
+        if (history && history.unmaterialized_dates && history.unmaterialized_dates.length
+            && history.date_from > history.available_date_max) {
+          setStateBox("warning", "Нет сохранённых данных за выбранный период",
+            "Откройте последние сохранённые дни кнопкой ниже или выберите другой период.");
           return;
         }
         setStateBox(
@@ -24310,15 +24341,21 @@
       snapshotPilotToolbarNode.hidden = true;
       filterSummaryNode.hidden = true;
       const marker = ((historySnapshotState.summary || {}).history_snapshot || {});
-      const missingToday = (marker.unmaterialized_dates || []).length > 0;
+      const missing = marker.unmaterialized_dates || [];
+      const onlyToday = missing.length === 1 && missing[0] === snapshotBusinessToday();
       const notice = document.querySelector("[data-history-current-unavailable]");
-      notice.hidden = !missingToday;
-      notice.textContent = missingToday
+      notice.hidden = !missing.length;
+      notice.textContent = onlyToday
         ? (marker.date_from === marker.date_to
           ? "За текущий день ещё нет сохранённых данных. Текущий день предварительный."
-          : "За текущий день ещё нет сохранённых данных. Прошлые дни показаны из готовой истории.") : "";
-      setLoadStatusLamp(missingToday ? "текущий день ещё не сохранён" : "готовая история",
-        missingToday ? "warning" : "success");
+          : "За текущий день ещё нет сохранённых данных. Прошлые дни показаны из готовой истории.")
+        : (missing.length ? "Нет сохранённых данных за " + formatBusinessDateDisplay(missing[0])
+          + (missing.length > 1 ? " — " + formatBusinessDateDisplay(missing[missing.length - 1]) : "")
+          + ". Последний сохранённый день — " + formatBusinessDateDisplay(marker.available_date_max)
+          + ". Прочерки означают отсутствие данных, а не ноль." : "");
+      document.querySelector("[data-history-saved-period]").hidden = !missing.length || !marker.available_date_max;
+      setLoadStatusLamp(onlyToday ? "текущий день ещё не сохранён" : missing.length ? "есть дни без сохранённых данных" : "готовая история",
+        missing.length ? "warning" : "success");
       renderHistoryBlockFilters();
     }
     function historySnapshotMerged() {
@@ -25843,6 +25880,7 @@
           historySnapshotState.viewId += 1;
           state.composition = null; snapshotPilotToolbarNode.hidden = true;
           document.querySelector("[data-history-current-unavailable]").hidden = true;
+          document.querySelector("[data-history-saved-period]").hidden = true;
           loadRefreshButton.hidden = true;
           setStateBox("error", "Готовая история недоступна для выбранного периода", escapeHtml(message));
           setLoadStatusLamp("история недоступна", "warning");
