@@ -608,11 +608,12 @@ class HistoryStore:
         edition = self.edition(edition_id)
         actual_id = digest(edition)
         missing_days = set(days) - set(edition["days"])
-        # Only the HTTP reader opts into the one-day business rollover. A stale
-        # edition, an internal gap or a future date retains the strict refusal.
-        if missing_days and not (business_today is not None and missing_days == {business_today}
-                and max(edition["days"], default="") ==
-                    (date.fromisoformat(business_today) - timedelta(days=1)).isoformat()):
+        # The HTTP reader may show an unpublished tail through business today.
+        # Saved dates stay exact; internal gaps and future dates still refuse.
+        # Calls without business_today retain the strict storage contract.
+        last_saved_day = max(edition["days"], default="")
+        if missing_days and not (business_today is not None and last_saved_day
+                and all(last_saved_day < day <= business_today for day in missing_days)):
             raise HistoryUnavailable("history_date_unavailable")
         catalog = _read(self.root / "catalogs" / (edition["catalog"] + ".json"))
         if digest(catalog) != edition["catalog"]:
@@ -677,7 +678,9 @@ class HistoryStore:
             if not selected:
                 break
             if day in missing_days:
-                reason = "За текущий день ещё нет сохранённых данных. Текущий день предварительный."
+                reason = ("За текущий день ещё нет сохранённых данных. Текущий день предварительный."
+                    if day == business_today else
+                    "За этот день нет сохранённых данных. Обновление истории не завершено.")
                 for rid in selected:
                     cell = [None, "—", "number", None, "", "unavailable", "muted", reason,
                             "unavailable", "Нет сохранённых данных", reason, "unavailable", None, "", "", ""]
