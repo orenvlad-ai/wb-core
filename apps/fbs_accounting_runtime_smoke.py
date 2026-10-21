@@ -151,6 +151,26 @@ class RuntimeTests(unittest.TestCase):
         runtime._record_prepare_failure(self.root, expected=version, error=ValueError("source_unavailable"))
         self.assertEqual(runtime.load(self.root)[0]["publication_error"]["invalid_from_date"], "2026-09-10")
 
+    def test_load_shared_accepts_legacy_string_and_none_errors_without_weakening_date_guard(self):
+        days = {
+            day: {"date": day, "status": status}
+            for day, status in (("2026-09-07", "closed"), ("2026-09-08", "closed"),
+                                ("2026-09-09", "closed"), ("2026-09-10", "open"))
+        }
+        for error, expected in (
+            (None, set(days)),
+            ("finance_handoff_exhausted", {"2026-09-07", "2026-09-08", "2026-09-09"}),
+            ({"invalid_from_date": "2026-09-09"}, {"2026-09-07", "2026-09-08"}),
+        ):
+            with self.subTest(error=error):
+                book = {"active": True, "effective_date": "2026-09-07", "shared_days": days,
+                        "publication_error": error}
+                with patch.object(runtime, "load", return_value=(book, "version")), \
+                     patch.object(runtime, "ActiveSharedCostSnapshot",
+                                  side_effect=lambda periods, *, effective_date: periods):
+                    result = runtime.load_shared(self.root)
+                self.assertEqual({period["date"] for period in result}, expected)
+
     def test_refused_new_gap_does_not_invalidate_previously_valid_closed_bridge(self):
         self.image = gap_capture()
         self.opening()

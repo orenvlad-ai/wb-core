@@ -454,7 +454,7 @@ def load_shared(runtime_dir):
     if book is None or not book["active"]:
         return None
     error = book.get("publication_error") or {}
-    invalid_from = error.get("invalid_from_date")
+    invalid_from = error.get("invalid_from_date") if isinstance(error, dict) else None
     periods = [p for day, p in book["shared_days"].items()
                if (not error or p["status"] == "closed") and (not invalid_from or day < invalid_from)]
     return ActiveSharedCostSnapshot(periods, effective_date=book["effective_date"])
