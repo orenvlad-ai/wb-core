@@ -234,7 +234,7 @@ class SheetVitrinaCycleSources:
             dict(as_of_date=day, execution_mode='auto_daily', source_keys=selected, metric_keys=metrics), invocation.runtime_context)
         return new_handle
 
-    def collected_source_summary(self, handle: CollectedLivePlanSources) -> dict:
+    def collected_source_summary(self, handle: CollectedLivePlanSources, *, allow_manual_full_scope=False) -> dict:
         """Owned copied proofs only; never expose retained payloads or attempt notes."""
         from packages.application import sheet_vitrina_v1_live_plan as live
         from packages.application.ready_publication import canonical, digest
@@ -253,7 +253,7 @@ class SheetVitrinaCycleSources:
                 or len(captured) != len(collected.slots)):
             raise CycleStageFailure('collection_capture_incomplete')
         mode = invocation.kwargs.get('execution_mode', invocation.args[2] if len(invocation.args) > 2 else 'auto_daily')
-        full_scope = mode == 'auto_daily' and collected.scope[4:] == ([], [])
+        full_scope = (mode == 'auto_daily' or (allow_manual_full_scope and mode == 'manual_operator')) and collected.scope[4:] == ([], [])
         if full_scope:
             # The remaining classification entries are derive-local operands,
             # not external captures. Keep every original source group/slot.

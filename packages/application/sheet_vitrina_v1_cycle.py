@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -31,6 +31,23 @@ class CycleConflict(ValueError):
 
 class CycleStageFailure(RuntimeError):
     pass
+
+
+def validate_recovery_as_of_date(day, now=None):
+    """One explicit closed date in rolling14; a receipt is readable after rollover."""
+    if not isinstance(day, str):
+        raise ValueError('recovery_as_of_date_requires_iso_date')
+    try:
+        parsed = date.fromisoformat(day)
+    except ValueError as exc:
+        raise ValueError('recovery_as_of_date_requires_iso_date') from exc
+    if parsed.isoformat() != day:
+        raise ValueError('recovery_as_of_date_requires_iso_date')
+    if now is not None:
+        today = date.fromisoformat(current_business_date_iso(now))
+        if not today - timedelta(days=13) <= parsed < today - timedelta(days=1):
+            raise ValueError('recovery_as_of_date_outside_closed_rolling14')
+    return day
 
 
 class FbsGenerationFailure(CycleStageFailure):
@@ -132,7 +149,7 @@ class CycleReceiptStore:
         finally:
             os.close(fd)
 
-    def _request_identity(self, *, request_key, slot_utc, config):
+    def _request_identity(self, *, request_key, slot_utc, config, recovery_as_of_date=None):
         if not request_key or len(request_key) > 160:
             raise ValueError('invalid_cycle_request')
         slot = datetime.fromisoformat(slot_utc.replace('Z', '+00:00'))
@@ -140,8 +157,13 @@ class CycleReceiptStore:
             raise ValueError('cycle_slot_requires_utc')
         slot_utc = slot.astimezone(timezone.utc).isoformat()
         manual = request_key.startswith('manual-cycle:')
-        fingerprint = digest(canonical({'slot': slot_utc, 'history': config.fingerprint(),
-                                        'scope': 'full_manual_daily' if manual else 'full_auto_daily'}))
+        scope = {'slot': slot_utc, 'history': config.fingerprint(),
+                 'scope': 'full_manual_daily' if manual else 'full_auto_daily'}
+        if recovery_as_of_date is not None:
+            if not manual:
+                raise ValueError('recovery_requires_manual_cycle')
+            scope['recovery_as_of_date'] = validate_recovery_as_of_date(recovery_as_of_date)
+        fingerprint = digest(canonical(scope))
         cycle_id = digest(request_key).removeprefix('sha256:')[:32]
         # Explicit manual operations have their own durable identity. They never
         # overwrite or consume the scheduled slot's receipt/index.
@@ -149,10 +171,10 @@ class CycleReceiptStore:
                                  'slot-' + digest(slot_utc).removeprefix('sha256:')[:32]) + '.json')
         return slot_utc, fingerprint, cycle_id, slot_path
 
-    def matching(self, *, request_key, slot_utc, config):
+    def matching(self, *, request_key, slot_utc, config, recovery_as_of_date=None):
         """Read-only dedup with the same scope checks; never grants admission."""
         _, fingerprint, cycle_id, slot_path = self._request_identity(
-            request_key=request_key, slot_utc=slot_utc, config=config)
+            request_key=request_key, slot_utc=slot_utc, config=config, recovery_as_of_date=recovery_as_of_date)
         prior = self.read(cycle_id)
         if prior is None and slot_path.exists():
             prior = self.read(json.loads(slot_path.read_text())['cycle_id'])
@@ -160,11 +182,11 @@ class CycleReceiptStore:
             raise CycleConflict('cycle_request_conflict')
         return prior
 
-    def accept(self, *, request_key, slot_utc, config, now, dispatch_id=None):
+    def accept(self, *, request_key, slot_utc, config, now, dispatch_id=None, recovery_as_of_date=None):
         slot_utc, fingerprint, cycle_id, slot_path = self._request_identity(
-            request_key=request_key, slot_utc=slot_utc, config=config)
+            request_key=request_key, slot_utc=slot_utc, config=config, recovery_as_of_date=recovery_as_of_date)
         def same_request_or_slot():
-            return self.matching(request_key=request_key, slot_utc=slot_utc, config=config)
+            return self.matching(request_key=request_key, slot_utc=slot_utc, config=config, recovery_as_of_date=recovery_as_of_date)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         stream = (self.runtime_dir / '.sheet-vitrina-cycle.lock').open('a+b')
         try:
@@ -191,6 +213,8 @@ class CycleReceiptStore:
                     self.write(prior)
                 stream.close()
                 return prior, None
+            if recovery_as_of_date is not None:
+                validate_recovery_as_of_date(recovery_as_of_date, now)
             latest = self.root / 'latest.json'
             if latest.exists():
                 old = self.read(json.loads(latest.read_text())['cycle_id'])
@@ -210,6 +234,8 @@ class CycleReceiptStore:
                 job_id='', status='accepted', current_stage='', started_at=self.timestamp_factory(),
                 finished_at=None, stages=[dict(stage=name, status='pending', versions={}, warnings=[]) for name in STAGES],
                 final_versions={}, error_code='')
+            if recovery_as_of_date is not None:
+                receipt['recovery_as_of_date'] = recovery_as_of_date
             if dispatch_id is not None:
                 receipt['dispatch_id'] = dispatch_id
             receipt['trigger_kind'] = 'manual' if request_key.startswith('manual-cycle:') else 'scheduled'
@@ -313,6 +339,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
     from packages.application.business_data_heavy_admission import require_heavy_owner
     if require_heavy_owner(entrypoint.runtime.runtime_dir).operation != 'cycle':
         raise RuntimeError('owned cycle heavy admission is required')
+    recovery_day = receipt.get('recovery_as_of_date')
     source_adapter = None
     closed = None
     backfill_dates = ()
@@ -322,6 +349,8 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
     finance = None
     fbs = None
     def closed_sources():
+        if recovery_day is not None:
+            return StageProof({'closed_backlog_policy': 'preserved_for_regular_cycle'})
         value = closed.collect(receipt['cycle_id'], include_retained=False)
         warnings = []
         for day, item in value['dates'].items():
@@ -338,9 +367,12 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
             'closed_selected_dates': canonical(tuple(sorted(value['dates'])))}, tuple(warnings))
     def sources():
         nonlocal handle, summary
-        handle = source_adapter.collect_sources(as_of_date=entrypoint._cycle_as_of_date(),
-            log=log, execution_mode='auto_daily')  # Full ordinary scope: no selectors.
-        summary = source_adapter.collected_source_summary(handle)
+        handle = source_adapter.collect_sources(as_of_date=recovery_day or entrypoint._cycle_as_of_date(),
+            log=log, execution_mode='manual_operator' if recovery_day else 'auto_daily')
+        # The signed dated manual request changes only the closed date/retry
+        # policy. Every source group and both temporal slots remain mandatory.
+        summary = source_adapter.collected_source_summary(handle, **(
+            {'allow_manual_full_scope': True} if recovery_day else {}))
         if summary['business_date'] != receipt['business_date']:
             raise CycleStageFailure('cycle_business_date_changed')
         return validate_collection(summary, require_full_scope=True)
@@ -358,10 +390,13 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         nonlocal ready
         entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
         plan = source_adapter.derive_collected(handle)
-        ready, proof = entrypoint._cycle_publish_ready(plan)
+        ready, proof = entrypoint._cycle_publish_ready(plan, **(
+            {'execution_mode': 'manual_operator'} if recovery_day else {}))
         return proof
     def closed_ready():
         nonlocal backfill_dates
+        if recovery_day is not None:
+            return StageProof({'closed_backlog_policy': 'preserved_for_regular_cycle'})
         warnings, proofs = list(closed.prepare_retained(receipt['cycle_id'])), []
         value = closed.status()
         for day, item in (value['dates'].items() if value else ()):
@@ -418,8 +453,13 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         # A durable accepted cycle must terminalize even if constructing its
         # adapters fails before the first source action. Ownership above still
         # precedes every receipt write; no unowned caller can terminalize it.
+        if recovery_day is not None:
+            if receipt.get('trigger_kind') != 'manual':
+                raise CycleStageFailure('recovery_requires_manual_cycle')
+            validate_recovery_as_of_date(recovery_day, entrypoint.now_factory())
         source_adapter = entrypoint._cycle_sources()
-        closed = ClosedBacklog(source_adapter)
+        if recovery_day is None:
+            closed = ClosedBacklog(source_adapter)
         actions = (closed_sources, sources, finance_sources, fbs_generation,
             lambda: entrypoint._cycle_warehouse(store, receipt, fbs),
             entrypoint._cycle_daily_projection, closed_ready, final_ready, history)

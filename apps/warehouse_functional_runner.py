@@ -161,6 +161,9 @@ def build_parser() -> argparse.ArgumentParser:
         manual_cycle = commands.add_parser(command)
         manual_cycle.add_argument('--request-id', required=True,
             help='Stable operation ID; reuse it for every retry/readback of this full cycle')
+        if command == 'full-cycle-start':
+            manual_cycle.add_argument('--recovery-as-of-date', default=None,
+                help='Optional exact historical business date for the owned full cycle')
     manual_sync = commands.add_parser("manual-sync")
     manual_sync.add_argument("--backup-dir", required=True)
     sync_dry_run = commands.add_parser("sync-dry-run")
@@ -246,7 +249,9 @@ def _run(
     if args.command in {'full-cycle-start', 'full-cycle-status'}:
         runtime = Path(str(args.runtime_dir)).resolve()
         return (manual_status(runtime, args.request_id) if args.command == 'full-cycle-status'
-                else launch(runtime, manual_request_id=args.request_id))
+                else launch(runtime, manual_request_id=args.request_id,
+                            **({'recovery_as_of_date': args.recovery_as_of_date}
+                               if getattr(args, 'recovery_as_of_date', None) is not None else {})))
     managed = legacy_refusal(Path(str(args.runtime_dir)).resolve())
     if managed and args.command in WAREHOUSE_SYNC_COMMANDS:
         return launch(Path(str(args.runtime_dir)).resolve()) if args.command == 'hourly-sync' else managed

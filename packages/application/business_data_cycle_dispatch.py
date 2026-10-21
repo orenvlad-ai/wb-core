@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import fcntl
 import hashlib
 import hmac
@@ -111,15 +111,32 @@ def _decode(dispatch_id):
     except (ValueError, UnicodeError) as exc:
         raise ValueError('invalid cycle dispatch envelope') from exc
     fields = {'schema', 'profile', 'deployed_sha', 'slot', 'history', 'request_key', 'request_fingerprint', 'cycle_id'}
-    manual = isinstance(value, dict) and value.get('schema') == 2
-    if (not isinstance(value, dict) or set(value) != fields | ({'manual_request_id'} if manual else set())
-            or value['schema'] not in {1, 2} or value['profile'] != profile.fingerprint(profile.PROFILE)
+    schema = value.get('schema') if isinstance(value, dict) else None
+    manual = schema in {2, 3}
+    optional_fields = ({'manual_request_id', 'recovery_as_of_date'} if schema == 3
+                       else {'manual_request_id'} if schema == 2 else set())
+    if (not isinstance(value, dict) or set(value) != fields | optional_fields
+            or schema not in {1, 2, 3} or value['profile'] != profile.fingerprint(profile.PROFILE)
             or re.fullmatch('[0-9a-f]{40}', str(value['deployed_sha'])) is None
             or re.fullmatch('[0-9a-f]{32}', str(value['cycle_id'])) is None):
         raise ValueError('invalid fixed cycle dispatch envelope')
     if manual and value['request_key'] != _manual_key(value['manual_request_id']):
         raise ValueError('invalid manual cycle request binding')
+    if schema == 3:
+        _canonical_recovery_date(value['recovery_as_of_date'])
     return value
+
+
+def _canonical_recovery_date(value):
+    if not isinstance(value, str):
+        raise ValueError('recovery date must be canonical YYYY-MM-DD')
+    try:
+        normalized = date.fromisoformat(value).isoformat()
+    except ValueError as exc:
+        raise ValueError('recovery date must be canonical YYYY-MM-DD') from exc
+    if normalized != value:
+        raise ValueError('recovery date must be canonical YYYY-MM-DD')
+    return normalized
 
 
 def _manual_key(request_id):
@@ -138,7 +155,7 @@ def _readiness(runtime):
     return None
 
 
-def prepare_manual(runtime, now, request_id):
+def prepare_manual(runtime, now, request_id, recovery_as_of_date=None):
     """Read-only explicit full-cycle request; no scheduled-slot claim or clock override."""
     key = _manual_key(request_id)
     sha = _identity(runtime)
@@ -153,16 +170,26 @@ def prepare_manual(runtime, now, request_id):
         value = _decode(identity)
         if prior.get('trigger_kind') != 'manual' or value.get('manual_request_id') != request_id:
             raise RuntimeError('manual cycle receipt identity changed')
+        if value.get('recovery_as_of_date') != recovery_as_of_date:
+            raise RuntimeError('manual cycle request date conflicts with its original identity')
         return readback(runtime, identity)
     refusal = _readiness(runtime)
     if refusal:
         return refusal
+    if recovery_as_of_date is not None:
+        from packages.application.sheet_vitrina_v1_cycle import validate_recovery_as_of_date
+        recovery_as_of_date = validate_recovery_as_of_date(recovery_as_of_date, now=now)
     config = history_config()
     slot = latest_slot(now)
-    _, request_fp, cycle_id, _ = store._request_identity(request_key=key, slot_utc=slot, config=config)
-    scope = dict(schema=2, profile=profile.fingerprint(profile.PROFILE), deployed_sha=sha,
+    identity_kwargs = {'recovery_as_of_date': recovery_as_of_date} if recovery_as_of_date is not None else {}
+    _, request_fp, cycle_id, _ = store._request_identity(
+        request_key=key, slot_utc=slot, config=config, **identity_kwargs)
+    scope = dict(schema=3 if recovery_as_of_date is not None else 2,
+                 profile=profile.fingerprint(profile.PROFILE), deployed_sha=sha,
                  slot=slot, history=config.fingerprint(), request_key=key,
                  request_fingerprint=request_fp, cycle_id=cycle_id, manual_request_id=request_id)
+    if recovery_as_of_date is not None:
+        scope['recovery_as_of_date'] = recovery_as_of_date
     body = _encode(_canonical(scope).encode())
     return {'status': 'prepared', 'accepted': False, 'dispatch_id': body + '.' + _encode(hmac.digest(_secret(), body.encode(), 'sha256'))}
 
@@ -223,14 +250,31 @@ def readback(runtime, dispatch_id):
         return {'status': 'unknown', 'accepted': None, 'dispatch_id': dispatch_id}
     if receipt['request_key'] != value['request_key'] or receipt['request_fingerprint'] != value['request_fingerprint']:
         raise RuntimeError('cycle dispatch receipt identity changed')
-    if value['schema'] == 2 and (receipt.get('dispatch_id') != dispatch_id or receipt.get('trigger_kind') != 'manual'):
+    if value['schema'] in {2, 3} and (receipt.get('dispatch_id') != dispatch_id or receipt.get('trigger_kind') != 'manual'):
         raise RuntimeError('manual cycle dispatch receipt differs')
-    return {'status': receipt['status'], 'accepted': True, 'dispatch_id': dispatch_id, 'receipt': {key: receipt.get(key) for key in ('cycle_id', 'request_key', 'request_fingerprint', 'job_id', 'status', 'current_stage', 'error_code', 'trigger_kind', 'slot_utc', 'business_date', 'started_at', 'finished_at')}}
+    if value['schema'] == 3 and receipt.get('recovery_as_of_date') != value['recovery_as_of_date']:
+        raise RuntimeError('manual cycle recovery date receipt differs')
+    receipt_fields = ('cycle_id', 'request_key', 'request_fingerprint', 'job_id', 'status', 'current_stage',
+                      'error_code', 'trigger_kind', 'slot_utc', 'business_date', 'started_at', 'finished_at')
+    if value['schema'] == 3:
+        receipt_fields += ('recovery_as_of_date',)
+    return {'status': receipt['status'], 'accepted': True, 'dispatch_id': dispatch_id,
+            'receipt': {key: receipt.get(key) for key in receipt_fields}}
 
 
 def _still_current(entrypoint, value):
     # Called only inside canonical acceptance serialization, after actual EX.
-    return (value['deployed_sha'] == _identity(entrypoint.runtime.runtime_dir)
+    recovery_date_ok = True
+    if value['schema'] == 3:
+        from packages.application.sheet_vitrina_v1_cycle import validate_recovery_as_of_date
+        try:
+            recovery_date_ok = validate_recovery_as_of_date(
+                value['recovery_as_of_date'], now=entrypoint.now_factory()
+            ) == value['recovery_as_of_date']
+        except (TypeError, ValueError):
+            recovery_date_ok = False
+    return (recovery_date_ok
+            and value['deployed_sha'] == _identity(entrypoint.runtime.runtime_dir)
             and value['history'] == history_config().fingerprint()
             and selected(entrypoint.runtime.runtime_dir)
             and value['slot'] == latest_slot(entrypoint.now_factory()))
@@ -282,8 +326,9 @@ def dispatch(entrypoint, payload):
     prior = readback(runtime, payload['dispatch_id'])
     if prior['accepted'] is True:
         return prior
-    manual = value['schema'] == 2
-    current = (prepare_manual(runtime, entrypoint.now_factory(), value['manual_request_id']) if manual
+    manual = value['schema'] in {2, 3}
+    current = (prepare_manual(runtime, entrypoint.now_factory(), value['manual_request_id'],
+                              **({'recovery_as_of_date': value['recovery_as_of_date']} if value['schema'] == 3 else {})) if manual
                else prepare(runtime, entrypoint.now_factory()))
     if current.get('dispatch_id') != payload['dispatch_id']:
         return {'status': 'not_accepted', 'accepted': False, 'reason': current['status'], 'dispatch_id': payload['dispatch_id']}
@@ -291,8 +336,9 @@ def dispatch(entrypoint, payload):
         from packages.application.business_data_cycle_wakeup import policy
         return (_still_current(entrypoint, value)
                 and (manual or policy(runtime, entrypoint.now_factory, expected_slot=value['slot']) is None))
+    start_kwargs = {'recovery_as_of_date': value['recovery_as_of_date']} if value['schema'] == 3 else {}
     result = entrypoint._start_sheet_cycle_job(request_key=value['request_key'], slot_utc=value['slot'], history_config=history_config(),
-        _dispatch_guard=admission_guard, _dispatch_id=payload['dispatch_id'])
+        _dispatch_guard=admission_guard, _dispatch_id=payload['dispatch_id'], **start_kwargs)
     # Actual acceptance is proved by the canonical receipt, not a matching job name.
     proof = readback(runtime, payload['dispatch_id'])
     if proof['accepted'] is True:
@@ -357,7 +403,7 @@ def _launcher_lock(runtime):
         os.close(fd)
 
 
-def _request(method, dispatch_id=None, *, manual_request_id=None):
+def _request(method, dispatch_id=None, *, manual_request_id=None, recovery_as_of_date=None):
     from urllib.request import Request, urlopen
     from urllib.parse import urlencode
     from apps.sheet_vitrina_v1_auto_refresh_tick import _build_web_auth_cookie
@@ -367,7 +413,12 @@ def _request(method, dispatch_id=None, *, manual_request_id=None):
         _manual_key(manual_request_id)
         if method != 'GET' or dispatch_id is not None:
             raise ValueError('manual preparation requires a read-only request')
-        url += '?' + urlencode({'manual_request_id': manual_request_id})
+        query = {'manual_request_id': manual_request_id}
+        if recovery_as_of_date is not None:
+            query['recovery_as_of_date'] = _canonical_recovery_date(recovery_as_of_date)
+        url += '?' + urlencode(query)
+    elif recovery_as_of_date is not None:
+        raise ValueError('recovery date requires a manual request ID')
     elif method == 'POST':
         data = _canonical({'dispatch_id': dispatch_id}).encode()
     elif dispatch_id:
@@ -392,10 +443,25 @@ def manual_status(runtime, request_id):
         if record['phase'] == 'terminal' and record['last_status'] == 'not_accepted':
             return {'status': 'not_accepted', 'accepted': False, 'dispatch_id': record['dispatch_id']}
         return _request('GET', record['dispatch_id'])
+    # The one local transport record may now belong to another manual request.
+    # Recover this operation by its stable canonical receipt ID and read back
+    # its original signed identity; never ask prepare to recreate a dated request.
+    key = _manual_key(request_id)
+    cycle_id = hashlib.sha256(key.encode()).hexdigest()[:32]
+    from packages.application.sheet_vitrina_v1_cycle import CycleReceiptStore
+    prior = CycleReceiptStore(runtime, lambda: '').read(cycle_id)
+    if prior is not None:
+        identity = prior.get('dispatch_id')
+        value = _decode(identity)
+        if (value['schema'] not in {2, 3} or value.get('manual_request_id') != request_id
+                or value.get('request_key') != key or value.get('cycle_id') != cycle_id
+                or prior.get('cycle_id') != cycle_id or prior.get('trigger_kind') != 'manual'):
+            raise RuntimeError('manual cycle receipt identity changed')
+        return _request('GET', identity)
     return _request('GET', manual_request_id=request_id)
 
 
-def launch(runtime, *, expected_slot=None, manual_request_id=None):
+def launch(runtime, *, expected_slot=None, manual_request_id=None, recovery_as_of_date=None):
     """Fixed launcher; a maintenance wakeup may bind its one exact debt slot."""
     runtime = Path(runtime).resolve()
     _identity(runtime)
@@ -403,6 +469,10 @@ def launch(runtime, *, expected_slot=None, manual_request_id=None):
         _manual_key(manual_request_id)
         if expected_slot is not None:
             raise ValueError('manual launch cannot select a scheduled slot')
+        if recovery_as_of_date is not None:
+            recovery_as_of_date = _canonical_recovery_date(recovery_as_of_date)
+    elif recovery_as_of_date is not None:
+        raise ValueError('recovery date requires a manual request ID')
     if not selected(runtime):
         raise RuntimeError('selected cycle launcher cannot dispatch the legacy profile')
     if expected_slot is not None and latest_slot(datetime.fromisoformat(expected_slot)) != expected_slot:
@@ -410,6 +480,12 @@ def launch(runtime, *, expected_slot=None, manual_request_id=None):
     try:
         with _launcher_lock(runtime):
             record = _read_record(runtime)
+            if record and manual_request_id is not None:
+                recorded = _decode(record['dispatch_id'])
+                if (recorded.get('manual_request_id') == manual_request_id
+                        and recorded.get('recovery_as_of_date') != recovery_as_of_date):
+                    return {'status': 'request_conflict', 'accepted': False,
+                            'dispatch_id': record['dispatch_id'], 'reason': 'manual_request_date_changed'}
             if record and record['phase'] != 'terminal':
                 # Resolve this same operation first. Unknown/active never
                 # authorizes another slot or resend of the old POST.
@@ -432,11 +508,14 @@ def launch(runtime, *, expected_slot=None, manual_request_id=None):
                 # A positively terminal old operation must not consume the
                 # sole next 3h timer invocation. Prepare once below, then at
                 # most one POST for a different server-issued slot identity.
-            prepared = (_request('GET', manual_request_id=manual_request_id) if manual_request_id is not None
+            prepared = (_request('GET', manual_request_id=manual_request_id,
+                                 **({'recovery_as_of_date': recovery_as_of_date}
+                                    if recovery_as_of_date is not None else {})) if manual_request_id is not None
                         else _request('GET'))
             if manual_request_id is not None and (prepared.get('dispatch_id') is not None or prepared.get('accepted') is True):
                 value = _decode(prepared.get('dispatch_id'))
-                if value['schema'] != 2 or value['manual_request_id'] != manual_request_id:
+                if (value['schema'] not in {2, 3} or value['manual_request_id'] != manual_request_id
+                        or value.get('recovery_as_of_date') != recovery_as_of_date):
                     raise RuntimeError('manual preparation differs from requested operation')
             if prepared.get('status') != 'prepared':
                 return prepared
