@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from packages.application.fbs_snapshot_cost import (
     CandidateStore, FbsSnapshotCostError, candidate_period_view, close_candidate_period,
-    evaluate_candidate, fingerprint, initialize_candidate,
+    cost_continuity_missing_dates, evaluate_candidate, fingerprint, initialize_candidate,
 )
 
 
@@ -223,6 +223,96 @@ class CostTests(unittest.TestCase):
             with self.assertRaisesRegex(FbsSnapshotCostError, "not_an_isolated"):
                 CandidateStore(business).save(self.initial, expected_fingerprint=None)
             self.assertEqual(business.read_bytes(), before)
+
+
+def gap_capture(day="2026-09-07", **kwargs):
+    result = capture(day, **kwargs)
+    result["quantity_snapshot"]["facility_evidence"] = {
+        "ff-1": {"seller_warehouse_id": 123, "mapping_id": "official-map-1"}}
+    result["source_digest"] = fingerprint(result)
+    return result
+
+
+class CostContinuityTests(unittest.TestCase):
+    def setUp(self):
+        self.initial = initialize_candidate(gap_capture())
+
+    def advance(self, state=None, day="2026-09-10", **kwargs):
+        return evaluate_candidate(state or self.initial, gap_capture(day, **kwargs),
+                                  allow_cost_continuity_gap=True)
+
+    def test_real_current_quantity_without_invented_gap_periods(self):
+        default = evaluate_candidate(self.initial, gap_capture("2026-09-10"))
+        self.assertEqual(default["last_attempt"]["status"], "missing_period_source")
+        current = self.advance(quantity="800")
+        self.assertEqual(set(current["periods"]), {"2026-09-10"})
+        self.assertEqual(cost_continuity_missing_dates(current), {"2026-09-08", "2026-09-09"})
+        for day in ("2026-09-08", "2026-09-09"):
+            self.assertFalse(candidate_period_view(current, day)["available"])
+        view = candidate_period_view(current, "2026-09-10")
+        self.assertEqual((view["quantity"], view["capital_rub"], view["wac_rub"]), ("800", "80000", "100"))
+        self.assertIn("cost_continuity", view["source"])
+        refreshed = self.advance(current, quantity="750")
+        self.assertEqual(value(refreshed, "2026-09-10")["capital_rub"], "75000")
+        self.assertEqual(refreshed["periods"]["2026-09-10"]["cost_continuity"],
+                         current["periods"]["2026-09-10"]["cost_continuity"])
+
+    def test_all_new_document_domains_block_including_empty_events(self):
+        for day in ("2026-09-08", "2026-09-10"):
+            for kind in ("receipt", "expense", "outgoing", "adjustment", "fbo_overhead"):
+                with self.subTest(day=day, kind=kind):
+                    doc = document(day=day, kind=kind)
+                    if kind == "fbo_overhead":
+                        doc["events"] = []
+                        doc["fingerprint"] = fingerprint(doc)
+                    with self.assertRaisesRegex(FbsSnapshotCostError, "cost_continuity_unabsorbed_document"):
+                        self.advance(docs=[doc])
+
+    def test_known_document_changes_and_missing_observations_block(self):
+        old = document(day="2026-09-07")
+        state = initialize_candidate(gap_capture(docs=[old]))
+        self.advance(state, docs=[old])
+        for docs in ([], [document(day="2026-09-07", capital="250000")]):
+            with self.assertRaisesRegex(FbsSnapshotCostError, "cost_continuity_known_document_changed"):
+                self.advance(state, docs=docs)
+        observed = deepcopy(self.initial)
+        observed["observed_documents"]["gone"] = {"business_date": "2026-09-08", "fingerprint": "gone", "affects_fbs": True}
+        with self.assertRaisesRegex(FbsSnapshotCostError, "cost_continuity_observed_document_changed"):
+            self.advance(observed)
+
+    def test_scope_mapping_and_completeness_are_required(self):
+        for mutation in ("mapping", "scope", "complete"):
+            image = gap_capture("2026-09-10")
+            if mutation == "mapping":
+                image["quantity_snapshot"]["facility_evidence"]["ff-1"]["seller_warehouse_id"] = 124
+            elif mutation == "scope":
+                image["quantity_snapshot"]["rows"].append({"facility_id": "ff-1", "nm_id": 2, "quantity": "0"})
+            else:
+                image["quantity_snapshot"]["complete"] = False
+            with self.subTest(mutation=mutation), self.assertRaises(FbsSnapshotCostError):
+                evaluate_candidate(self.initial, image, allow_cost_continuity_gap=True)
+
+    def test_following_day_receipt_uses_real_resumed_opening(self):
+        current = self.advance(quantity="750")
+        doc = document(day="2026-09-11", quantity="250", capital="50000")
+        revalued = self.advance(current, day="2026-09-11", quantity="900", docs=[doc])
+        self.assertEqual(revalued["last_attempt"]["target_date"], "2026-09-10")
+        self.assertEqual(value(revalued, "2026-09-10")["quantity"], "750")
+        closed = close_candidate_period(revalued, "2026-09-10", today="2026-09-11")
+        after = self.advance(closed, day="2026-09-11", quantity="900", docs=[doc])
+        row = value(after, "2026-09-11")
+        self.assertEqual((row["opening_quantity"], row["wac_rub"], row["capital_rub"]), ("750", "125", "112500"))
+        late = document("late", day="2026-09-10")
+        with self.assertRaisesRegex(FbsSnapshotCostError, "cost_continuity_unabsorbed_document"):
+            self.advance(after, day="2026-09-11", docs=[doc, late])
+
+    def test_tampered_proof_cannot_advance_or_close(self):
+        current = self.advance()
+        current["periods"]["2026-09-10"]["cost_continuity"]["missing_dates"] = []
+        with self.assertRaisesRegex(FbsSnapshotCostError, "cost_continuity_proof_invalid"):
+            self.advance(current)
+        with self.assertRaisesRegex(FbsSnapshotCostError, "cost_continuity_proof_invalid"):
+            close_candidate_period(current, "2026-09-10", today="2026-09-11")
 
 
 if __name__ == "__main__":

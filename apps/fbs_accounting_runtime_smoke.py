@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from apps.fbs_snapshot_cost_smoke import capture, document
+from apps.fbs_snapshot_cost_smoke import capture, document, gap_capture
 from apps.fbs_inventory_presentation_smoke import retained, row
 from apps.shared_sku_cost_smoke import wb
 from apps.shared_sku_cost_reports_smoke import SharedCostReportTests, shared_periods, sale, DAY, END, WEEK_ONE
@@ -104,6 +104,68 @@ class RuntimeTests(unittest.TestCase):
         third, _ = runtime.prepare(self.root, now=datetime(2026, 9, 9, 14, tzinfo=timezone.utc))
         self.assertEqual(third["shared_days"]["2026-09-07"], after["shared_days"]["2026-09-07"])
 
+    def test_no_document_gap_persists_unknown_days_and_resumes_next_day(self):
+        self.image = gap_capture()
+        self.opening()
+        day = "2026-09-10"
+        self.image, self.wb = gap_capture(day, quantity="750"), wb(day)
+        book, expected = runtime.prepare(self.root, now=datetime(2026, 9, 10, 14, tzinfo=timezone.utc))
+        self.assertEqual(set(book["state"]["periods"]), {"2026-09-07", day})
+        self.assertEqual(set(book["shared_days"]), {"2026-09-07", day})
+        self.assertEqual(set(book["presentations"]), {"2026-09-07", day})
+        self.assertEqual(book["state"]["periods"][day]["rows"]["ff-1:1"]["capital_rub"], "75000")
+        version = runtime.save(self.root, book, expected=expected, operation_id="resume-after-gap")
+        self.assertEqual(runtime.load(self.root), (book, version))
+        day = "2026-09-11"
+        received = document(day=day, quantity="250", capital="50000")
+        self.image, self.wb = gap_capture(day, quantity="900", docs=[received]), wb(day)
+        after, expected = runtime.prepare(self.root, now=datetime(2026, 9, 11, 14, tzinfo=timezone.utc))
+        self.assertEqual(after["state"]["periods"]["2026-09-10"]["status"], "closed")
+        row = after["state"]["periods"][day]["rows"]["ff-1:1"]
+        self.assertEqual((row["opening_quantity"], row["wac_rub"]), ("750", "125"))
+        runtime.save(self.root, after, expected=expected, operation_id="after-gap-normal-receipt")
+
+    def test_late_gap_document_invalidates_closed_financial_operands_only_from_bridge(self):
+        self.image = gap_capture()
+        self.opening()
+        for number in (10, 11, 12):
+            day = f"2026-09-{number}"
+            self.image, self.wb = gap_capture(day, quantity="750"), wb(day)
+            book, expected = runtime.prepare(self.root, now=datetime(2026, 9, number, 14, tzinfo=timezone.utc))
+            runtime.save(self.root, book, expected=expected, operation_id=f"gap-day-{number}")
+        before, version = runtime.load(self.root)
+        self.image = gap_capture("2026-09-12", docs=[document(day="2026-09-09")])
+        with self.assertRaisesRegex(ValueError, "cost_continuity_unabsorbed_document") as caught:
+            runtime.prepare(self.root, now=datetime(2026, 9, 12, 14, tzinfo=timezone.utc))
+        runtime._record_prepare_failure(self.root, expected=version, error=caught.exception)
+        failed, version = runtime.load(self.root)
+        self.assertEqual(failed["publication_error"]["invalid_from_date"], "2026-09-10")
+        self.assertEqual(failed["state"], before["state"])
+        self.assertEqual(failed["presentations"], before["presentations"])
+        shared = runtime.load_shared(self.root)
+        self.assertTrue(shared.closed_for("2026-09-07"))
+        self.assertEqual(shared.resolve(nm_id="1", operation_date=date(2026, 9, 7))["status"], "resolved")
+        for number in (8, 9, 10, 11, 12):
+            self.assertFalse(shared.closed_for(f"2026-09-{number:02}"))
+            self.assertEqual(shared.resolve(nm_id="1", operation_date=date(2026, 9, number))["status"], "missing")
+        runtime._record_prepare_failure(self.root, expected=version, error=ValueError("source_unavailable"))
+        self.assertEqual(runtime.load(self.root)[0]["publication_error"]["invalid_from_date"], "2026-09-10")
+
+    def test_refused_new_gap_does_not_invalidate_previously_valid_closed_bridge(self):
+        self.image = gap_capture()
+        self.opening()
+        for number in (10, 11):
+            day = f"2026-09-{number}"
+            self.image, self.wb = gap_capture(day), wb(day)
+            book, expected = runtime.prepare(self.root, now=datetime(2026, 9, number, 14, tzinfo=timezone.utc))
+            version = runtime.save(self.root, book, expected=expected, operation_id=f"valid-bridge-{number}")
+        self.image, self.wb = gap_capture("2026-09-15", docs=[document(day="2026-09-14")]), wb("2026-09-15")
+        with self.assertRaisesRegex(ValueError, "cost_continuity_unabsorbed_document") as caught:
+            runtime.prepare(self.root, now=datetime(2026, 9, 15, 14, tzinfo=timezone.utc))
+        runtime._record_prepare_failure(self.root, expected=version, error=caught.exception)
+        self.assertNotIn("invalid_from_date", runtime.load(self.root)[0]["publication_error"])
+        self.assertTrue(runtime.load_shared(self.root).closed_for("2026-09-10"))
+
     def test_missing_wb_cost_survives_midnight_without_freezing_fresh_day(self):
         self.opening()
         self.wb.update(complete=False, authority_complete=True)
@@ -133,7 +195,7 @@ class RuntimeTests(unittest.TestCase):
         self.image = capture("2026-09-09")
         self.wb = wb("2026-09-09")
         before = runtime.path(self.root).read_bytes()
-        with self.assertRaisesRegex(ValueError, "current_fbs_period_missing"):
+        with self.assertRaisesRegex(ValueError, "cost_continuity_mapping_missing"):
             runtime.prepare(self.root, now=datetime(2026, 9, 9, 14, tzinfo=timezone.utc))
         self.assertEqual(runtime.path(self.root).read_bytes(), before)
 

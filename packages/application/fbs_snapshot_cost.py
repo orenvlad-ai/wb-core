@@ -22,7 +22,9 @@ ZERO = Decimal(0)
 
 
 class FbsSnapshotCostError(ValueError):
-    pass
+    def __init__(self, message, *, invalid_from_date=None):
+        super().__init__(message)
+        self.invalid_from_date = invalid_from_date
 
 
 def canonical(value: Any) -> str:
@@ -177,11 +179,71 @@ def _last_closed(state: dict) -> tuple[str, dict]:
     return day, rows
 
 
-def evaluate_candidate(state: dict, capture: dict) -> dict:
+def _gap_mapping(snapshot: dict) -> dict:
+    evidence = snapshot.get("facility_evidence", {})
+    mapping = {fid: {key: row.get(key) for key in ("seller_warehouse_id", "mapping_id")}
+               for fid, row in evidence.items()}
+    if (not mapping or set(mapping) != {row["facility_id"] for row in snapshot["rows"]}
+            or any(not item["seller_warehouse_id"] or not item["mapping_id"] for item in mapping.values())):
+        raise FbsSnapshotCostError("cost_continuity_mapping_missing")
+    return mapping
+
+
+def cost_continuity_missing_dates(state: dict) -> set[str]:
+    """Validate explicit no-document gaps, never manufacture daily periods."""
+    missing = set()
+    opening_day = state["baseline"]["business_date"]
+    opening = state["baseline"]["rows"]
+    known = dict(state["baseline"]["absorbed_documents"])
+    for day, period in sorted(state["periods"].items()):
+        proof = period.get("cost_continuity")
+        if proof is not None:
+            days = [(_day(opening_day) + timedelta(days=n)).isoformat()
+                    for n in range(1, (_day(day) - _day(opening_day)).days)]
+            if (proof != {"contract": "fbs_no_document_gap_v1", "opening_date": opening_day,
+                          "resumed_date": day, "missing_dates": days,
+                          "opening_rows_digest": fingerprint(opening), "document_manifest": known,
+                          "facility_mapping": _gap_mapping(period["snapshot"])}
+                    or not days or set(days) & set(state["periods"])
+                    or period["opening_date"] != opening_day or period["opening_rows"] != opening
+                    or period["applied_documents"] or set(period["rows"]) != set(opening)
+                    or any(row["wac_rub"] != opening[key]["wac_rub"] for key, row in period["rows"].items())):
+                raise FbsSnapshotCostError("cost_continuity_proof_invalid", invalid_from_date=day)
+            missing.update(days)
+        if period["status"] == "closed":
+            opening_day, opening = day, period["rows"]
+            known.update(period["applied_documents"])
+    return missing
+
+
+def _check_gap_documents(state: dict, documents: dict, known: dict, through_day: str) -> None:
+    # All document domains matter: a transfer or FBO overhead can change the
+    # auxiliary book even when it has no direct FBS events.
+    if any(identity not in documents or documents[identity]["fingerprint"] != digest
+           for identity, digest in known.items()):
+        raise FbsSnapshotCostError("cost_continuity_known_document_changed")
+    if any(identity not in known and doc["business_date"] <= through_day
+           for identity, doc in documents.items()):
+        raise FbsSnapshotCostError("cost_continuity_unabsorbed_document")
+    if any(item["business_date"] <= through_day and
+           (identity not in documents or documents[identity]["fingerprint"] != item["fingerprint"])
+           for identity, item in state["observed_documents"].items()):
+        raise FbsSnapshotCostError("cost_continuity_observed_document_changed")
+
+
+def evaluate_candidate(state: dict, capture: dict, *, allow_cost_continuity_gap: bool = False) -> dict:
     """Rebuild the open day from its frozen opening, never from a prior attempt."""
     if state.get("schema") != SCHEMA or state.get("policy") != POLICY or state.get("candidate_only") is not True:
         raise FbsSnapshotCostError("invalid_candidate_state")
     day, quantities, documents = _capture(capture)
+    cost_continuity_missing_dates(state)
+    for _, period in sorted(state["periods"].items()):
+        proof = period.get("cost_continuity")
+        if proof:
+            try:
+                _check_gap_documents(state, documents, proof["document_manifest"], proof["resumed_date"])
+            except FbsSnapshotCostError as exc:
+                raise FbsSnapshotCostError(str(exc), invalid_from_date=proof["resumed_date"]) from exc
     if _timestamp(capture["captured_at"]) < _timestamp(state["last_document_capture_at"]):
         raise FbsSnapshotCostError("document_observation_time_regression")
     result = deepcopy(state)
@@ -210,8 +272,17 @@ def evaluate_candidate(state: dict, capture: dict) -> dict:
     if day <= closed_day:
         result["last_attempt"]["status"] = "closed_period_preserved"
         return result
+    continuity = None
     if _day(day) != _day(closed_day) + timedelta(days=1):
         open_day = (_day(closed_day) + timedelta(days=1)).isoformat()
+        # A previously admitted gap has a real open period at its resumed date.
+        # Revalue/close that exact saved observation before advancing again.
+        bridged_open = [d for d, p in state["periods"].items()
+                        if closed_day < d < day and p["status"] == "open" and p.get("cost_continuity")]
+        if bridged_open:
+            if len(bridged_open) != 1:
+                raise FbsSnapshotCostError("cost_continuity_open_period_ambiguous")
+            open_day = bridged_open[0]
         prior_open = state["periods"].get(open_day)
         if prior_open is not None and prior_open["status"] == "open":
             # New document observations can revise a still-open prior day.
@@ -224,13 +295,30 @@ def evaluate_candidate(state: dict, capture: dict) -> dict:
                 "retained_quantity_snapshot": prior_open["snapshot"],
                 "document_capture_source_digest": capture["source_digest"],
             })
-            result = evaluate_candidate(state, retained)
+            result = evaluate_candidate(state, retained, allow_cost_continuity_gap=allow_cost_continuity_gap)
             result["periods"][open_day]["document_capture_date"] = day
             result["last_attempt"] = {"date": day, "target_date": open_day,
                 "status": "prior_open_period_revalued", "source_digest": capture["source_digest"]}
             return result
-        result["last_attempt"].update(status="missing_period_source", expected_date=(_day(closed_day) + timedelta(days=1)).isoformat())
-        return result
+        prior_proof = state["periods"].get(day, {}).get("cost_continuity")
+        if not allow_cost_continuity_gap and prior_proof is None:
+            result["last_attempt"].update(status="missing_period_source", expected_date=(_day(closed_day) + timedelta(days=1)).isoformat())
+            return result
+        _check_gap_documents(state, documents, known, day)
+        if pending or set(quantities) != set(opening):
+            raise FbsSnapshotCostError("cost_continuity_scope_or_documents_incomplete")
+        opening_snapshot = state["periods"].get(closed_day, state["baseline"])["snapshot"]
+        mapping = _gap_mapping(capture["quantity_snapshot"])
+        if mapping != _gap_mapping(opening_snapshot):
+            raise FbsSnapshotCostError("cost_continuity_mapping_changed")
+        continuity = {"contract": "fbs_no_document_gap_v1", "opening_date": closed_day,
+                      "resumed_date": day, "missing_dates": [
+                          (_day(closed_day) + timedelta(days=n)).isoformat()
+                          for n in range(1, (_day(day) - _day(closed_day)).days)],
+                      "opening_rows_digest": fingerprint(opening), "document_manifest": dict(known),
+                      "facility_mapping": mapping}
+        if prior_proof is not None and continuity != prior_proof:
+            raise FbsSnapshotCostError("cost_continuity_proof_changed")
     previous = state["periods"].get(day)
     if previous and previous["opening_rows"] != opening:
         raise FbsSnapshotCostError("period_opening_drift")
@@ -339,6 +427,8 @@ def evaluate_candidate(state: dict, capture: dict) -> dict:
         "applied_documents": applied, "diagnostics": diagnostics,
         "document_cost_state": document_cost_state, "document_valuation": document_valuation,
     }
+    if continuity is not None:
+        result["periods"][day]["cost_continuity"] = continuity
     return result
 
 
@@ -346,6 +436,7 @@ def close_candidate_period(state: dict, day: str, *, today: str) -> dict:
     """Explicit candidate closure; schedule and final T0 belong to activation."""
     if state.get("schema") != SCHEMA or state.get("policy") != POLICY or state.get("candidate_only") is not True:
         raise FbsSnapshotCostError("candidate_requires_document_cost_v2_baseline")
+    cost_continuity_missing_dates(state)
     _day(day)
     if _day(today) <= _day(day):
         raise FbsSnapshotCostError("current_day_cannot_close")
@@ -380,6 +471,8 @@ def candidate_period_view(state: dict, day: str) -> dict:
         rows, status, quality = period["rows"], period["status"], period["quality"]
         document_cost_state = period["document_cost_state"]
         source = {"snapshot_id": period["snapshot"]["id"], "source_digest": period["source_digest"]}
+        if period.get("cost_continuity") is not None:
+            source["cost_continuity"] = deepcopy(period["cost_continuity"])
     elif day == baseline["business_date"]:
         rows, status, quality = baseline["rows"], "baseline", "accepted_initial_cost"
         document_cost_state = baseline["document_cost_state"]
