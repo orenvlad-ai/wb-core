@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
@@ -443,8 +443,9 @@ class RegistryUploadDbBackedRuntime:
         )
         from packages.application.web_vitrina_management_history import (
             carry_forward, load_presentations, dated_parameters, recalculate_current_envelope,
-            recalculate_yesterday_envelope, yesterday_date,
+            recalculate_yesterday_envelope, recalculate_dated_proxy, yesterday_date,
         )
+        from packages.application.vitrina_economics import EFFECTIVE_DATE
         from packages.business_time import current_business_date_iso
 
         publication_now = datetime.now(timezone.utc)
@@ -513,6 +514,38 @@ class RegistryUploadDbBackedRuntime:
                     parameters=dated_parameters(conn, publication_date) if estimate.get('available') or active_inventory is not None else None)
                 plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
                     parameters=dated_parameters(conn, yesterday_date(publication_date)))
+                if EFFECTIVE_DATE <= plan.as_of_date < yesterday_date(publication_date):
+                    dated_proxy = recalculate_dated_proxy(
+                        asdict(plan),
+                        day=plan.as_of_date,
+                        parameters=dated_parameters(conn, plan.as_of_date),
+                        operation_id=(
+                            "ready-dated-proxy:"
+                            + current_state.bundle_version
+                            + ":"
+                            + plan.as_of_date
+                            + ":"
+                            + plan.snapshot_id
+                        ),
+                    )["plan"]
+                    dated_data = next(
+                        sheet for sheet in dated_proxy["sheets"]
+                        if sheet["sheet_name"] == "DATA_VITRINA"
+                    )
+                    plan = replace(
+                        plan,
+                        metadata=dated_proxy.get("metadata", {}),
+                        sheets=[
+                            replace(
+                                sheet,
+                                rows=dated_data["rows"],
+                                row_count=len(dated_data["rows"]),
+                            )
+                            if sheet.sheet_name == "DATA_VITRINA"
+                            else sheet
+                            for sheet in plan.sheets
+                        ],
+                    )
             _assert_finance_daily_recovery_values_preserved(
                 conn,
                 bundle_version=current_state.bundle_version,

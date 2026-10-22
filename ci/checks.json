@@ -601,6 +601,8 @@
     },
     "fbs_accounting": {
       "patterns": [
+        "packages/application/fbs_accounting_gap_archive.py",
+        "apps/fbs_accounting_gap_archive_smoke.py",
         "apps/fbs_accounting_runtime.py",
         "packages/application/fbs_accounting_runtime.py",
         "packages/application/fbs_accounting_apply.py",
@@ -609,6 +611,7 @@
         "packages/application/registry_upload_db_backed_runtime.py"
       ],
       "commands": [
+        ["python3", "apps/fbs_accounting_gap_archive_smoke.py"],
         ["python3", "apps/fbs_accounting_runtime_smoke.py"],
         ["python3", "apps/fbs_accounting_apply_smoke.py"]
       ],
@@ -1214,6 +1217,7 @@
     },
     "web_vitrina_history_activation": {
       "patterns": [
+        "packages/application/fbs_accounting_gap_archive.py",
         "packages/application/fbs_accounting_historical_history.py",
         "packages/application/fbs_accounting_runtime.py",
         "packages/application/fbs_inventory_presentation.py",

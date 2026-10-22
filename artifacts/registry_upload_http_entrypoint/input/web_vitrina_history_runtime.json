@@ -2,7 +2,7 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:c9bd10822b4a1d0068cee753f1423e05b52b752ad2e9443ea174ba84992c1119",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:f662f4f55b57b5108bf6986b10938857f08844aba102202fa199379f4b1a6404",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
     "packages/application/sheet_vitrina_v1_web_vitrina.py": "5c5530e35e1b87520a0b536855d37e821e11c6029b12cd09d5a900688d986a07",
@@ -29,13 +29,14 @@
     "packages/application/vitrina_catalog.py": "22bc533476dc7452d4f0fd4b2ca62265fd8bca1263133196bf1a322cf57ea1e1",
     "packages/application/promo_historical_recovery.py": "9b97deeb91faa662cd89023b2dc197fabfc9a6ee17a519f92f30c57d167d6f55",
     "packages/application/fbs_accounting_historical_history.py": "b6c5b768e35e0c0b739b65685eb0218e5b7d5e65b47dd64dd53ff346153732c5",
-    "packages/application/fbs_accounting_runtime.py": "cd5459ae059e714f69efe3a5e9bb4fa2d7e7a89d6a5dd94686b6d0d61fe40162",
+    "packages/application/fbs_accounting_runtime.py": "1cc0b7b3baa2c661b01f9f0d471e44a93e504a67ec71799162cb8c3c6ac9d500",
     "packages/application/fbs_inventory_presentation.py": "3802a9a76bee02e664165024cbc672f0ee97136bb71ba019e43e497140545256",
     "packages/application/inventory_quantity.py": "88ad0b3374ca226771ee004fe45f30c34cbd13519353d9893bb1ac967c08bce5",
     "packages/application/operator_policy_history.py": "63aac9fc607bce9319f10ad6f499f90169c5c53be0115e875c9ea63ff4841065",
     "packages/application/historical_dated_inputs.py": "28fd39c17c21b54903455146bc7984d2907becfaf40721c9c4460747299d91cf",
     "packages/application/vitrina_incident_rematerialization.py": "7beb9eeb4da162e48681c19c2b4416335088b6636541242a401b23a877b48635",
-    "packages/application/wb_incident_policy.py": "f4aed79b712002dffe39dd2adcb42f7a8574a67762c5e406092af95c23ea4c3d"
+    "packages/application/wb_incident_policy.py": "f4aed79b712002dffe39dd2adcb42f7a8574a67762c5e406092af95c23ea4c3d",
+    "packages/application/fbs_accounting_gap_archive.py": "fc48981f0bcb5edf71a5c852f430271f895c383b0937850e1f2abcf4f6e1934f"
   },
   "group_migration_root": "/mnt/wb-core-extra100/web-vitrina-history-groups-candidate",
   "repair_code_hashes": {
