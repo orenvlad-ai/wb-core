@@ -263,6 +263,11 @@ def _prepare_from_snapshot(runtime_dir, *, db, conn, now, opening, before, expec
         book["presentations"][target] = FbsInventorySnapshot(fbs_state=state,
             wb_capture=book["wb_days"][target], retained=book["retained_days"][target], day=target).payload()
         state = evaluate_candidate(state, capture, allow_cost_continuity_gap=True)
+    if not opening:
+        from packages.application.fbs_accounting_gap_archive import recover_previous_day
+        book['state'] = state
+        book = recover_previous_day(book, capture=capture, db=db, conn=conn)
+        state = book['state']
     view = candidate_period_view(state, day)
     if not view["available"]:
         raise ValueError("current_fbs_period_missing:" + str(state["last_attempt"]))

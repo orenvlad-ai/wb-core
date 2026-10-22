@@ -144,8 +144,118 @@ def main():
             assert transformed['metadata']['server_cell_presentation'][key][day]==owned['metadata']['server_cell_presentation'][key][day]
             assert next(r[2] for r in data_sheet(transformed)['rows'] if r[1]==key)==change['after']
     _dated_proxy_regressions(result['plan'], p3, p4)
+    _older_target_writer_projection(rows, p3, p4)
     _writer_rollover(rows, p3, p4)
     print('management_history: mixed exact/estimate, no missing-to-zero, dated formulas, eligible TOTAL, idempotency, rollover, cross-bundle exact column: ok')
+
+
+def _older_target_writer_projection(base_rows, p3, p4):
+    """The final ready writer repairs its old target column from dated inputs only."""
+    from apps.web_vitrina_official_fbs_smoke import fixture
+    from packages.application.web_vitrina_official_fbs import build_current_official_fbs_estimate
+    from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+    from apps.sheet_vitrina_v1_web_vitrina_contract_smoke import BUNDLE_FIXTURE
+
+    old_day, untouched_day, yesterday, today = (
+        '2026-10-15', '2026-10-14', '2026-10-21', '2026-10-22'
+    )
+
+    class Clock(datetime):
+        current = datetime(2026, 10, 22, 10, 20, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    with TemporaryDirectory() as tmp, patch('packages.business_time.datetime', Clock):
+        root = Path(tmp)
+        path = root / 'source.sqlite3'
+        conn = fixture(path)
+        conn.close()
+        model = build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=Clock.current)
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=root / 'runtime')
+        runtime.ingest_bundle(json.loads(BUNDLE_FIXTURE.read_text()), activated_at='2026-10-22T10:00:00Z')
+        state = runtime.load_current_state()
+
+        rows = []
+        for original in base_rows:
+            row_id = original[1]
+            metric = row_id.split('|', 1)[1]
+            values = {untouched_day: 777, old_day: 999, yesterday: 555, today: 666}
+            if row_id == 'SKU:1|orderSum': values[old_day] = 2000
+            elif row_id == 'SKU:1|orderCount': values[old_day] = 4
+            elif row_id == 'SKU:1|ads_sum': values[old_day] = 10
+            elif row_id == 'SKU:1|our_wb_unit_cost_rub': values[old_day] = 10
+            elif row_id == 'SKU:2|orderSum': values[old_day] = 500
+            elif row_id == 'SKU:2|orderCount': values[old_day] = 1
+            elif row_id == 'SKU:2|ads_sum': values[old_day] = 5
+            elif row_id == 'SKU:2|our_wb_unit_cost_rub': values[old_day] = ''
+            elif metric == 'stock_total': values[old_day] = 333
+            rows.append([original[0], row_id, *(values[day] for day in (untouched_day, old_day, yesterday, today))])
+
+        dates = [untouched_day, old_day, yesterday, today]
+        data = SheetVitrinaWriteTarget(
+            'DATA_VITRINA', 'A1', 'A1:F99', 'A:F', 'replace', False,
+            ['label', 'key', *dates], rows, len(rows), 6,
+        )
+        status = SheetVitrinaWriteTarget(
+            'STATUS', 'A1', 'A1:A1', 'A:A', 'replace', False, ['status'], [], 0, 1,
+        )
+        plan = SheetVitrinaV1Envelope(
+            'v1', 'old-target-projection', old_day, dates,
+            [
+                SheetVitrinaV1TemporalSlot('prior_closed', 'closed', untouched_day),
+                SheetVitrinaV1TemporalSlot('requested_closed', 'closed', old_day),
+                SheetVitrinaV1TemporalSlot('yesterday_closed', 'closed', yesterday),
+                SheetVitrinaV1TemporalSlot('today_current', 'today', today),
+            ], {}, [data, status],
+            {'server_cell_presentation': {
+                'SKU:1|our_wb_unit_cost_rub': {old_day: {
+                    'source': 'official_fbs_management_inventory_v1',
+                    'source_as_of_date': old_day,
+                    'management_value': '10',
+                    'state': 'unconfirmed',
+                }}
+            }},
+        )
+        selected_dates = []
+
+        def select_parameters(conn, day):
+            selected_dates.append(day)
+            return p3, p4
+
+        with patch('packages.application.registry_upload_db_backed_runtime.datetime', Clock), \
+             patch('packages.application.web_vitrina_management_history.dated_parameters', side_effect=select_parameters), \
+             patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate', return_value=model):
+            save_ready_fixture(
+                runtime, current_state=state, refreshed_at='2026-10-22T10:20:00Z', plan=plan,
+            )
+
+        published = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=old_day)
+        assert isinstance(published, SheetVitrinaV1Envelope)
+        values = {row[1]: row[2:] for row in published.sheets[0].rows}
+        assert values['SKU:1|proxy_profit_4_rub'][1] == 1078
+        assert values['SKU:1|our_wb_unit_cost_rub'][1] == 10
+        assert published.metadata['server_cell_presentation']['SKU:1|our_wb_unit_cost_rub'][old_day]['source'] == 'official_fbs_management_inventory_v1'
+        assert values['SKU:2|proxy_profit_4_rub'][1] == ''
+        # Catalog economics must publish the eligible contribution while making
+        # the missing-cost SKU and incomplete aggregate explicit.
+        assert values['TOTAL|total_proxy_profit_4_rub'][1] == 1078
+        assert values['SKU:2|our_wb_unit_cost_rub'][1] == ''
+        coverage = published.metadata['catalog_economics_coverage'][old_day]['4']
+        total_evidence = published.metadata['server_cell_presentation']['TOTAL|total_proxy_profit_4_rub'][old_day]
+        assert total_evidence['quality_state'] == 'partial'
+        assert total_evidence['completeness_state'] == 'partial'
+        assert total_evidence['missing_sku_count'] == 1
+        assert coverage['included_count'] == 1
+        assert 'SKU:2' in coverage['missing_scope']
+        assert values['SKU:1|stock_total'][1] == 333
+        assert all(row[0] == 777 for row in values.values())
+        coverage_dates = set(published.metadata['catalog_economics_coverage'])
+        assert old_day in coverage_dates and untouched_day not in coverage_dates
+        assert coverage_dates <= {old_day, yesterday, today}
+        assert published.date_columns == dates
+        assert old_day in selected_dates
 
 
 def _writer_rollover(base_rows,p3,p4):
@@ -194,7 +304,7 @@ def _writer_rollover(base_rows,p3,p4):
         tomorrow=replace(latest,snapshot_id='save6',as_of_date='2026-09-05',date_columns=['2026-09-05','2026-09-06'],metadata={},
             temporal_slots=[SheetVitrinaV1TemporalSlot('yesterday_closed','closed','2026-09-05'),SheetVitrinaV1TemporalSlot('today_current','current','2026-09-06')],
             sheets=[replace(latest.sheets[0],header=['label','key','2026-09-05','2026-09-06'],rows=cleared,column_count=4),status])
-        with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value={'available':False}):
+        with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_management_history.dated_parameters',return_value=(p3,p4)), patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value={'available':False}):
             save_ready_fixture(runtime,current_state=state,refreshed_at='2026-09-06T10:10:00Z',plan=tomorrow)
         closed=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
         assert next(r[2] for r in closed.sheets[0].rows if r[1]=='SKU:1|proxy_profit_4_rub')==''
@@ -220,13 +330,14 @@ def _writer_rollover(base_rows,p3,p4):
             assert values['SKU:1|our_wb_unit_cost_rub']==lastcost
             assert {call.args[1] for call in selected.call_args_list}=={'2026-09-05','2026-09-06'}
             assert complete.metadata['server_cell_presentation']['SKU:1|proxy_profit_4_rub']['2026-09-05']['evidence']['proxy4_version']==p4.version_id
+            tomorrow=complete
             # Repeated ordinary publication must not put back the old profit.
             save_ready_fixture(runtime,current_state=state,refreshed_at='2026-09-06T10:30:00Z',plan=tomorrow)
             repeated=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
             assert repeated.sheets[0].rows==complete.sheets[0].rows
         # Once it becomes older history, the accepted correction survives.
         Clock.current=datetime(2026,9,7,10,10,tzinfo=timezone.utc)
-        with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value={'available':False}):
+        with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_management_history.dated_parameters',return_value=(p3,p4)), patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value={'available':False}):
             save_ready_fixture(runtime,current_state=state,refreshed_at='2026-09-07T10:10:00Z',plan=tomorrow)
         older=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
         assert next(r[2] for r in older.sheets[0].rows if r[1]=='SKU:1|proxy_profit_4_rub')==values['SKU:1|proxy_profit_4_rub']
