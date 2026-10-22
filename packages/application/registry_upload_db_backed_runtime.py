@@ -445,6 +445,7 @@ class RegistryUploadDbBackedRuntime:
             carry_forward, load_presentations, dated_parameters, recalculate_current_envelope,
             recalculate_yesterday_envelope, recalculate_dated_proxy, yesterday_date,
         )
+        from packages.application.vitrina_economics import EFFECTIVE_DATE
         from packages.business_time import current_business_date_iso
 
         publication_now = datetime.now(timezone.utc)
@@ -513,7 +514,7 @@ class RegistryUploadDbBackedRuntime:
                     parameters=dated_parameters(conn, publication_date) if estimate.get('available') or active_inventory is not None else None)
                 plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
                     parameters=dated_parameters(conn, yesterday_date(publication_date)))
-                if plan.as_of_date < yesterday_date(publication_date):
+                if EFFECTIVE_DATE <= plan.as_of_date < yesterday_date(publication_date):
                     dated_proxy = recalculate_dated_proxy(
                         asdict(plan),
                         day=plan.as_of_date,
