@@ -924,6 +924,7 @@
     }
 
     .wb-finance-negative { color: var(--error-text); font-weight: 700; }
+    .wb-finance-table td.wb-finance-cost-missing { color: var(--error-text); background: var(--error-bg); font-weight: 700; }
     .wb-finance-week-status { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; font-weight: 600; }
     .wb-finance-warning { color: var(--error-text); }
     .wb-finance-expense-cell { display: grid; grid-template-columns: minmax(72px,1fr) auto; gap: 8px; align-items: center; }
@@ -15100,7 +15101,9 @@
               ? financeSalesWithoutCost(week)
               : (week.metrics ? week.metrics[definition.key] : null);
             const numeric = value === null || value === undefined ? null : Number(value);
-            const className = numeric !== null && (numeric < 0 || (definition.missingCost && numeric > 0)) ? " class=\"wb-finance-negative\"" : "";
+            const className = definition.missingCost && numeric > 0
+              ? " class=\"wb-finance-cost-missing\""
+              : (numeric !== null && numeric < 0 ? " class=\"wb-finance-negative\"" : "");
             if (definition.expense) {
               const share = financeExpenseShare(value, week.metrics && week.metrics.net_revenue);
               const previousWeek = weekIndex > 0 ? weeks[weekIndex - 1] : null;
