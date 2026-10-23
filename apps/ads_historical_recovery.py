@@ -66,6 +66,33 @@ class OfficialAdsHistoricalSource:
     def list_campaigns(self) -> Any:
         return self._get_json(f"{self._base_url}/adv/v1/promotion/count")
 
+    def fetch_creation_times(self, *, campaign_ids: Sequence[int]) -> dict[int, str]:
+        """Bind dates to the complete requested IDs from official campaign details."""
+        result: dict[int, str] = {}
+        for offset in range(0, len(campaign_ids), MAX_IDS_PER_REQUEST):
+            batch = list(campaign_ids[offset : offset + MAX_IDS_PER_REQUEST])
+            if offset:
+                time.sleep(1)
+            query = parse.urlencode({'ids': ','.join(str(value) for value in batch)})
+            payload = self._get_json(f'{self._base_url}/api/advert/v2/adverts?{query}')
+            adverts = payload.get('adverts') if isinstance(payload, dict) else None
+            if not isinstance(adverts, list):
+                raise AdsHistoricalRecoveryError('official campaign details are incomplete')
+            returned: set[int] = set()
+            for advert in adverts:
+                campaign_id = advert.get('id') if isinstance(advert, dict) else None
+                stamps = advert.get('timestamps') if isinstance(advert, dict) else None
+                if type(campaign_id) is not int or campaign_id not in batch or campaign_id in returned:
+                    raise AdsHistoricalRecoveryError('official campaign detail identity is invalid')
+                created = stamps.get('created') if isinstance(stamps, dict) else None
+                if not isinstance(created, str) or not created:
+                    raise AdsHistoricalRecoveryError('official campaign creation date is missing')
+                result[campaign_id] = created
+                returned.add(campaign_id)
+            if returned != set(batch):
+                raise AdsHistoricalRecoveryError('official campaign details omitted requested IDs')
+        return result
+
     def fetch_fullstats(
         self, *, campaign_ids: Sequence[int], date_from: date, date_to: date
     ) -> Any:

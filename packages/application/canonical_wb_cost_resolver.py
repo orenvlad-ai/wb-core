@@ -242,7 +242,7 @@ class CanonicalChannelCostSnapshot:
                 str(item["business_date"]) for item in items
             )
         if READY_SNAPSHOTS_TABLE in wb.table_names:
-            common_inventory_costs = _load_common_inventory_costs(conn)
+            common_inventory_costs = _LazyCommonInventoryCosts(conn)
         return cls(
             wb=wb,
             fbs_order_ids_by_identity_hash={
@@ -253,6 +253,32 @@ class CanonicalChannelCostSnapshot:
             fbs_pooled_states_by_nm=pooled_states,
             common_inventory_cost_by_date_nm=common_inventory_costs,
         )
+
+
+class _LazyCommonInventoryCosts(Mapping[tuple[str, str], Mapping[str, Any]]):
+    """Load the reserve source only if a pooled FBS cost is actually absent.
+
+    The owning snapshot and this mapping belong to the same open connection
+    and read transaction.  No process-global cache can hide source changes.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._loaded: dict[tuple[str, str], Mapping[str, Any]] | None = None
+
+    def _values(self) -> dict[tuple[str, str], Mapping[str, Any]]:
+        if self._loaded is None:
+            self._loaded = _load_common_inventory_costs(self._conn)
+        return self._loaded
+
+    def __getitem__(self, key: tuple[str, str]) -> Mapping[str, Any]:
+        return self._values()[key]
+
+    def __iter__(self):
+        return iter(self._values())
+
+    def __len__(self) -> int:
+        return len(self._values())
 
 
 def pooled_fbs_state_as_of(

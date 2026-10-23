@@ -2688,14 +2688,27 @@ class SheetVitrinaV1LivePlanBlock:
                 )
 
         strict_closed = source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
-        if strict_closed and accepted_snapshot is not None:
+        # WB can revise yesterday after the first post-midnight observation.
+        # Revisit only the real calendar yesterday; older accepted history and
+        # the current-only stock sources retain their existing guarantees.
+        refresh_yesterday = strict_closed and column_date == (
+            date.fromisoformat(current_business_date_iso(now)) - timedelta(days=1)
+        ).isoformat()
+        if strict_closed and accepted_snapshot is not None and not refresh_yesterday:
             accepted_status, accepted_payload, accepted_at = accepted_snapshot
             return _append_status_note(accepted_status, f"resolution_rule=accepted_closed_snapshot_preserved; accepted_at={accepted_at}"), accepted_payload
+        if (refresh_yesterday and accepted_snapshot is not None and allow_persisted_retry
+                and closure_state is not None and closure_state.state != CLOSURE_STATE_SUCCESS
+                and not _closure_attempt_is_due(closure_state, now)):
+            accepted_status, accepted_payload, accepted_at = accepted_snapshot
+            return _append_status_note(accepted_status,
+                f"resolution_rule=accepted_closed_snapshot_preserved; accepted_at={accepted_at}; "
+                f"yesterday_refetch_waiting; next_retry_at={closure_state.next_retry_at}"), accepted_payload
         if strict_closed and closure_state is not None and closure_state.state == CLOSURE_STATE_SUCCESS:
-            # A legacy success with no source-qualified accepted payload is an
-            # outstanding obligation, even when its old retry counter was high.
+            # A completed observation is not final for calendar-yesterday.
+            # Legacy success without a qualified payload also needs a new attempt.
             next_attempt_count = 1
-        elif strict_closed and allow_persisted_retry and not _closure_attempt_is_due(closure_state, now):
+        elif strict_closed and accepted_snapshot is None and allow_persisted_retry and not _closure_attempt_is_due(closure_state, now):
             prior = self._load_slot_snapshot_status(source_key=source_key, temporal_slot=temporal_slot,
                 temporal_policy=temporal_policy, column_date=column_date, requested_nm_ids=requested_nm_ids,
                 snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT)
@@ -2782,6 +2795,23 @@ class SheetVitrinaV1LivePlanBlock:
             column_date=column_date,
             temporal_slot=temporal_slot,
         )
+        if refresh_yesterday and accepted_snapshot is not None and candidate_valid:
+            _, old_payload, _ = accepted_snapshot
+            old_ids = {item.nm_id for item in getattr(old_payload, "items", [])}
+            new_ids = {item.nm_id for item in getattr(payload, "items", [])}
+            old_clock = getattr(old_payload, "source_fetched_at", None)
+            new_clock = getattr(payload, "source_fetched_at", None)
+            regressed = not old_ids.issubset(new_ids)
+            if old_clock:
+                try:
+                    regressed = regressed or _parse_runtime_timestamp(new_clock) < _parse_runtime_timestamp(old_clock)
+                except (TypeError, ValueError):
+                    regressed = True
+            if regressed:
+                candidate_valid = False
+                status = _append_status_note(status, "yesterday_candidate_coverage_or_source_clock_regressed")
+        if refresh_yesterday:
+            status = _append_status_note(status, "yesterday_observation_revisable; refetch_on_next_cycle")
         if (source_key == "ads_compact" and status.kind == "incomplete"
                 and accepted_snapshot is not None and accepted_snapshot[0].kind in {"success", "empty"}):
             # A validated partial contribution cannot downgrade this date's
@@ -2919,14 +2949,19 @@ class SheetVitrinaV1LivePlanBlock:
             )
             if _source_slot_supports_persisted_retry(source_key=source_key, temporal_slot=temporal_slot):
                 ads_partial = source_key == "ads_compact" and accepted_status.kind == "incomplete"
-                retry_at, retry_state = (_next_closure_retry(now, next_attempt_count, "ads_partial_preserved")
-                                         if ads_partial else (None, CLOSURE_STATE_SUCCESS))
+                retry_at, retry_state = (
+                    _next_closure_retry(now, next_attempt_count, "yesterday_refetch_failed",
+                                        server_next_retry_at=_status_server_next_retry_at(status))
+                    if refresh_yesterday else
+                    _next_closure_retry(now, next_attempt_count, "ads_partial_preserved")
+                    if ads_partial else (None, CLOSURE_STATE_SUCCESS)
+                )
                 self.runtime.save_temporal_source_closure_state(
                     source_key=source_key,
                     target_date=column_date,
                     slot_kind=temporal_slot,
                     state=retry_state,
-                    attempt_count=next_attempt_count if ads_partial else closure_state.attempt_count if closure_state is not None else 0,
+                    attempt_count=next_attempt_count if ads_partial or refresh_yesterday else closure_state.attempt_count if closure_state is not None else 0,
                     next_retry_at=retry_at,
                     last_reason="accepted_snapshot_preserved_after_invalid_attempt",
                     last_attempt_at=now_iso,

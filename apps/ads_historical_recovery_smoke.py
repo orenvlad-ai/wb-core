@@ -377,7 +377,55 @@ def _snapshot_count(path: Path) -> int:
         return int(conn.execute("SELECT COUNT(*) FROM temporal_source_slot_snapshots").fetchone()[0])
 
 
+def _assert_official_creation_dates() -> None:
+    class CreationSource(FakeOfficialSource):
+        def fetch_creation_times(self, *, campaign_ids):
+            return {cid: ('2026-09-02T00:00:00+03:00' if cid == 120
+                          else '2026-09-01T23:30:00+03:00' if cid == 119
+                          else '2026-08-01T12:00:00+03:00') for cid in campaign_ids}
+
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / 'operational.sqlite3'
+        _seed_database(path, existing_date=date(2026, 8, 31), non_target_date=date(2026, 10, 16))
+        source = CreationSource(empty_date=date(2026, 8, 29))
+        scope = AdsHistoricalRecoveryScope.build(nm_ids=[245720334], target_dates=[date(2026, 9, 1)])
+        recovery = AdsHistoricalRecovery(db_path=path, source=source)
+        plan = recovery.plan(scope)
+        assert plan['status'] == 'ready', plan['blockers']
+        assert plan['source_manifest']['excluded_created_after_scope_count'] == 1
+        requested = {cid for call in source.calls for cid in call['campaign_ids']}
+        assert 120 not in requested and 119 in requested  # Late WB evening is still the same WB day.
+        future = next(c for c in plan['source_manifest']['campaigns'] if c['campaign_id'] == 120)
+        assert future['source_action'] == 'excluded_created_after_scope'
+        assert future['created_at'] == '2026-09-02T00:00:00+03:00'
+        original_creation = source.fetch_creation_times
+        def equivalent_offsets(*, campaign_ids):
+            values = original_creation(campaign_ids=campaign_ids)
+            values[119] = '2026-09-02T01:30:00+05:00'  # Same instant as 01.09 23:30 Moscow.
+            return values
+        source.fetch_creation_times = equivalent_offsets
+        equivalent = recovery.plan(scope)
+        assert equivalent['status'] == 'ready'
+        assert equivalent['source_manifest']['excluded_created_after_scope_count'] == 1
+        source.fetch_creation_times = lambda **_kw: {}
+        incomplete = recovery.plan(scope)
+        assert incomplete['status'] == 'blocked' and incomplete['write_set']['insert_snapshot_count'] == 0
+        assert any(b['code'] == 'ads_upstream_incomplete' for b in incomplete['blockers'])
+
+    client = OfficialAdsHistoricalSource(token='fixture')
+    for answer in ({'adverts': []}, {'adverts': [{'id': 1, 'timestamps': {}}]},
+                   {'adverts': [{'id': 2, 'timestamps': {'created': '2026-09-02T00:00:00Z'}}]}):
+        with patch.object(client, '_get_json', return_value=answer):
+            try:
+                client.fetch_creation_times(campaign_ids=[1])
+            except AdsHistoricalRecoveryError:
+                pass
+            else:
+                raise AssertionError('incomplete or foreign creation metadata accepted')
+
+
 def main() -> int:
+    _assert_official_creation_dates()
     with tempfile.TemporaryDirectory(prefix="ads-historical-recovery-") as raw_dir:
         root = Path(raw_dir)
         db_path = root / "registry_upload_runtime.sqlite3"
