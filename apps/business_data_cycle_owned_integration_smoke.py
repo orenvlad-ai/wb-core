@@ -95,7 +95,7 @@ class OwnedCycleIntegration(unittest.TestCase):
             thread.join(240)
             self.assertFalse(thread.is_alive(), 'actual owned cycle did not terminate')
             receipt = CycleReceiptStore(runtime.runtime_dir, lambda:fixture.STAMP).read(accepted['cycle_id'])
-            self.assertEqual(receipt['status'], 'degraded', getattr(entry, 'history_error', receipt))
+            self.assertEqual(receipt['status'], 'degraded', {'history_failure': receipt.get('history_failure'), 'traceback': getattr(entry, 'history_error', '')})
             self.assertEqual(collect.call_count, 1)
             self.assertEqual(set(collect.call_args.kwargs), {'as_of_date','log','execution_mode'})
             self.assertEqual(spp.call_count, 1)
@@ -147,7 +147,7 @@ class OwnedCycleIntegration(unittest.TestCase):
             self.assertEqual(receipt['trigger_kind'], 'manual')
             self.assertEqual(receipt['dispatch_id'], identity)
             self.assertIn(receipt['status'], {'complete', 'degraded'},
-                getattr(entry, 'history_error', receipt))
+                {'history_failure': receipt.get('history_failure'), 'traceback': getattr(entry, 'history_error', '')})
             self.assertEqual(tuple(item['stage'] for item in receipt['stages']), STAGES)
             self.assertEqual(collect.call_count, 1)
             self.assertEqual(collect.call_args.kwargs['execution_mode'], 'auto_daily')
@@ -162,7 +162,7 @@ class OwnedCycleIntegration(unittest.TestCase):
             self.assertTrue(all(item['state'] == 'acknowledged' for item in
                 ClosedBacklog(entry.source_adapter).status()['dates'].values()))
             self.assertEqual(case.case.counters['seller_funnel_block'].request_dates,
-                [*wiring.OLD, '2026-04-20'])
+                [*wiring.OLD, '2026-04-19', '2026-04-20'])
             before = list(entry.events)
             repeated = dispatch.dispatch(entry, {'dispatch_id':identity})
             self.assertEqual(repeated['receipt']['cycle_id'], receipt['cycle_id'])
