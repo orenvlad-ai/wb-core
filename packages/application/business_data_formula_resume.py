@@ -432,7 +432,9 @@ def _buyer_native_read(command):
 def _buyer_journal(boot_id, start, stop, *, unit=BUYER_UNIT):
     if unit not in {BUYER_UNIT, FEEDBACK_UNIT}:
         raise RuntimeError('formula resume unsupported guarded service')
-    return _buyer_native_read(['/usr/bin/journalctl', '--no-pager', '--output=json', '--all', '-n', '5',
+    # One overflow sentinel beyond the only permitted complete native shape.
+    limit = '6' if unit == FEEDBACK_UNIT else '5'
+    return _buyer_native_read(['/usr/bin/journalctl', '--no-pager', '--output=json', '--all', '-n', limit,
         '--boot=' + boot_id, '--unit=' + unit,
         '--since=@' + str(start), '--until=@' + str(stop + 1),
         '--output-fields=MESSAGE,UNIT,_PID,_SYSTEMD_UNIT,_BOOT_ID,_SYSTEMD_INVOCATION_ID,__REALTIME_TIMESTAMP'])
@@ -566,11 +568,20 @@ def _guarded_service_completion(runtime, plan, old, current, systemd, activity_r
         events = [json.loads(line, object_pairs_hook=unique_object, parse_constant=reject_constant) for line in raw.splitlines()]
     except (ValueError, UnicodeError) as exc:
         raise RuntimeError('formula resume guarded service journal is malformed') from exc
-    if len(events) != 4 or any(not isinstance(v, dict) for v in events):
+    allowed_lengths = {4, 5} if unit == FEEDBACK_UNIT else {4}
+    if len(events) not in allowed_lengths or any(not isinstance(v, dict) for v in events):
         raise RuntimeError('formula resume guarded service complete unique journal invocation absent')
     messages = ['Starting ' + unit + ' - ' + description + '...',
         '{"status": "skipped_maintenance", "reason": "skipped_maintenance"}',
         unit + ': Deactivated successfully.', 'Finished ' + unit + ' - ' + description + '.']
+    if len(events) == 5:
+        cpu_message = events[4].get('MESSAGE')
+        if (not isinstance(cpu_message, str) or re.fullmatch(re.escape(unit) +
+                r': Consumed (?:0|[1-9][0-9]{0,3})\.[0-9]{3}s CPU time\.', cpu_message) is None):
+            raise RuntimeError('formula resume guarded service CPU accounting message differs')
+        # Keep the optional manager record in the same provenance/order/bounds
+        # proof and retained receipt. Never discard arbitrary journal output.
+        messages.append(cpu_message)
     timestamps, monotonic, sequence = [], [], []
     for index, event in enumerate(events):
         service = index == 1

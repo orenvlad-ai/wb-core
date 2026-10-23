@@ -127,6 +127,11 @@ deactivate/finish invocation, with current boot, unit, InvocationID, PID and
 start/stop interval matching live systemd and LastTriggerUSec. No caller flag or
 saved PID grants this exception. Missing, duplicate, malformed, foreign,
 oversized, timed-out or changing native evidence refuses without retry.
+Only feedback may additionally have the observed final systemd manager record
+`<unit>: Consumed N.NNNs CPU time.` (up to four integer digits). It must follow
+the complete four-record invocation, pass the same PID 1/init.scope/unit/boot,
+cursor, sequence and time bounds, and remain in the retained proof. The bounded
+query reads six records to detect overflow; no other extra output is ignored.
 Each native transport is limited to five seconds and 64 KiB. After reading the
 journal, a fresh nonrecursive native readback rechecks controls, admission,
 jobs/processes/live services and unit pairs/configuration before advancing.

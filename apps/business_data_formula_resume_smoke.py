@@ -234,6 +234,16 @@ class FormulaResumeTests(unittest.TestCase):
     def buyer_journal_bytes(self, events):
         return ('\n'.join(json.dumps(v) for v in events) + '\n').encode()
 
+    def feedback_cpu_record(self, events):
+        event = deepcopy(events[-1])
+        event['MESSAGE'] = self.guarded_unit + ': Consumed 1.052s CPU time.'
+        for key in ('__REALTIME_TIMESTAMP', '__MONOTONIC_TIMESTAMP', '__SEQNUM'):
+            event[key] = str(int(event[key]) + 1)
+        event['__CURSOR'] = ('s=' + event['__SEQNUM_ID'] + ';i=' + format(int(event['__SEQNUM']), 'x') +
+            ';b=' + event['_BOOT_ID'] + ';m=' + format(int(event['__MONOTONIC_TIMESTAMP']), 'x') +
+            ';t=' + format(int(event['__REALTIME_TIMESTAMP']), 'x') + ';x=1')
+        return event
+
     def test_guarded_buyer_native_guard_before_main_and_same_plan_resume(self):
         plan, events = self.guarded_buyer_fixture()
         from packages.application.business_data_procedure_admission import guarded_cli
@@ -304,6 +314,62 @@ class FormulaResumeTests(unittest.TestCase):
         owner_path.write_bytes(original)
         self.assertEqual(self.systemd.calls, calls)
         self.assertTrue(barrier.barrier_status(self.runtime)['active'])
+
+    def test_guarded_feedback_native_cpu_accounting_retained(self):
+        plan, events = self.guarded_buyer_fixture()
+        events.append(self.feedback_cpu_record(events))
+        calls = list(self.systemd.calls)
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            receipt = self.apply(plan)
+        proof = receipt['guarded_service_completions'][formula.FEEDBACK_UNIT]
+        self.assertEqual(proof['journal_events'], events)
+        timer = formula.FEEDBACK_UNIT.replace('.service', '.timer')
+        self.assertEqual([c for c in self.systemd.calls if c[1] == timer], [c for c in calls if c[1] == timer])
+        self.assertEqual(formula.load(self.runtime, OP)['phase'], 'released')
+
+    def test_guarded_feedback_native_cpu_accounting_forgery_or_overflow_refuses(self):
+        plan, events = self.guarded_buyer_fixture()
+        cpu = self.feedback_cpu_record(events)
+        cases = [events + [cpu, cpu], events[1:] + [cpu], events[:3] + [cpu, events[3]]]
+        for key, value in [('MESSAGE', 'unrelated manager output'), ('MESSAGE', self.guarded_unit + ': Consumed 1s CPU time.'),
+                ('MESSAGE', self.guarded_unit + ': Consumed 1.052s CPU time. extra'), ('_PID', '2668333'),
+                ('_SYSTEMD_UNIT', self.guarded_unit), ('UNIT', formula.BUYER_UNIT), ('_BOOT_ID', 'b' * 32),
+                ('__SEQNUM', events[-1]['__SEQNUM']), ('__REALTIME_TIMESTAMP', '1')]:
+            changed = deepcopy(cpu); changed[key] = value; cases.append(events + [changed])
+        before = deepcopy(formula.load(self.runtime, OP)); calls = list(self.systemd.calls)
+        for changed in cases:
+            with self.subTest(events=changed), patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(changed)):
+                with self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
+        self.assertEqual(formula.load(self.runtime, OP), before)
+        self.assertEqual(self.systemd.calls, calls)
+
+    def test_guarded_feedback_cpu_committed_proof_cannot_change(self):
+        plan, events = self.guarded_buyer_fixture(); events.append(self.feedback_cpu_record(events))
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'synthetic committed crash'):
+                self.apply(plan, _fault=lambda point: (_ for _ in ()).throw(RuntimeError('synthetic committed crash')) if point == 'committed' else None)
+        before = deepcopy(formula.load(self.runtime, OP)); calls = list(self.systemd.calls)
+        changed = deepcopy(events); changed[-1]['MESSAGE'] = changed[-1]['MESSAGE'].replace('1.052s', '1.053s')
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(changed)):
+            with self.assertRaisesRegex(RuntimeError, 'retained guarded service completion differs'):self.apply(plan)
+        self.assertEqual(formula.load(self.runtime, OP), before)
+        self.assertEqual(self.systemd.calls, calls)
+
+    def test_guarded_feedback_native_journal_bound_includes_overflow_sentinel(self):
+        with patch.object(formula, '_buyer_native_read', return_value=b'') as transport:
+            formula._buyer_journal('a' * 32, 1, 2, unit=formula.FEEDBACK_UNIT)
+            self.assertEqual(transport.call_args.args[0][5], '6')
+            formula._buyer_journal('a' * 32, 1, 2)
+            self.assertEqual(transport.call_args.args[0][5], '5')
+            with self.assertRaisesRegex(RuntimeError, 'unsupported guarded service'):
+                formula._buyer_journal('a' * 32, 1, 2, unit='foreign.service')
+            self.assertEqual(transport.call_count, 2)
+
+    def test_guarded_buyer_cpu_accounting_remains_unsupported(self):
+        plan, events = self.guarded_buyer_fixture(); events.append(self.feedback_cpu_record(events))
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'complete unique journal invocation absent'):
+                formula._observe(self.runtime, plan, **self.options)
 
     def test_guarded_feedback_incomplete_forged_foreign_or_stale_journal_refuses(self):
         plan, events = self.guarded_buyer_fixture()
