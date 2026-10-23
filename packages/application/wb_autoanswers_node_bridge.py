@@ -304,7 +304,11 @@ class NodeAutoanswersBridge:
             payload["local_policy"] = "unspecified-missing-kit-2026-10-23-v1"
         if fixture_scenario:
             payload["fixture_scenario"] = fixture_scenario
-        result = self._invoke(payload)
+        if payload.get("local_policy"):
+            self.verify()
+        result = self._invoke(payload, runner_path=(
+            Path(__file__).resolve().parents[1] / "node/wb_autoanswers_v1_4_2/make_mvp/scripts/local_policy_runner.mjs"
+        ) if payload.get("local_policy") else None)
         if payload.get("local_policy") and (
             int((result.get("pipeline") or {}).get("model_calls_this_run") or 0) != 0
             or float((result.get("pipeline") or {}).get("estimated_cost_usd") or 0) != 0
@@ -347,11 +351,11 @@ class NodeAutoanswersBridge:
             "reply": str(guard.get("reply") or ""),
         }
 
-    def _invoke(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _invoke(self, payload: Mapping[str, Any], *, runner_path: Path | None = None) -> dict[str, Any]:
         environment = os.environ.copy() if self.env is None else dict(self.env)
         try:
             completed = subprocess.run(
-                [self.node_binary, str(self.runner_path)],
+                [self.node_binary, str(runner_path or self.runner_path)],
                 input=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 text=True,
                 stdout=subprocess.PIPE,

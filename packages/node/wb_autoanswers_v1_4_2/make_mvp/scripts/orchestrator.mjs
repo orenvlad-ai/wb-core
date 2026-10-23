@@ -233,9 +233,8 @@ export async function runJob(rawInput, dependencies = {}) {
 
     // This exact owner-approved class has no factual missing-item detail to
     // classify. Use the guarded clarification, preserving normal job/code audit.
-    // Check raw input: the server may add a synthetic prefilter text for 5★ tags.
-    if (isUnspecifiedMissingKit(rawInput, reviewInput.media)) {
-      const replacement = missingKitReplacement({review: rawInput, media: reviewInput.media,
+    if (isUnspecifiedMissingKit(rawInput, rawInput.media)) {
+      const replacement = missingKitReplacement({review: rawInput, media: rawInput.media,
         processingKey: idempotencyKey, existing: await store.listCaseCodes()});
       const caseCode = replacement.case_code;
       await store.reserveCaseCode({case_code: caseCode, idempotency_key: idempotencyKey,
