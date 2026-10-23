@@ -186,20 +186,23 @@ class BacklogRecoveryTest(unittest.TestCase):
                         build_plan(conn, runtime_dir=runtime_dir, manifest=manifest, remote=remote)
                 self.assertEqual(repo.get_feedback("safe-public")["publications"][0]["publication_key"], publication["publication_key"])
 
-    def prepare_return_question(self, runtime_dir: Path):
+    def prepare_return_question(self, runtime_dir: Path, *, missing_kit: bool = False):
         clock = MutableClock()
         repo = AutoanswersRepository(runtime_dir=runtime_dir, now_factory=clock, env={})
         repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
         detail = feedback("generic-return", text="Как можно оформить возврат?")
         detail.update(pros="", photoLinks=None, productValuation=1)
+        if missing_kit:
+            detail.update(text="", bables=["брак", "плохое качество", "неполный комплект"])
         repo.upsert_feedback(detail, source_stream="unanswered", run_kind="steady")
         job = repo.enqueue_processing("generic-return", trigger_source="steady_sync", actor_id="sync")
         repo.claim_processing_job(worker_id="ai")
         repo.settle_budget(job["processing_key"], actual_cost_usd="0.05014125")
         repo.complete_generation(job["processing_key"], worker_id="ai", result=successful_result(
-            "wb_support", final_reply="Здравствуйте. Обратитесь в поддержку Wildberries по заказу.",
+            "wb_return" if missing_kit else "wb_support",
+            final_reply="Здравствуйте. Оформите заявку на возврат через Wildberries." if missing_kit else "Здравствуйте. Обратитесь в поддержку Wildberries по заказу.",
             case_code=None, fallback_used=True, usage={"api_calls":{"total":7}},
-            pipeline_result={"primary_issue":"WB_REFUND_STATUS","outcome":"fallback","model_call_count":7}))
+            pipeline_result={"primary_issue":"MISSING_PARTS" if missing_kit else "WB_REFUND_STATUS","outcome":"fallback","model_call_count":7}))
         backup = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}" / "verified.sqlite3"
         backup.parent.mkdir(parents=True)
         with sqlite3.connect(repo.db_path) as source, sqlite3.connect(backup) as target:
@@ -325,6 +328,116 @@ class BacklogRecoveryTest(unittest.TestCase):
                 envelope["request"]={**request,"replacement_policy":"forged"}
                 with self.assertRaisesRegex(ValueError,"operation-request-mismatch"):
                     execute(envelope,runtime_dir=runtime_dir,env_file=runtime_dir/"unused",source=source)
+
+    def test_missing_kit_replacement_preserves_paid_history_and_publishes_exactly_once(self):
+        from apps.wb_autoanswers_recovery_apply import execute
+        with TemporaryDirectory() as directory:
+            runtime_dir = Path(directory)
+            repo,clock,detail,source,manifest,remote,details,backup = self.prepare_return_question(runtime_dir, missing_kit=True)
+            original = repo.get_feedback("generic-return")["ai_jobs"][0]
+            request = {"manifest": manifest, "approval_reference": "owner-missing-kit-rule",
+                       "recovery_reference": str(backup), "replacement_policy": "unspecified_missing_kit_v1"}
+            envelope = {"action": "preview", "operation_id": "synthetic-missing-kit-replacement",
+                        "request": request, "expected_runtime_sha": "a"*40, "actor": "test"}
+            with patch("apps.wb_autoanswers_backlog_recovery._deployed_runtime_evidence", return_value={"deployed_sha":"a"*40}), patch("apps.wb_autoanswers_backlog_recovery._now", clock):
+                preview = execute(envelope,runtime_dir=runtime_dir,env_file=runtime_dir/"unused",source=source)
+                self.assertEqual(preview["scope"]["actions"][0]["action"], "replace_unspecified_missing_kit")
+                envelope.update(action="apply",expected_prestate=preview["prestate_sha256"],expected_candidate=preview["candidate_sha256"])
+                self.assertEqual(execute(envelope,runtime_dir=runtime_dir,env_file=runtime_dir/"unused",source=source)["disposition"], "submitted")
+                envelope["action"] = "readback"
+                self.assertEqual(execute(envelope,runtime_dir=runtime_dir,env_file=runtime_dir/"unused",source=source)["state"], "applied")
+            stored = repo.get_feedback("generic-return")
+            job, publication = stored["ai_jobs"][0], stored["publications"][0]
+            for field in ("processing_key", "attempts", "actual_cost_usd"):
+                self.assertEqual(job[field], original[field])
+            self.assertEqual(json.loads(job["result_json"])["usage"], json.loads(original["result_json"])["usage"])
+            self.assertFalse(job["fallback_used"])
+            self.assertIn("уточните, чего не хватило", publication["exact_reply"])
+            self.assertEqual(publication["exact_reply"].count(job["case_code"]), 1)
+            with _open(runtime_dir,read_only=True) as conn:
+                self.assertEqual(conn.execute("SELECT result_json FROM sheet_vitrina_v1_wb_autoanswer_job_revisions").fetchone()[0], original["result_json"])
+            transport = FakeWbTransport(); transport.current_details["generic-return"] = detail
+            transport.readbacks = [{**detail, "answer": {"text": publication["exact_reply"]}}]
+            publisher = AutoanswersPublicationWorker(repository=repo,transport=transport,worker_id="pub")
+            self.assertEqual(publisher.run_once()["state"], "publish_pending_readback")
+            self.assertEqual(publisher.run_once()["state"], "published")
+            self.assertIsNone(publisher.run_once())
+            self.assertEqual(len(transport.write_calls), 1)
+
+    def test_future_missing_kit_uses_zero_cost_policy_and_automatic_publication(self):
+        import os
+        from packages.application.wb_autoanswers_worker import AutoanswersProcessingWorker
+        from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge
+        class NoopMedia:
+            def process(self, **kwargs): return {"media_uncertain": False}
+        for rating in (1, 5):
+            with self.subTest(rating=rating), TemporaryDirectory() as directory:
+                repo = AutoanswersRepository(runtime_dir=Path(directory),env={})
+                repo.update_settings(master_enabled=True,mode="auto_all",actor_id="admin")
+                detail = feedback("future-kit", text="")
+                detail.update(pros="",cons="",photoLinks=None,productValuation=rating,bables=["неполный комплект", "брак"])
+                repo.upsert_feedback(detail,source_stream="unanswered",run_kind="steady")
+                repo.enqueue_processing("future-kit",trigger_source="steady_sync",actor_id="sync")
+                # An expired cooldown is still durable failure history. A local
+                # reply must not claim that the provider has recovered.
+                repo.save_sync_cursor("wb_autoanswers_provider_pause",cursor={"failures":3,"until":"2020-01-01T00:00:00Z","error_code":"OPENAI_HTTP_429"},successful=False)
+                before_pause = repo.provider_pause_status()
+                worker = AutoanswersProcessingWorker(repository=repo,bridge=NodeAutoanswersBridge(env={**os.environ,"WB_AUTOANSWERS_TEST_MODE":"1"}),media_processor=NoopMedia(),worker_id="ai")
+                result = worker.run_once(execution_mode="fixture",fixture_scenario="generic_return_question")
+                self.assertEqual((result["state"],result["model_calls"],result["cost_usd"]), ("approved",0,0))
+                self.assertEqual(repo.provider_pause_status(), before_pause)
+                with _open(Path(directory),read_only=True) as conn:
+                    self.assertIsNone(conn.execute("SELECT last_successful_ai_call_at FROM sheet_vitrina_v1_wb_autoanswers_runtime_state").fetchone()[0])
+                    self.assertIsNone(conn.execute("SELECT provider_call_started_at FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations").fetchone()[0])
+                stored = repo.get_feedback("future-kit")
+                self.assertEqual(stored["ai_jobs"][0]["final_route"], "public_only")
+                transport = FakeWbTransport(); transport.current_details["future-kit"] = detail
+                transport.readbacks = [{**detail,"answer":{"text":stored["publications"][0]["exact_reply"]}}]
+                publisher = AutoanswersPublicationWorker(repository=repo,transport=transport,worker_id="pub")
+                self.assertEqual(publisher.run_once()["state"], "publish_pending_readback")
+                self.assertEqual(publisher.run_once()["state"], "published")
+                self.assertIsNone(publisher.run_once())
+                self.assertEqual(len(transport.write_calls), 1)
+
+    def test_missing_kit_replacement_rejects_other_class_or_changed_content(self):
+        for change in ("other_class", "text", "manual", "publication"):
+            with self.subTest(change=change), TemporaryDirectory() as directory:
+                runtime_dir = Path(directory)
+                repo,clock,detail,source,manifest,remote,details,_backup = self.prepare_return_question(runtime_dir,missing_kit=change != "other_class")
+                if change == "text":
+                    changed = {**detail,"cons":"Самого стекла не было"}
+                    repo.upsert_feedback(changed,source_stream="unanswered",run_kind="steady")
+                if change == "manual":
+                    with repo.transaction() as conn: conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET manual_started=1")
+                if change == "publication":
+                    with repo.transaction() as conn:
+                        job = dict(conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs").fetchone())
+                        repo._create_publication_job(conn,job=job,reply=job["final_reply"],reply_sha=job["final_reply_sha256"],request_source="automatic",requested_by=None,mode_at_enqueue="auto_all",manual_edit_revision=None,at=clock())
+                with _open(runtime_dir,read_only=True) as conn:
+                    with self.assertRaises(RuntimeError):
+                        build_plan(conn,runtime_dir=runtime_dir,manifest=manifest,remote=remote,replacement_policy="unspecified_missing_kit_v1")
+
+    def test_local_kit_failure_does_not_create_provider_uncertainty_or_cooldown(self):
+        from packages.application.wb_autoanswers_worker import AutoanswersProcessingWorker
+        from packages.application.wb_autoanswers_node_bridge import NodeBoundaryError
+        class NoopMedia:
+            def process(self, **kwargs): return {"media_uncertain": False}
+        class FailedLocalBridge:
+            def run(self, **kwargs): raise NodeBoundaryError("local timeout",code="node_timeout",retryable=True)
+        with TemporaryDirectory() as directory:
+            repo = AutoanswersRepository(runtime_dir=Path(directory),env={})
+            repo.update_settings(master_enabled=True,mode="auto_all",actor_id="admin")
+            detail = feedback("failed-kit",text="")
+            detail.update(pros="",cons="",photoLinks=None,bables=["неполный комплект"])
+            repo.upsert_feedback(detail,source_stream="unanswered",run_kind="steady")
+            repo.enqueue_processing("failed-kit",trigger_source="steady_sync",actor_id="sync")
+            before = repo.provider_pause_status()
+            worker = AutoanswersProcessingWorker(repository=repo,bridge=FailedLocalBridge(),media_processor=NoopMedia(),worker_id="ai")
+            self.assertEqual(worker.run_once()["state"], "retryable_error")
+            self.assertEqual(repo.provider_pause_status(), before)
+            with _open(Path(directory),read_only=True) as conn:
+                self.assertIsNone(conn.execute("SELECT provider_call_started_at FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations").fetchone()[0])
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts").fetchone()[0], 0)
 
     def test_recovery_gets_are_paced_and_retry_429_with_server_delay(self) -> None:
         class Clock:

@@ -9,6 +9,7 @@ import mimetypes
 import os
 from pathlib import Path
 import subprocess
+import unicodedata
 from typing import Any, Mapping
 
 from packages.application.wb_autoanswers_failures import transient_provider_failure
@@ -22,6 +23,27 @@ from packages.contracts.wb_autoanswers import (
 
 DEFAULT_TIMEOUT_SECONDS = 180
 MAX_EMBEDDED_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def is_unspecified_missing_kit_input(raw: Mapping[str, Any]) -> bool:
+    """Mirror the narrow local Node policy before entering a paid boundary."""
+    rating = raw.get("rating")
+    if isinstance(rating, bool) or not isinstance(rating, int) or rating not in range(1, 6):
+        return False
+    if any(str(raw.get(field) or "").strip() for field in ("text", "pros", "cons")):
+        return False
+    tags = raw.get("wb_tags")
+    if not isinstance(tags, list) or not tags:
+        return False
+    normalized = [unicodedata.normalize("NFKC", str(tag)).strip().lower() for tag in tags]
+    media = raw.get("media") or {}
+    video = media.get("video") or {}
+    return (
+        "неполный комплект" in normalized
+        and all(tag in {"неполный комплект", "брак", "плохое качество"} for tag in normalized)
+        and not media.get("photos") and not video.get("present") and not video.get("frame_refs")
+        and media.get("status") in {None, "", "none"}
+    )
 
 
 def _live_provider_failure(code: str, message: str) -> tuple[str, bool]:
@@ -257,7 +279,9 @@ class NodeAutoanswersBridge:
                 evidence_parts.append(f"К отзыву приложено фото: {len(photos)}")
             if bool(video.get("present")):
                 evidence_parts.append("К отзыву приложено видео")
-            if evidence_parts:
+            # Keep original empty text for the narrow owner-approved tag-only
+            # clarification, which runs before the ordinary 5-star prefilter.
+            if evidence_parts and not is_unspecified_missing_kit_input(payload_raw):
                 payload_raw["text"] = ". ".join(evidence_parts)
                 adapter = {
                     "contract": "content_bearing_prefilter_adapter_v1",
@@ -276,9 +300,16 @@ class NodeAutoanswersBridge:
             "execution_mode": execution_mode,
             "raw_input": payload_raw,
         }
+        if is_unspecified_missing_kit_input(raw_input):
+            payload["local_policy"] = "unspecified-missing-kit-2026-10-23-v1"
         if fixture_scenario:
             payload["fixture_scenario"] = fixture_scenario
         result = self._invoke(payload)
+        if payload.get("local_policy") and (
+            int((result.get("pipeline") or {}).get("model_calls_this_run") or 0) != 0
+            or float((result.get("pipeline") or {}).get("estimated_cost_usd") or 0) != 0
+        ):
+            raise NodeBoundaryError("local policy returned provider usage", code="local_policy_provider_usage")
         if adapter is not None:
             result["boundary_adapter"] = adapter
         return result

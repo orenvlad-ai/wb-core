@@ -11,6 +11,7 @@ import {MAX_REWRITES, PROMPT_BUNDLE_VERSION} from "./constants.mjs";
 import {calculateJobCost, usageRecord} from "./cost_accounting.mjs";
 import {runDraftGuard} from "./draft_guard.mjs";
 import {applyReturnQuestionPolicy, RETURN_QUESTION_POLICY} from "./return_question_policy.mjs";
+import {isUnspecifiedMissingKit, missingKitReplacement, MISSING_KIT_POLICY} from "./missing_kit_policy.mjs";
 import {selectApprovedFallback} from "./fallback.mjs";
 import {isReusableJob, makeIdempotencyKey} from "./idempotency.mjs";
 import {MemoryStore} from "./memory_store.mjs";
@@ -229,6 +230,45 @@ export async function runJob(rawInput, dependencies = {}) {
     await persist();
     await store.appendAudit(idempotencyKey, auditEvent("normalized_input", reviewInput, nowDate(now)));
     await transition("normalized");
+
+    // This exact owner-approved class has no factual missing-item detail to
+    // classify. Use the guarded clarification, preserving normal job/code audit.
+    // Check raw input: the server may add a synthetic prefilter text for 5★ tags.
+    if (isUnspecifiedMissingKit(rawInput, reviewInput.media)) {
+      const replacement = missingKitReplacement({review: rawInput, media: reviewInput.media,
+        processingKey: idempotencyKey, existing: await store.listCaseCodes()});
+      const caseCode = replacement.case_code;
+      await store.reserveCaseCode({case_code: caseCode, idempotency_key: idempotencyKey,
+        review_id: reviewInput.review.review_id, review_version: reviewInput.review.review_version,
+        prompt_bundle_version: PROMPT_BUNDLE_VERSION, active: true, created_at: nowDate(now).toISOString()});
+      for (const next of ["classified", "guarded", "drafted", "validated", "ready"]) {
+        await transition(next, {policy_version: MISSING_KIT_POLICY, model_calls: 0});
+      }
+      const result = replyResult({reviewInput, classification: {review_mode: "negative",
+        primary_issue: "MISSING_PARTS", primary_issue_subtype: null, positive_signals: [],
+        route: "seller_chat", route_reason: `Уточнить у продавца недостающий предмет [${MISSING_KIT_POLICY}]`},
+        caseCode, drafts: [{draft_reply: replacement.final_reply}], validations: ["pass"],
+        finalDraft: {draft_reply: replacement.final_reply, requested_materials: []}, outcome: "ready", modelCallCount: 0});
+      await assertContract("pipeline_result.schema.json", result);
+      const cost = calculateJobCost([], pricingProfile);
+      await store.appendAudit(idempotencyKey, auditEvent("missing_kit_clarification", {
+        policy_version: MISSING_KIT_POLICY, final_reply: replacement.final_reply, case_code: caseCode, model_calls: 0}, nowDate(now)));
+      await store.appendAudit(idempotencyKey, auditEvent("job_complete", {
+        outcome: "ready", fallback_id: null, model_call_count: 0, cost, final_reply: replacement.final_reply}, nowDate(now)));
+      await store.rememberReply({idempotency_key: idempotencyKey, route: "seller_chat",
+        primary_issue: "MISSING_PARTS", reply: replacement.final_reply, created_at: nowDate(now).toISOString()});
+      job.result = result;
+      job.outcome = "ready";
+      job.manager_message = replacement.final_reply;
+      await persist();
+      if (deliverToManager) {
+        await deliverToManager({text: replacement.final_reply, publication_action: "reply", idempotency_key: idempotencyKey});
+        await transition("delivered_to_telegram");
+      }
+      return {idempotency_key: idempotencyKey, idempotent_reuse: false, model_calls_this_run: 0,
+        state: job.state, result, manager_message: job.manager_message, usage: cost.usage,
+        estimated_cost_usd: cost.estimated_cost_usd, fallback_id: null};
+    }
 
     if (!reviewInput.prefilter.model_calls_allowed) {
       const result = skipResult(reviewInput);

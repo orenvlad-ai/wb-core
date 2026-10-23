@@ -65,6 +65,7 @@ from packages.application.wb_autoanswers_runtime import (  # noqa: E402
 from packages.application.wb_autoanswers_chat_public import promote_chat_invitation
 
 RETURN_QUESTION_REPLACEMENT = "generic_return_question_v1"
+MISSING_KIT_REPLACEMENT = "unspecified_missing_kit_v1"
 CONTRACT = "wb_autoanswers_backlog_recovery_v1"
 T0_CONTRACT = "wb_autoanswers_t0_manifest_v1"
 DATABASE_FILENAME = AUTOANSWERS_DB_FILENAME
@@ -550,8 +551,13 @@ def _return_question_replacement(
     conn: sqlite3.Connection,
     job: Mapping[str, Any],
     feedback: Mapping[str, Any],
+    *, replacement_policy: str = RETURN_QUESTION_REPLACEMENT,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Explicit replacement of this reviewed error class, never fallback approval."""
+    source_route, primary_issue, script_name = {
+        RETURN_QUESTION_REPLACEMENT: ("wb_support", "WB_REFUND_STATUS", "return_question_replacement.mjs"),
+        MISSING_KIT_REPLACEMENT: ("wb_return", "MISSING_PARTS", "missing_kit_replacement.mjs"),
+    }[replacement_policy]
     job, feedback = dict(job), dict(feedback)
     result = json.loads(str(job["result_json"] or "{}"))
     raw = json.loads(str(feedback["raw_json"]))
@@ -570,7 +576,7 @@ def _return_question_replacement(
     ).fetchone()
     valid = (
         not archived and str(raw.get("id") or "") == str(job["feedback_id"])
-        and job["state"] == "needs_review" and job["final_route"] == "wb_support"
+        and job["state"] == "needs_review" and job["final_route"] == source_route
         and job["fallback_used"] and result.get("fallback_used") is True
         and job["hard_gates_passed"] and result.get("hard_gates_passed") is True
         and job["node_contract_valid"] and result.get("node_contract_valid") is True
@@ -581,8 +587,8 @@ def _return_question_replacement(
         and not job["last_error_code"] and not job["regeneration_required"]
         and not job["lease_owner"] and not job["lease_until"] and not publication
         and json.loads(str(job["review_reasons_json"])) == ["fallback_used"]
-        and (result.get("pipeline_result") or {}).get("primary_issue") == "WB_REFUND_STATUS"
-        and result.get("final_route") == "wb_support"
+        and (result.get("pipeline_result") or {}).get("primary_issue") == primary_issue
+        and result.get("final_route") == source_route
         and result.get("final_reply") == job["final_reply"]
         and final_reply_hash(str(job["final_reply"])) == job["final_reply_sha256"]
         and not job["case_code"] and not result.get("case_code")
@@ -603,13 +609,14 @@ def _return_question_replacement(
     payload = {
         "review": {
             "review_id": job["feedback_id"], "review_version": str(job["content_version"]),
+            "rating": content["rating"],
             "text": content["text"], "pros": content["pros"], "cons": content["cons"],
             "wb_tags": content["tags"],
         },
         "media": {"photos": content["media"], "video": {"present": bool(raw.get("video"))}},
         "processingKey": job["processing_key"], "existing": existing,
     }
-    script = ROOT / "packages/node/wb_autoanswers_v1_4_2/make_mvp/scripts/return_question_replacement.mjs"
+    script = ROOT / "packages/node/wb_autoanswers_v1_4_2/make_mvp/scripts" / script_name
     completed = subprocess.run(
         ["node", str(script)], input=canonical_json(payload), text=True,
         capture_output=True, timeout=20, check=False,
@@ -621,7 +628,7 @@ def _return_question_replacement(
     # Retain settled usage for audit; this replacement itself has no paid calls.
     promoted["usage"] = result.get("usage") or {}
     promoted["pipeline_result"] = {
-        "route": "seller_chat", "primary_issue": "OTHER_SPECIFIC", "outcome": "ready",
+        "route": "seller_chat", "primary_issue": "MISSING_PARTS" if replacement_policy == MISSING_KIT_REPLACEMENT else "OTHER_SPECIFIC", "outcome": "ready",
         "publication_action": "reply", "policy_version": replacement["policy_version"],
         "model_call_count": 0,
     }
@@ -641,8 +648,9 @@ def _apply_return_question_replacement(
     repo: AutoanswersRepository, conn: sqlite3.Connection, *, job: Mapping[str, Any],
     feedback: Mapping[str, Any], planned: Mapping[str, Any], policy_epoch: int,
     actor: str, at: datetime,
+    replacement_policy: str = RETURN_QUESTION_REPLACEMENT,
 ) -> None:
-    result, proof = _return_question_replacement(conn, job, feedback)
+    result, proof = _return_question_replacement(conn, job, feedback, replacement_policy=replacement_policy)
     if proof != planned["return_question_replacement"]:
         raise RuntimeError("generic return replacement changed after preview")
     _archive_original_job(conn, job, reason=proof["policy_version"], at=at)
@@ -669,7 +677,7 @@ def _apply_return_question_replacement(
     )
     repo._audit(
         conn, aggregate_type="processing_job", aggregate_id=str(job["processing_key"]),
-        event_type="generic_return_question_policy_replaced", actor_type="recovery", actor_id=actor,
+        event_type="missing_kit_clarification_policy_replaced" if replacement_policy == MISSING_KIT_REPLACEMENT else "generic_return_question_policy_replaced", actor_type="recovery", actor_id=actor,
         details={"proof": proof, "source_usage": result["usage"],
                  "retained_actual_cost_usd": job["actual_cost_usd"], "wb_posts": 0},
         at=at, previous_state=str(job["state"]), next_state=STATE_APPROVED,
@@ -709,7 +717,7 @@ def build_plan(
     remote: Mapping[str, Any],
     replacement_policy: str | None = None,
 ) -> dict[str, Any]:
-    if replacement_policy not in {None, RETURN_QUESTION_REPLACEMENT}:
+    if replacement_policy not in {None, RETURN_QUESTION_REPLACEMENT, MISSING_KIT_REPLACEMENT}:
         raise ValueError("unsupported replacement policy")
     feedback_ids = sorted(str(item["feedback_id"]) for item in manifest["items"])
     rows = {str(row["feedback_id"]): row for row in _target_rows(conn, feedback_ids)}
@@ -740,7 +748,7 @@ def build_plan(
                 raise RuntimeError("generic return replacement requires an existing reviewed job")
             full_job = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?", (row["processing_key"],)).fetchone()
             full_feedback = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?", (feedback_id,)).fetchone()
-            _, return_proof = _return_question_replacement(conn, full_job, full_feedback)
+            _, return_proof = _return_question_replacement(conn, full_job, full_feedback, replacement_policy=replacement_policy)
             if return_proof["source_content_hash"] != details_by_id[feedback_id]["content_hash"]:
                 raise RuntimeError("generic return replacement remote content changed")
         elif row and row.get("fallback_used") and not details_by_id[feedback_id]["answer_present"]:
@@ -760,7 +768,7 @@ def build_plan(
             audited_complete=audited_complete,
         )
         if return_proof:
-            action = "replace_generic_return_question"
+            action = "replace_unspecified_missing_kit" if replacement_policy == MISSING_KIT_REPLACEMENT else "replace_generic_return_question"
         if action == "readback_only":
             # A possible prior POST can never be repeated by this runner.
             if not details_by_id[feedback_id]["answer_present"]:
@@ -1404,14 +1412,15 @@ def apply_plan(
                 )
                 applied_actions.append({"feedback_id": feedback_id, "action": "safe_public_provenance_repaired" if repaired is not None else "publication_rebound"})
                 continue
-            if planned["action"] == "replace_generic_return_question":
+            if planned["action"] in {"replace_generic_return_question", "replace_unspecified_missing_kit"}:
                 if _content_hash(details[feedback_id]) != planned["remote_content_hash"]:
                     raise RuntimeError("generic return replacement fresh remote content changed")
                 _apply_return_question_replacement(
                     repo, conn, job=job, feedback=feedback, planned=planned,
                     policy_epoch=next_epoch, actor=actor, at=at,
+                    replacement_policy=replacement_policy,
                 )
-                applied_actions.append({"feedback_id": feedback_id, "action": "generic_return_question_replaced"})
+                applied_actions.append({"feedback_id": feedback_id, "action": "unspecified_missing_kit_replaced" if replacement_policy == MISSING_KIT_REPLACEMENT else "generic_return_question_replaced"})
                 continue
             evidence = AutoanswersRepository._completed_node_evidence(
                 conn, str(job["processing_key"])

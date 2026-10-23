@@ -13,6 +13,7 @@ from packages.application.wb_autoanswers_node_bridge import (
     NodeAutoanswersBridge,
     NodeBoundaryError,
     build_frozen_raw_input,
+    is_unspecified_missing_kit_input,
 )
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository, AutoanswersRuntimeError
 from packages.contracts.wb_autoanswers import (
@@ -45,6 +46,7 @@ class AutoanswersProcessingWorker:
         if claimed is None:
             return None
         key = str(claimed["processing_key"])
+        local_clarification = False
         try:
             # Recheck the exact enable/policy epoch for every processing kind,
             # including the zero-cost deterministic path.  A claim made before
@@ -94,7 +96,9 @@ class AutoanswersProcessingWorker:
             if detail is None:
                 raise AutoanswersRuntimeError("feedback not found", code="feedback_not_found")
             raw_input = build_frozen_raw_input(detail, processing_key=key)
-            self.repository.mark_provider_call_started(key, worker_id=self.worker_id)
+            local_clarification = is_unspecified_missing_kit_input(raw_input)
+            if not local_clarification:
+                self.repository.mark_provider_call_started(key, worker_id=self.worker_id)
             node = self.bridge.run(
                 processing_key=key,
                 raw_input=raw_input,
@@ -112,8 +116,10 @@ class AutoanswersProcessingWorker:
                 )
                 return {"processing_key": key, "state": stored["state"], "model_calls": 0}
             actual_cost = pipeline.get("estimated_cost_usd") or 0
-            self.repository.settle_budget(key, actual_cost_usd=actual_cost)
-            self.repository.record_provider_success()
+            self.repository.settle_budget(key, actual_cost_usd=actual_cost,
+                                          provider_call_succeeded=not local_clarification)
+            if not local_clarification:
+                self.repository.record_provider_success()
             pipeline_result = dict(result)
             if node.get("boundary_adapter"):
                 pipeline_result["server_boundary_adapter"] = dict(
@@ -142,6 +148,16 @@ class AutoanswersProcessingWorker:
                 "model_calls": int(pipeline.get("model_calls_this_run") or 0),
             }
         except NodeBoundaryError as exc:
+            if local_clarification:
+                # A local Node failure cannot establish provider spend, quota
+                # health or a shared provider cooldown.
+                if exc.retryable:
+                    self.repository.record_processing_retry(key, error_code=exc.code,
+                                                           retry_after_seconds=60, worker_id=self.worker_id)
+                else:
+                    self.repository.record_processing_terminal(key, error_code=exc.code, worker_id=self.worker_id)
+                return {"processing_key": key, "state": "retryable_error" if exc.retryable else "terminal_error",
+                        "error_code": exc.code, "model_calls": 0}
             if exc.partial_cost_usd > 0:
                 self.repository.record_failed_processing_usage(
                     key,

@@ -7,6 +7,7 @@ import path from "node:path";
 import {fileURLToPath} from "node:url";
 
 import {runJob} from "../wb_autoanswers_v1_4_2/make_mvp/scripts/orchestrator.mjs";
+import {isUnspecifiedMissingKit, MISSING_KIT_POLICY} from "../wb_autoanswers_v1_4_2/make_mvp/scripts/missing_kit_policy.mjs";
 import {calculateJobCost, usageRecord} from "../wb_autoanswers_v1_4_2/make_mvp/scripts/cost_accounting.mjs";
 import {MemoryStore} from "../wb_autoanswers_v1_4_2/make_mvp/scripts/memory_store.mjs";
 import {runDraftGuard} from "../wb_autoanswers_v1_4_2/make_mvp/scripts/draft_guard.mjs";
@@ -38,6 +39,7 @@ function assertEnvelope(envelope) {
     if (!envelope.raw_input || typeof envelope.raw_input !== "object") fail("INVALID_RAW_INPUT", "raw_input object required");
     if (!envelope.processing_key) fail("PROCESSING_KEY_REQUIRED", "processing_key required");
     if (!["fixture", "live"].includes(envelope.execution_mode)) fail("INVALID_EXECUTION_MODE", "execution_mode must be fixture or live");
+    if (envelope.local_policy !== undefined && envelope.local_policy !== MISSING_KIT_POLICY) fail("INVALID_LOCAL_POLICY", "unknown local policy");
   }
   if (envelope.operation === "guard_final") {
     const input = envelope.guard_input;
@@ -162,7 +164,12 @@ async function execute(envelope) {
   if (envelope.operation === "guard_final") return {verified, guard: await guardFinal(envelope.guard_input)};
   const store = new MemoryStore();
   const observedTrace = [];
-  const roleRunner = envelope.execution_mode === "fixture"
+  if (envelope.local_policy && !isUnspecifiedMissingKit(envelope.raw_input, envelope.raw_input.media)) {
+    fail("LOCAL_POLICY_SCOPE_MISMATCH", "local policy scope changed before execution");
+  }
+  const roleRunner = envelope.local_policy
+    ? () => fail("LOCAL_POLICY_PROVIDER_FORBIDDEN", "local policy cannot call a provider")
+    : envelope.execution_mode === "fixture"
     ? await fixtureRoleRunner(envelope.fixture_scenario)
     : liveRoleRunner(observedTrace);
   let result;

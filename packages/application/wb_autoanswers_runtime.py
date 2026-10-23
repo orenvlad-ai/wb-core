@@ -7140,7 +7140,8 @@ class AutoanswersRepository:
                 ).fetchone()
             )
 
-    def settle_budget(self, processing_key_value: str, *, actual_cost_usd: Any) -> None:
+    def settle_budget(self, processing_key_value: str, *, actual_cost_usd: Any,
+                      provider_call_succeeded: bool = True) -> None:
         actual = _money(actual_cost_usd)
         if actual < 0:
             raise ValueError("actual cost cannot be negative")
@@ -7179,13 +7180,14 @@ class AutoanswersRepository:
                 "UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET actual_cost_usd=?, updated_at=? WHERE processing_key=?",
                 (str(archived_total + failed_total + actual), iso_utc(now), processing_key_value),
             )
-            conn.execute(
-                """
-                UPDATE sheet_vitrina_v1_wb_autoanswers_runtime_state
-                SET last_successful_ai_call_at=?, updated_at=? WHERE singleton=1
-                """,
-                (iso_utc(now), iso_utc(now)),
-            )
+            if provider_call_succeeded:
+                conn.execute(
+                    """
+                    UPDATE sheet_vitrina_v1_wb_autoanswers_runtime_state
+                    SET last_successful_ai_call_at=?, updated_at=? WHERE singleton=1
+                    """,
+                    (iso_utc(now), iso_utc(now)),
+                )
 
     def record_failed_processing_usage(
         self,
