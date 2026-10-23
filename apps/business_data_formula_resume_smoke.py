@@ -47,9 +47,9 @@ class FileSystemd(FakeSystemd):
         return super().disable_now(unit)
 
     def _run(self, args):
-        if args == ['show', formula.BUYER_UNIT, '--property=InvocationID']:
+        if len(args) == 3 and args[0] == 'show' and args[1] in {formula.BUYER_UNIT, formula.FEEDBACK_UNIT} and args[2] == '--property=InvocationID':
             return SimpleNamespace(returncode=0, stdout='InvocationID=' +
-                self.states[formula.BUYER_UNIT]['properties']['InvocationID'] + '\n')
+                self.states[args[1]]['properties']['InvocationID'] + '\n')
         if args[0] == 'show':
             value = self.states[args[1]]
             props = dict(value['properties'],UnitFileState=value['is_enabled'],ActiveState=value['is_active'])
@@ -74,17 +74,19 @@ class FormulaResumeTests(unittest.TestCase):
         (self.runtime / pause.POLICY_FILENAME).chmod(0o600)
         self.systemd = FileSystemd()
         self.proc = self.root / 'proc'; self.proc.mkdir()
-        guarded_buyer = self._testMethodName.startswith('test_guarded_buyer')
-        if guarded_buyer:
+        guarded = self._testMethodName.startswith(('test_guarded_buyer', 'test_guarded_feedback'))
+        self.guarded_unit = formula.FEEDBACK_UNIT if self._testMethodName.startswith('test_guarded_feedback') else formula.BUYER_UNIT
+        guarded_sources = formula.FEEDBACK_GUARD_SOURCES if self.guarded_unit == formula.FEEDBACK_UNIT else formula.BUYER_GUARD_SOURCES
+        if guarded:
             boot = self.proc / 'sys/kernel/random/boot_id'; boot.parent.mkdir(parents=True)
             boot.write_text('11111111-2222-3333-4444-555555555555\n')
-            for relative in formula.BUYER_GUARD_SOURCES:
+            for relative in guarded_sources:
                 path = self.app / relative; path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes((ROOT / relative).read_bytes())
             native_read = formula._buyer_native_read
             def read_native(command):
-                if command == ['/usr/bin/systemctl', 'show', formula.BUYER_UNIT, '--property=InvocationID', '--no-pager']:
-                    return self.systemd._run(['show', formula.BUYER_UNIT, '--property=InvocationID']).stdout.encode()
+                if command == ['/usr/bin/systemctl', 'show', self.guarded_unit, '--property=InvocationID', '--no-pager']:
+                    return self.systemd._run(['show', self.guarded_unit, '--property=InvocationID']).stdout.encode()
                 return native_read(command)
             self.addCleanup(patch.stopall)
             patch.object(formula, '_buyer_native_read', side_effect=read_native).start()
@@ -115,9 +117,9 @@ class FormulaResumeTests(unittest.TestCase):
         for unit, value in self.systemd.states.items():
             fragment = self.units / unit
             data = self.original_artifact if unit == formula.UNIT else b'[Unit]\nDescription=Synthetic ordinary unit\n'
-            if guarded_buyer and unit == formula.BUYER_UNIT:
+            if guarded and unit == self.guarded_unit:
                 data = (ROOT / ('artifacts/registry_upload_http_entrypoint/systemd/' + unit)).read_bytes().replace(
-                    b'/opt/wb-core-runtime/state', str(self.runtime).encode())
+                    b'/opt/wb-core-runtime/state', str(self.runtime).encode()).replace(b'/opt/wb-core-runtime/app', str(self.app).encode())
                 artifact = self.app / ('artifacts/registry_upload_http_entrypoint/systemd/' + unit)
                 artifact.write_bytes(data)
                 value.update(is_enabled='static', is_active='failed')
@@ -133,8 +135,9 @@ class FormulaResumeTests(unittest.TestCase):
             if unit == formula.UNIT:
                 exec_line = next(line for line in data.decode().splitlines() if line.startswith('ExecStart='))[10:]
                 value['properties']['ExecStart'] = '{ path=/usr/bin/python3 ; argv[]=' + exec_line + ' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }'
-            if guarded_buyer and unit == formula.BUYER_UNIT:
-                value['properties']['ExecStart'] = '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 apps/wb_buyer_authenticated_collect.py --tick --runtime-dir ' + str(self.runtime) + ' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }'
+            if guarded and unit == self.guarded_unit:
+                command = next(line[10:] for line in data.decode().splitlines() if line.startswith('ExecStart='))
+                value['properties']['ExecStart'] = '{ path=/usr/bin/python3 ; argv[]=' + command + ' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }'
             if unit in {formula.UNIT, 'wb-core-sheet-vitrina-canary-restore.service'}:
                 value['properties']['ExecStart'] = value['properties']['ExecStart'].replace('start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0', 'start_time=[Thu 2026-10-08 19:31:08 UTC] ; stop_time=[Thu 2026-10-08 19:31:09 UTC] ; pid=2419611 ; code=exited ; status=0')
         self.dropin = self.units / (formula.UNIT + '.d') / '10-fixture.conf'
@@ -144,8 +147,8 @@ class FormulaResumeTests(unittest.TestCase):
             properties=dict(LoadState='loaded',MainPID='42',SubState='running'))
         from packages.application.business_data_schedule_profile import WAREHOUSE_TIMER
         self.systemd.states[WAREHOUSE_TIMER].update(is_enabled='enabled',is_active='active')
-        if guarded_buyer:
-            self.systemd.states[formula.BUYER_UNIT.replace('.service', '.timer')].update(is_enabled='enabled', is_active='active')
+        if guarded:
+            self.systemd.states[self.guarded_unit.replace('.service', '.timer')].update(is_enabled='enabled', is_active='active')
         self.options = dict(systemd=self.systemd,activity_reader=self.activity,proc_root=self.proc)
         self.pause_options = dict(**self.options,window_id='formula-pause-001',actor='test',reason='synthetic deploy')
         self.addCleanup(patch.stopall)
@@ -197,7 +200,7 @@ class FormulaResumeTests(unittest.TestCase):
 
     def guarded_buyer_fixture(self):
         plan = self.prepare()
-        timer = formula.BUYER_UNIT.replace('.service', '.timer')
+        timer = self.guarded_unit.replace('.service', '.timer')
         with self.assertRaisesRegex(RuntimeError, 'synthetic buyer timer boundary'):
             self.apply(plan, _fault=lambda p: (_ for _ in ()).throw(RuntimeError('synthetic buyer timer boundary'))
                 if p == 'timer:start:' + timer else None)
@@ -205,26 +208,26 @@ class FormulaResumeTests(unittest.TestCase):
         start = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=1)
         stop = start + timedelta(seconds=1)
         fmt = lambda value: value.strftime('%a %Y-%m-%d %H:%M:%S UTC')
-        props = self.systemd.states[formula.BUYER_UNIT]['properties']
+        props = self.systemd.states[self.guarded_unit]['properties']
         props.update(ActiveState='inactive', SubState='dead', MainPID='0', Result='success',
             ExecMainCode='1', ExecMainStatus='0', ExecMainStartTimestamp=fmt(start), InvocationID='a' * 32)
         props['ExecStart'] = re.sub(r' ; start_time=.*', ' ; start_time=[' + fmt(start) +
             '] ; stop_time=[' + fmt(stop) + '] ; pid=2668333 ; code=exited ; status=0 }', props['ExecStart'])
-        self.systemd.states[formula.BUYER_UNIT]['is_active'] = 'inactive'
+        self.systemd.states[self.guarded_unit]['is_active'] = 'inactive'
         self.systemd.states[timer]['properties']['LastTriggerUSec'] = fmt(start)
-        description = 'WB Core account-scoped buyer price observations'
-        messages = ['Starting ' + formula.BUYER_UNIT + ' - ' + description + '...',
+        description = 'WB Core Feedbacks Auto Complaints Due Tick' if self.guarded_unit == formula.FEEDBACK_UNIT else 'WB Core account-scoped buyer price observations'
+        messages = ['Starting ' + self.guarded_unit + ' - ' + description + '...',
             '{"status": "skipped_maintenance", "reason": "skipped_maintenance"}',
-            formula.BUYER_UNIT + ': Deactivated successfully.', 'Finished ' + formula.BUYER_UNIT + ' - ' + description + '.']
+            self.guarded_unit + ': Deactivated successfully.', 'Finished ' + self.guarded_unit + ' - ' + description + '.']
         events = []
         for i, micros in enumerate((10000, 1300000, 1400000, 1500000)):
             event = dict(MESSAGE=messages[i], _BOOT_ID='11111111222233334444555555555555',
-                _PID='2668333' if i == 1 else '1', _SYSTEMD_UNIT=formula.BUYER_UNIT if i == 1 else 'init.scope',
+                _PID='2668333' if i == 1 else '1', _SYSTEMD_UNIT=self.guarded_unit if i == 1 else 'init.scope',
                 __REALTIME_TIMESTAMP=str(int(start.timestamp()) * 1000000 + micros))
             event.update(__SEQNUM_ID='c' * 32, __SEQNUM=str(i + 1), __MONOTONIC_TIMESTAMP=str(micros))
             event['__CURSOR'] = 's=' + 'c' * 32 + ';i=' + format(i + 1, 'x') + ';b=' + event['_BOOT_ID'] + ';m=' + format(micros, 'x') + ';t=' + format(int(event['__REALTIME_TIMESTAMP']), 'x') + ';x=1'
             if i == 1:event['_SYSTEMD_INVOCATION_ID'] = 'a' * 32
-            else:event['UNIT'] = formula.BUYER_UNIT
+            else:event['UNIT'] = self.guarded_unit
             events.append(event)
         return plan, events
 
@@ -260,6 +263,151 @@ class FormulaResumeTests(unittest.TestCase):
                 formula._observe(self.runtime, plan, **self.options)
         state['phase'] = 'restoring'; formula._save(self.runtime, state, 'synthetic_restoring_boundary')
         with self.assertRaises(RuntimeError):self.prepare()
+
+    def test_guarded_feedback_fresh_skip_resumes_without_timer_resend(self):
+        plan, events = self.guarded_buyer_fixture()
+        timer = formula.FEEDBACK_UNIT.replace('.service', '.timer')
+        restored_calls = [c for c in self.systemd.calls if c[1] == timer]
+        from packages.application.business_data_procedure_admission import guarded_cli
+        called, output = [], io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(guarded_cli(lambda: called.append('main'), argv=['--runtime-dir', str(self.runtime)]), 0)
+        self.assertEqual(called, [])
+        self.assertEqual(output.getvalue().strip(), events[1]['MESSAGE'])
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            receipt = self.apply(plan)
+        proof = receipt['guarded_service_completions'][formula.FEEDBACK_UNIT]
+        self.assertEqual(proof['source_hashes'], formula.FEEDBACK_GUARD_SOURCES)
+        self.assertEqual(proof['original_pair'], ['static', 'failed'])
+        self.assertEqual(proof['observed_pair'], ['static', 'inactive'])
+        self.assertFalse(proof['original_service_pair_restored'])
+        self.assertEqual([c for c in self.systemd.calls if c[1] == timer], restored_calls)
+        self.assertEqual(formula.load(self.runtime, OP)['plan'], plan)
+        self.assertEqual(pause.load_state(self.runtime)['baseline'], self.baseline)
+        self.assertEqual(pause.load_state(self.runtime)['restore_readback'], receipt)
+        self.assertEqual(formula.load(self.runtime, OP)['phase'], 'released')
+
+    def test_guarded_feedback_prepared_and_foreign_operation_refuse(self):
+        plan, events = self.guarded_buyer_fixture()
+        state = deepcopy(formula.load(self.runtime, OP)); calls = list(self.systemd.calls)
+        state['phase'] = 'prepared'; formula._save(self.runtime, state, 'synthetic_prepared')
+        with patch.object(formula, '_buyer_journal', side_effect=AssertionError('no journal before restoring authority')):
+            with self.assertRaisesRegex(RuntimeError, 'original restoring authority'):
+                formula._observe(self.runtime, plan, **self.options)
+        state['phase'] = 'restoring'; formula._save(self.runtime, state, 'synthetic_restoring')
+        with self.assertRaises(RuntimeError):self.prepare()
+        owner_path = self.runtime / deploy.FILENAME; original = owner_path.read_bytes()
+        owner = deploy.load(self.runtime); owner['operation_id'] = 'foreign-owner'; deploy._save(self.runtime, owner)
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'same completed canonical deploy owner'):
+                formula._observe(self.runtime, plan, **self.options)
+        owner_path.write_bytes(original)
+        self.assertEqual(self.systemd.calls, calls)
+        self.assertTrue(barrier.barrier_status(self.runtime)['active'])
+
+    def test_guarded_feedback_incomplete_forged_foreign_or_stale_journal_refuses(self):
+        plan, events = self.guarded_buyer_fixture()
+        cases = [[], events[:3], events + [events[-1]]]
+        for key, value in [('_SYSTEMD_UNIT', formula.BUYER_UNIT), ('_PID', '2668334'),
+                ('_SYSTEMD_INVOCATION_ID', 'b' * 32), ('_BOOT_ID', 'b' * 32),
+                ('MESSAGE', '{"status":"success"}'), ('__REALTIME_TIMESTAMP', '1')]:
+            changed = deepcopy(events); changed[1][key] = value; cases.append(changed)
+        state = deepcopy(formula.load(self.runtime, OP)); calls = list(self.systemd.calls)
+        for changed in cases:
+            with self.subTest(events=changed), patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(changed)):
+                with self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
+        self.assertEqual(formula.load(self.runtime, OP), state)
+        self.assertEqual(self.systemd.calls, calls)
+
+    def test_guarded_feedback_source_config_terminal_timer_and_foreign_unit_refuse(self):
+        plan, events = self.guarded_buyer_fixture()
+        props = self.systemd.states[formula.FEEDBACK_UNIT]['properties']
+        calls = list(self.systemd.calls)
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            for relative in formula.FEEDBACK_GUARD_SOURCES:
+                path = self.app / relative; original = path.read_bytes(); path.write_bytes(original + b'\n# foreign\n')
+                with self.assertRaisesRegex(RuntimeError, 'admission source'):formula._observe(self.runtime, plan, **self.options)
+                path.write_bytes(original)
+            for key, value in [('ExecMainStatus', '1'), ('MainPID', '9'), ('InvocationID', 'b' * 32),
+                    ('ExecStart', props['ExecStart'].replace('--runtime-dir', '--foreign-option'))]:
+                original = props.get(key); props[key] = value
+                with self.subTest(key=key), self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
+                props[key] = original
+            fragment = self.units / formula.FEEDBACK_UNIT; original = fragment.read_bytes()
+            fragment.write_bytes(original + b'\n[Service]\nEnvironment=FOREIGN=1\n')
+            with self.assertRaisesRegex(RuntimeError, 'foreign unit configuration'):
+                formula._observe(self.runtime, plan, **self.options)
+            fragment.write_bytes(original)
+            dropin = self.units / (formula.FEEDBACK_UNIT + '.d') / 'foreign.conf'
+            dropin.parent.mkdir(); dropin.write_text('[Service]\nEnvironment=FOREIGN=1\n')
+            original = props['DropInPaths']; props['DropInPaths'] = str(dropin)
+            with self.assertRaisesRegex(RuntimeError, 'foreign unit configuration'):
+                formula._observe(self.runtime, plan, **self.options)
+            props['DropInPaths'] = original
+            timer = formula.FEEDBACK_UNIT.replace('.service', '.timer')
+            self.systemd.states[timer]['is_active'] = 'inactive'
+            with self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
+            self.systemd.states[timer]['is_active'] = 'active'
+            foreign = self.systemd.states[DRAINED_UNIT]; original = foreign['is_active']; foreign['is_active'] = 'failed'
+            with self.assertRaisesRegex(RuntimeError, 'held service enabled/activity differs'):
+                formula._observe(self.runtime, plan, **self.options)
+            foreign['is_active'] = original
+        self.assertEqual(self.systemd.calls, calls)
+
+    def test_guarded_feedback_fresh_current_invocation_required(self):
+        plan, events = self.guarded_buyer_fixture()
+        self.systemd.states[formula.FEEDBACK_UNIT]['properties']['InvocationID'] = 'b' * 32
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'native identity/outcome'):
+                formula._observe(self.runtime, plan, **self.options)
+        fresh = deepcopy(events); fresh[1]['_SYSTEMD_INVOCATION_ID'] = 'b' * 32
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(fresh)):
+            receipt = self.apply(plan)
+        self.assertEqual(receipt['guarded_service_completions'][formula.FEEDBACK_UNIT]['invocation_id'], 'b' * 32)
+
+    def test_guarded_feedback_invocation_or_writer_change_during_journal_refuses(self):
+        plan, events = self.guarded_buyer_fixture()
+        props = self.systemd.states[formula.FEEDBACK_UNIT]['properties']
+        def changed_invocation(*args, **kwargs):
+            props['InvocationID'] = 'b' * 32
+            return self.buyer_journal_bytes(events)
+        with patch.object(formula, '_buyer_journal', side_effect=changed_invocation):
+            with self.assertRaisesRegex(RuntimeError, 'journal readback changed'):
+                formula._observe(self.runtime, plan, **self.options)
+        props['InvocationID'] = 'a' * 32
+        current = pause.readback(self.runtime, **self.options); fresh = deepcopy(current)
+        fresh['writer_processes'] = [{'pid':'new-writer'}]
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)), \
+                patch.object(pause, 'readback', side_effect=[deepcopy(current), fresh]):
+            with self.assertRaisesRegex(RuntimeError, 'post-journal'):
+                formula._observe(self.runtime, plan, **self.options)
+        self.assertEqual(formula.load(self.runtime, OP)['phase'], 'restoring')
+
+    def test_guarded_feedback_committed_evidence_cannot_be_replaced(self):
+        plan, events = self.guarded_buyer_fixture()
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            with self.assertRaisesRegex(RuntimeError, 'synthetic committed crash'):
+                self.apply(plan, _fault=lambda point: (_ for _ in ()).throw(RuntimeError('synthetic committed crash')) if point == 'committed' else None)
+        before = deepcopy(formula.load(self.runtime, OP)); calls = list(self.systemd.calls)
+        self.systemd.states[formula.FEEDBACK_UNIT]['properties']['InvocationID'] = 'b' * 32
+        changed = deepcopy(events); changed[1]['_SYSTEMD_INVOCATION_ID'] = 'b' * 32
+        with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(changed)):
+            with self.assertRaisesRegex(RuntimeError, 'retained guarded service completion differs'):
+                self.apply(plan)
+        self.assertEqual(formula.load(self.runtime, OP), before)
+        self.assertEqual(self.systemd.calls, calls)
+        self.assertTrue(barrier.barrier_status(self.runtime)['active'])
+
+    def test_guarded_feedback_reset_terminal_retains_native_identity(self):
+        plan, events = self.guarded_buyer_fixture()
+        fields = self.buyer_reset_fields(); props = self.systemd.states[formula.FEEDBACK_UNIT]['properties']
+        props['ExecStart'] = re.sub(r' ; start_time=.*', ' ; ' + RESET_TAIL + ' }', props['ExecStart'])
+        payload = lambda: ('\n'.join(k + '=' + v for k, v in fields.items()) + '\n').encode()
+        with self.buyer_reset_native_read(payload), patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
+            receipt = self.apply(plan)
+        proof = receipt['guarded_service_completions'][formula.FEEDBACK_UNIT]
+        self.assertEqual([proof[k] for k in ('pid', 'start', 'stop')],
+            [fields[k] for k in ('ExecMainPID', 'ExecMainStartTimestamp', 'ExecMainExitTimestamp')])
 
     def test_guarded_buyer_missing_stale_foreign_malformed_journal_refuses(self):
         plan, events = self.guarded_buyer_fixture()
@@ -410,7 +558,7 @@ class FormulaResumeTests(unittest.TestCase):
         self.assertTrue(all(c[:6] == ['/usr/bin/journalctl', '--no-pager', '--output=json', '--all', '-n', '5'] for c in commands))
 
     def buyer_reset_fields(self):
-        props = self.systemd.states[formula.BUYER_UNIT]['properties']
+        props = self.systemd.states[self.guarded_unit]['properties']
         terminal = re.search(r' ; start_time=\[([^]]+)\] ; stop_time=\[([^]]+)\] ; pid=([1-9][0-9]*) ; code=exited ; status=0 \}$', props['ExecStart'])
         return dict(ExecMainPID=terminal[3], ExecMainStartTimestamp=terminal[1],
             ExecMainExitTimestamp=terminal[2], InvocationID=props['InvocationID'])
@@ -418,7 +566,7 @@ class FormulaResumeTests(unittest.TestCase):
     @contextmanager
     def buyer_reset_native_read(self, payload):
         native_read = formula._buyer_native_read
-        command = ['/usr/bin/systemctl', 'show', formula.BUYER_UNIT,
+        command = ['/usr/bin/systemctl', 'show', self.guarded_unit,
             '--property=ExecMainPID,ExecMainStartTimestamp,ExecMainExitTimestamp,InvocationID', '--no-pager']
         with patch.object(formula, '_buyer_native_read', side_effect=lambda args:
                 payload() if args == command else native_read(args)):

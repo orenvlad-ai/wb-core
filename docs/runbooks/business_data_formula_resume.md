@@ -92,13 +92,13 @@ release. Root reviews the change before any production use.
 ### One bounded recovery when the formula-changing deploy is already held
 
 If the completed original deploy changed the formula pin and its older resume
-tool rejects ONLY the recognized runtime tails above, or the exact guarded buyer
-completion described below, another canonical deploy
+tool rejects ONLY the recognized runtime tails above, or one of the exact pinned
+guarded completions described below, another canonical deploy
 claim cannot pass the original baseline. Do not reset claim or rewrite baseline.
 Root may authorize a private recovery ONLY after independent review and trusted
 Gate PASS of the exact fix. This is no generic force/fallback command.
 
-The only additional service-state case is the canonical buyer collector which
+The original additional service-state case is the canonical buyer collector which
 was `static/failed` (exit-code/status 1) in the original hold, then completed as
 `static/inactive/dead`, PID 0, exited 0/success because its restored original
 enabled/active timer launched the native CLI while the original barrier was
@@ -109,6 +109,17 @@ the already durable same-plan restoring/committed operation can prove it.
 
 The recovery independently pins the installed buyer CLI, procedure admission
 and barrier source bytes to reviewed base e47c7aa78b48a3cecb6f45506bab42ee46859d95.
+The same proof also admits the single canonical
+`wb-core-feedbacks-auto-complaints-tick.service` transition from
+`static/failed` (exit-code/status 1 in the original hold) to
+`static/inactive/dead`, PID 0, exited 0/success. Its restored original timer must
+have run only the native `skipped_maintenance` guard before main. Its installed
+CLI/admission/barrier bytes are independently pinned to reviewed base
+`8ed6e3eecbe84695934c80033a1b341feb565e38`; the exact absolute CLI command,
+canonical fragment and all unchanged drop-ins remain mandatory. No other service
+or transition is admitted, and simultaneous semantic deviations of both pinned
+services still refuse. Preview and prepared transitions never use this exception.
+
 It retains exact configuration/digests, original timer target, unchanged raw
 controls, completed owner/runtime/formula authority and original window/baseline.
 A fresh bounded native journal read must prove one complete start/guarded-skip/
@@ -171,6 +182,14 @@ and native wakeup; no fresh candidate receipt format is invented. After proven
 resume, a fresh native pause/window and ordinary canonical release can deploy the
 fix. No new deploy claim is attempted under the blocked original window, and
 canonical deploy guards remain intact.
+
+For the feedback recovery, retain the existing reviewed plan and restoring
+operation. Earlier journal exports are diagnostic evidence only: every recovery
+observation reads the CURRENT native InvocationID, PID, timestamps and complete
+four-event journal. A later valid guarded invocation may be proved while the
+operation is still restoring. Once committed, the retained invocation evidence
+cannot be replaced; a later invocation refuses the saved receipt. Already restored
+timer commands are skipped by actual pair readback, never replayed by a fresh plan.
 
 Preview/status never provision transition records or submit timer commands.
 Preview takes `--runtime-dir`, `--app-dir`, `--env-file`, `--operation-id` (the
