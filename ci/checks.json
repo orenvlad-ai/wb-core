@@ -1125,6 +1125,8 @@
         "ci/**",
         "apps/github_release_runner.py",
         "apps/github_release_runner_smoke.py",
+        "apps/ads_closed_day_recovery*.py",
+        "packages/application/ads_historical_recovery.py",
         "apps/production_apply_adapters.py",
         "apps/production_apply_adapters_smoke.py",
         "apps/production_apply_launcher.py",
@@ -1136,6 +1138,7 @@
         ["python3", "ci/release_dispatch_smoke.py"],
         ["python3", "ci/post_merge_release_recovery_smoke.py"],
         ["python3", "ci/post_merge_completion_recovery_smoke.py"],
+        ["python3", "apps/ads_closed_day_recovery_smoke.py"],
         ["python3", "apps/production_apply_adapters_smoke.py"],
         ["python3", "apps/production_apply_launcher_smoke.py"]
       ],

@@ -103,6 +103,13 @@ Historical recovery schema `ads_historical_recovery_v4` uses the official campai
 
 # 4. Decimal formulas
 
+For historical Ads recovery, active/paused campaign creation timestamps are
+read with complete ID coverage from official `/api/advert/v2/adverts`. A
+campaign created after the requested interval in the WB `Europe/Moscow`
+calendar is retained in the source manifest with its timestamp and an explicit
+exclusion reason. Missing or invalid metadata blocks confirmation; a late
+evening of the target WB day is never excluded by the operator's timezone.
+
 Formula version is `partner_report_profitability_ui_first_v4` and schema version is `partner_report_v4`. The inherited Finance aggregate retains full `net_revenue`, but exposes `covered_net_revenue`, `sales_without_cost_rub`, `orders_without_cost`, optional `units_without_cost`, `profit_coverage_status` and reason evidence. Uncovered sales enter neither the margin/profit numerator nor the profitability-revenue denominator; a 500-ruble uncovered sale can never become 500 rubles of profit.
 
 For each week:
@@ -151,6 +158,11 @@ At internal Decimal working precision, every explicit main/subrow account catego
 
 # 5. UI contract and performance
 
+The channel cost snapshot reads the common-inventory reserve lazily, on the
+same open read connection, only when pooled FBS cost is absent. A covered
+pooled sale does not decode archived ready plans; an actual reserve lookup
+retains the existing same-SKU, exact-day rules and is loaded once per snapshot.
+
 Clicking `Сформировать` immediately shows loading and a visible cancel action. A 30-second AbortController timeout produces a human-readable error. The preview, blockers and source coverage appear directly below settings; blockers are above the table. Available values remain visible in an incomplete preview while missing dependent values stay absent. Excel is enabled only for `status=ready`.
 
 The table has metrics in rows, weeks in columns and `Итого за период`; its first metric column is sticky. At ~390 px, settings/messages/actions remain within the viewport and horizontal scrolling belongs only to the table.
@@ -177,6 +189,7 @@ ZIP, raw Finance workbook, ads/cost evidence workbooks and package privacy scann
 - public route allowlist: `python3 apps/registry_upload_http_entrypoint_public_routes_smoke.py`;
 - authenticated production read-only acceptance: hosted `finance-ui-flow`; passed status requires ready preview, empty blockers, visible table, real XLSX download, workbook structure/content checks, UI/XLSX reconciliation, desktop/narrow screenshots and no fatal browser/network errors.
 - production raw-operation reconciliation: hosted `partner-finance-diagnostic --output <external-0600-json>`.
+- missing official Ads days: `ads_closed_day_recovery_v1` through Production Apply consumes an exact reviewed `ads_historical_recovery_v4` plan, preserves target before-images in private evidence and delegates transactional publication/readback to the existing recovery service. It inserts only absent accepted closed-day slots and their closure rows; it never rebuilds ready plans, Finance or COGS. Ambiguous attempts require readback of the same operation.
 - production-scale diagnostic memory contract: `python3 apps/partner_finance_production_diagnostic_scale_smoke.py` (300,013 streamed rows, fail-closed group/candidate pressure, 12,000 invalid-JSON rows reduced to bounded evidence, bounded peak RSS, SQLite unchanged).
 
 The flow records every attempted preview POST before asserting its outcome. JSON failures retain HTTP status, application code, human-readable error and blockers. A non-JSON proxy/runtime response retains HTTP status plus the bounded `response_not_json` code without copying its HTML body into evidence. Neither failure can produce `status=passed`.
