@@ -61,14 +61,28 @@ class WebVitrinaManagementHistoryAdapter:
 
     def build(self, request: dict[str, Any], operation_id: str, conn: Any) -> dict[str, Any]:
         source = request["source"]
-        source_day = date.fromisoformat(source["column_date"])
         days = sorted(set(request["dates"]))
-        if not days or len(days) > 31 or any(date.fromisoformat(d) > source_day for d in days):
+        last_known = request.get('last_known_as_of') is True
+        source_day = date.fromisoformat(source["column_date"]) if not last_known else None
+        if not days or len(days) > 31 or (not last_known and any(date.fromisoformat(d) > source_day for d in days)):
             raise ValueError("estimate-date-scope-invalid")
         if digest(source) != request["source_sha256"]:
             raise ValueError("frozen-source-digest-mismatch")
         proxy_only = request.get('recalculate_proxy_only') is True
-        if proxy_only:
+        if last_known:
+            from packages.business_time import current_business_date_iso
+            from packages.application.vitrina_last_known_cost import capture_source
+            today = current_business_date_iso(datetime.now(timezone.utc))
+            if (proxy_only or request.get('current_only') or request.get('complete_day_sources')
+                    or any(date.fromisoformat(d) >= date.fromisoformat(today) for d in days)):
+                raise ValueError('last-known-cost-requires-past-dates-only')
+            active = conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()
+            if active is None or active[0] != source['bundle_version']:
+                raise ValueError('last-known-cost-active-bundle-required')
+            current = capture_source(request['runtime_dir'], dates=days, bundle_version=source['bundle_version'])
+            if digest(current) != request['source_sha256']:
+                raise ValueError('last-known-cost-source-drift')
+        elif proxy_only:
             from packages.business_time import current_business_date_iso
             if (request.get('current_only') or request.get('complete_day_sources') or source['costs']
                     or source['column_date'] != current_business_date_iso(datetime.now(timezone.utc))):
@@ -85,7 +99,7 @@ class WebVitrinaManagementHistoryAdapter:
             if digest(current)!=request['source_sha256']: raise ValueError('current-source-cas-drift')
         elif any(d >= source['column_date'] for d in days):
             raise ValueError('historical-repair-must-precede-source-date')
-        for key, cell in source["costs"].items():
+        for key, cell in ({} if last_known else source["costs"]).items():
             if cell.get("source") != "official_fbs_management_inventory_v1" or cell.get("source_as_of_date") != str(source_day):
                 raise ValueError("frozen-source-provenance-invalid")
             number = Decimal(cell["management_value"])
@@ -122,7 +136,11 @@ class WebVitrinaManagementHistoryAdapter:
             if record["bundle_version"] != source["bundle_version"]:
                 continue
             facts=project_complete_day(plan,sources=factual_sources,conn=conn,bundle_version=record['bundle_version'],operation_id=operation_id) if factual_sources else {'plan':plan,'changes':[]}
-            if proxy_only:
+            if last_known:
+                from packages.application.vitrina_last_known_projection import project_last_known
+                result = project_last_known(plan, dates=days, source=source, parameters=params,
+                                            operation_id=operation_id)
+            elif proxy_only:
                 result = {'plan': plan, 'changes': [], 'remaining': []}
                 for day in days:
                     revised = recalculate_dated_proxy(result['plan'], day=day, parameters=params[day], operation_id=operation_id)
