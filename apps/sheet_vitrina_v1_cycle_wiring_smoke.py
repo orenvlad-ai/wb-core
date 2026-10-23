@@ -172,9 +172,10 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(self.case.runtime.load_sheet_vitrina_ready_snapshot().as_of_date, '2026-04-19')
         closed = ClosedBacklog(entry.source_adapter).status()
         self.assertTrue(all(item['state'] == 'acknowledged' for item in closed['dates'].values()))
-        # Canonical main reuses its seeded accepted yesterday, and requests
-        # current exactly once. Closure excludes both main dates.
-        self.assertEqual(self.case.counters['seller_funnel_block'].request_dates, [*OLD, '2026-04-20'])
+        # Older accepted history stays frozen; yesterday is refreshed and
+        # current is requested once. Closure excludes both main dates.
+        self.assertEqual(self.case.counters['seller_funnel_block'].request_dates,
+            [*OLD, '2026-04-19', '2026-04-20'])
         # Canonical scope includes cached groups too; zero transport calls for
         # an admitted cache are not exclusion of that source group.
         main_summary = entry.source_adapter.collected_source_summary(full_summary.call_args.args[0])
@@ -232,7 +233,8 @@ class WiringTests(unittest.TestCase):
         with self.assertRaisesRegex(CycleStageFailure, 'fixed_domain_failed'):
             self.execute(entry)
         self.assertFalse(any(event.startswith('ready:') or event == 'rolling14' for event in entry.events))
-        self.assertEqual(self.case.counters['seller_funnel_block'].request_dates, [*OLD,'2026-04-20'])
+        self.assertEqual(self.case.counters['seller_funnel_block'].request_dates,
+            [*OLD, '2026-04-19', '2026-04-20'])
     def test_clock_crossing_inside_a_stage_is_failure_before_following_effects(self):
         entry = FixedDomainEntry(self.case)
         original = entry._cycle_finance_sources
