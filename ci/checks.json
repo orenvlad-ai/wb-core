@@ -339,13 +339,15 @@
         "apps/business_data_cycle_owned_integration_smoke.py",
         "packages/application/sheet_vitrina_v1_closed_backlog.py",
         "apps/sheet_vitrina_v1_local_derive_smoke.py",
+        "apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py",
+        "apps/sheet_vitrina_yesterday_refetch_smoke.py",
         "packages/application/registry_upload_http_entrypoint.py",
         "packages/application/sheet_vitrina_v1_live_plan.py",
         "packages/application/wb_finance_daily.py",
         "packages/application/web_vitrina_snapshot_admission.py",
         "apps/web_vitrina_history_candidate_build.py"
       ],
-      "commands": [["python3", "apps/sheet_vitrina_v1_cycle_smoke.py"], ["python3", "apps/sheet_vitrina_v1_cycle_wiring_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"], ["python3", "apps/sheet_vitrina_v1_local_derive_smoke.py"]],
+      "commands": [["python3", "apps/sheet_vitrina_v1_cycle_smoke.py"], ["python3", "apps/sheet_vitrina_v1_cycle_wiring_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"], ["python3", "apps/sheet_vitrina_v1_local_derive_smoke.py"], ["python3", "apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py"], ["python3", "apps/sheet_vitrina_yesterday_refetch_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "wb_buyer_support": {
