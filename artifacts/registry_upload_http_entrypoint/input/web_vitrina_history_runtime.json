@@ -2,7 +2,7 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:f662f4f55b57b5108bf6986b10938857f08844aba102202fa199379f4b1a6404",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:a1ff2cb2d620ead55a9bec5f39d24a71782eca234722733dca1579899f8dde24",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
     "packages/application/sheet_vitrina_v1_web_vitrina.py": "5c5530e35e1b87520a0b536855d37e821e11c6029b12cd09d5a900688d986a07",
@@ -24,7 +24,7 @@
     "packages/application/web_vitrina_view_model.py": "6111ca481b561d24f98a74cf1be075070318430408749985b18e81b21185e460",
     "packages/application/web_vitrina_gravity_table_adapter.py": "1b971891e53a0ae468540db90b2d65814b26c603823e9f55e6390fbd3bdbf95e",
     "packages/application/sheet_vitrina_v1_temporal_policy.py": "dbf20c46d57526a4c7db72f8dd089d99e2a12ac0fad9eb435c6cd854835e5e47",
-    "packages/application/sheet_vitrina_v1_live_plan.py": "9581531f628125baeb58a20729665b83476e7ef883e658a7a86a3d83b3a78d2a",
+    "packages/application/sheet_vitrina_v1_live_plan.py": "2772b7529df8e839e3f383b2c759b84161db6ab7f36ff1f9cedb6f7e53995977",
     "packages/application/web_vitrina_group_blocks.py": "2a6c4a42a815b00fc448140b5ec57b0cc1234a8bfb813ee68b73754b8f336992",
     "packages/application/vitrina_catalog.py": "22bc533476dc7452d4f0fd4b2ca62265fd8bca1263133196bf1a322cf57ea1e1",
     "packages/application/promo_historical_recovery.py": "9b97deeb91faa662cd89023b2dc197fabfc9a6ee17a519f92f30c57d167d6f55",
