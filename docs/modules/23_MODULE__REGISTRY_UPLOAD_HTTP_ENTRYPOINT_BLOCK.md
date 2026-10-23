@@ -497,6 +497,7 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - если valid exact-date truth ещё не принят, auto/retry contour создаёт или продолжает persisted retry state `closure_pending / closure_retrying / closure_rate_limited / closure_exhausted`;
   - invalid / missing / incomplete candidate не принимается как final closed truth;
   - already accepted closed snapshot не может быть затёрт later invalid attempt.
+  - Для Group A календарное вчера (по Asia/Yekaterinburg) повторно собирается на каждом refresh: первый ответ после полуночи не фиксирует окончательные показы/открытия/CTR. Новый exact-date payload принимается только при валидной serving provenance, не меньшем охвате ранее принятых SKU и не более старом source clock. При отказе сохраняются прежние значения и долг повторной попытки. Более старые accepted даты и складские снимки этим правилом не пересобираются.
   - full refresh и group refresh must not overwrite previously confirmed visible metric cells with blanks when a selected source/date status is `error/missing/not_found/blocked/not_available`; they keep prior cells and still update STATUS/job truth with the exact upstream or runtime blocker.
 - Source-aware slot reduction now follows the policy tag rather than a coarse worst-slot rule:
   - `seller_funnel_snapshot` и `web_source_snapshot` остаются полноценными two-slot sources; problematic `today_current` keeps source/card/aggregate yellow or red.

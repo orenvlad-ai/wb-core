@@ -408,6 +408,21 @@ def cleaner_command_checks():
         assert not any(len(c)>1 and c[1].endswith('_browser_smoke.py') and c[1]!=script for c in plan['commands']),plan
 
 
+def yesterday_refetch_group_checks():
+    scripts = (
+        "apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py",
+        "apps/sheet_vitrina_yesterday_refetch_smoke.py",
+    )
+    plan = build_plan_from_paths(
+        pull_request=73, base=BASE, head=HEAD, paths=[scripts[1]],
+        file_exists=lambda _, path: path in scripts,
+    )
+    verify_plan(plan)
+    assert plan["groups"] == ["sheet_vitrina_cycle"], plan
+    assert all(["python3", script] in plan["commands"] for script in scripts), plan
+
+
+
 def payment_pdf_dependency_checks():
     exists = lambda _, path: (select_checks.ROOT / path).is_file()
     scripts = (
@@ -1037,6 +1052,7 @@ def main() -> None:
     documentation_only_checks()
     autoanswers_mjs_checks()
     cleaner_command_checks()
+    yesterday_refetch_group_checks()
     # The hosted system Python may install into user-site, which -I correctly
     # excludes. Dependency install, trusted harness and nested Python must share
     # the same ephemeral venv; the existing launcher smoke exercises -I for real.

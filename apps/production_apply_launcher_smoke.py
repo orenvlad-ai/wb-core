@@ -131,6 +131,7 @@ expected = {
     "promo_archive_publication_v1",
     "finance_daily_publication_v1",
     "ads_partial_publication_v1",
+    "ads_closed_day_recovery_v1",
     "fbs_snapshot_accounting_v1",
     "finance_payout_reconcile_v1",
     "supplier_invoice_revision_v1",

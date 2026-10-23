@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -16,8 +17,10 @@ if str(ROOT) not in sys.path:
 
 from packages.application.canonical_wb_cost_resolver import (  # noqa: E402
     CHANNEL_LOCATION_COST_FORMULA_VERSION,
+    CanonicalChannelCostSnapshot,
     resolve_channel_location_cost,
 )
+from packages.application import canonical_wb_cost_resolver as resolver  # noqa: E402
 from packages.application.ff_pool_foundation import (  # noqa: E402
     BALANCES_TABLE,
     FACILITIES_TABLE,
@@ -105,6 +108,32 @@ def main() -> int:
             before = conn.execute(
                 f"SELECT facility_id,nm_id,quantity,capital_rub FROM {BALANCES_TABLE} ORDER BY facility_id"
             ).fetchall()
+            # A large reserve archive must never be read for already covered
+            # pooled sales. A missing pool still uses the exact same reserve,
+            # loaded once on this connection, including cached absence.
+            with patch.object(
+                resolver, "_load_common_inventory_costs",
+                wraps=resolver._load_common_inventory_costs,
+            ) as load_reserve:
+                snapshot = CanonicalChannelCostSnapshot.from_connection(conn)
+                for day in (DAY, "2026-08-21"):
+                    value = resolve_channel_location_cost(
+                        conn, nm_id="101", operation_date=date.fromisoformat(day),
+                        operation={"deliveryType": "fbs"}, snapshot=snapshot,
+                    )
+                    assert value["unit_cost_rub"] == "175"
+                assert load_reserve.call_count == 0
+                reserve = resolve_channel_location_cost(
+                    conn, nm_id="202", operation_date=date.fromisoformat(DAY),
+                    operation={"deliveryType": "fbs"}, snapshot=snapshot,
+                )
+                assert reserve["unit_cost_rub"] == "88"
+                missing = resolve_channel_location_cost(
+                    conn, nm_id="303", operation_date=date.fromisoformat(DAY),
+                    operation={"deliveryType": "fbs"}, snapshot=snapshot,
+                )
+                assert missing["status"] == "missing"
+                assert load_reserve.call_count == 1
             pooled = resolve_channel_location_cost(
                 conn,
                 nm_id="101",

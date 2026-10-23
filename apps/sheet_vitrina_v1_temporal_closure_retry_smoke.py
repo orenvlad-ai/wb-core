@@ -126,7 +126,7 @@ def main() -> None:
                 raise AssertionError(f"{key} must preserve the accepted closed-day snapshot after a later invalid attempt")
             expected_note = (
                 "accepted_closed_stock_snapshot_preserved" if key.startswith("stocks[")
-                else "accepted_closed_snapshot_preserved"
+                else "accepted_closed_preserved_after_invalid_attempt"
             )
             if expected_note not in str(preserved_status_rows[key][10]):
                 raise AssertionError(f"{key} must explain that the accepted closed-day snapshot was preserved")

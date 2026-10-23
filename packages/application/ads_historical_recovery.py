@@ -39,6 +39,7 @@ MAX_IDS_PER_REQUEST = 50
 REQUESTS_PER_MINUTE = 3
 MIN_REQUEST_INTERVAL_SECONDS = 60.0 / REQUESTS_PER_MINUTE
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
+WB_ADS_TIMEZONE = ZoneInfo("Europe/Moscow")
 DEFAULT_NM_IDS = (245720334,)
 DEFAULT_TARGET_DATES = tuple(
     day
@@ -193,11 +194,13 @@ class AdsHistoricalRecovery:
         source: AdsHistoricalSource,
         now_factory: Callable[[], datetime] | None = None,
         failure_injector: Callable[[int], None] | None = None,
+        backup_creator: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.source = source
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self.failure_injector = failure_injector
+        self.backup_creator = backup_creator or create_coherent_sqlite_backup
 
     def plan(self, scope: AdsHistoricalRecoveryScope) -> dict[str, Any]:
         """Build a deterministic read-only plan; upstream errors become blockers."""
@@ -469,7 +472,7 @@ class AdsHistoricalRecovery:
                 "readback": self.readback(scope),
             }
 
-        backup = create_coherent_sqlite_backup(
+        backup = self.backup_creator(
             self.db_path, Path(backup_dir), fingerprint=expected_fingerprint
         )
         with self._connect(read_only=False) as conn:
@@ -747,9 +750,32 @@ class AdsHistoricalRecovery:
             item for item in campaigns if item["status"] in ALLOWED_CAMPAIGN_STATUSES
         ]
         scope_start = min(target_dates)
+        scope_end = max(target_dates)
+        creation_times: dict[int, str] = {}
+        fetch_creation = getattr(self.source, 'fetch_creation_times', None)
+        creation_ids = sorted(item['campaign_id'] for item in eligible_all if item['status'] in {9, 11})
+        if callable(fetch_creation) and creation_ids:
+            creation_times = fetch_creation(campaign_ids=creation_ids)
+            if not isinstance(creation_times, dict) or set(creation_times) != set(creation_ids):
+                raise AdsHistoricalRecoveryError('official campaign creation coverage is incomplete')
+            for stamp in creation_times.values():
+                try:
+                    created = datetime.fromisoformat(str(stamp).replace('Z', '+00:00'))
+                except ValueError as exc:
+                    raise AdsHistoricalRecoveryError('official campaign creation date is invalid') from exc
+                if created.tzinfo is None:
+                    raise AdsHistoricalRecoveryError('official campaign creation timezone is missing')
         eligible: list[dict[str, Any]] = []
         excluded_completed: list[dict[str, Any]] = []
+        excluded_created: list[dict[str, Any]] = []
         for item in eligible_all:
+            created_at = creation_times.get(item['campaign_id'])
+            if created_at:
+                item = {**item, 'created_at': created_at}
+                created_date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).astimezone(WB_ADS_TIMEZONE).date()
+                if created_date > scope_end:
+                    excluded_created.append({**item, 'source_action': 'excluded_created_after_scope'})
+                    continue
             change_date = _optional_iso_date(item.get("change_time"))
             if item["status"] == 7 and change_date is not None and change_date < scope_start:
                 excluded_completed.append(
@@ -912,7 +938,7 @@ class AdsHistoricalRecovery:
                         )
 
         campaign_manifest = sorted(
-            [*eligible, *excluded_completed], key=lambda item: int(item["campaign_id"])
+            [*eligible, *excluded_completed, *excluded_created], key=lambda item: int(item["campaign_id"])
         )
         response_digest = canonical_digest(requests)
         campaign_digest = canonical_digest(campaign_manifest)
@@ -931,6 +957,8 @@ class AdsHistoricalRecovery:
             "all_campaign_count": len(campaigns),
             "all_campaign_digest": all_campaign_digest,
             "excluded_completed_before_scope_count": len(excluded_completed),
+            "excluded_created_after_scope_count": len(excluded_created),
+            "creation_source": '/api/advert/v2/adverts' if creation_times else None,
             "unsupported_overlap_count": len(unsupported_overlaps),
             "unsupported_overlaps": unsupported_overlaps,
             "campaigns": campaign_manifest,
@@ -1260,6 +1288,7 @@ class AdsHistoricalRecovery:
             uri = f"file:{self.db_path.resolve()}?mode=ro"
             conn = sqlite3.connect(uri, uri=True, timeout=60, isolation_level=None)
             conn.execute("PRAGMA busy_timeout=60000")
+            conn.execute("PRAGMA query_only=ON")
         else:
             conn = connect_sqlite(
                 self.db_path,

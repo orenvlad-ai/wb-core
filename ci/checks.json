@@ -339,13 +339,15 @@
         "apps/business_data_cycle_owned_integration_smoke.py",
         "packages/application/sheet_vitrina_v1_closed_backlog.py",
         "apps/sheet_vitrina_v1_local_derive_smoke.py",
+        "apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py",
+        "apps/sheet_vitrina_yesterday_refetch_smoke.py",
         "packages/application/registry_upload_http_entrypoint.py",
         "packages/application/sheet_vitrina_v1_live_plan.py",
         "packages/application/wb_finance_daily.py",
         "packages/application/web_vitrina_snapshot_admission.py",
         "apps/web_vitrina_history_candidate_build.py"
       ],
-      "commands": [["python3", "apps/sheet_vitrina_v1_cycle_smoke.py"], ["python3", "apps/sheet_vitrina_v1_cycle_wiring_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"], ["python3", "apps/sheet_vitrina_v1_local_derive_smoke.py"]],
+      "commands": [["python3", "apps/sheet_vitrina_v1_cycle_smoke.py"], ["python3", "apps/sheet_vitrina_v1_cycle_wiring_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"], ["python3", "apps/sheet_vitrina_v1_local_derive_smoke.py"], ["python3", "apps/sheet_vitrina_v1_temporal_closure_retry_smoke.py"], ["python3", "apps/sheet_vitrina_yesterday_refetch_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "wb_buyer_support": {
@@ -1125,6 +1127,8 @@
         "ci/**",
         "apps/github_release_runner.py",
         "apps/github_release_runner_smoke.py",
+        "apps/ads_closed_day_recovery*.py",
+        "packages/application/ads_historical_recovery.py",
         "apps/production_apply_adapters.py",
         "apps/production_apply_adapters_smoke.py",
         "apps/production_apply_launcher.py",
@@ -1136,6 +1140,7 @@
         ["python3", "ci/release_dispatch_smoke.py"],
         ["python3", "ci/post_merge_release_recovery_smoke.py"],
         ["python3", "ci/post_merge_completion_recovery_smoke.py"],
+        ["python3", "apps/ads_closed_day_recovery_smoke.py"],
         ["python3", "apps/production_apply_adapters_smoke.py"],
         ["python3", "apps/production_apply_launcher_smoke.py"]
       ],
