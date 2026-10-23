@@ -924,6 +924,7 @@
     }
 
     .wb-finance-negative { color: var(--error-text); font-weight: 700; }
+    .wb-finance-table td.wb-finance-cost-missing { color: var(--error-text); background: var(--error-bg); font-weight: 700; }
     .wb-finance-week-status { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; font-weight: 600; }
     .wb-finance-warning { color: var(--error-text); }
     .wb-finance-expense-cell { display: grid; grid-template-columns: minmax(72px,1fr) auto; gap: 8px; align-items: center; }
@@ -15075,7 +15076,9 @@
           {key:"before_cogs_margin_pct", label:"Рентабельность до себестоимости, %", type:"percent"},
           {internal: true, label:"Внутренние данные WB Core — не входят в финансовый отчёт Wildberries"},
           {key:"cogs", label:"Себестоимость наша", type:"money"}, {key:"profit_after_cogs", label:"Прибыль после себестоимости", type:"money"},
-          {key:"final_margin_pct", label:"Итоговая рентабельность, %", type:"percent"}
+          {key:"final_margin_pct", label:"Итоговая рентабельность, %", type:"percent"},
+          {group: "Продажи без себестоимости"},
+          {key:"sales_without_cost_rub", label:"Сумма продаж, ₽ · должно быть 0", type:"money", missingCost:true}
         ];
         const head = "<thead><tr><th>Метрика</th>" + weeks.map((week) => {
           const diagnostic = financeCostQualityDiagnostic(week);
@@ -15094,9 +15097,13 @@
             return "<tr class=\"wb-finance-internal-divider\"><td>" + escapeHtml(definition.label) + "</td>" + weeks.map(function () { return "<td></td>"; }).join("") + "</tr>";
           }
           return "<tr><td>" + escapeHtml(definition.label) + "</td>" + weeks.map((week, weekIndex) => {
-            const value = week.metrics ? week.metrics[definition.key] : null;
+            const value = definition.missingCost
+              ? financeSalesWithoutCost(week)
+              : (week.metrics ? week.metrics[definition.key] : null);
             const numeric = value === null || value === undefined ? null : Number(value);
-            const className = numeric !== null && numeric < 0 ? " class=\"wb-finance-negative\"" : "";
+            const className = definition.missingCost && numeric > 0
+              ? " class=\"wb-finance-cost-missing\""
+              : (numeric !== null && numeric < 0 ? " class=\"wb-finance-negative\"" : "");
             if (definition.expense) {
               const share = financeExpenseShare(value, week.metrics && week.metrics.net_revenue);
               const previousWeek = weekIndex > 0 ? weeks[weekIndex - 1] : null;
@@ -15174,6 +15181,16 @@
           "<li>Finance backup: <code>" + escapeHtml(String(backup.retained_backup_id || "не активирован")) + "</code>; статус: " + escapeHtml(String(backup.status || "unknown")) + "; retained: " + escapeHtml(String(backup.retained_count || 0)) + " / " + escapeHtml(formatBytes(backup.retained_bytes)) + "; возраст/RPO: " + escapeHtml(String(backup.age_seconds === null || backup.age_seconds === undefined ? "—" : backup.age_seconds)) + " / " + escapeHtml(String(backup.rpo_seconds || "—")) + " сек.; next replacement: " + escapeHtml(backup.next_replacement_capacity ? "доступен" : "заблокирован") + ".</li>" +
           "<li>Backup success/failure: " + escapeHtml(String(backup.last_success && backup.last_success.at || "—")) + " / " + escapeHtml(String(backup.last_failure && backup.last_failure.at || "—")) + "; прогноз retained growth 30/90 дней: " + escapeHtml(formatBytes(backup.projected_30_day_growth_bytes)) + " / " + escapeHtml(formatBytes(backup.projected_90_day_growth_bytes)) + "; headroom 30/90 дней: " + escapeHtml(formatBytes(backup.projected_30_day_available_bytes)) + " / " + escapeHtml(formatBytes(backup.projected_90_day_available_bytes)) + "; blockers: " + escapeHtml((Array.isArray(backup.blockers) && backup.blockers.length) ? backup.blockers.join("; ") : "нет") + ".</li>" +
           "</ul>";
+      }
+
+      function financeSalesWithoutCost(period) {
+        const coverage = period.cost_coverage || {};
+        const amount = period.metrics && period.metrics.sales_without_cost_rub;
+        if (amount !== null && amount !== undefined && amount !== "") return amount;
+        const uncovered = coverage.uncovered_sales_revenue_rub;
+        if (uncovered !== null && uncovered !== undefined && uncovered !== "") return uncovered;
+        const unmatched = coverage.unmatched_units;
+        return unmatched !== null && unmatched !== undefined && unmatched !== "" && Number(unmatched) === 0 ? 0 : null;
       }
 
       function financeCostQualityDiagnostic(week) {
