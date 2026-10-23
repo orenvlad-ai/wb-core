@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from packages.application.wb_autoanswers_node_bridge import (
     NodeAutoanswersBridge,
@@ -23,6 +24,20 @@ class NodeBridgeTest(unittest.TestCase):
     def test_frozen_identity_verification(self) -> None:
         result = self.bridge().verify()
         self.assertEqual(result["verified"]["artifact_count"], 28)
+
+    def test_local_missing_kit_reply_needs_no_provider_key_and_scope_mismatch_cannot_call_provider(self) -> None:
+        raw = {"ingestion_id":"local-kit", "review_id":"local-kit", "review_version":"1", "rating":1,
+               "text":"", "pros":"", "cons":"", "wb_tags":["неполный комплект"],
+               "media":{"photos":[],"video":{"present":False}}}
+        environment = {k:v for k,v in os.environ.items() if k != "OPENAI_API_KEY"}
+        bridge = NodeAutoanswersBridge(env=environment)
+        result = bridge.run(processing_key="local-kit|1|1.4.2",raw_input=raw,execution_mode="live")
+        self.assertEqual(result["pipeline"]["model_calls_this_run"], 0)
+        self.assertEqual(result["pipeline"]["result"]["route"], "seller_chat")
+        with patch("packages.application.wb_autoanswers_node_bridge.is_unspecified_missing_kit_input",return_value=True):
+            with self.assertRaises(NodeBoundaryError) as raised:
+                bridge.run(processing_key="local-kit|1|1.4.2",raw_input={**raw,"text":"Пришло разбитое стекло"},execution_mode="live")
+            self.assertEqual(raised.exception.code, "LOCAL_POLICY_SCOPE_MISMATCH")
 
     def test_fixture_pipeline_crosses_versioned_json_boundary(self) -> None:
         raw = {
