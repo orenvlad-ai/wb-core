@@ -277,7 +277,18 @@ class ObservedSQLiteConnection(sqlite3.Connection):
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> bool | None:
         try:
-            return sqlite3.Connection.__exit__(self, exc_type, exc, tb)
+            if exc_type is None:
+                try:
+                    # sqlite3's native context exit bypasses our commit override
+                    # and only waits the short per-attempt busy timeout. Retry
+                    # COMMIT itself, never the already executed business writes.
+                    self.commit()
+                except BaseException:
+                    self.rollback()
+                    raise
+            else:
+                self.rollback()
+            return False
         finally:
             self.close()
 
