@@ -15078,7 +15078,9 @@
           {key:"cogs", label:"Себестоимость наша", type:"money"}, {key:"profit_after_cogs", label:"Прибыль после себестоимости", type:"money"},
           {key:"final_margin_pct", label:"Итоговая рентабельность, %", type:"percent"},
           {group: "Продажи без себестоимости"},
-          {key:"sales_without_cost_rub", label:"Сумма продаж, ₽ · должно быть 0", type:"money", missingCost:true}
+          {key:"sales_without_cost_rub", label:"Сумма продаж, ₽ · должно быть 0", type:"money", missingCost:true},
+          {key:"sales_with_estimated_cost_rub", label:"Продажи с оценочной себестоимостью, ₽", type:"money"},
+          {key:"cost_quality", label:"Полнота расчёта себестоимости", type:"text", costQuality:true}
         ];
         const head = "<thead><tr><th>Метрика</th>" + weeks.map((week) => {
           const diagnostic = financeCostQualityDiagnostic(week);
@@ -15097,6 +15099,11 @@
             return "<tr class=\"wb-finance-internal-divider\"><td>" + escapeHtml(definition.label) + "</td>" + weeks.map(function () { return "<td></td>"; }).join("") + "</tr>";
           }
           return "<tr><td>" + escapeHtml(definition.label) + "</td>" + weeks.map((week, weekIndex) => {
+            if (definition.costQuality) {
+              const status = week.metrics && week.metrics.profit_coverage_status;
+              const label = status === "estimated" ? "Управленческая оценка" : status === "complete" ? "Полное покрытие" : "Неполный расчёт";
+              return "<td title=\"" + escapeHtml(financeCostQualityDiagnostic(week)) + "\">" + escapeHtml(label) + "</td>";
+            }
             const value = definition.missingCost
               ? financeSalesWithoutCost(week)
               : (week.metrics ? week.metrics[definition.key] : null);
@@ -15132,7 +15139,7 @@
           "; строк: " + new Intl.NumberFormat("ru-RU").format(weeks.reduce((sum, week) => sum + Number(week.raw_row_count || 0), 0)) + ".";
         statusElement.className = incompleteWeeks.length || sourceProblemWeeks.length ? "section-message error" : "section-message success";
         notesElement.innerHTML =
-          "<p>Единый источник себестоимости выбирается построчно: стоимость того же nmId на 01.07 проецируется на более ранние операции; с 01.07 используется canonical exact-date cost. Legacy COST_PRICE и отдельный Finance retro-map в расчёте не участвуют.</p>" +
+          "<p>Единый источник себестоимости выбирается построчно: стоимость того же nmId на 01.07 проецируется на более ранние операции; с 01.07 используется стоимость на дату операции. При её отсутствии допускается явно утверждённая оценка того же товара с указанием исходной даты. Выручка учитывается полностью; прибыль после себестоимости доступна только при полном покрытии стоимости. Legacy COST_PRICE и отдельный Finance retro-map в расчёте не участвуют.</p>" +
           "<p>Агентское вознаграждение и эквайринг показаны отдельно и учитываются по одному разу. Приёмка/транзит исключаются из расходов периода только при exact Finance↔supply cost-layer lineage; неподтверждённая сумма остаётся расходом.</p>" +
           "<p>СПП FBO/FBS: средний процент по количеству проданных единиц в России; неизвестный канал или отсутствующий СПП не приравниваются к нулю. Покрытие указано в подсказке периода.</p>" +
           (incompleteWeeks.length ? "<p class=\"wb-finance-warning\">Не удалось полностью рассчитать себестоимость для периодов: " + incompleteWeeks.map(formatPeriod).join(", ") + ". Откройте tooltip периода для списка SKU и причин.</p>" : "") +
@@ -15198,6 +15205,7 @@
         const quality = coverage.quality || {};
         const sources = quality.source_units || {};
         const parts = [];
+        if (Number(coverage.estimated_units || 0)) parts.push("Управленческая оценка: " + formatFinanceMetric(coverage.estimated_units, "count") + " шт.; точная стоимость заменит оценку после пересчёта");
         if (Number(sources.projected_from_2026_07_01 || 0)) parts.push("проекция от 01.07: " + formatFinanceMetric(sources.projected_from_2026_07_01, "count") + " шт.");
         if (Number(sources.canonical_exact_date || 0)) parts.push("exact-date Our WB Cost: " + formatFinanceMetric(sources.canonical_exact_date, "count") + " шт.");
         if (Number(coverage.unmatched_units || 0)) parts.push("без себестоимости: " + formatFinanceMetric(coverage.unmatched_units, "count") + " шт.");

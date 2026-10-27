@@ -1086,9 +1086,11 @@ def _assert_fbs_channel_partial_coverage(block: WbFinanceWeeklyBlock) -> None:
         "sales_without_cost_rub": "400.0000",
         "orders_without_cost": 1,
         "units_without_cost": 1,
-        "cogs": "430.0000",
-        "profit_after_cogs": "1570.0000",
-        "final_margin_pct": "78.5000",
+        "cogs": None,
+        "before_cogs_profit": "2400.0000",
+        "before_cogs_margin_pct": "100.0000",
+        "profit_after_cogs": None,
+        "final_margin_pct": None,
         "profit_coverage_status": "partial",
     }
     for key, value in expected.items():

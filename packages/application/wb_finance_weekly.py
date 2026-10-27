@@ -82,7 +82,7 @@ FBS_FINANCE_HISTORICAL_CUTOFF = date(2026, 8, 23)
 FBS_FINANCE_FORWARD_INGRESS_DATE = FBS_FINANCE_HISTORICAL_CUTOFF + timedelta(
     days=1
 )
-PROFIT_METHOD_VERSION = "wb_finance_profit_covered_revenue_v4_signed_deductions"
+PROFIT_METHOD_VERSION = "wb_finance_profit_full_revenue_v5_explicit_estimates"
 COST_METHOD_VERSION = CHANNEL_LOCATION_COST_FORMULA_VERSION
 COST_ECONOMIC_SIGNATURE_VERSION = "wb_finance_cost_economic_signature_v1"
 
@@ -173,15 +173,11 @@ def recalculate_cost_derived_metrics(
     covered_net_revenue = _decimal(coverage["covered_net_revenue_rub"])
     uncovered_net_revenue = _decimal(coverage["uncovered_net_revenue_rub"])
     uncovered_sales_revenue = _decimal(coverage["uncovered_sales_revenue_rub"])
-    eligible = not (
-        int(coverage["unmatched_units"]) > 0
-        and int(coverage["matched_units"]) <= 0
-    )
+    eligible = int(coverage["unmatched_units"]) == 0
     before = (
-        covered_net_revenue
+        _decimal(result["net_revenue"])
         - _decimal(result.get("profit_period_expenses"))
         + _decimal(result.get("positive_adjustments"))
-        if eligible else None
     )
     cogs = _decimal(coverage["partial_cogs_rub"]) if eligible else None
     profit = before - cogs if before is not None and cogs is not None else None
@@ -189,16 +185,17 @@ def recalculate_cost_derived_metrics(
         profit_revenue_covered=_money_text(covered_net_revenue),
         profit_revenue_uncovered=_money_text(uncovered_net_revenue),
         sales_without_cost_rub=_money_text(uncovered_sales_revenue),
+        sales_with_estimated_cost_rub=coverage.get("estimated_sales_revenue_rub", "0.0000"),
         orders_without_cost=int(coverage["uncovered_sales_order_count"]),
         units_without_cost=int(coverage["uncovered_sales_units"]),
         sales_cost_coverage_pct=coverage["sales_revenue_coverage_pct"],
         profit_coverage_status=coverage["profit_coverage_status"],
         before_cogs_profit=_money_text(before),
-        before_cogs_margin_pct=_money_text(_ratio(before, covered_net_revenue)),
+        before_cogs_margin_pct=_money_text(_ratio(before, _decimal(result["net_revenue"]))),
         cogs=_money_text(cogs),
         cogs_complete=int(coverage["unmatched_units"]) == 0,
         profit_after_cogs=_money_text(profit),
-        final_margin_pct=_money_text(_ratio(profit, covered_net_revenue)),
+        final_margin_pct=_money_text(_ratio(profit, _decimal(result["net_revenue"]))),
         profit_semantics_complete=int(coverage["unmatched_units"]) == 0,
     )
     return result
@@ -828,10 +825,16 @@ class WbFinanceWeeklyBlock:
     def shared_cost_snapshot(self) -> SharedSkuCostSnapshot | None:
         return self._shared_cost_snapshot
 
-    def _pin_active_cost(self):
+    def _pin_active_cost(self, manifest=None):
         if not self.shared_cost_is_candidate:
             from packages.application.fbs_accounting_runtime import load_shared
             self._shared_cost_snapshot = load_shared(self.runtime_dir)
+            if self._shared_cost_snapshot is not None:
+                from packages.application.vitrina_last_known_cost import approved_reporting_snapshot
+                with closing(self.store_registry.connect("operational", mode="ro",
+                        operation="finance_approved_cost_estimates", manifest=manifest or self.store_registry.load())) as estimate_conn:
+                    estimate_conn.execute("PRAGMA query_only=ON")
+                    self._shared_cost_snapshot = approved_reporting_snapshot(self._shared_cost_snapshot, estimate_conn)
 
     def ensure_schema(self) -> None:
         if self.shared_cost_is_candidate:
@@ -2088,20 +2091,14 @@ class WbFinanceWeeklyBlock:
             coverage["uncovered_sales_revenue_rub"]
         )
         covered_sales_revenue = _decimal(coverage["covered_sales_revenue_rub"])
-        profit_eligible = not (
-            int(coverage["unmatched_units"]) > 0
-            and int(coverage["matched_units"]) <= 0
-        )
+        profit_eligible = int(coverage["unmatched_units"]) == 0
         before_cogs = (
-            covered_net_revenue
+            net_revenue
             - profit_period_expenses
             + values["positive_adjustments"]
-            if profit_eligible
-            else None
         )
-        # A partial canonical COGS is truthful when its revenue denominator is
-        # restricted to the same covered sales.  Missing cost never becomes
-        # zero and uncovered revenue never leaks into the profit numerator.
+        # Full-period profit requires full valuation coverage. Explicit estimates
+        # are labelled; unknown cost must never silently become zero.
         cogs = (
             _decimal(coverage["partial_cogs_rub"])
             if profit_eligible
@@ -2122,6 +2119,7 @@ class WbFinanceWeeklyBlock:
             "profit_revenue_covered": _money_text(covered_net_revenue),
             "profit_revenue_uncovered": _money_text(uncovered_net_revenue),
             "sales_without_cost_rub": _money_text(uncovered_sales_revenue),
+            "sales_with_estimated_cost_rub": coverage.get("estimated_sales_revenue_rub", "0.0000"),
             "orders_without_cost": int(coverage["uncovered_sales_order_count"]),
             "units_without_cost": int(coverage["uncovered_sales_units"]),
             "sales_cost_coverage_pct": coverage["sales_revenue_coverage_pct"],
@@ -2162,13 +2160,13 @@ class WbFinanceWeeklyBlock:
             ),
             "before_cogs_profit": _money_text(before_cogs),
             "before_cogs_margin_pct": _money_text(
-                _ratio(before_cogs, covered_net_revenue)
+                _ratio(before_cogs, net_revenue)
             ),
             "cogs": _money_text(cogs),
             "cogs_complete": coverage["unmatched_units"] == 0,
             "profit_after_cogs": _money_text(profit),
             "final_margin_pct": _money_text(
-                _ratio(profit, covered_net_revenue)
+                _ratio(profit, net_revenue)
             ),
             "commission_control_reconciliation_rub": _money_text(
                 values["combined_commission_control"]
@@ -3073,6 +3071,8 @@ class WbFinanceWeeklyBlock:
             self._nomenclature_identity_index(conn)
         )
         cogs = ZERO
+        estimated_sales_rub = ZERO
+        estimated_units = 0
         matched_units = 0
         unmatched_units = 0
         problem_rows: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -3319,6 +3319,10 @@ class WbFinanceWeeklyBlock:
                 problem["unmatched_units"] += gross_qty
                 problem["net_units"] += signed_qty
                 continue
+            if resolution.get("quality") == "management_estimate":
+                estimated_units += gross_qty
+                if sign > 0:
+                    estimated_sales_rub += revenue
             unit_cost = _decimal(resolution["unit_cost_rub"])
             signed_cogs = Decimal(signed_qty) * unit_cost
             cogs += signed_cogs
@@ -3518,8 +3522,10 @@ class WbFinanceWeeklyBlock:
             "uncovered_fbs_sales_units": uncovered_fbs_sales_units,
             "covered_sales_units": covered_sales_units,
             "uncovered_sales_units": uncovered_sales_units,
+            "estimated_sales_revenue_rub": _money_text(estimated_sales_rub),
+            "estimated_units": estimated_units,
             "profit_coverage_status": (
-                "partial" if uncovered_sales_rub > ZERO else "complete"
+                "partial" if unmatched_units else "estimated" if estimated_units else "complete"
             ),
             "daily_rows": daily_rows,
             "problem_skus": [problem_rows[key] for key in sorted(problem_rows)],
@@ -7043,8 +7049,8 @@ class WbFinanceWeeklyBlock:
         return conn
 
     def _connect_canonical_plan(self) -> sqlite3.Connection:
-        self._pin_active_cost()
         manifest = self.store_registry.load()
+        self._pin_active_cost(manifest)
         conn = self.store_registry.connect(
             "operational",
             mode="ro",
@@ -7064,8 +7070,8 @@ class WbFinanceWeeklyBlock:
         return conn
 
     def _connect_stale_cost_plan(self, *, storage_authority: list[GenerationManifest] | None = None) -> sqlite3.Connection:
-        self._pin_active_cost()
         manifest = self.store_registry.load()
+        self._pin_active_cost(manifest)
         conn = self.store_registry.connect(
             "operational",
             mode="ro",
@@ -7119,10 +7125,10 @@ class WbFinanceWeeklyBlock:
         return versions
 
     def _connect(self, *, storage_authority: list[GenerationManifest] | None = None) -> sqlite3.Connection:
-        self._pin_active_cost()
         if self.shared_cost_is_candidate:
             return self._connect_shared_cost_preview()
         manifest = self.store_registry.load()
+        self._pin_active_cost(manifest)
         conn = self.store_registry.connect(
             "operational",
             mode="rw",

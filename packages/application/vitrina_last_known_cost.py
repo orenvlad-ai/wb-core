@@ -179,3 +179,79 @@ def project_costs(plan: dict[str, Any], *, dates: list[str], source: dict[str, A
             changes.append({"date": day, "row_id": row_id, "before": before,
                             "after": value, "provenance": provenance})
     return {"plan": working, "changes": changes, "remaining": remaining}
+
+
+class ApprovedEstimateCostSnapshot:
+    """Pinned reporting overlay; never writes or invents inventory/book facts."""
+
+    def __init__(self, exact, cells):
+        self.exact = exact
+        self.cells = json.loads(json.dumps(cells))
+        self.version_id = fingerprint({'exact': exact.version_id, 'approved_estimates': self.cells})
+
+    def __getattr__(self, name):
+        return getattr(self.exact, name)
+
+    def metadata(self):
+        return {**self.exact.metadata(), 'version_id': self.version_id,
+                'management_estimate_policy': 'explicit_applied_same_sku_closed_cost_v1'}
+
+    def resolve(self, *, nm_id, operation_date):
+        resolved = self.exact.resolve(nm_id=nm_id, operation_date=operation_date)
+        if resolved.get('status') == 'resolved':
+            return resolved
+        # Do not override invalid identity, invalidated books or unresolved
+        # exact-day components. Only a genuinely absent day/SKU is eligible.
+        if resolved.get('reason') not in {'shared_cost_exact_date_missing', 'shared_cost_sku_missing'}:
+            return resolved
+        cell = self.cells.get(str(nm_id), {}).get(operation_date.isoformat())
+        if cell is None:
+            return resolved
+        return {**resolved, 'status': 'resolved', 'reason': '',
+                'unit_cost_rub': cell['management_value'],
+                'quality': 'management_estimate', 'projection_quality': 'management_estimate',
+                'selection_method': 'explicit_applied_same_sku_closed_cost',
+                'canonical_source_date': cell['source_as_of_date'],
+                'canonical_source_version': cell['source_day_version_id'],
+                'canonical_source_identity': cell['operation_id'] + ':' + fingerprint(cell),
+                'source_digest': fingerprint(cell)}
+
+
+def approved_reporting_snapshot(exact, conn):
+    """Read only applied Vitrina estimates, and revalidate their closed source."""
+    if exact is None:
+        return None
+    from packages.application.web_vitrina_management_history import load_presentations
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {'registry_upload_current_state', 'sheet_vitrina_v1_ready_snapshots'} <= tables:
+        return exact
+    state = conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()
+    if state is None or not exact._days:
+        return exact
+    cells = load_presentations(conn, bundle_version=state[0], dates=None, cost_only=True)
+    approved = {}
+    for key, by_date in cells.items():
+        if not key.startswith('SKU:') or not key.endswith('|' + COST):
+            continue
+        nm = key[4:].split('|')[0]
+        for day, cell in by_date.items():
+            invalid_from = getattr(exact, 'invalid_from_date', None)
+            if invalid_from and day >= invalid_from:
+                continue
+            source_day = cell.get('source_as_of_date', '')
+            if (cell.get('quality_state') != 'management_estimate'
+                    or cell.get('target_date') != day or not cell.get('operation_id')
+                    or not str(cell.get('source_snapshot_id', '')).startswith('last-known-cost:')
+                    or cell.get('evidence', {}).get('selection_method') != 'latest_same_sku_closed_resolved_on_or_before_target'
+                    or source_day > day or source_day not in exact._days):
+                continue
+            period = exact._days[source_day]
+            row = period['rows'].get(nm)
+            amount = _positive_finite(cell.get('management_value'))
+            if (period['status'] != 'closed' or row is None or row['status'] != 'resolved'
+                    or cell.get('source_day_version_id') != period['version_id']
+                    or cell.get('source_digest') != row['source_digest']
+                    or amount is None or amount != _positive_finite(row['unit_cost_rub'])):
+                continue
+            approved.setdefault(nm, {})[day] = cell
+    return ApprovedEstimateCostSnapshot(exact, approved) if approved else exact
