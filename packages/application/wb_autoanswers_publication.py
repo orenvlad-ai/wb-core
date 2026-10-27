@@ -98,22 +98,24 @@ class AutoanswersPublicationWorker:
             detail = self.transport.fetch_detail(str(claimed["feedback_id"]))
         except WbAutoanswersHttpError as exc:
             if exc.status_code == 429 or exc.status_code >= 500:
-                self.repository.record_publication_readback_retry(
+                return self.repository.record_publication_readback_retry(
                     key,
                     error_code=f"wb_readback_http_{exc.status_code}",
-                    retry_after_seconds=exc.retry_after_seconds or 60,
+                    retry_after_seconds=max(300, exc.retry_after_seconds or 0),
                     worker_id=self.worker_id,
                 )
-                return {"publication_key": key, "state": "retryable_error", "write_attempted": False}
-            raise
+            stored = self.repository.record_publication_readback(
+                key, answer_text=None, worker_id=self.worker_id,
+                failure_code=f"wb_readback_http_{exc.status_code}",
+            )
+            return {"publication_key": key, "state": stored["state"], "write_attempted": False}
         except WbAutoanswersTransportError:
-            self.repository.record_publication_readback_retry(
+            return self.repository.record_publication_readback_retry(
                 key,
                 error_code="wb_readback_transport",
-                retry_after_seconds=60,
+                retry_after_seconds=300,
                 worker_id=self.worker_id,
             )
-            return {"publication_key": key, "state": "retryable_error", "write_attempted": False}
         stored = self.repository.record_publication_readback(
             key,
             answer_text=_readback_answer(detail),

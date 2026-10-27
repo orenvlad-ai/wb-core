@@ -8558,6 +8558,14 @@ class AutoanswersRepository:
                 raise AutoanswersRuntimeError("processing job not found", code="job_not_found")
             if str(job["state"]) not in {STATE_GENERATED, STATE_NEEDS_REVIEW}:
                 raise AutoanswersRuntimeError("job cannot be approved", code="invalid_approval_state")
+            if conn.execute(
+                "SELECT 1 FROM sheet_vitrina_v1_wb_publication_jobs WHERE processing_key=? AND write_started_at IS NOT NULL",
+                (processing_key_value,),
+            ).fetchone():
+                raise AutoanswersRuntimeError(
+                    "a started publication can only be reconciled",
+                    code="publication_already_started",
+                )
             feedback = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?",
                 (job["feedback_id"],),
@@ -9163,8 +9171,11 @@ class AutoanswersRepository:
         *,
         answer_text: str | None,
         worker_id: str,
+        failure_code: str | None = None,
     ) -> dict[str, Any]:
         now = self._now()
+        if failure_code and answer_text:
+            raise ValueError("failed readback cannot confirm an answer")
         observed = normalized_reply(answer_text)
         observed_hash = final_reply_hash(observed) if observed else None
         with self.transaction() as conn:
@@ -9174,7 +9185,11 @@ class AutoanswersRepository:
             ).fetchone()
             if row is None:
                 raise AutoanswersRuntimeError("publication job not found", code="publication_not_found")
-            if observed_hash == str(row["normalized_reply_sha256"]):
+            if failure_code:
+                state = STATE_NEEDS_REVIEW
+                error_code = failure_code
+                event = "publication_readback_failed"
+            elif observed_hash == str(row["normalized_reply_sha256"]):
                 state = STATE_PUBLISHED
                 error_code = None
                 event = "publication_confirmed_by_readback"
@@ -9216,7 +9231,7 @@ class AutoanswersRepository:
                 event_type=event,
                 actor_type="worker",
                 actor_id=_clean_text(worker_id),
-                details={"observed_hash": observed_hash, "matches": state == STATE_PUBLISHED},
+                details={"observed_hash": observed_hash, "matches": state == STATE_PUBLISHED, "error_code": error_code},
                 at=now,
                 previous_state=str(row["state"]),
                 next_state=state,
@@ -9303,7 +9318,7 @@ class AutoanswersRepository:
         error_code: str,
         retry_after_seconds: int,
         worker_id: str,
-    ) -> None:
+    ) -> dict[str, Any]:
         now = self._now()
         with self.transaction() as conn:
             row = conn.execute(
@@ -9312,14 +9327,22 @@ class AutoanswersRepository:
             ).fetchone()
             if row is None:
                 raise AutoanswersRuntimeError("publication job not found", code="publication_not_found")
+            failures = int(conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswers_audit_events "
+                "WHERE aggregate_type='publication_job' AND aggregate_id=? AND event_type='publication_readback_retry'",
+                (publication_key_value,),
+            ).fetchone()[0])
+            exhausted = failures >= 2
+            state = STATE_NEEDS_REVIEW if exhausted else STATE_RETRYABLE_ERROR
             conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_wb_publication_jobs
-                SET state=?, retry_stage='readback', last_error_code=?, available_at=?,
+                SET state=?, retry_stage=?, last_error_code=?, available_at=?,
                     lease_owner=NULL, lease_until=NULL, updated_at=? WHERE publication_key=?
                 """,
                 (
-                    STATE_RETRYABLE_ERROR,
+                    state,
+                    None if exhausted else "readback",
                     _clean_text(error_code),
                     iso_utc(now + timedelta(seconds=max(1, int(retry_after_seconds)))),
                     iso_utc(now),
@@ -9328,20 +9351,22 @@ class AutoanswersRepository:
             )
             conn.execute(
                 "UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET state=?, last_error_code=?, updated_at=? WHERE processing_key=?",
-                (STATE_RETRYABLE_ERROR, _clean_text(error_code), iso_utc(now), row["processing_key"]),
+                (state, _clean_text(error_code), iso_utc(now), row["processing_key"]),
             )
             self._audit(
                 conn,
                 aggregate_type="publication_job",
                 aggregate_id=publication_key_value,
-                event_type="publication_readback_retry",
+                event_type="publication_readback_retry_exhausted" if exhausted else "publication_readback_retry",
                 actor_type="worker",
                 actor_id=_clean_text(worker_id),
-                details={"error_code": error_code, "retry_after_seconds": retry_after_seconds},
+                details={"error_code": error_code, "retry_after_seconds": retry_after_seconds, "failed_readbacks": failures + 1},
                 at=now,
                 previous_state=str(row["state"]),
-                next_state=STATE_RETRYABLE_ERROR,
+                next_state=state,
             )
+
+        return {"publication_key": publication_key_value, "state": state, "write_attempted": False}
 
     def _backlog_candidates(self, conn: sqlite3.Connection) -> list[tuple[str, int]]:
         rows = conn.execute(

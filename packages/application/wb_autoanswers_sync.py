@@ -397,6 +397,7 @@ class WbFeedbackSyncService:
                   AND feedback_id>? ORDER BY feedback_id LIMIT ?""", (after, min(100, max(1, batch_size)) + len(official))).fetchall()
         selected = [str(row["feedback_id"]) for row in rows if str(row["feedback_id"]) not in official][:max(1, min(100, batch_size))]
         resolved = 0
+        unavailable = []
         for feedback_id in selected:
             try:
                 detail = self.source.fetch_detail(feedback_id)
@@ -407,10 +408,19 @@ class WbFeedbackSyncService:
                 if detail and str(detail.get("id") or "") == feedback_id and (answer_text.strip() or detail.get("state") == "wbRu"):
                     self.repository.upsert_feedback(detail, source_stream="absent_inventory_detail", run_kind="detail_readback")
                     resolved += 1
+            except WbAutoanswersHttpError as exc:
+                if exc.status_code not in {404, 410}:
+                    raise self._map_error(exc) from exc
+                # Unavailable is not answered/deleted. Advance only the rotating
+                # detail pass, retaining the unresolved feedback for later checks.
+                unavailable.append({"feedback_id": feedback_id, "code": f"wb_http_{exc.status_code}"})
             except Exception as exc:
                 raise self._map_error(exc) from exc
         self.repository.save_sync_cursor(stream, cursor={"inventory_at": observed["completed_at"], "after": selected[-1] if selected else ""}, successful=True)
-        return {"checked": len(selected), "resolved": resolved}
+        result = {"checked": len(selected), "resolved": resolved}
+        if unavailable:
+            result["unavailable"] = unavailable
+        return result
 
     def reconcile_archive_tick(
         self,
