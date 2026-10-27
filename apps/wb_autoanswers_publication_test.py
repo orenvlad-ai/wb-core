@@ -137,6 +137,100 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(self.worker.run_once()["state"], "published")
         self.assertEqual(len(self.transport.write_calls), 1)
 
+    def test_unavailable_readback_isolated_and_next_answer_publishes_once(self) -> None:
+        for status in (400, 403, 404, 410):
+            with self.subTest(status=status):
+                bad, good = f"bad-{status}", f"good-{status}"
+                self.approved(bad)
+                self.assertTrue(self.worker.run_once()["write_attempted"])
+                self.approved(good)
+                self.transport.readbacks = [WbAutoanswersHttpError(status, "unavailable")]
+                result = self.worker.run_once()
+                self.assertEqual(result["state"], "needs_review")
+                stored = self.repo.get_feedback(bad)["publications"][0]
+                self.assertEqual(stored["last_error_code"], f"wb_readback_http_{status}")
+                self.assertEqual(stored["attempts"], 1)
+                self.assertIsNotNone(stored["write_started_at"])
+                with self.assertRaises(AutoanswersRuntimeError) as refused:
+                    self.repo.approve_for_publication(
+                        self.repo.get_feedback(bad)["publications"][0]["processing_key"],
+                        actor_id="admin", confirmed=True,
+                    )
+                self.assertEqual(refused.exception.code, "publication_already_started")
+
+                self.assertTrue(self.worker.run_once()["write_attempted"])
+                reply = self.repo.get_feedback(good)["generated_reply"]
+                self.transport.readbacks = [feedback(good, answer=reply)]
+                self.assertEqual(self.worker.run_once()["state"], "published")
+                self.clock.advance(600)
+                self.assertIsNone(self.worker.run_once())
+                self.assertEqual(sum(name == bad for name, _ in self.transport.write_calls), 1)
+                self.assertEqual(sum(name == good for name, _ in self.transport.write_calls), 1)
+
+    def test_temporary_readback_failure_leaves_time_for_next_publication(self) -> None:
+        self.approved("temporary")
+        self.worker.run_once()
+        self.approved("next")
+        self.transport.readbacks = [WbAutoanswersHttpError(503, "temporary")]
+        self.assertEqual(self.worker.run_once()["state"], "retryable_error")
+        self.clock.advance(70)
+        self.assertTrue(self.worker.run_once()["write_attempted"])
+        reply = self.repo.get_feedback("next")["generated_reply"]
+        self.transport.readbacks = [feedback("next", answer=reply)]
+        self.assertEqual(self.worker.run_once()["state"], "published")
+        self.clock.advance(300)
+        reply = self.repo.get_feedback("temporary")["generated_reply"]
+        self.transport.readbacks = [feedback("temporary", answer=reply)]
+        self.assertEqual(self.worker.run_once()["state"], "published")
+        self.assertEqual(len(self.transport.write_calls), 2)
+
+    def test_repeated_readback_failures_are_bounded_without_second_post(self) -> None:
+        self.approved("outage")
+        self.worker.run_once()
+        for expected in ("retryable_error", "retryable_error", "needs_review"):
+            self.transport.readbacks = [WbAutoanswersHttpError(503, "outage")]
+            self.assertEqual(self.worker.run_once()["state"], expected)
+            self.clock.advance(301)
+        self.assertIsNone(self.worker.run_once())
+        self.assertEqual(len(self.transport.write_calls), 1)
+
+    def test_bounded_readback_failures_release_active_sweep_rating_priority(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        for name, rating in (("priority-one", 1), ("priority-two", 2)):
+            row = feedback(name, text=f"Содержательный отзыв {rating}")
+            row["productValuation"] = rating
+            self.transport.current_details[name] = row
+            self.repo.upsert_feedback(row, source_stream="unanswered", run_kind="steady")
+            job = self.repo.enqueue_processing(name, trigger_source="steady_sync", actor_id="sync")
+            self.repo.claim_processing_job(worker_id="ai")
+            self.repo.complete_generation(job["processing_key"], result=successful_result(), worker_id="ai")
+        preview = self.repo.preview_mode_transition("auto_all", actor_id="admin", run_max_usd="1.00")
+        self.repo.apply_mode_transition("auto_all", actor_id="admin", preview_id=preview["preview_id"])
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+
+        self.assertTrue(self.worker.run_once()["write_attempted"])
+        self.assertEqual(self.transport.write_calls[0][0], "priority-one")
+        for expected in ("retryable_error", "retryable_error", "needs_review"):
+            self.transport.readbacks = [WbAutoanswersHttpError(503, "outage")]
+            self.assertEqual(self.worker.run_once()["state"], expected)
+            if expected == "retryable_error":
+                # The earlier rating owns the active bucket until retry exhaustion.
+                self.assertIsNone(self.worker.run_once())
+                self.clock.advance(301)
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile", batch_size=25)
+        self.assertTrue(self.worker.run_once()["write_attempted"])
+        self.assertEqual(self.transport.write_calls[1][0], "priority-two")
+        reply = self.repo.get_feedback("priority-two")["generated_reply"]
+        self.transport.readbacks = [feedback("priority-two", answer=reply)]
+        self.assertEqual(self.worker.run_once()["state"], "published")
+        self.clock.advance(600)
+        self.assertIsNone(self.worker.run_once())
+        isolated = self.repo.get_feedback("priority-one")["publications"][0]
+        self.assertEqual(isolated["state"], "needs_review")
+        self.assertEqual(isolated["attempts"], 1)
+        self.assertIsNotNone(isolated["write_started_at"])
+        self.assertEqual([name for name, _ in self.transport.write_calls], ["priority-one", "priority-two"])
+
     def test_204_requires_matching_detail_readback(self) -> None:
         _processing, publication = self.approved()
         reply = self.repo.get_feedback("publish")["generated_reply"]
@@ -191,7 +285,7 @@ class PublicationTest(unittest.TestCase):
         self.repo.update_settings(master_enabled=False, actor_id="admin")
         first_readback = self.worker.run_once()
         self.assertEqual(first_readback["state"], "retryable_error")
-        self.clock.advance(2)
+        self.clock.advance(301)
         second_readback = self.worker.run_once()
         self.assertEqual(second_readback["state"], "published")
         self.assertEqual(len(self.transport.readbacks), 0)

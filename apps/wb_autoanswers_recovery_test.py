@@ -267,6 +267,24 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(service.reconcile_absent_unanswered_tick(batch_size=10), {"checked": 2, "resolved": 1})
         self.assertEqual(self.repo.get_feedback("unknown")["answer"]["text"], "")
         self.assertEqual(self.repo.local_unanswered_count(), 1)
+    def test_absent_404_advances_pass_without_resolving_unknown_feedback(self):
+        from packages.adapters.wb_autoanswers import WbAutoanswersHttpError
+        for name in ("a-unavailable", "b-answered"):
+            self.insert(name)
+        self.inventory([])
+        class Source(FakeReadSource):
+            def fetch_detail(_self, name):
+                if name == "a-unavailable":
+                    raise WbAutoanswersHttpError(404, "unavailable")
+                return feedback(name, answer="Ответ WB")
+        service = WbFeedbackSyncService(repository=self.repo, source=Source(), now_factory=self.clock)
+        first = service.reconcile_absent_unanswered_tick(batch_size=1)
+        self.assertEqual(first["resolved"], 0)
+        self.assertEqual(first["unavailable"][0]["code"], "wb_http_404")
+        self.assertEqual(self.repo.get_feedback("a-unavailable")["answer"]["text"], "")
+        self.assertEqual(service.reconcile_absent_unanswered_tick(batch_size=1), {"checked": 1, "resolved": 1})
+        self.assertEqual(self.repo.local_unanswered_count(), 1)
+
     def test_startup_resume_and_epoch_change_start_full_inventory_immediately(self):
         self.enable()
         source = FakeReadSource()
