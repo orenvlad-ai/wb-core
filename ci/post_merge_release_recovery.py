@@ -89,6 +89,17 @@ CLEANER_PROFILE = {
     "operation_id": "release-v3-25425fa6463f2f9f279c3b123cae971b",
 }
 
+CLEANER_PROFILES = {
+    CLEANER_RELEASE_RUN_ID: CLEANER_PROFILE,
+    40563653934: {
+        "pull_request": 1501, "gate_run_id": 40560748870,
+        "base_sha": "b94a6e6b1243b86a8a98453fcaaddf68a96648ac",
+        "head_sha": "35034b036cd313ada80ab39deceaeb7d559d8bbe",
+        "merge_sha": "ecf9c14c76bb6955e77850572a2af0cda13a83fc",
+        "operation_id": "release-v3-3eae790579e0668cb2bd24acabf05bc7",
+    },
+}
+
 # Exact first storage-status refusal after sync/metadata, before dependencies.
 PREDEPENDENCY_RELEASE_RUN_ID = 37598234406
 PREDEPENDENCY_PROFILE = {
@@ -153,7 +164,7 @@ def recovery_case(release_run_id: int) -> RecoveryCase:
 
 
 def cleaner_completion_case(case: RecoveryCase, release_run_id: int) -> bool:
-    return case is RecoveryCase.STORAGE_TAIL and release_run_id == CLEANER_RELEASE_RUN_ID
+    return case is RecoveryCase.STORAGE_TAIL and release_run_id in CLEANER_PROFILES
 
 
 def normal_activation_tail_case(case: RecoveryCase) -> bool:
@@ -340,7 +351,7 @@ def _validate_original_receipt(
         if release_run_id != PREDEPENDENCY_RELEASE_RUN_ID or any(normalized.get(key) != expected for key, expected in PREDEPENDENCY_PROFILE.items()):
             raise RecoveryError("original-receipt-not-exact-predependency-storage")
     if cleaner_completion_case(case, release_run_id):
-        if release_run_id != CLEANER_RELEASE_RUN_ID or any(normalized.get(k) != v for k, v in CLEANER_PROFILE.items()):
+        if release_run_id not in CLEANER_PROFILES or any(normalized.get(k) != v for k, v in CLEANER_PROFILES[release_run_id].items()):
             raise RecoveryError("original-receipt-not-exact-cleaner-completion")
     if case is RecoveryCase.SQLITE_ACTIVATION:
         profile = _sqlite_activation_profile(release_run_id)
@@ -388,13 +399,13 @@ def _prove_failed_stage(
             "line 1282, in deploy_current_checkout",
             'run_stage("readback",cleaner_precomplete_probe_command,allow_transport_reconciliation=False)',
             "apps/search_cluster_cleaner_release_probe.py --phase before_complete",
-            "--expected-sha " + CLEANER_PROFILE["merge_sha"],
-            CLEANER_PROFILE["operation_id"],
+            "--expected-sha " + CLEANER_PROFILES[release_run_id]["merge_sha"],
+            CLEANER_PROFILES[release_run_id]["operation_id"],
             '{"status": "skipped_maintenance", "reason": "skipped_maintenance"}',
             "ConnectionRefusedError", "returned non-zero exit status 1.",
         )
         failures = re.findall(r"(?:subprocess\.)?CalledProcessError:.*?returned non-zero exit status (\d+)", text, re.DOTALL)
-        if (release_run_id != CLEANER_RELEASE_RUN_ID or gate_run_id != CLEANER_PROFILE["gate_run_id"]
+        if (release_run_id not in CLEANER_PROFILES or gate_run_id != CLEANER_PROFILES[release_run_id]["gate_run_id"]
                 or any(item not in text for item in required)
                 or not _storage_tail_gate_argument_matches(text, gate_run_id)
                 or failures != ["1"] or "exit status 255" in text):
@@ -1455,7 +1466,7 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion_input": completion_script,
     }
     if (case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE} or cleaner_completion_case(case, release_run_id)):
-        expected_merge = _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILE["merge_sha"] if cleaner_completion_case(case, release_run_id) else PREDEPENDENCY_PROFILE["merge_sha"]
+        expected_merge = _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILES[release_run_id]["merge_sha"] if cleaner_completion_case(case, release_run_id) else PREDEPENDENCY_PROFILE["merge_sha"]
         if target.target_id != "wb_core_eu_hosted_runtime_active" or runtime_dir != "/opt/wb-core-runtime/state" or merge != expected_merge:
             raise RecoveryError("sqlite-activation-target-contract-invalid")
         commands["cleaner_precomplete_probe"] = hosted._remote_shell_command(
@@ -1463,7 +1474,7 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
             f"--phase before_complete --expected-sha {shlex.quote(merge)} --runtime-dir {shlex.quote(runtime_dir)}"
         )
     if cleaner_completion_case(case, release_run_id):
-        if release_run_id != CLEANER_RELEASE_RUN_ID:
+        if release_run_id not in CLEANER_PROFILES:
             raise RecoveryError("cleaner-completion-release-not-exact")
         # The original log proves successful skipped activation. Never replay it.
         del commands["activation"]
