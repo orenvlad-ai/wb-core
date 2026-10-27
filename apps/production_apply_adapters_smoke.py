@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 from types import SimpleNamespace
 
@@ -46,8 +47,55 @@ class Harness(WbFbsMappingEvidenceProductionAdapter):
         return {"operation_id": kwargs["operation_id"], "disposition": "submitted"}
 
 
+def finance_stale_adapter_contract():
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch, Mock
+    from apps.wb_finance_weekly import FinanceStaleCostAdapter
+    from packages.application.wb_finance_payout_apply import digest
+    from apps.production_apply_launcher import execute
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        request = {'runtime_dir':tmp}
+        plan = {'fingerprint':'sha256:'+'1'*64, 'target_before_digest':'sha256:'+'2'*64,
+                'seller_id':'test', 'date_from':'2026-10-12','date_to':'2026-10-25',
+                'weeks':[{'week_start':'2026-10-12','week_end':'2026-10-18'}]}
+        result = {'fingerprint':plan['fingerprint'],'non_target_digest_after':'same',
+                  'target_image_digest':digest({}), 'weeks':plan['weeks'],
+                  'source_advanced_after_apply':False,'post_verify_stale_week_count':0}
+        block = Mock(runtime_dir=root,db_path=root/'db')
+        block.apply_stale_cost_weeks.return_value = result
+        block._finance_target_images.return_value = {}
+        block._json_digest.side_effect = digest
+        adapter = FinanceStaleCostAdapter()
+        adapter._bound = Mock(return_value=(block,plan))
+        conn = sqlite3.connect(':memory:')
+        registry = Mock()
+        registry.connect.return_value = conn
+        with patch('packages.application.wb_finance_payout_apply.target', return_value=(registry,None)), \
+                patch('apps.wb_finance_weekly.WarehouseRecoveryRegistry', return_value=registry), \
+                patch('apps.wb_finance_weekly._prepare_bounded_finance_recovery', return_value={'operation_id':'recover','lifecycle':'mutating'}):
+            preview = adapter.preview(request,'finance-test')
+            receipt = execute(action='apply',adapter_name='finance_test',operation_id='finance-test',
+                request=request,expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters={'finance_test':adapter})
+            assert receipt['state']=='applied'
+            block.apply_stale_cost_weeks.assert_called_once()
+        # An interrupted prior submit can only be read back; it cannot replay.
+        path = adapter._path(request,'finance-interrupted')
+        path.write_text(json.dumps({'request_digest':digest(request),'plan_fingerprint':plan['fingerprint']}))
+        assert adapter.readback(request,'finance-interrupted')['state']=='ambiguous'
+        try:
+            execute(action='apply',adapter_name='finance_test',operation_id='finance-interrupted',request=request,
+                    expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters={'finance_test':adapter})
+        except Exception as exc:
+            assert str(exc)=='operation-not-ready'
+        else:
+            raise AssertionError('ambiguous operation replayed')
+        block.apply_stale_cost_weeks.assert_called_once()
+
+
 def main() -> None:
-    assert set(ADAPTERS) == {"wb_autoanswers_recovery_v1", "inventory_retention_publication_v1", "web_source_publication_v1", "promo_archive_publication_v1", "finance_daily_publication_v1", "ads_partial_publication_v1", "ads_closed_day_recovery_v1", "fbs_snapshot_accounting_v1", "finance_payout_reconcile_v1", "wb_fbs_mapping_evidence_v1", "web_vitrina_management_history_v1", "web_vitrina_wb_history_recovery_v1", "supplier_invoice_revision_v1", "search_cluster_cleaner_manual_v1"}
+    finance_stale_adapter_contract()
+    assert set(ADAPTERS) == {"finance_stale_cost_v1", "wb_autoanswers_recovery_v1", "inventory_retention_publication_v1", "web_source_publication_v1", "promo_archive_publication_v1", "finance_daily_publication_v1", "ads_partial_publication_v1", "ads_closed_day_recovery_v1", "fbs_snapshot_accounting_v1", "finance_payout_reconcile_v1", "wb_fbs_mapping_evidence_v1", "web_vitrina_management_history_v1", "web_vitrina_wb_history_recovery_v1", "supplier_invoice_revision_v1", "search_cluster_cleaner_manual_v1"}
     for adapter_name in ADAPTERS:
         registered = ADAPTERS[adapter_name]
         assert callable(registered.preview)

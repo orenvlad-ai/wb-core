@@ -476,5 +476,94 @@ from packages.application.business_data_procedure_admission import guard_cli
 main = guard_cli(default_runtime='.runtime/registry_upload')(main)
 
 
+class FinanceStaleCostAdapter:
+    """One-submit launcher wrapper for the existing bounded Finance repair."""
+
+    def _bound(self, request):
+        from packages.application.wb_finance_payout_apply import target, digest
+        from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
+        target(request)
+        plan = json.loads(Path(request['plan_path']).read_text())
+        if (plan.get('schema_version') != 'wb_finance_stale_cost_recalculation_v1'
+                or not plan.get('apply_allowed') or plan.get('blockers')
+                or not plan.get('weeks') or len(plan['weeks']) > 60
+                or plan['fingerprint'] != request['plan_fingerprint']
+                or digest({k:v for k,v in plan.items() if k != 'fingerprint'}) != plan['fingerprint']):
+            raise ValueError('finance_stale_plan_invalid')
+        block = WbFinanceWeeklyBlock(Path(request['runtime_dir']), seller_id=plan['seller_id'])
+        return block, plan
+
+    def _path(self, request, operation_id):
+        from apps.production_apply_launcher import validate_operation
+        validate_operation(operation_id)
+        return Path(request['runtime_dir']) / 'evidence' / (operation_id + '.finance-stale-intent.json')
+
+    def preview(self, request, operation_id):
+        _, plan = self._bound(request)
+        return {'operation_id':operation_id, 'target':str(Path(request['runtime_dir']).resolve()),
+                'scope':{'seller_id':plan['seller_id'], 'weeks':plan['weeks']},
+                'prestate_sha256':plan['target_before_digest'], 'candidate_sha256':plan['fingerprint'],
+                'recovery':{'kind':'target_scoped_before_image', 'source':'native_finance_recovery_registry'}}
+
+    def apply(self, request, operation_id, preview):
+        from apps.production_apply_contract import AmbiguousSubmit
+        from packages.application.wb_finance_payout_apply import digest
+        block, plan = self._bound(request)
+        if (preview['candidate_sha256'] != plan['fingerprint']
+                or preview['prestate_sha256'] != plan['target_before_digest']):
+            raise ValueError('finance_stale_preview_drift')
+        path = self._path(request, operation_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Exclusive intent fences every replay, even after process/network failure.
+        with path.open('x') as stream:
+            json.dump({'request_digest':digest(request), 'plan_fingerprint':plan['fingerprint']}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            registry = WarehouseRecoveryRegistry(runtime_dir=block.runtime_dir, db_path=block.db_path)
+            recovery = _prepare_bounded_finance_recovery(registry, block.db_path, plan)
+            if recovery['lifecycle'] == RecoveryState.VERIFIED.value:
+                recovery = registry.begin_mutation(recovery['operation_id'], expected_source_digest=plan['target_before_digest'])
+            result = block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'],
+                date_from=date.fromisoformat(plan['date_from']),
+                date_to=date.fromisoformat(plan['date_to']) if plan['date_to'] else None)
+            if result.get('source_advanced_after_apply') or result.get('post_verify_stale_week_count'):
+                raise ValueError('finance_stale_post_source_changed')
+            registry.retain(recovery['operation_id'], after_digest=result['fingerprint'],
+                            non_target_digest=result['non_target_digest_after'])
+            with path.with_suffix('.result.json').open('x') as stream:
+                json.dump({'request_digest':digest(request), 'result':result, 'recovery':recovery['operation_id']}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception as exc:
+            raise AmbiguousSubmit('finance_stale_readback_required') from exc
+        return {'operation_id':operation_id, 'disposition':'submitted'}
+
+    def readback(self, request, operation_id):
+        from contextlib import closing
+        from packages.application.wb_finance_payout_apply import target, digest
+        path = self._path(request, operation_id)
+        if not path.exists():
+            return {'operation_id':operation_id, 'state':'not_submitted'}
+        intent = json.loads(path.read_text())
+        if intent['request_digest'] != digest(request):
+            raise ValueError('finance_stale_operation_request_mismatch')
+        result_path = path.with_suffix('.result.json')
+        if not result_path.exists():
+            return {'operation_id':operation_id, 'state':'ambiguous'}
+        saved = json.loads(result_path.read_text())
+        if saved['request_digest'] != digest(request):
+            raise ValueError('finance_stale_result_request_mismatch')
+        registry, manifest = target(request)
+        block, plan = self._bound(request)
+        with closing(registry.connect('operational', mode='ro', manifest=manifest, operation='finance_stale_readback')) as conn:
+            conn.execute('PRAGMA query_only=ON')
+            keys = {(plan['seller_id'], w['week_start'], w['week_end']) for w in plan['weeks']}
+            actual = block._json_digest(block._finance_target_images(conn, keys))
+        expected = saved['result']['target_image_digest']
+        return {'operation_id':operation_id, 'state':'applied' if actual == expected else 'ambiguous',
+                'target_image_digest':actual, 'recovery':saved['recovery'], 'weeks':saved['result']['weeks']}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
