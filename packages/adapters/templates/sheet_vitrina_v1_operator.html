@@ -15100,8 +15100,9 @@
           }
           return "<tr><td>" + escapeHtml(definition.label) + "</td>" + weeks.map((week, weekIndex) => {
             if (definition.costQuality) {
-              const status = week.metrics && week.metrics.profit_coverage_status;
-              const label = status === "estimated" ? "Управленческая оценка" : status === "complete" ? "Полное покрытие" : "Неполный расчёт";
+              const status = (week.metrics && week.metrics.profit_coverage_status)
+                || (week.cost_coverage && week.cost_coverage.profit_coverage_status);
+              const label = status === "estimated" ? "Управленческая оценка" : status === "complete" ? "Полное покрытие" : status === "partial" ? "Неполный расчёт" : "Полнота не определена";
               return "<td title=\"" + escapeHtml(financeCostQualityDiagnostic(week)) + "\">" + escapeHtml(label) + "</td>";
             }
             const value = definition.missingCost
