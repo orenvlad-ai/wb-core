@@ -525,6 +525,7 @@ class FinanceStaleCostAdapter:
             if recovery['lifecycle'] == RecoveryState.VERIFIED.value:
                 recovery = registry.begin_mutation(recovery['operation_id'], expected_source_digest=plan['target_before_digest'])
             result = block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'],
+                expected_storage_manifest_sha256=request['storage_manifest_sha256'],
                 date_from=date.fromisoformat(plan['date_from']),
                 date_to=date.fromisoformat(plan['date_to']) if plan['date_to'] else None)
             if result.get('source_advanced_after_apply') or result.get('post_verify_stale_week_count'):
@@ -558,6 +559,7 @@ class FinanceStaleCostAdapter:
         block, plan = self._bound(request)
         with closing(registry.connect('operational', mode='ro', manifest=manifest, operation='finance_stale_readback')) as conn:
             conn.execute('PRAGMA query_only=ON')
+            conn.execute('BEGIN')
             keys = {(plan['seller_id'], w['week_start'], w['week_end']) for w in plan['weeks']}
             actual = block._json_digest(block._finance_target_images(conn, keys))
         expected = saved['result']['target_image_digest']

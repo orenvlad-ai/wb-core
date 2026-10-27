@@ -55,7 +55,7 @@ def finance_stale_adapter_contract():
     from apps.production_apply_launcher import execute
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
-        request = {'runtime_dir':tmp}
+        request = {'runtime_dir':tmp, 'storage_manifest_sha256':'sha256:approved-generation'}
         plan = {'fingerprint':'sha256:'+'1'*64, 'target_before_digest':'sha256:'+'2'*64,
                 'seller_id':'test', 'date_from':'2026-10-12','date_to':'2026-10-25',
                 'weeks':[{'week_start':'2026-10-12','week_end':'2026-10-18'}]}
@@ -79,6 +79,7 @@ def finance_stale_adapter_contract():
                 request=request,expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters={'finance_test':adapter})
             assert receipt['state']=='applied'
             block.apply_stale_cost_weeks.assert_called_once()
+            assert block.apply_stale_cost_weeks.call_args.kwargs['expected_storage_manifest_sha256'] == request['storage_manifest_sha256']
         # An interrupted prior submit can only be read back; it cannot replay.
         path = adapter._path(request,'finance-interrupted')
         path.write_text(json.dumps({'request_digest':digest(request),'plan_fingerprint':plan['fingerprint']}))

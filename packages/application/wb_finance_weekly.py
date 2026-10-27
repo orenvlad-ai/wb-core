@@ -6096,6 +6096,7 @@ class WbFinanceWeeklyBlock:
         self,
         *,
         expected_fingerprint: str,
+        expected_storage_manifest_sha256: str | None = None,
         date_from: date = FBS_FINANCE_FORWARD_INGRESS_DATE,
         date_to: date | None = None,
     ) -> dict[str, Any]:
@@ -6104,6 +6105,9 @@ class WbFinanceWeeklyBlock:
         phase_started = datetime.now(timezone.utc)
         original_authority: list[GenerationManifest] = []
         with self._connect_stale_cost_plan(storage_authority=original_authority) as plan_conn:
+            if (expected_storage_manifest_sha256 is not None
+                    and original_authority[0].manifest_sha256 != expected_storage_manifest_sha256):
+                raise ValueError("Finance storage manifest changed before apply")
             self._assert_readonly_plan_connection(plan_conn)
             operator_plan_token=self._sqlite_data_version_token(plan_conn)
             plan = self._plan_stale_cost_weeks_in_connection(

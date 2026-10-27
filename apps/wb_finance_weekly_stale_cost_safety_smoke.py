@@ -88,6 +88,23 @@ def main() -> None:
             _metrics(block, "2026-06-29") == mixed_before, "dry-run changed mixed week"
         )
 
+        # The launcher approved an earlier generation; identical plan data must
+        # not allow native apply to write to the newly opened generation.
+        from unittest.mock import patch
+        with patch.object(block, '_plan_stale_cost_weeks_in_connection', side_effect=AssertionError('planning reached after authority drift')):
+            try:
+                block.apply_stale_cost_weeks(
+                    expected_fingerprint=str(plan['fingerprint']),
+                    expected_storage_manifest_sha256='sha256:previous-approved-generation',
+                    date_from=date(2026, 6, 29), date_to=date(2026, 7, 26),
+                )
+            except ValueError as exc:
+                _assert('storage manifest changed' in str(exc), str(exc))
+            else:
+                raise AssertionError('generation drift unexpectedly applied')
+        _assert(_metrics(block, '2026-06-29') == mixed_before, 'generation drift changed target')
+        _assert(_metrics(block, '2026-07-20') == late_before, 'generation drift changed second target')
+
         try:
             block.apply_stale_cost_weeks(
                 expected_fingerprint="sha256:wrong",
