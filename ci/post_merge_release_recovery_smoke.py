@@ -1839,10 +1839,9 @@ def test_existing_started_owner_apply_binding() -> None:
         restore_apply(originals)
 
 
-def test_cleaner_completion_exact_evidence_and_no_replay() -> None:
+def test_cleaner_completion_exact_evidence_and_no_replay(run_id=recovery.CLEANER_RELEASE_RUN_ID) -> None:
     case = recovery.RecoveryCase.STORAGE_TAIL
-    run_id = recovery.CLEANER_RELEASE_RUN_ID
-    profile = recovery.CLEANER_PROFILE
+    profile = recovery.CLEANER_PROFILES[run_id]
     assert recovery.recovery_case(run_id) is case
     assert recovery.recovery_case(run_id + 1) is recovery.RecoveryCase.STORAGE_TAIL
     raw = f'''python3 apps/github_release_runner.py run --workflow-run-id "{profile['gate_run_id']}" --output receipt.json
@@ -1901,7 +1900,8 @@ subprocess.CalledProcessError: Command ['ssh', '{profile['operation_id']}', 'app
 
 
 def legacy_tail_regressions() -> None:
-    test_cleaner_completion_exact_evidence_and_no_replay()
+    for run_id in recovery.CLEANER_PROFILES:
+        test_cleaner_completion_exact_evidence_and_no_replay(run_id)
     test_manual_release_full_evidence_chain()
     test_predependency_exact_source_and_dependency_proofs()
     test_predependency_previous_success_receipt()
