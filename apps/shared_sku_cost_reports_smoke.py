@@ -173,9 +173,10 @@ class SharedCostReportTests(unittest.TestCase):
         by_nm = {row["nm_id"]:json.loads(row["metrics_json"]) for row in finance["sku_projections"]}
         self.assertIsNone(by_nm[str(TARGET_NM)]["cogs"])
         self.assertEqual(by_nm[str(other_nm)]["cogs"], "100.0000")
-        # Aggregate COGS is explicitly the covered contribution; the separate
-        # coverage exposes the excluded SKU and its revenue.
-        self.assertEqual(finance["aggregate"]["cogs"], "100.0000")
+        # Aggregate COGS/profit stay unavailable until every unit is covered.
+        self.assertIsNone(finance["aggregate"]["cogs"])
+        self.assertIsNone(finance["aggregate"]["profit_after_cogs"])
+        self.assertEqual(finance["cost_coverage"]["partial_cogs_rub"], "100.0000")
         self.assertEqual(finance["cost_coverage"]["unmatched_units"], 1)
         self.assertEqual(finance["aggregate"]["profit_revenue_covered"], "1000.0000")
         self.assertEqual(finance["aggregate"]["profit_revenue_uncovered"], "1000.0000")
@@ -194,15 +195,14 @@ class SharedCostReportTests(unittest.TestCase):
         finance, partner, coverage = self.read_candidate(self.candidate({DAY: "100"}))
         self.assertEqual(finance["aggregate"]["profit_revenue_covered"], "1000.0000")
         self.assertEqual(finance["aggregate"]["profit_revenue_uncovered"], "1000.0000")
-        self.assertEqual(partner["weeks"][0]["values"]["cogs"], "100.0000")
+        self.assertIsNone(partner["weeks"][0]["values"]["cogs"])
         values = partner["weeks"][0]["values"]
         self.assertEqual(values["net_revenue"], "2000.0000")
         self.assertEqual(values["sales_without_cost_rub"], "1000.0000")
         self.assertEqual(values["orders_without_cost"], "1.0000")
         self.assertEqual(values["estimated_tax"], "60.0000")  # 6% of the covered 1000 only
-        # Covered revenue1000 - COGS100 - commission200 - ads30904
-        # - office10000 - tax60; uncovered revenue never enters profit.
-        self.assertEqual(values["net_profit"], "-40264.0000")
+        # Partial cost coverage cannot produce a final partner profit.
+        self.assertIsNone(values["net_profit"])
         self.assertEqual(coverage["unmatched_units"], 1)
 
     def test_mixed_period_and_default_legacy_before_boundary(self):
