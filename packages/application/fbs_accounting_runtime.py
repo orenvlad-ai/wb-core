@@ -465,7 +465,9 @@ def load_shared(runtime_dir):
     invalid_from = error.get("invalid_from_date") if isinstance(error, dict) else None
     periods = [p for day, p in book["shared_days"].items()
                if (not error or p["status"] == "closed") and (not invalid_from or day < invalid_from)]
-    return ActiveSharedCostSnapshot(periods, effective_date=book["effective_date"])
+    snapshot = ActiveSharedCostSnapshot(periods, effective_date=book["effective_date"])
+    object.__setattr__(snapshot, "invalid_from_date", invalid_from)
+    return snapshot
 
 
 class ActiveInventorySnapshot(FbsInventorySnapshot):

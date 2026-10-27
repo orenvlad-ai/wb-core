@@ -67,6 +67,79 @@ def save_book(runtime: Path, periods: dict[str, dict], *, active=True, publicati
 
 
 
+class ReportingEstimateTests(unittest.TestCase):
+    def test_approved_overlay_exact_priority_and_invalid_source(self):
+        from datetime import date
+        from packages.application.shared_sku_cost import SharedSkuCostSnapshot
+        from packages.application.vitrina_last_known_cost import approved_reporting_snapshot
+        from packages.application.wb_finance_weekly import recalculate_cost_derived_metrics
+        prior = shared_day("2026-10-15", {"1": ("resolved", "12.5")})
+        exact_day = shared_day("2026-10-21", {"1": ("resolved", "15")})
+        exact = SharedSkuCostSnapshot([prior, exact_day], effective_date="2026-10-15")
+        cell = {"source": SOURCE, "quality_state": "management_estimate", "target_date": "2026-10-16",
+                "operation_id": "approved-test", "source_snapshot_id": "last-known-cost:test",
+                "source_as_of_date": "2026-10-15", "management_value": "12.5",
+                "source_day_version_id": prior["version_id"], "source_digest": prior["rows"]["1"]["source_digest"],
+                "evidence": {"selection_method": "latest_same_sku_closed_resolved_on_or_before_target"}}
+        with sqlite3.connect(":memory:") as conn:
+            conn.executescript("CREATE TABLE registry_upload_current_state(slot,bundle_version); INSERT INTO registry_upload_current_state VALUES(1,'b'); CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version,plan_json,refreshed_at,as_of_date,snapshot_id);")
+            def save(c):
+                conn.execute("DELETE FROM sheet_vitrina_v1_ready_snapshots")
+                conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?,?)", ('b', json.dumps({'metadata': {'server_cell_presentation': {'SKU:1|our_wb_unit_cost_rub': {'2026-10-16': c}}}}), 'now','2026-10-21','s'))
+            save(cell)
+            only_prior = SharedSkuCostSnapshot([prior], effective_date='2026-10-15')
+            self.assertEqual(approved_reporting_snapshot(only_prior, conn).resolve(nm_id='1', operation_date=date(2026,10,16))['quality'], 'management_estimate')
+            report = approved_reporting_snapshot(exact, conn)
+            resolve = lambda snap, day, nm='1': snap.resolve(nm_id=nm, operation_date=date.fromisoformat(day))
+            self.assertEqual(resolve(report, '2026-10-16')['unit_cost_rub'], '12.5')
+            self.assertEqual(resolve(report, '2026-10-16')['quality'], 'management_estimate')
+            self.assertEqual(resolve(report, '2026-10-21')['unit_cost_rub'], '15')
+            self.assertEqual(resolve(report, '2026-10-17')['status'], 'missing')
+            self.assertEqual(resolve(report, '2026-10-16', '2')['status'], 'missing')
+            object.__setattr__(only_prior, 'invalid_from_date', '2026-10-16')
+            self.assertEqual(resolve(approved_reporting_snapshot(only_prior, conn), '2026-10-16')['status'], 'missing')
+            revised = SharedSkuCostSnapshot([prior, shared_day('2026-10-16', {'1': ('resolved','14')}), exact_day], effective_date='2026-10-15')
+            self.assertEqual(resolve(approved_reporting_snapshot(revised, conn), '2026-10-16')['unit_cost_rub'], '14')
+            for field, value in [('management_value','99'), ('source_digest','bad'), ('source_day_version_id','bad'), ('source_as_of_date','2026-10-21')]:
+                save({**cell, field:value})
+                self.assertEqual(resolve(approved_reporting_snapshot(exact, conn), '2026-10-16')['status'], 'missing')
+        from apps.wb_finance_weekly_smoke import _seed_canonical_cost, _fixture_rows
+        from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
+        with TemporaryDirectory() as tmp:
+            block = WbFinanceWeeklyBlock(Path(tmp))
+            block.ensure_schema()
+            _seed_canonical_cost(block.db_path)
+            rows = [{**r, 'nmId':1, 'rrDate':'2026-10-16', 'saleDt':'2026-10-16'} for r in _fixture_rows()[:2]]
+            with sqlite3.connect(block.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                block._shared_cost_snapshot = report
+                block.shared_cost_is_candidate = True
+                metrics, coverage, _ = block._aggregate_rows(conn, rows, date(2026,10,12))
+                self.assertEqual(coverage['estimated_units'],4)
+                self.assertEqual(coverage['estimated_sales_revenue_rub'],'360.0000')
+                self.assertEqual(coverage['cogs_rub'],'25.0000')
+                self.assertEqual(metrics['profit_coverage_status'],'estimated')
+                old_hash = coverage['cost_state_hash']
+                block._shared_cost_snapshot = revised
+                metrics2, coverage2, _ = block._aggregate_rows(conn,rows,date(2026,10,12))
+                self.assertEqual(coverage2['estimated_units'],0)
+                self.assertEqual(coverage2['cogs_rub'],'28.0000')
+                self.assertNotEqual(old_hash,coverage2['cost_state_hash'])
+                self.assertEqual(metrics2['profit_coverage_status'],'complete')
+        metrics = {'net_revenue':'1000', 'profit_period_expenses':'200', 'positive_adjustments':'0'}
+        coverage = {'covered_net_revenue_rub':'600','uncovered_net_revenue_rub':'400', 'uncovered_sales_revenue_rub':'400',
+                    'matched_units':6,'unmatched_units':4,'partial_cogs_rub':'150','uncovered_sales_order_count':4,
+                    'uncovered_sales_units':4,'sales_revenue_coverage_pct':'60','profit_coverage_status':'partial'}
+        result = recalculate_cost_derived_metrics(metrics,coverage)
+        self.assertEqual(result['before_cogs_profit'],'800.0000')
+        self.assertEqual(result['before_cogs_margin_pct'],'80.0000')
+        self.assertIsNone(result['profit_after_cogs'])
+        full = recalculate_cost_derived_metrics(metrics, {**coverage,'matched_units':10,'unmatched_units':0,'partial_cogs_rub':'250','profit_coverage_status':'estimated','estimated_sales_revenue_rub':'400'})
+        self.assertEqual(full['profit_after_cogs'],'550.0000')
+        self.assertEqual(full['final_margin_pct'],'55.0000')
+        self.assertEqual(full['sales_with_estimated_cost_rub'],'400')
+
+
 class LastKnownCostTests(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()

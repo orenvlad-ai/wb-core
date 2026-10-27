@@ -42,6 +42,7 @@ _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
     "fbs_snapshot_accounting_v1": (
         "packages.application.fbs_accounting_apply", "FbsAccountingAdapter",
     ),
+    "finance_stale_cost_v1": ("apps.wb_finance_weekly", "FinanceStaleCostAdapter"),
     "finance_payout_reconcile_v1": (
         "packages.application.wb_finance_payout_apply", "FinancePayoutAdapter",
     ),

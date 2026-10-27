@@ -228,18 +228,20 @@ def project(plan: dict[str, Any], *, dates: list[str], source: dict[str, Any],
     return {"plan": after, "changes": changes, "remaining": remaining}
 
 
-def load_presentations(conn: Any, *, bundle_version: str, dates: list[str]) -> dict[str, Any]:
+def load_presentations(conn: Any, *, bundle_version: str, dates: list[str] | None, cost_only: bool = False) -> dict[str, Any]:
     """Only explicitly applied estimates can survive ordinary publication."""
     result: dict[str, Any] = {}
-    if not dates:
+    if dates == []:
         return result
-    placeholders = ','.join('?' for _ in dates)
+    placeholders = ",".join("?" for _ in (dates or []))
+    date_filter = " AND dated.key IN (" + placeholders + ") " if dates is not None else " "
+    cost_filter = " AND cells.key LIKE 'SKU:%|our_wb_unit_cost_rub' AND json_extract(dated.value,'$.source_snapshot_id') LIKE 'last-known-cost:%' " if cost_only else " "
     query = ("SELECT cells.key, dated.key, dated.value FROM sheet_vitrina_v1_ready_snapshots snapshot, "
         "json_each(snapshot.plan_json,'$.metadata.server_cell_presentation') cells, json_each(cells.value) dated "
-        "WHERE snapshot.bundle_version=? AND dated.key IN (" + placeholders + ") "
+        "WHERE snapshot.bundle_version=? " + date_filter + cost_filter +
         "AND json_extract(dated.value,'$.source')=? "
         "ORDER BY snapshot.refreshed_at,snapshot.as_of_date,snapshot.snapshot_id")
-    for key, day, raw in conn.execute(query, (bundle_version, *dates, SOURCE)):
+    for key, day, raw in conn.execute(query, (bundle_version, *(dates or []), SOURCE)):
         result.setdefault(key, {})[day] = json.loads(raw)
     return result
 

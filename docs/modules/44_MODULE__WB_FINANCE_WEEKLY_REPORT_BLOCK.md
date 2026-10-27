@@ -114,13 +114,18 @@ survives into a new connection. See migration 154.
 
 Coverage counts gross sale/return units, orders and sale revenue, so a
 symmetric sale/return pair cannot hide missing cost even if net COGS is zero.
-The full sales fact remains visible, but uncovered sales enter neither the
-profit numerator nor the profitability-revenue denominator. Profit/margin use
-covered net revenue and covered signed COGS, publish `partial` plus
-covered/uncovered revenue/orders/units, and never turn a 500-ruble uncovered
-sale into 500 rubles of profit. Formula version is
-`wb_finance_profit_covered_revenue_v4_signed_deductions`. Repeated missing
-operations remain losslessly collapsed and source-bound.
+Before-cost profit and margin always use full net revenue, independently of cost
+coverage. Final full-period profit/COGS/margin are unavailable while any sale or
+return lacks valuation; covered COGS remains available in coverage diagnostics.
+Explicitly applied same-SKU last-known estimates from Vitrina may fill absent
+shared-cost days/SKUs, with closed-source version, row digest and amount checked
+against the same pinned book. Invalidated target days cannot use estimates.
+Exact costs take priority; changed provenance participates in scoped CAS and
+ordinary stale-week recalculation. Estimates never manufacture inventory/capital.
+The UI separately shows unknown-cost sales and estimated-cost sales with a
+`partial`, `estimated` or `complete` state. Formula version:
+`wb_finance_profit_full_revenue_v5_explicit_estimates`.
+Repeated missing operations remain losslessly collapsed and source-bound.
 
 ## Agent remuneration, acquiring and WB correction
 

@@ -167,9 +167,9 @@ class RuntimeTests(unittest.TestCase):
                         "publication_error": error}
                 with patch.object(runtime, "load", return_value=(book, "version")), \
                      patch.object(runtime, "ActiveSharedCostSnapshot",
-                                  side_effect=lambda periods, *, effective_date: periods):
+                                  side_effect=lambda periods, *, effective_date: type("Snapshot", (), {"periods": periods})()):
                     result = runtime.load_shared(self.root)
-                self.assertEqual({period["date"] for period in result}, expected)
+                self.assertEqual({period["date"] for period in result.periods}, expected)
 
     def test_record_prepare_failure_handles_legacy_error_and_preserves_date_boundary(self):
         from contextlib import nullcontext

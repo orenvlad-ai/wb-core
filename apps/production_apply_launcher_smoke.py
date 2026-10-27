@@ -133,7 +133,7 @@ expected = {
     "ads_partial_publication_v1",
     "ads_closed_day_recovery_v1",
     "fbs_snapshot_accounting_v1",
-    "finance_payout_reconcile_v1",
+    "finance_payout_reconcile_v1", "finance_stale_cost_v1",
     "supplier_invoice_revision_v1",
     "web_vitrina_management_history_v1",
     "web_vitrina_wb_history_recovery_v1",
