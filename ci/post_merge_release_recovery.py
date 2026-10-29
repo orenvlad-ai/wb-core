@@ -98,6 +98,13 @@ CLEANER_PROFILES = {
         "merge_sha": "ecf9c14c76bb6955e77850572a2af0cda13a83fc",
         "operation_id": "release-v3-3eae790579e0668cb2bd24acabf05bc7",
     },
+    40885416921: {
+        "pull_request": 1505, "gate_run_id": 40878949065,
+        "base_sha": "7b22b5ef2d70b2bf21d702c97a7cbed8b2ac6c30",
+        "head_sha": "b2f7062e9db9c25aac5406c1ea94d25862cb9225",
+        "merge_sha": "597eafe8f50bbfbe5c38533006dbfde1361cc867",
+        "operation_id": "release-v3-4b74569e32b7a8fbaaa36d1c03c69106",
+    },
 }
 
 # Exact first storage-status refusal after sync/metadata, before dependencies.
