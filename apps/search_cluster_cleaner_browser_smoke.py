@@ -25,6 +25,15 @@ def browser_login(page,f,username='owner'):
     expect(page.locator('[data-kc-checked]')).not_to_have_text('—')
 
 
+def dismiss_acceptance(page):
+    # Accepted commands open a modal receipt; continue through its real close
+    # control, as an operator does, before interacting with the underlying UI.
+    popup=page.get_by_role('dialog',name='Принято',exact=True)
+    expect(popup).to_be_visible()
+    popup.get_by_role('button',name='Закрыть',exact=True).click()
+    expect(popup).to_be_hidden()
+
+
 def run(output:Path):
     output.mkdir(parents=True,exist_ok=True);checks=[];screens=[]
     def check(name,condition=True):
@@ -75,6 +84,7 @@ def run(output:Path):
             question.get_by_role('button',name='Оставить',exact=True).dblclick()
             expect(page.locator('[data-kc-pending]')).to_have_text('2')
             check('double_click_decision_once',f.count('cleaner_manual_overrides')==before+1)
+            dismiss_acceptance(page)
             page.locator('[data-kc-history-open]').click();expect(page.locator('[data-kc-history]')).to_contain_text('Решение владельца')
             page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-page="history"]')).to_be_visible();check('history_reload_deep_link')
             page.locator('[data-kc-page="history"] [data-kc-back]').click()
@@ -82,7 +92,9 @@ def run(output:Path):
             page.locator('[data-kc-profiles-open]').click();page.locator('[data-kc-profile-number]').fill('102');page.locator('[data-kc-profile-find] button').click()
             expect(page.locator('[data-kc-profile-form]')).to_be_visible();page.locator('[data-kc-profile-models]').select_option(['17 pro']);page.locator('[data-kc-profile-source]').fill('Тест совместимости <img src=x onerror="window.cleanerXss=2">');page.locator('[data-kc-profile-save]').click()
             expect(page.locator('[data-kc-profile-versions]')).to_contain_text('не активна');check('draft_does_not_activate',f.request('/profiles/102')[1]['active_version'] is None)
+            dismiss_acceptance(page)
             page.get_by_role('button',name='Активировать версию',exact=True).click();expect(page.locator('[data-kc-profile-versions]')).to_contain_text('действует');check('explicit_profile_activation',f.request('/profiles/102')[1]['active_version']==1)
+            dismiss_acceptance(page)
             check('profile_source_xss_is_text',page.locator('[data-kc-profile-versions] img').count()==0 and page.evaluate('window.cleanerXss===undefined'))
             page.goto(f.base_url+f.url.split(f.base_url)[1].split('?')[0]+'?tab=ads',wait_until='domcontentloaded');expect(page.locator('[data-ads-panel]')).to_be_visible();expect(page.locator('[data-keyword-cleaner]')).to_be_hidden();check('old_ads_deep_link_opens_bids')
             check('no_browser_js_errors',not errors);page.close()
@@ -93,6 +105,7 @@ def run(output:Path):
             expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
             expect(page.locator('[data-kc-stage-text]')).to_contain_text('Получаем ключи')
             check('double_click_run_one_job',f.count('cleaner_runs')==before+1)
+            dismiss_acceptance(page)
             def busy_owner_job(route):
                 payload=route.fetch().json();payload.update(manual_worker_state='busy',manual_worker_alive=True)
                 route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False))
@@ -198,6 +211,7 @@ def run(output:Path):
                 page.route('**/keyword-cleaner/manual-clean/*/recheck',recheck)
                 page.locator('[data-kc-manual-advert]').select_option('10101');page.locator('[data-kc-manual-nm]').select_option('101');page.locator('[data-kc-run]').click()
                 expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
+                dismiss_acceptance(page)
                 expect(page.locator('[data-kc-stage-text]')).to_contain_text('Сверяем правила товара',timeout=7000)
                 if outcome=='complete':page.screenshot(path=str(output/'manual-running.png'),full_page=True);screens.append('manual-running.png')
                 expect(page.locator('[data-kc-manual-result]')).to_contain_text('полный список исключений' if outcome=='unknown-minus-empty' else 'стекло iphone 16 pro max',timeout=7000)
@@ -229,6 +243,7 @@ def run(output:Path):
                     page.get_by_role('button',name='Проверить результат WB').click()
                     expect(page.locator('[data-kc-message]')).to_contain_text('Уточняем ту же операцию и продолжаем пару только после проверки отправки.')
                     expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
+                    dismiss_acceptance(page)
                     check('recheck_uses_same_job_readback_only',len(rechecks)==1 and bool(rechecks[0].get('request_id')) and f.count('cleaner_runs')==2)
                 if outcome=='failed':check('manual_error_is_visible','Чистка не выполнена' in result_text and 'WB не ответил' in result_text)
                 if outcome=='initial-empty':
@@ -345,6 +360,7 @@ def run(output:Path):
             page.locator('[data-kc-batch-choices] input[value="10116:20116"]').check()
             expect(page.locator('[data-kc-batch-start]')).to_be_enabled()
             page.locator('[data-kc-batch-start]').click();expect(page.locator('[data-kc-batch-stage]')).to_be_visible()
+            dismiss_acceptance(page)
             check('batch_one_durable_post_with_exact_pairs',len(posts)==1 and len(posts[0]['targets'])==16 and posts[0]['selected_categories']==['active','paused'] and bool(posts[0]['request_id']))
             expect(page.locator('[data-kc-batch-stage-text]')).to_contain_text('Кампания Стекло',timeout=8000)
             page.screenshot(path=str(output/'batch-running.png'),full_page=True);screens.append('batch-running.png')
@@ -359,6 +375,7 @@ def run(output:Path):
             page.locator('[data-kc-batch-result] button').nth(1).click()
             expect(page.locator('[data-kc-batch-result]')).to_contain_text('Уточнить результат и продолжить')
             page.get_by_role('button',name='Уточнить результат и продолжить').click()
+            dismiss_acceptance(page)
             expect(page.locator('[data-kc-batch-result]')).to_contain_text('Массовая чистка · Частично',timeout=8000)
             expect(page.locator('[data-kc-batch-result] .kc-phrase-detail')).to_contain_text('Исключение подтверждено',timeout=8000)
             expect(page.get_by_role('button',name='Уточнить результат и продолжить')).to_have_count(0)
@@ -411,6 +428,7 @@ def run(output:Path):
             page.unroute('**/keyword-cleaner/requests/*')
             page.route('**/keyword-cleaner/requests/*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(lost_source[0])))
             page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden()
+            dismiss_acceptance(page)
             check('batch_lost_reply_recovered_by_get_without_repost',len(posts)==1 and posts[0]['targets']==[dict(advert_id=10101,nm_id=101)])
             page.unroute_all(behavior='wait');page.close()
         with running_fixture() as f:
@@ -462,6 +480,7 @@ def run(output:Path):
             expect(page.locator('[data-kc-batch-start]')).to_be_enabled()
             page.locator('[data-kc-batch-start]').click()
             expect(page.locator('[data-kc-batch-stage]')).to_be_visible()
+            dismiss_acceptance(page)
             check('batch_large_selection_one_explicit_intent_no_ui_cap',len(posts)==1 and len(posts[0]['targets'])==130 and bool(posts[0]['request_id']) and f.count('cleaner_requests')==before+1)
             page.close()
         with running_fixture() as f:
@@ -546,7 +565,7 @@ def run(output:Path):
             page.route('**/keyword-cleaner/manual-clean',pending_post);page.route('**/keyword-cleaner/requests/*',lambda route:route.abort())
             page.locator('[data-kc-manual-advert]').select_option('10101');page.locator('[data-kc-manual-nm]').select_option('101');page.locator('[data-kc-run]').click();expect(page.locator('[data-kc-recover]')).to_be_visible();expect(page.locator('[data-kc-message]')).to_contain_text('Не удалось проверить сохранение')
             page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-recover]')).to_be_visible();check('manual_uncertain_command_survives_reload')
-            page.unroute('**/keyword-cleaner/requests/*');page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden();check('manual_recovery_get_only_one_post',len(posts)==1);page.unroute_all(behavior='wait');page.close()
+            page.unroute('**/keyword-cleaner/requests/*');page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden();dismiss_acceptance(page);check('manual_recovery_get_only_one_post',len(posts)==1);page.unroute_all(behavior='wait');page.close()
         with running_fixture() as f:
             with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
             page=browser.new_page();browser_login(page,f);posts=[];hanging=[]
@@ -555,6 +574,7 @@ def run(output:Path):
             page.route('**/keyword-cleaner/manual-clean',hanging_post);page.locator('[data-kc-manual-advert]').select_option('10101');page.locator('[data-kc-manual-nm]').select_option('101')
             start=time.monotonic();page.locator('[data-kc-run]').click();expect(page.locator('[data-kc-stage-text]')).to_contain_text('Получаем ключи',timeout=16000)
             check('manual_hanging_post_recovers_one_request',len(posts)==1 and 9<=time.monotonic()-start<16)
+            dismiss_acceptance(page)
             for route in hanging:
                 try:route.abort('failed')
                 except Exception:pass
