@@ -395,6 +395,9 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         return proof
     def closed_ready():
         nonlocal backfill_dates
+        if receipt['final_versions'].get('fbs_accounting_status') == 'unavailable':
+            return StageProof({'closed_backlog_policy': 'deferred_accounting_unavailable'},
+                ({'source_key': 'closed_ready', 'policy': 'deferred_accounting_unavailable'},))
         if recovery_day is not None:
             return StageProof({'closed_backlog_policy': 'preserved_for_regular_cycle'})
         warnings, proofs = list(closed.prepare_retained(receipt['cycle_id'])), []
@@ -435,7 +438,8 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         if history_config.fingerprint() != receipt['history_config_fingerprint']:
             raise CycleStageFailure('cycle_history_contract_changed')
         from packages.application.fbs_accounting_historical_history import pending_receipt
-        historical=pending_receipt(entrypoint.runtime)
+        historical = (None if receipt['final_versions'].get('fbs_accounting_status') == 'unavailable'
+                      else pending_receipt(entrypoint.runtime))
         kwargs=dict(backfill_dates=backfill_dates,closed_receipt=closed if backfill_dates else None)
         if historical is not None:
             historical.freeze_scope(entrypoint.now_factory())
@@ -469,7 +473,9 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
             receipt.update(status='running', current_stage=item['stage'])
             item.update(status='running', started_at=store.timestamp_factory())
             store.write(receipt)  # Before effects: a crash is uncertain, never pending replay.
-            proof = action()
+            from packages.application.fbs_accounting_degraded import degraded_accounting_scope
+            with degraded_accounting_scope(entrypoint.runtime, receipt['final_versions']):
+                proof = action()
             if current_business_date_iso(entrypoint.now_factory()) != receipt['business_date']:
                 raise CycleStageFailure('cycle_business_date_changed')
             if not isinstance(proof, StageProof) or not proof.versions or not all(isinstance(v,str) and v for v in proof.versions.values()):

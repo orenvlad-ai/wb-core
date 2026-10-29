@@ -3278,6 +3278,8 @@ class RegistryUploadHttpEntrypoint:
         active = result.get('active_version') or {}
         finance = result.get('wb_finance_cost_recalculation') or {}
         economics = result.get('functional_economics_publication') or {}
+        if result.get('status') == 'degraded':
+            return self._cycle_unavailable_accounting_proof(receipt, run_id, result)
         if (result.get('status') != 'success' or not active.get('version_id')
                 or accounting.get('status') != 'published' or accounting.get('ready_obligation') != 'complete'
                 or not accounting.get('operation_id') or not economics.get('plan_fingerprint')
@@ -3307,6 +3309,41 @@ class RegistryUploadHttpEntrypoint:
             'fbs_book': version, 'fbs_ready_operation': accounting['operation_id'],
             'economics_fingerprint': economics['plan_fingerprint'], 'weekly_cost_fingerprint': finance['fingerprint']},
             tuple(valuation_warnings))
+
+    def _cycle_unavailable_accounting_proof(self, receipt, run_id, result):
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+        from packages.application.ready_publication import readonly
+        from packages.application.fbs_accounting_runtime import load
+        from packages.application.warehouse_update_journal import PHASES
+        accounting = result.get("fbs_snapshot_accounting") or {}
+        active = result.get("active_version") or {}
+        book, version = load(self.runtime.runtime_dir)
+        open_days = sorted(day for day, period in (book or {}).get("state", {}).get("periods", {}).items()
+                           if period.get("status") == "open")
+        if (accounting.get("status") != "unavailable" or accounting.get("reason") != "incomplete_period_cannot_close"
+                or not version or version != accounting.get("version") or not book.get("active")
+                or book.get("publication_error", {}).get("reason") != accounting["reason"]
+                or not open_days or open_days[0] != accounting.get("blocked_date")
+                or not active.get("version_id")):
+            raise CycleStageFailure("warehouse_accounting_invalidation_unproven")
+        with readonly(self.runtime.db_path) as conn:
+            run = conn.execute("SELECT status,functional_version_id FROM sheet_vitrina_v1_warehouse_update_runs WHERE run_id=?", (run_id,)).fetchone()
+            phases = {row[0]: row[1] for row in conn.execute("SELECT phase_key,status FROM sheet_vitrina_v1_warehouse_update_phases WHERE run_id=?", (run_id,))}
+            current = conn.execute("SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1").fetchone()
+            stocks = conn.execute("SELECT snapshot_id,pagination_complete,raw_rows_digest,snapshot_date FROM sheet_vitrina_v1_warehouse_wb_snapshots WHERE version_id=?", (active["version_id"],)).fetchall()
+        expected_phases = {name: "success" for name in PHASES}
+        expected_phases.update(functional_publication="degraded", dependent_replay_economics="skipped")
+        if (not run or run["status"] != "degraded" or run["functional_version_id"] != active["version_id"]
+                or phases != expected_phases or not current or current[0] != active["version_id"]
+                or len(stocks) != 1 or not stocks[0]["pagination_complete"] or not stocks[0]["raw_rows_digest"]
+                or stocks[0]["snapshot_date"] != receipt["business_date"]):
+            raise CycleStageFailure("warehouse_degraded_generation_or_journal_changed")
+        return StageProof({"warehouse_run": run_id, "functional_version": active["version_id"],
+            "fbo_snapshot": stocks[0]["snapshot_id"], "fbo_digest": stocks[0]["raw_rows_digest"],
+            "fbs_book": version, "fbs_accounting_status": "unavailable",
+            "fbs_accounting_reason": accounting["reason"], "fbs_accounting_blocked_date": open_days[0]},
+            ({"source_key": "fbs_accounting", "policy": "unavailable_costs_dependents_skipped",
+              "reason": accounting["reason"], "date": open_days[0]},))
 
     def _cycle_daily_projection(self):
         from apps.wb_finance_daily import _worker_lock
@@ -3444,7 +3481,8 @@ class RegistryUploadHttpEntrypoint:
         owner = RegistryUploadHttpEntrypoint._cycle_owned_worker_identity(self, receipt)
         self._cycle_verify_ready(ready)
         policy_receipt = supplier_receipt = None
-        if historical_receipt is None and hasattr(self.runtime, 'db_path'):
+        if (historical_receipt is None and hasattr(self.runtime, 'db_path')
+                and receipt.get('final_versions', {}).get('fbs_accounting_status') != 'unavailable'):
             from packages.application.operator_policy_history import pending as pending_policy_history
             from packages.application.operator_supplier_history import pending as pending_supplier_history
             # One native dated publication owner per pass: FF, policy, supplier.
@@ -7809,6 +7847,10 @@ class RegistryUploadHttpEntrypoint:
                 durable_run_id,
                 phase_key,
                 item_count=item_count,
+                status=("degraded" if phase_key == "functional_publication"
+                        and isinstance(value, Mapping)
+                        and (value.get("fbs_snapshot_accounting") or {}).get("status") == "unavailable"
+                        else "success"),
                 details=dict(value) if isinstance(value, Mapping) else {},
             )
             return value
@@ -7856,13 +7898,39 @@ class RegistryUploadHttpEntrypoint:
                     plan,
                     confirm_fingerprint=str(plan["plan_fingerprint"]),
                 )
-                accounting = _publish_fbs_snapshot_accounting(self.runtime)
+                from packages.application.fbs_accounting_runtime import FbsAccountingUnavailable
+                try:
+                    accounting = _publish_fbs_snapshot_accounting(self.runtime)
+                except FbsAccountingUnavailable as exc:
+                    # The functional commit is proven; this exact book quality
+                    # failure must not stop independent source publication.
+                    accounting = exc.diagnostic()
                 planning = self.inventory_planning.current()
                 return {**result, "fbs_snapshot_accounting": accounting,
                         "planning_inventory_readback": planning}
 
             result = run_phase("functional_publication", publish_functional)
             planning_inventory_readback = result["planning_inventory_readback"]
+            accounting = result.get("fbs_snapshot_accounting") or {}
+            if accounting.get("status") == "unavailable":
+                # Do not recalculate/acknowledge dependent financial or operator
+                # work with an unclosed accounting day. A subsequent sound cycle
+                # remains responsible for these obligations.
+                self.warehouse_update_journal.phase_finished(
+                    durable_run_id, "dependent_replay_economics", status="skipped",
+                    error=accounting["reason"], details={"accounting": accounting})
+                retention_after = run_phase("recovery_retention_after",
+                    lambda: run_bounded_recovery_retention(self.runtime))
+                payload = {"status": "degraded", "durable_run_id": durable_run_id,
+                    "active_version": result.get("active_version"),
+                    "fbs_snapshot_accounting": accounting,
+                    "wb_valuation": dict(plan.get("wb_valuation") or {}),
+                    "recovery_retention_before": retention_before,
+                    "recovery_retention_after": retention_after,
+                    "dependent_replay_economics": {"status": "skipped", "reason": accounting["reason"]}}
+                self.warehouse_update_journal.finish(durable_run_id, status="degraded",
+                    result=payload, error=accounting["reason"])
+                return payload
             overhead_completion = None
             def dependent_replay() -> dict[str, Any]:
                 nonlocal overhead_completion

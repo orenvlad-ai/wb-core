@@ -48,6 +48,48 @@ class RuntimeTests(unittest.TestCase):
         version = runtime.save(self.root, book, expected=expected, operation_id="activate-test")
         return book, version
 
+    def test_book_commit_contention_rolls_back_without_partial_revision(self):
+        initial, version = self.opening()
+        from packages.application.sqlite_contention import connect_sqlite, SQLiteContentionExhausted
+        with sqlite3.connect(runtime.path(self.root)) as reader:
+            reader.execute("BEGIN")
+            before = reader.execute("SELECT count(*) FROM accounting_revisions").fetchone()[0]
+            with patch.object(runtime, "connect_sqlite", side_effect=lambda path, **kw: connect_sqlite(path, timeout_ms=600)):
+                with self.assertRaises(SQLiteContentionExhausted) as caught:
+                    runtime._save_book(self.root, {**initial, "active": False}, expected=version, operation_id="blocked-commit")
+            self.assertEqual(caught.exception.phase, "commit")
+        self.assertEqual(runtime.load(self.root)[1], version)
+        with sqlite3.connect(runtime.path(self.root)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM accounting_revisions").fetchone()[0], before)
+            self.assertIsNone(conn.execute("SELECT 1 FROM accounting_revisions WHERE operation_id='blocked-commit'").fetchone())
+
+    def test_quality_error_is_preserved_when_invalidation_cannot_commit(self):
+        self.opening()
+        from packages.application.fbs_snapshot_cost import FbsSnapshotCostError
+        original = FbsSnapshotCostError("incomplete_period_cannot_close")
+        contention = sqlite3.OperationalError("database is locked")
+        with patch.object(runtime, "prepare", side_effect=original), \
+             patch.object(runtime, "_record_prepare_failure", side_effect=contention):
+            with self.assertRaises(FbsSnapshotCostError) as caught: runtime.refresh(self.root)
+        self.assertIs(caught.exception, original)
+        self.assertIs(caught.exception.__cause__, contention)
+        self.assertNotIsInstance(caught.exception, runtime.FbsAccountingUnavailable)
+
+    def test_verified_incomplete_day_exposes_degraded_proof_without_closing_it(self):
+        initial, _ = self.opening()
+        initial["state"]["periods"][self.day]["quality"] = "incomplete"
+        before = runtime.save(self.root, initial, expected=runtime.load(self.root)[1], operation_id="incomplete")
+        from packages.application.fbs_snapshot_cost import FbsSnapshotCostError
+        with patch.object(runtime, "prepare", side_effect=FbsSnapshotCostError("incomplete_period_cannot_close")):
+            with self.assertRaises(runtime.FbsAccountingUnavailable) as caught: runtime.refresh(self.root)
+        after, version = runtime.load(self.root)
+        self.assertNotEqual(before, version)
+        self.assertEqual(caught.exception.version, version)
+        self.assertEqual(caught.exception.blocked_date, self.day)
+        self.assertEqual(after["state"], initial["state"])
+        self.assertEqual(after["shared_days"], initial["shared_days"])
+        self.assertEqual(after["state"]["periods"][self.day]["status"], "open")
+
     def test_default_capture_time_follows_pinned_source_snapshot(self):
         self.opening()
         from packages.application import ready_publication

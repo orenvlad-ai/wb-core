@@ -478,8 +478,19 @@ class RegistryUploadDbBackedRuntime:
             from packages.application.sheet_vitrina_v1_closed_ready_repair import validate_retained_candidate
             validate_retained_candidate(plan, expected, business_date=publication_date, runtime=self)
         book, expected_book = load(self.runtime_dir) if _prepared_book is None else _prepared_book
+        from packages.application.fbs_accounting_degraded import (
+            current_degraded_accounting, materialize_degraded_accounting, reconcile_recovered_accounting,
+        )
+        degraded = current_degraded_accounting(self.runtime_dir, book=book, book_version=expected_book)
+        if degraded is not None and _prepared_book is not None:
+            raise ReadyPublicationConflict("degraded_accounting_book_write_forbidden")
+        if (degraded is not None and _retained_closed_replay
+                and any(day >= degraded['invalid_from_date'] and day not in degraded['closed_dates']
+                        for day in plan.date_columns)):
+            raise ReadyPublicationConflict("degraded_accounting_retained_affected_date_forbidden")
         active_inventory = inventory_from_book(book, now=publication_now, runtime_dir=self.runtime_dir) if book and book["active"] else None
-        if active_inventory is not None and publication_date in plan.date_columns and active_inventory.payload()["quality"] == "unavailable":
+        if (active_inventory is not None and publication_date in plan.date_columns
+                and active_inventory.payload()["quality"] == "unavailable" and degraded is None):
             raise ReadyPublicationConflict("ready_current_book_operand_unavailable")
         with readonly(self.db_path) as conn:
             check_expected(conn, expected)
@@ -492,6 +503,8 @@ class RegistryUploadDbBackedRuntime:
             if _prepared_book is not None:
                 check_pinned_authority(conn, book["publication_authority"])
                 check_material(conn, book["publication_inputs"])
+            if degraded is None and not _retained_closed_replay:
+                plan = reconcile_recovered_accounting(plan, book=book)
             if not _retained_closed_replay:
                 estimate = {"available": False} if active_inventory is not None else build_current_official_fbs_estimate(
                     self.db_path, nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
@@ -546,6 +559,9 @@ class RegistryUploadDbBackedRuntime:
                             for sheet in plan.sheets
                         ],
                     )
+            # Carry-forward and all dated economics have finished. Apply the
+            # unavailable overlay last so no stale numerical operand survives.
+            plan = materialize_degraded_accounting(plan, proof=degraded)
             _assert_finance_daily_recovery_values_preserved(
                 conn,
                 bundle_version=current_state.bundle_version,
@@ -577,6 +593,7 @@ class RegistryUploadDbBackedRuntime:
                 raise ReadyPublicationConflict("ready_history_changed")
             if load(self.runtime_dir)[1] != expected_book:
                 raise ReadyPublicationConflict("ready_book_changed")
+            current_degraded_accounting(self.runtime_dir)
             record_intent(conn, operation_id=operation_id, attempt_id=attempt_id, kind="book_ready" if _prepared_book else "ready",
                 expected=expected, inputs={"material": material_inputs, "history": history_inputs,
                     "authority": expected.authority,
@@ -600,6 +617,7 @@ class RegistryUploadDbBackedRuntime:
                 book_version = _save_book(self.runtime_dir, book, expected=expected_book,
                                          operation_id=operation_id + ":" + attempt_id)
                 _after_book_commit()
+            current_degraded_accounting(self.runtime_dir)
             replace_ready(conn, expected=expected, activated_at=current_state.activated_at,
                 snapshot_id=plan.snapshot_id, plan_version=plan.plan_version, refreshed_at=refreshed_at,
                 plan_json=serialized_plan)

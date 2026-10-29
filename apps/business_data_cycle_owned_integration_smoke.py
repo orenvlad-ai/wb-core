@@ -67,7 +67,7 @@ class OwnedEntry(wiring.FixedDomainEntry):
 
 @unittest.skipUnless(sys.platform == 'linux', 'actual Linux child ownership required')
 class OwnedCycleIntegration(unittest.TestCase):
-    def test_unavailable_spp_reaches_domains_exact_current_ready_and_native_as_degraded(self):
+    def test_unavailable_spp_reaches_domains_exact_current_ready_and_native_as_degraded(self, accounting_unavailable=False):
         case = wiring.WiringTests()
         with patch.object(fixture, 'heavy_admitted', return_value=nullcontext()):
             case.setUp()
@@ -81,6 +81,26 @@ class OwnedCycleIntegration(unittest.TestCase):
         for name in ('.web-vitrina-finished-builder.lock', '.wb-finance-daily-worker.lock'):
             (runtime.runtime_dir / name).touch(mode=0o600)
         entry = OwnedEntry(case.case)
+        if accounting_unavailable:
+            from datetime import timedelta
+            from apps.ready_publication_smoke import make_book
+            from packages.application import fbs_accounting_runtime as accounting
+            from packages.application.sheet_vitrina_v1_cycle import StageProof
+            book, expected = make_book(runtime.runtime_dir, opening=True,
+                now=fixture.NOW - timedelta(days=1))
+            version = accounting.save(runtime.runtime_dir, book, expected=expected, operation_id='fixture-opening')
+            accounting._record_prepare_failure(runtime.runtime_dir, expected=version,
+                error=ValueError('incomplete_period_cannot_close'))
+            failed_book = accounting.load(runtime.runtime_dir)
+            original_warehouse = entry._cycle_warehouse
+            def unavailable_warehouse(*args):
+                proof = original_warehouse(*args)
+                return StageProof({**proof.versions, 'fbs_book': failed_book[1],
+                    'fbs_accounting_status': 'unavailable',
+                    'fbs_accounting_reason': 'incomplete_period_cannot_close',
+                    'fbs_accounting_blocked_date': '2026-04-19'},
+                    ({'source_key': 'fbs_accounting', 'policy': 'cost_unavailable'},))
+            entry._cycle_warehouse = unavailable_warehouse
         publisher = Entry(runtime_dir=runtime.runtime_dir, runtime=runtime, now_factory=lambda:fixture.NOW,
             activated_at_factory=lambda:fixture.STAMP, refreshed_at_factory=lambda:fixture.STAMP)
         entry._cycle_publish_ready = publisher._cycle_publish_ready
@@ -114,8 +134,22 @@ class OwnedCycleIntegration(unittest.TestCase):
             self.assertEqual(native._current()['current'],receipt['final_versions']['history_edition_id'])
             self.assertEqual(len(native.edition()['days']),14)
             self.assertEqual(entry.backfill,())
+            if accounting_unavailable:
+                self.assertEqual(accounting.load(runtime.runtime_dir), failed_book)
+                saved = runtime.load_sheet_vitrina_ready_snapshot()
+                unavailable = saved.metadata['fbs_accounting_unavailable']
+                self.assertIn('2026-04-19', unavailable['dates'])
+                self.assertIn('2026-04-20', unavailable['dates'])
+                self.assertTrue(any(cell.get('reason_code') == 'incomplete_period_cannot_close'
+                    for dates in saved.metadata['server_cell_presentation'].values() for cell in dates.values()))
+                self.assertEqual(next(stage for stage in receipt['stages']
+                    if stage['stage'] == 'closed_ready')['status'], 'degraded')
         self.assertTrue(heavy_admission_status(runtime.runtime_dir)['idle'])
         self.assertTrue(admission_idle(runtime.runtime_dir)['idle'])
+
+    def test_unavailable_accounting_reaches_real_owned_history_child_without_context(self):
+        self.test_unavailable_spp_reaches_domains_exact_current_ready_and_native_as_degraded(
+            accounting_unavailable=True)
 
     def test_manual_dispatch_actual_operator_thread_ready_owned_child_and_exact_readback(self):
         case = wiring.WiringTests()

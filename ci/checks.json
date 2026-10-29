@@ -517,6 +517,8 @@
     "ready_publication": {
       "patterns": [
         "packages/application/ready_publication.py",
+        "packages/application/fbs_accounting_degraded.py",
+        "apps/fbs_accounting_degraded_smoke.py",
         "packages/application/promo_campaign_archive.py",
         "packages/application/sheet_vitrina_v1_inventory_history.py",
         "packages/application/warehouse_business_projection.py",
@@ -530,6 +532,7 @@
       ],
       "commands": [
         ["python3", "apps/ready_publication_smoke.py"],
+        ["python3", "apps/fbs_accounting_degraded_smoke.py"],
         ["python3", "apps/ready_writer_closure_smoke.py"],
         ["python3", "apps/fbs_accounting_runtime_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_inventory_history_smoke.py"],
@@ -1225,6 +1228,7 @@
         "packages/application/fbs_accounting_gap_archive.py",
         "packages/application/fbs_accounting_historical_history.py",
         "packages/application/fbs_accounting_runtime.py",
+        "packages/application/fbs_accounting_degraded.py",
         "packages/application/fbs_inventory_presentation.py",
         "packages/application/inventory_quantity.py",
         "artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json",
