@@ -169,6 +169,7 @@ HISTORY_SOURCE_REASONS = frozenset({
     'accepted_ready_source_disappeared',
     'book_blob_content_unknown',
     'book_source_resource_limit',
+    'live_book_bootstrap_pending',
     'bound_book_blob_missing',
     'bound_book_version_missing',
     'current_bundle_missing',

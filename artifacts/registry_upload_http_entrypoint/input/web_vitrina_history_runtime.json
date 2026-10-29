@@ -45,6 +45,6 @@
     "packages/application/web_vitrina_history_group_repair.py": "55980d00f189b7adb210bafa94f29be4fd77d7dc1831111fe00bfb7ebd4ffab4",
     "packages/application/web_vitrina_group_repair_inputs.py": "493ffb5ec2ec96861027071ef0d1a71c180aabaffe93511359abb82e7394c161",
     "packages/application/web_vitrina_group_blocks.py": "2a6c4a42a815b00fc448140b5ec57b0cc1234a8bfb813ee68b73754b8f336992",
-    "packages/application/web_vitrina_history_live_adapter.py": "8d2430d87a45eb26b36beca5799c639ecd953262bb9817b4a08c41a3ea42b8ef"
+    "packages/application/web_vitrina_history_live_adapter.py": "5fcd989e4b8b810aa074e2566dfb1144cdee690c71be38c50be2dd742fbef08c"
   }
 }
