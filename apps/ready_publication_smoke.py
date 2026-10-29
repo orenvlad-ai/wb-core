@@ -25,6 +25,8 @@ from apps.shared_sku_cost_smoke import wb
 from packages.application import fbs_accounting_runtime as book
 from packages.application import registry_upload_db_backed_runtime as dbmod
 from packages.application import ready_publication as publication
+# Native rollover selection imports date consumers; initialize before fixture clock mocks.
+from packages.application import web_vitrina_window_v3 as _rollover_window
 from packages.application.fbs_snapshot_cost import fingerprint
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.business_time import current_business_date_iso

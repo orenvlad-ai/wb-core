@@ -9,6 +9,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from playwright.sync_api import expect,sync_playwright
 from apps.search_cluster_cleaner_reconcile_integration_fixture import LEGACY_QUERY,running_integration_fixture
 from apps.search_cluster_cleaner_web_fixture import PASSWORD
+from apps.search_cluster_cleaner_browser_smoke import dismiss_acceptance
 
 
 def main():
@@ -33,6 +34,7 @@ def main():
         expect(page.locator('[data-kc-batch-start]')).to_be_enabled()
         page.locator('[data-kc-batch-start]').click()
         expect(page.locator('[data-kc-batch-stage]')).to_be_visible()
+        dismiss_acceptance(page)
         card=page.locator('[data-kc-batch-result]')
         try:expect(card).to_contain_text('Массовая чистка · Выполнено',timeout=15000)
         except AssertionError:
@@ -75,6 +77,7 @@ def main():
         expect(page.locator('[data-kc-batch-start]')).to_be_enabled()
         page.locator('[data-kc-batch-start]').click()
         expect(card).to_contain_text('без новых изменений: 1',timeout=30000)
+        dismiss_acceptance(page)
         assert len(fake.writes)==1
         second_batch=fixture.request('/summary')[1]['last_manual_batch']['batch_id']
         assert second_batch!=first_batch
