@@ -90,6 +90,40 @@ class OwnedRetentionTests(unittest.TestCase):
             return RegistryUploadHttpEntrypoint._handle_owned_warehouse_manual_sync_request(self.entry,
                 owner_token=owner['owner_token'])
 
+    def test_verified_accounting_quality_failure_skips_financial_completion(self):
+        from packages.application.fbs_accounting_runtime import FbsAccountingUnavailable
+        from unittest.mock import Mock
+        self.entry.calculation_parameters_block.process_pending_targeted_recalculations = Mock()
+        self.entry.wb_finance_weekly_block.recalculate_stale_cost_weeks = Mock()
+        with ExitStack() as stack:
+            self.ports(stack)
+            stack.enter_context(patch('apps.warehouse_functional_runner._publish_fbs_snapshot_accounting',
+                side_effect=FbsAccountingUnavailable(version='failed-book', blocked_date='2026-10-27')))
+            completions = [stack.enter_context(patch('packages.application.' + name)) for name in (
+                'operator_ff_overhead.complete_current_cycle', 'operator_warehouse_documents.reconcile',
+                'operator_fulfillment_services.reconcile', 'operator_supplier_processing.reconcile')]
+            stack.enter_context(heavy_admitted(self.root, operation='cycle'))
+            owner = stack.enter_context(warehouse_functional_job_lock(self.root))
+            result = RegistryUploadHttpEntrypoint._handle_owned_warehouse_manual_sync_request(self.entry,
+                owner_token=owner['owner_token'])
+        self.assertEqual(result['status'], 'degraded')
+        self.assertEqual(self.applies, 1)
+        self.entry.calculation_parameters_block.process_pending_targeted_recalculations.assert_not_called()
+        self.entry.wb_finance_weekly_block.recalculate_stale_cost_weeks.assert_not_called()
+        for completion in completions: completion.assert_not_called()
+        phases = {p['phase_key']: p for p in self.journal.public_status()['phases']}
+        self.assertEqual(phases['functional_publication']['status'], 'degraded')
+        self.assertEqual(phases['dependent_replay_economics']['status'], 'skipped')
+        self.assertEqual(phases['recovery_retention_after']['status'], 'success')
+
+    def test_unconfirmed_accounting_failure_still_stops_cycle(self):
+        with patch('apps.warehouse_functional_runner._publish_fbs_snapshot_accounting',
+                   side_effect=sqlite3.OperationalError('database is locked')):
+            with self.assertRaises(sqlite3.OperationalError): self.cycle()
+        phases = {p['phase_key']: p for p in self.journal.public_status()['phases']}
+        self.assertEqual(phases['functional_publication']['status'], 'failed')
+        self.assertEqual(phases['dependent_replay_economics']['status'], 'pending')
+
     def test_sequential_owned_cycles_rotate_native_artifacts_and_keep_receipts(self):
         foreign=self.registry.checkpoint_root/'foreign.keep'
         foreign.parent.mkdir(parents=True,exist_ok=True);foreign.write_text('unowned')

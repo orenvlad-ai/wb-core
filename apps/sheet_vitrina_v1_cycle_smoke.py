@@ -890,6 +890,12 @@ class SourceAndAdmissionTests(unittest.TestCase):
 
 class BoundWarehouseTests(unittest.TestCase):
     def test_owned_handler_runs_all_tails_once_and_checks_exact_journal(self):
+        self._owned_handler_case()
+
+    def test_known_unavailable_accounting_has_exact_degraded_generation_proof(self):
+        self._owned_handler_case(unavailable=True)
+
+    def _owned_handler_case(self, unavailable=False):
         from packages.application.warehouse_update_journal import WarehouseUpdateJournal, PHASES
         from packages.application.storage_registry import StoreRegistry
         from unittest.mock import Mock
@@ -897,7 +903,7 @@ class BoundWarehouseTests(unittest.TestCase):
             root=Path(temp);db=StoreRegistry(root).resolve('operational')
             with sqlite3.connect(db) as conn:
                 conn.execute('CREATE TABLE sheet_vitrina_v1_warehouse_functional_active(slot INTEGER,version_id TEXT)')
-                conn.execute('CREATE TABLE sheet_vitrina_v1_warehouse_wb_snapshots(snapshot_id TEXT,version_id TEXT,pagination_complete INTEGER,raw_rows_digest TEXT)')
+                conn.execute('CREATE TABLE sheet_vitrina_v1_warehouse_wb_snapshots(snapshot_id TEXT,version_id TEXT,pagination_complete INTEGER,raw_rows_digest TEXT,snapshot_date TEXT)')
             entry=Entry.__new__(Entry)
             entry.runtime=SimpleNamespace(runtime_dir=root,db_path=db,finalize_completed_wb_transit_cost_recalculations=Mock(return_value={}))
             entry.activated_at_factory=lambda:STAMP
@@ -913,7 +919,7 @@ class BoundWarehouseTests(unittest.TestCase):
             def apply(plan,**kwargs):
                 with sqlite3.connect(db) as conn:
                     conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_active VALUES(1,'functional')")
-                    conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots VALUES('fbo','functional',1,'fbo-digest')")
+                    conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots VALUES('fbo','functional',1,'fbo-digest','2026-09-29')")
                 return {'active_version':{'version_id':'functional'}}
             valuation={'status':'partial','missing':[{'nm_id':101,'reason':'wb_cost_unavailable'}],
                 'provisional':[{'nm_id':102}]}
@@ -925,10 +931,15 @@ class BoundWarehouseTests(unittest.TestCase):
             accounting={'status':'published','ready_obligation':'complete','version':'book','operation_id':'book-ready'}
             publication={'status':'published','accounting_version':'book','operation_id':'book-ready'}
             book={'state':{'periods':{'2026-09-29':{'snapshot':{'id':'fbs','digest':'fbs-digest'}}}}}
+            if unavailable:
+                book = {'active': True, 'publication_error': {'reason': 'incomplete_period_cannot_close'},
+                        'state': {'periods': {'2026-09-28': {'status': 'open', 'quality': 'incomplete'}}}}
+            from packages.application.fbs_accounting_runtime import FbsAccountingUnavailable
+            failure = FbsAccountingUnavailable(version='book', blocked_date='2026-09-28') if unavailable else None
             # This fixture exercises ordinary publication without a historical
             # cohort; the owned handler still consults the historical path first.
             with patch('packages.application.fbs_accounting_historical_cycle.refresh',return_value=None) as historical_refresh, \
-                 patch('packages.application.fbs_accounting_runtime.refresh',return_value=accounting) as refresh, \
+                 patch('packages.application.fbs_accounting_runtime.refresh',return_value=accounting,side_effect=failure) as refresh, \
                  patch('packages.application.fbs_accounting_runtime.load',return_value=(book,'book')), \
                  patch('packages.application.fbs_accounting_runtime.current_publication_receipt',return_value=publication) as publication_read, \
                  patch('packages.application.operator_warehouse_documents.drain',return_value={'request_ids':['receipt-1']}) as operator_drain, \
@@ -937,6 +948,34 @@ class BoundWarehouseTests(unittest.TestCase):
                  heavy_admitted(root, operation='cycle'):
                 proof=entry._cycle_warehouse(store,receipt,{'fbs_generation':'fbs','fbs_digest':'fbs-digest'})
             self.assertEqual(proof.versions['fbs_book'],'book')
+            if unavailable:
+                self.assertEqual(proof.versions['fbs_accounting_status'], 'unavailable')
+                self.assertEqual(proof.versions['fbs_accounting_blocked_date'], '2026-09-28')
+                self.assertNotIn('weekly_cost_fingerprint', proof.versions)
+                self.assertTrue(proof.warnings)
+                operator_reconcile.assert_not_called()
+                fulfillment_reconcile.assert_not_called()
+                publication_read.assert_not_called()
+                entry.wb_finance_weekly_block.recalculate_stale_cost_weeks.assert_not_called()
+                entry.calculation_parameters_block.publish_current_functional_economics.assert_not_called()
+                run_id = proof.versions['warehouse_run']
+                with sqlite3.connect(db) as conn:
+                    result = json.loads(conn.execute('SELECT result_json FROM sheet_vitrina_v1_warehouse_update_runs WHERE run_id=?', (run_id,)).fetchone()[0])
+                with patch('packages.application.fbs_accounting_runtime.load', return_value=(book, 'changed-book')):
+                    with self.assertRaisesRegex(CycleStageFailure, 'invalidation_unproven'):
+                        entry._cycle_unavailable_accounting_proof(receipt, run_id, result)
+                for change, restore in (
+                    ("UPDATE sheet_vitrina_v1_warehouse_functional_active SET version_id='other'", "UPDATE sheet_vitrina_v1_warehouse_functional_active SET version_id='functional'"),
+                    ("UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET pagination_complete=0", "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET pagination_complete=1"),
+                    ("UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET snapshot_date='2026-09-28'", "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET snapshot_date='2026-09-29'"),
+                    ("UPDATE sheet_vitrina_v1_warehouse_update_phases SET status='success' WHERE phase_key='dependent_replay_economics'", "UPDATE sheet_vitrina_v1_warehouse_update_phases SET status='skipped' WHERE phase_key='dependent_replay_economics'"),
+                ):
+                    with sqlite3.connect(db) as conn: conn.execute(change)
+                    with patch('packages.application.fbs_accounting_runtime.load', return_value=(book, 'book')):
+                        with self.assertRaisesRegex(CycleStageFailure, 'generation_or_journal_changed'):
+                            entry._cycle_unavailable_accounting_proof(receipt, run_id, result)
+                    with sqlite3.connect(db) as conn: conn.execute(restore)
+                return
             self.assertEqual(proof.warnings, (
                 {'source_key':'warehouse_valuation','policy':'cost_unavailable','nm_id':'101','date':'2026-09-29'},
                 {'source_key':'warehouse_valuation','policy':'provisional_fbs_valuation','nm_id':'102','date':'2026-09-29'}))

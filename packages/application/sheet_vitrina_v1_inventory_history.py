@@ -176,6 +176,13 @@ def prepare_inventory_history_from_ready_plan(
     _ensure_inventory_history_schema_ready(conn)
     current_date = _slot_date(plan, "today_current")
     closed_date = _slot_date(plan, "yesterday_closed")
+    from packages.application.fbs_accounting_degraded import degraded_inventory_date
+    # No legacy fallback and no finalization of a prior capture on a day whose
+    # accounting operands were explicitly withheld by the ready owner.
+    if degraded_inventory_date(plan, current_date):
+        current_date = ""
+    if degraded_inventory_date(plan, closed_date):
+        closed_date = ""
     result: dict[str, Any] = {"current": None, "closed": None, "closed_date": closed_date,
         "prior_closed_capture": _latest_capture_id(conn, business_date=closed_date) if closed_date else ""}
     def typed_capture(day):

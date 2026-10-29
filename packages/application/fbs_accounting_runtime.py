@@ -28,9 +28,25 @@ from packages.application.shared_sku_cost import SharedSkuCostSnapshot, build_sh
 from packages.application.shared_sku_cost_sources import capture_wb_component
 from packages.application.storage_registry import StoreRegistry
 from packages.business_time import current_business_date_iso
+from packages.application.sqlite_contention import connect_sqlite
 
 SCHEMA = "fbs_active_snapshot_accounting_v1"
 TABLES = {"accounting_revisions", "accounting_current", "accounting_blobs"}
+
+
+class FbsAccountingUnavailable(ValueError):
+    """A verified quality invalidation, never an uncertain publication failure."""
+
+    def __init__(self, *, version, blocked_date):
+        super().__init__("incomplete_period_cannot_close")
+        self.version = version
+        self.blocked_date = blocked_date
+
+    def diagnostic(self):
+        return {"status": "unavailable", "reason": str(self),
+                "version": self.version, "blocked_date": self.blocked_date,
+                "ready_obligation": "not_performed"}
+
 
 
 def unpack(conn, text):
@@ -123,7 +139,7 @@ def _save_book(runtime_dir, book, *, expected, operation_id):
         raise ValueError("invalid_accounting_book")
     load(runtime_dir)  # Admit an existing file before any writing connection.
     version = fingerprint(book)
-    with closing(sqlite3.connect(path(runtime_dir), timeout=0)) as conn, conn:
+    with connect_sqlite(path(runtime_dir), timeout_ms=30_000) as conn:
         conn.execute("BEGIN IMMEDIATE")
         admit(conn)
         conn.execute("CREATE TABLE IF NOT EXISTS accounting_revisions(version TEXT PRIMARY KEY,operation_id TEXT UNIQUE NOT NULL,payload TEXT NOT NULL,previous_version TEXT)")
@@ -172,7 +188,7 @@ def _commit_book_intent(runtime_dir, book, *, expected, operation_id, inputs, ki
     authority = authority or capture_authority(runtime_dir)
     db = Path(authority["path"])
     now = datetime.now(timezone.utc).isoformat()
-    with closing(sqlite3.connect(db, timeout=0)) as conn:
+    with connect_sqlite(db, timeout_ms=30_000) as conn:
         conn.execute("BEGIN IMMEDIATE")
         check_pinned_authority(conn, authority)
         from packages.application.operator_ff_overhead import assert_book_closure
@@ -218,8 +234,8 @@ def _record_prepare_failure(runtime_dir, *, expected, error):
             getattr(error, "invalid_from_date", None)) if day]
         if boundaries:
             failed["publication_error"]["invalid_from_date"] = min(boundaries)
-        _commit_book_intent(runtime_dir, failed, expected=expected, operation_id="failure-" + uuid4().hex,
-                            inputs={}, kind="book_quality_failure")
+        return _commit_book_intent(runtime_dir, failed, expected=expected, operation_id="failure-" + uuid4().hex,
+                                   inputs={}, kind="book_quality_failure")
 
 
 def prepare(runtime_dir, *, now=None, opening=False):
@@ -354,7 +370,20 @@ def refresh(runtime_dir, *, ready_runtime=None):
         # Do not carry the pre-build plan clock into this separate capture.
         book, expected = prepare(runtime_dir)
     except Exception as exc:
-        _record_prepare_failure(runtime_dir, expected=prior_version, error=exc)
+        try:
+            invalidated_version = _record_prepare_failure(runtime_dir, expected=prior_version, error=exc)
+        except Exception as recording_error:
+            # Preserve the root cause, but do not authorize degraded publication
+            # when durable invalidation is unconfirmed. Never resubmit this write.
+            raise exc from recording_error
+        from packages.application.fbs_snapshot_cost import FbsSnapshotCostError
+        if isinstance(exc, FbsSnapshotCostError) and str(exc) == "incomplete_period_cannot_close" and invalidated_version:
+            failed, actual_version = load(runtime_dir)
+            open_days = sorted(day for day, period in failed["state"]["periods"].items()
+                               if period["status"] == "open")
+            if (actual_version == invalidated_version and failed["active"] and open_days
+                    and failed.get("publication_error", {}).get("reason") == str(exc)):
+                raise FbsAccountingUnavailable(version=actual_version, blocked_date=open_days[0]) from exc
         raise
     if book is None:
         return {"status": "not_active"}

@@ -677,6 +677,9 @@ class SheetVitrinaV1WebVitrinaBlock:
                 source_statuses=(dict(snapshot.metadata or {}).get('group_source_statuses', [])
                     if date_from and date_to else [status for day in snapshot.date_columns
                         for status in accepted_source_statuses(snapshot, column_date=day)]))
+        from packages.application.fbs_accounting_degraded import apply_degraded_rows
+        rows = apply_degraded_rows(rows,
+            presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}))
         if output_row_ids is not None:
             rows = [row for row in rows if row.row_id in output_row_ids]
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
