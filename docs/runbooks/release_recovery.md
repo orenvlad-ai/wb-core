@@ -78,6 +78,15 @@ metadata CAS и конечный readback. Повтор sync, restart, activatio
 принимать соединения после раннего probe. Точные base/head/merge и operation
 зафиксированы отдельным профилем; остальные выпуски не получают этого допуска.
 
+Этот же точный completion-путь разрешён для выпуска 40885416921
+(PR 1505, Gate 40878949065, merge
+`597eafe8f50bbfbe5c38533006dbfde1361cc867`, operation
+`release-v3-4b74569e32b7a8fbaaa36d1c03c69106`). Отдельный профиль закрепляет
+base/head/merge; immutable log обязан пройти те же проверки единственного
+отказа `before_complete` на строке 1282 после `skipped_maintenance`.
+Восстановление продолжает исходную операцию только после успешного readback
+сервиса и cleaner; повтор deploy, restart и activation не разрешён.
+
 Успех подтверждают связанный recovery receipt, завершённая metadata, точная
 версия, сервисы и неизменный изолированный Finance pilot.
 
