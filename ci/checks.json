@@ -1228,6 +1228,7 @@
         "packages/application/fbs_accounting_gap_archive.py",
         "packages/application/fbs_accounting_historical_history.py",
         "packages/application/fbs_accounting_runtime.py",
+        "packages/application/fbs_accounting_degraded.py",
         "packages/application/fbs_inventory_presentation.py",
         "packages/application/inventory_quantity.py",
         "artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json",
