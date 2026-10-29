@@ -151,7 +151,7 @@ class LiveNativeAdapter:
         self.capture_calls += 1
         self.stats = {"bytes": 0, "queries": 0, "plans_loaded": 0,
                       "dated_days_loaded": 0, "component_captures_loaded": 0,
-                      "temporal_proofs_loaded": 0, "reasons": []}
+                      "temporal_proofs_loaded": 0, "book_blobs_loaded": 0, "reasons": []}
         self.deadline = time.monotonic() + self.max_capture_seconds
         self.require_source_families()
         self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -541,19 +541,36 @@ class LiveNativeAdapter:
             for day in days:
                 refs = sorted({mapping[day] for mapping in record["index"].values() if day in mapping})
                 for ref in refs:
-                    if not conn.execute("SELECT 1 FROM accounting_blobs WHERE digest=?", (ref,)).fetchone():
+                    size = conn.execute("SELECT length(payload) FROM accounting_blobs WHERE digest=?", (ref,)).fetchone()
+                    self.stats["queries"] += 1
+                    if size is None:
                         raise LiveSourceUnavailable("bound_book_blob_missing")
                     if ref not in record["verified"]:
+                        # Only a whole verified blob is reusable proof progress.
+                        # Refuse an oversized individual blob before fetching it;
+                        # a bounded initial capture may resume cumulative work.
+                        if size[0] > self.max_read_bytes or time.monotonic() >= self.deadline:
+                            raise LiveSourceUnavailable("book_source_resource_limit")
+                        if size[0] > self.max_read_bytes - self.stats["bytes"]:
+                            progress = any(self.stats.get(key, 0) for key in (
+                                "plans_loaded", "dated_days_loaded", "component_captures_loaded",
+                                "temporal_proofs_loaded", "book_blobs_loaded"))
+                            raise LiveSourceUnavailable("live_book_bootstrap_pending" if progress
+                                                        else "book_source_resource_limit")
                         row = conn.execute("SELECT payload FROM accounting_blobs WHERE digest=?", (ref,)).fetchone()
+                        self.stats["queries"] += 1
                         self.stats["bytes"] += len(row[0])
-                        if self.stats["bytes"] > self.max_read_bytes:
+                        if len(row[0]) != size[0] or self.stats["bytes"] > self.max_read_bytes:
                             raise LiveSourceUnavailable("book_source_resource_limit")
                         decoder = zlib.decompressobj()
                         payload = decoder.decompress(row[0], self.max_read_bytes + 1)
                         if (len(payload) > self.max_read_bytes or not decoder.eof
                                 or decoder.unconsumed_tail or fingerprint(json.loads(payload)) != ref):
                             raise LiveSourceUnavailable("book_blob_content_unknown")
+                        if time.monotonic() >= self.deadline:
+                            raise LiveSourceUnavailable("book_source_resource_limit")
                         record["verified"].append(ref)
+                        self.stats["book_blobs_loaded"] = self.stats.get("book_blobs_loaded", 0) + 1
                 per_day[day]["book"] = [version, refs]
 
     def _bind_quality_resolver(self, conn, context, cache):
@@ -666,7 +683,7 @@ def capture_initial_proofs(adapter: LiveNativeAdapter, deadline_monotonic=None) 
     Fresh compiler/publication captures must call capture directly so a failed
     revalidation cannot become a retry or a new accepted source snapshot.
     """
-    bootstrap_reads = {"captures": 0, "bytes": 0, "queries": 0, "temporal_proofs_loaded": 0}
+    bootstrap_reads = {"captures": 0, "bytes": 0, "queries": 0, "temporal_proofs_loaded": 0, "book_blobs_loaded": 0}
     configured_capture_seconds = adapter.max_capture_seconds
     while True:
         if deadline_monotonic is not None:
@@ -682,10 +699,11 @@ def capture_initial_proofs(adapter: LiveNativeAdapter, deadline_monotonic=None) 
             # retry. A no-progress or terminal source error stays a refusal.
             progress = any(adapter.stats.get(counter, 0) for counter in (
                 "plans_loaded", "dated_days_loaded", "component_captures_loaded",
-                "temporal_proofs_loaded"))
+                "temporal_proofs_loaded", "book_blobs_loaded"))
             resumable = str(exc) in {
                 "live_ready_bootstrap_pending", "live_dated_bootstrap_pending",
-                "live_components_bootstrap_pending", "live_temporal_bootstrap_pending"}
+                "live_components_bootstrap_pending", "live_temporal_bootstrap_pending",
+                "live_book_bootstrap_pending"}
             # Fresh metadata reads outside the individual proof loaders can
             # exhaust the same byte budget after completed proofs were cached.
             # Continue only initial warming, never timeouts or no-progress reads.
@@ -703,6 +721,7 @@ def capture_initial_proofs(adapter: LiveNativeAdapter, deadline_monotonic=None) 
             bootstrap_reads["bytes"] += adapter.stats.get("bytes", 0)
             bootstrap_reads["queries"] += adapter.stats.get("queries", 0)
             bootstrap_reads["temporal_proofs_loaded"] += adapter.stats.get("temporal_proofs_loaded", 0)
+            bootstrap_reads["book_blobs_loaded"] += adapter.stats.get("book_blobs_loaded", 0)
             adapter.max_capture_seconds = configured_capture_seconds
     return vector, bootstrap_reads
 

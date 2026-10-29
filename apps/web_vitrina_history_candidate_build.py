@@ -31,7 +31,7 @@ from packages.application.business_data_heavy_admission import heavy_admitted, H
 SAFE_SOURCE_FAILURE_REASONS = frozenset({
     "live_source_resource_limit", "live_source_read_incomplete", "live_bootstrap_deadline",
     "live_ready_bootstrap_pending", "live_dated_bootstrap_pending",
-    "live_components_bootstrap_pending", "live_temporal_bootstrap_pending",
+    "live_components_bootstrap_pending", "live_temporal_bootstrap_pending", "live_book_bootstrap_pending",
     "source_cache_resource_limit", "book_source_resource_limit", "book_blob_content_unknown",
     "bound_book_blob_missing", "bound_book_version_missing", "current_bundle_missing",
     "accepted_ready_source_disappeared", "live_inventory_capture_manifest_invalid",

@@ -95,7 +95,7 @@ def singleflight(runtime_dir: Path):
 
 
 SAFE_FAILURE_COUNTERS = ("bytes", "queries", "plans_loaded", "dated_days_loaded",
-                         "component_captures_loaded", "temporal_proofs_loaded")
+                         "component_captures_loaded", "temporal_proofs_loaded", "book_blobs_loaded")
 
 
 def bounded_worker(command: list[str], seconds: float, *, allowed_failure_reasons=()) -> dict:
