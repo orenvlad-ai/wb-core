@@ -390,6 +390,30 @@ class ClosedBacklog:
         value = self.status()
         if value is None or all(v['state'] == 'acknowledged' for v in value['dates'].values()):
             value = self.collect(cycle_id, retained_only=True)
+        # A pending external source may occupy one slot for many cycles. Use
+        # remaining capacity for independent accepted retained facts, without
+        # acquiring sources or replacing the original obligation/authority.
+        from packages.application.sheet_vitrina_v1_closed_ready_repair import retained_candidates
+        yesterday = (date.fromisoformat(live.current_business_date_iso(self.sources.block.now_factory())) - timedelta(days=1)).isoformat()
+        candidates = retained_candidates(self, yesterday=yesterday)
+        current = self.runtime.load_current_state()
+        if value['authority'] != capture_authority(self.runtime.runtime_dir, db_path=self.runtime.db_path):
+            raise ClosedBacklogConflict('closed_source_authority_changed')
+        if value['bundle_version'] != current.bundle_version:
+            raise ClosedBacklogConflict('closed_source_bundle_changed')
+        # Acknowledged retained work has no outstanding source/Ready/native
+        # obligation. Recycle only those slots, leaving unresolved dates exact.
+        value['dates'] = {day: item for day, item in value['dates'].items()
+            if not (item['state'] == 'acknowledged' and 'retained_replay' in item)}
+        for day, candidate in sorted(candidates.items()):
+            source_count = sum(len(item['sources']) for item in value['dates'].values())
+            if (day in value['dates'] or len(value['dates']) >= 2
+                    or source_count + len(candidate['anchors']) > MAX_SOURCES):
+                continue
+            value['dates'][day] = dict(state='accepted',
+                retained_replay=dict(before_ready_digest=candidate['before_ready_digest']),
+                sources={key: dict(anchor=anchor, before=anchor, attempt_before=None,
+                    outcome='accepted_retained') for key, anchor in candidate['anchors'].items()})
         selected = [(day, item) for day,item in value['dates'].items()
             if 'retained_replay' in item and item['state'] not in {'ready','acknowledged'}]
         if not selected:
@@ -397,9 +421,6 @@ class ClosedBacklog:
         from packages.application.fbs_accounting_historical_history import pending_receipt
         pending = pending_receipt(self.runtime)
         warnings = []
-        from packages.application.sheet_vitrina_v1_closed_ready_repair import retained_candidates
-        yesterday = (date.fromisoformat(live.current_business_date_iso(self.sources.block.now_factory())) - timedelta(days=1)).isoformat()
-        candidates = retained_candidates(self, yesterday=yesterday)
         for day, item in selected:
             item.pop('deferred_reason', None)
             try:

@@ -298,6 +298,80 @@ class RetainedRepairTests(unittest.TestCase):
         self.assertNotIn('deferred_reason', self.backlog.status()['dates'][DAY])
         self.assertEqual(counts, {key:list(s.request_dates) for key,s in self.counters.items()})
 
+    def test_pending_source_does_not_starve_retained_and_ack_frees_capacity(self):
+        from packages.application.ready_publication import capture_authority
+        pending = dict(state='pending',sources={'stocks':dict(anchor=None,before=None,
+            attempt_before=None,outcome='backoff_or_exhausted')})
+        value = dict(schema_version=1,cycle_id='a'*32,bundle_version=self.runtime.load_current_state().bundle_version,
+            authority=capture_authority(self.runtime.runtime_dir,db_path=self.runtime.db_path),
+            dates={'2026-10-01':deepcopy(pending)})
+        self.backlog._write(value)
+        counts = {key:list(v.request_dates) for key,v in self.counters.items()}
+        self.assertEqual(self.backlog.prepare_retained(CYCLE),())
+        enrolled = self.backlog.status()
+        self.assertEqual(enrolled['cycle_id'],value['cycle_id'])
+        self.assertEqual(enrolled['authority'],value['authority'])
+        self.assertEqual(enrolled['dates']['2026-10-01'],pending)
+        self.assertEqual(enrolled['dates'][DAY]['state'],'accepted')
+        self.assertEqual(counts,{key:list(v.request_dates) for key,v in self.counters.items()})
+        # Recycle a previously authenticated native acknowledgement, never the
+        # unrelated pending stock request. Actual acknowledgement has its own
+        # native-history regression below.
+        original = deepcopy(enrolled['dates'][DAY])
+        original['state']='acknowledged'
+        original['native']={'edition_id':'prior-authenticated-edition'}
+        enrolled['dates'].pop(DAY)
+        enrolled['dates']['2026-10-02']=original
+        for key, source in enrolled['dates']['2026-10-02']['sources'].items():
+            for field in ('anchor','before'):
+                source[field]['snapshot_date']='2026-10-02'
+        self.backlog._write(enrolled)
+        self.assertEqual(self.backlog.prepare_retained(CYCLE),())
+        after = self.backlog.status()
+        self.assertEqual(set(after['dates']),{'2026-10-01',DAY})
+        self.assertEqual(after['dates']['2026-10-01'],pending)
+        self.assertEqual(counts,{key:list(v.request_dates) for key,v in self.counters.items()})
+
+    def test_retained_closed_facts_publish_with_unavailable_accounting(self):
+        from apps.ready_publication_smoke import make_book
+        from packages.application import fbs_accounting_runtime as accounting
+        from packages.application import fbs_accounting_degraded as degraded
+        from packages.application.sheet_vitrina_v1_inventory_history import CAPTURES_TABLE, FINALIZATIONS_TABLE
+        initial, expected = make_book(self.runtime.runtime_dir, opening=True,
+            now=datetime.fromisoformat(DAY+'T14:00:00+00:00'), typed=True)
+        version = accounting.save(self.runtime.runtime_dir, initial, expected=expected, operation_id='incomplete-opening')
+        accounting._record_prepare_failure(self.runtime.runtime_dir, expected=version,
+            error=ValueError('incomplete_period_cannot_close'))
+        book, version = accounting.load(self.runtime.runtime_dir)
+        versions = dict(fbs_accounting_status='unavailable',fbs_accounting_reason='incomplete_period_cannot_close',fbs_book=version)
+        with degraded.degraded_accounting_scope(self.runtime,versions):
+            original = degraded.materialize_degraded_accounting(self.original,
+                proof=degraded.current_degraded_accounting(self.runtime))
+            with closing(sqlite3.connect(self.runtime.db_path)) as conn, conn:
+                conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?',
+                    (_serialize_sheet_vitrina_plan(original),DAY))
+            with readonly(self.runtime.db_path) as conn:
+                inventory = {table:[tuple(r) for r in conn.execute('SELECT * FROM '+table)]
+                    for table in (CAPTURES_TABLE, FINALIZATIONS_TABLE)}
+            plan = self.candidate()
+            self.publish(plan)
+        saved = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=DAY)
+        rows = {r[1]:r[2] for sheet in saved.sheets if sheet.sheet_name=='DATA_VITRINA' for r in sheet.rows}
+        self.assertEqual(rows[f'SKU:{self.nm_ids[0]}|orderCount'],5)
+        self.assertEqual(rows[f'SKU:{self.nm_ids[0]}|orderSum'],3000)
+        self.assertEqual(rows[f'SKU:{self.nm_ids[0]}|fin_buyout_rub'],700.25)
+        self.assertEqual(saved.metadata[degraded.METADATA_KEY]['dates'],[DAY])
+        self.assertEqual(saved.metadata[degraded.METADATA_KEY]['book_version'],version)
+        self.assertTrue(all(value in ('',None) for identity,value in rows.items()
+            if degraded._dependent_metric(identity.split('|')[-1])))
+        self.assertEqual(accounting.load(self.runtime.runtime_dir),(book,version))
+        self.assertEqual(self.raw('2026-10-09'),self.donor_raw)
+        with readonly(self.runtime.db_path) as conn:
+            for table, before in inventory.items():
+                self.assertEqual(before,[tuple(r) for r in conn.execute('SELECT * FROM '+table)])
+        self.backlog.record_ready(DAY)
+        self.assertEqual(self.backlog.publication_dates(),(DAY,))
+
     def test_real_closed_book_binding_capital_and_inventory_are_unchanged(self):
         from apps.fbs_snapshot_cost_smoke import capture
         from apps.shared_sku_cost_smoke import wb

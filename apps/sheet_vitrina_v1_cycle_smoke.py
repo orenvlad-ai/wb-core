@@ -184,6 +184,66 @@ class CycleTests(unittest.TestCase):
             self.store.accept(request_key='scheduled-test', slot_utc=SLOT,
                 config=self.config, now=NOW, recovery_as_of_date='2026-09-25')
 
+    def test_unavailable_accounting_only_publishes_retained_closed_facts(self):
+        from contextlib import nullcontext
+        from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklogConflict
+        for prior_ready in (False, True):
+            with self.subTest(prior_ready=prior_ready):
+                receipt, lock = self.accepted(key='retained-'+str(prior_ready),
+                    slot='2026-09-29T'+('11' if prior_ready else '10')+':00:00+00:00')
+                fake = CycleFake(self.root)
+                class Backlog(EmptyClosedFixture):
+                    def __init__(self, adapter):
+                        super().__init__(adapter)
+                        self.value={'dates':{'2026-09-25':dict(state='ready' if prior_ready else 'accepted',
+                            sources={'stocks':dict(anchor='accepted',outcome='accepted')})}}
+                        fake.backlog=self
+                    def status(self):return self.value
+                    def collect(self,*args,**kwargs):
+                        self.entry.mark('closed_sources');return self.value
+                    def prepare_retained(self,*args):
+                        self.value['dates']['2026-09-27']=dict(state='accepted',retained_replay={},
+                            sources={'sales_funnel_history':dict(anchor='accepted',outcome='accepted')})
+                        return ()
+                    def retained_replay(self,day):return day=='2026-09-27'
+                    def record_ready(self,day):
+                        assert day=='2026-09-27'
+                        if self.value['dates'][day]['state']!='ready':
+                            raise ClosedBacklogConflict('closed_ready_source_not_consumed:sales_funnel_history')
+                        return {'date':day}
+                    def can_replace_retained_ready(self,day,error):return day=='2026-09-27'
+                    def compose(self,handle,day):
+                        assert day=='2026-09-27';return handle
+                    def merge_retained_ready(self,day,plan):return plan
+                    def publication_dates(self):
+                        return tuple(sorted(day for day,item in self.value['dates'].items() if item['state']=='ready'))
+                def warehouse(*args):
+                    fake.mark('warehouse')
+                    return StageProof({'fbs_accounting_status':'unavailable'},({'policy':'unavailable'},))
+                fake._cycle_warehouse=warehouse
+                def dated(plan,*,retained_only=False):
+                    self.assertTrue(retained_only)
+                    fake.events.append('retained_ready')
+                    fake.backlog.value['dates']['2026-09-27']['state']='ready'
+                    return {},StageProof({'ready':'committed'})
+                fake._cycle_publish_dated_ready=dated
+                def history(config,receipt,ready,*,backfill_dates,closed_receipt):
+                    self.assertEqual(backfill_dates,('2026-09-25','2026-09-27') if prior_ready else ('2026-09-27',))
+                    for day in backfill_dates:closed_receipt.value['dates'][day]['state']='acknowledged'
+                    return fake.mark('rolling14')
+                fake._cycle_history=history
+                try:
+                    with heavy_admitted(self.root,operation='cycle'), patch(
+                            'packages.application.sheet_vitrina_v1_cycle.ClosedBacklog',Backlog), patch(
+                            'packages.application.fbs_accounting_degraded.degraded_accounting_scope',return_value=nullcontext()):
+                        result=run_cycle(fake,self.store,receipt,self.config,lambda _:None)
+                finally:lock.close()
+                self.assertEqual(result['status'],'degraded',result)
+                self.assertEqual(fake.events.count('retained_ready'),1)
+                self.assertEqual(fake.backlog.value['dates']['2026-09-25']['state'],'acknowledged' if prior_ready else 'accepted')
+                stage=next(item for item in result['stages'] if item['stage']=='closed_ready')
+                self.assertTrue(any(item['policy']=='deferred_accounting_unavailable' for item in stage['warnings']))
+
     def test_fixed_order_and_no_repeat_after_finish(self):
         receipt,lock=self.accepted();fake=CycleFake(self.root)
         try:

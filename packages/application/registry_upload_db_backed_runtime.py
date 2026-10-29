@@ -484,10 +484,9 @@ class RegistryUploadDbBackedRuntime:
         degraded = current_degraded_accounting(self.runtime_dir, book=book, book_version=expected_book)
         if degraded is not None and _prepared_book is not None:
             raise ReadyPublicationConflict("degraded_accounting_book_write_forbidden")
-        if (degraded is not None and _retained_closed_replay
-                and any(day >= degraded['invalid_from_date'] and day not in degraded['closed_dates']
-                        for day in plan.date_columns)):
-            raise ReadyPublicationConflict("degraded_accounting_retained_affected_date_forbidden")
+        # A validated retained replay changes only pinned closed source facts.
+        # Its unavailable accounting overlay is applied after validation below;
+        # the retained path never writes the book or captures inventory.
         active_inventory = inventory_from_book(book, now=publication_now, runtime_dir=self.runtime_dir) if book and book["active"] else None
         if (active_inventory is not None and publication_date in plan.date_columns
                 and active_inventory.payload()["quality"] == "unavailable" and degraded is None):

@@ -142,8 +142,13 @@ class OwnedCycleIntegration(unittest.TestCase):
                 self.assertIn('2026-04-20', unavailable['dates'])
                 self.assertTrue(any(cell.get('reason_code') == 'incomplete_period_cannot_close'
                     for dates in saved.metadata['server_cell_presentation'].values() for cell in dates.values()))
-                self.assertEqual(next(stage for stage in receipt['stages']
-                    if stage['stage'] == 'closed_ready')['status'], 'degraded')
+                # There is no old-date work in this fixture. Unavailable
+                # accounting no longer defers an otherwise empty backlog.
+                closed = next(stage for stage in receipt['stages']
+                    if stage['stage'] == 'closed_ready')
+                self.assertEqual(closed['status'], 'complete')
+                self.assertEqual(json.loads(closed['versions']['closed_backfill_dates']), [])
+                self.assertEqual(closed['warnings'], [])
         self.assertTrue(heavy_admission_status(runtime.runtime_dir)['idle'])
         self.assertTrue(admission_idle(runtime.runtime_dir)['idle'])
 
