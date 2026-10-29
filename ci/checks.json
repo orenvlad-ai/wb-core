@@ -517,6 +517,10 @@
     "ready_publication": {
       "patterns": [
         "packages/application/ready_publication.py",
+        "packages/application/ready_rollover.py",
+        "packages/application/ready_rollover_recovery.py",
+        "apps/ready_rollover_recovery.py",
+        "apps/ready_rollover_smoke.py",
         "packages/application/fbs_accounting_degraded.py",
         "apps/fbs_accounting_degraded_smoke.py",
         "packages/application/promo_campaign_archive.py",
@@ -532,6 +536,7 @@
       ],
       "commands": [
         ["python3", "apps/ready_publication_smoke.py"],
+        ["python3", "apps/ready_rollover_smoke.py"],
         ["python3", "apps/fbs_accounting_degraded_smoke.py"],
         ["python3", "apps/ready_writer_closure_smoke.py"],
         ["python3", "apps/fbs_accounting_runtime_smoke.py"],

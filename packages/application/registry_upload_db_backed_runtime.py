@@ -492,6 +492,8 @@ class RegistryUploadDbBackedRuntime:
         if (active_inventory is not None and publication_date in plan.date_columns
                 and active_inventory.payload()["quality"] == "unavailable" and degraded is None):
             raise ReadyPublicationConflict("ready_current_book_operand_unavailable")
+        from packages.application import ready_rollover
+        from packages.business_time import default_business_as_of_date
         with readonly(self.db_path) as conn:
             check_expected(conn, expected)
             check_build_inputs(conn, build_inputs)
@@ -562,6 +564,9 @@ class RegistryUploadDbBackedRuntime:
             # Carry-forward and all dated economics have finished. Apply the
             # unavailable overlay last so no stale numerical operand survives.
             plan = materialize_degraded_accounting(plan, proof=degraded)
+            rollover = [] if _retained_closed_replay else ready_rollover.prepare(
+                conn, plan=plan, expected=expected,
+                default_date=default_business_as_of_date(publication_now), degraded=degraded)
             _assert_finance_daily_recovery_values_preserved(
                 conn,
                 bundle_version=current_state.bundle_version,
@@ -587,6 +592,7 @@ class RegistryUploadDbBackedRuntime:
             conn.execute("PRAGMA busy_timeout=0")
             conn.execute("BEGIN IMMEDIATE")
             check_expected(conn, expected)
+            ready_rollover.check(conn, rollover)
             check_material(conn, material_inputs)
             check_build_inputs(conn, build_inputs)
             if capture_history(conn) != history_inputs:
@@ -603,6 +609,7 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
             check_expected(conn, expected)
+            ready_rollover.check(conn, rollover)
             check_material(conn, material_inputs)
             check_build_inputs(conn, build_inputs)
             if capture_history(conn) != history_inputs:
@@ -621,6 +628,8 @@ class RegistryUploadDbBackedRuntime:
             replace_ready(conn, expected=expected, activated_at=current_state.activated_at,
                 snapshot_id=plan.snapshot_id, plan_version=plan.plan_version, refreshed_at=refreshed_at,
                 plan_json=serialized_plan)
+            ready_rollover.apply(conn, rollover, operation_id=operation_id,
+                finished_at=refreshed_at, book_version=book_version)
             if not _retained_closed_replay:
                 capture_inventory_history_from_ready_plan(
                     conn,
