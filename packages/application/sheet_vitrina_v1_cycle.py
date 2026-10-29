@@ -395,15 +395,17 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         return proof
     def closed_ready():
         nonlocal backfill_dates
-        if receipt['final_versions'].get('fbs_accounting_status') == 'unavailable':
-            return StageProof({'closed_backlog_policy': 'deferred_accounting_unavailable'},
-                ({'source_key': 'closed_ready', 'policy': 'deferred_accounting_unavailable'},))
+        accounting_unavailable = receipt['final_versions'].get('fbs_accounting_status') == 'unavailable'
         if recovery_day is not None:
             return StageProof({'closed_backlog_policy': 'preserved_for_regular_cycle'})
         warnings, proofs = list(closed.prepare_retained(receipt['cycle_id'])), []
         value = closed.status()
         for day, item in (value['dates'].items() if value else ()):
             if item['state'] == 'acknowledged' or item.get('deferred_reason') or not all(source['anchor'] for source in item['sources'].values()):
+                continue
+            if accounting_unavailable and not closed.retained_replay(day):
+                warnings.append(dict(source_key='closed_ready', date=day,
+                    policy='deferred_accounting_unavailable'))
                 continue
             if current_business_date_iso(entrypoint.now_factory()) != receipt['business_date']:
                 raise CycleStageFailure('cycle_business_date_changed')
@@ -430,6 +432,8 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
                     raise
                 closed._defer_publication(day, str(exc))
                 warnings.append(dict(source_key='closed_ready', date=day, policy=str(exc)))
+        # Previously committed Ready dates retain their existing native proof
+        # obligation; unavailable accounting only prevents a new full replay.
         backfill_dates = closed.publication_dates()
         return StageProof({'closed_ready_proofs': canonical(proofs),
             'closed_backfill_dates': canonical(backfill_dates),

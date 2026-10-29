@@ -324,10 +324,13 @@
     "sheet_vitrina_closed_backlog": {
       "patterns": [
         "packages/application/sheet_vitrina_v1_closed_backlog.py",
+        "packages/application/sheet_vitrina_v1_closed_ready_repair.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
         "packages/application/sheet_vitrina_v1_cycle_sources.py",
+        "apps/sheet_vitrina_v1_closed_ready_repair_smoke.py",
         "apps/sheet_vitrina_v1_closed_backlog_smoke.py"
       ],
-      "commands": [["python3", "apps/sheet_vitrina_v1_closed_backlog_smoke.py"]],
+      "commands": [["python3", "apps/sheet_vitrina_v1_closed_backlog_smoke.py"], ["python3", "apps/sheet_vitrina_v1_closed_ready_repair_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "sheet_vitrina_cycle": {
