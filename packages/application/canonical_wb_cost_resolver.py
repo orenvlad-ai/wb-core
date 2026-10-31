@@ -843,6 +843,74 @@ def resolve_finance_canonical_cost(
     )
 
 
+def proven_finance_no_operation_skus(conn: sqlite3.Connection, *, as_of_date: date) -> set[int]:
+    """Prove a sparse SKU-day is empty from a complete, matching weekly projection.
+
+    This proves only absence of sales/returns; it supplies no cost or profit
+    evidence. A missing SKU projection, ambiguous identity/date, stale digest,
+    partial fetch, or incomplete daily decomposition stays unknown.
+    """
+    required = {'wb_finance_weekly_sync', 'wb_finance_weekly_reports',
+                'wb_finance_weekly_sku_aggregates'}
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not required <= tables:
+        return set()
+    try:
+        syncs = conn.execute(
+            'SELECT seller_id,week_start,week_end,status,unchanged_sync_count,last_error,'
+            'content_hash,raw_row_count,report_count FROM wb_finance_weekly_sync '
+            'WHERE week_start<=? AND week_end>=?', (as_of_date.isoformat(),) * 2).fetchall()
+        # The consumer has no seller selector: never combine tenants or versions.
+        if len(syncs) != 1:
+            return set()
+        seller, start, end, status, unchanged, error, digest, count, report_count = syncs[0]
+        if status not in {'completed', 'incomplete_cost'} or unchanged < 1 or error or not digest or count <= 0:
+            return set()
+        reports = conn.execute('SELECT row_count,content_hash FROM wb_finance_weekly_reports '
+            'WHERE seller_id=? AND week_start=? AND week_end=?', (seller,start,end)).fetchall()
+        if len(reports) != report_count or sum(r[0] for r in reports) != count or any(not r[1] for r in reports):
+            return set()
+        rows = conn.execute('SELECT nm_id,coverage_json,week_content_hash,raw_row_count,formula_version '
+            'FROM wb_finance_weekly_sku_aggregates WHERE seller_id=? AND week_start=? AND week_end=?',
+            (seller,start,end)).fetchall()
+        if (sum(r[3] for r in rows) != count or any(r[2] != digest for r in rows)
+                or sum(r[0] == '__account__' for r in rows) != 1
+                or any(r[4] != 'wb_finance_weekly_sku_aggregate_v5' for r in rows)):
+            return set()
+        absent = set()
+        fields = ('covered_sales_revenue_rub', 'uncovered_sales_revenue_rub',
+                  'covered_returns_revenue_rub', 'uncovered_returns_revenue_rub',
+                  'covered_sales_units', 'uncovered_sales_units')
+        for nm, payload, _, _, _ in rows:
+            coverage = json.loads(payload)
+            if not isinstance(coverage, dict) or not isinstance(coverage.get('quality'), dict):
+                return set()
+            if (coverage.get('global_week_content_hash') != digest
+                    or coverage.get('identity_blockers') != []
+                    or coverage.get('quality', {}).get('operation_date_fallback_rows') != 0):
+                return set()
+            daily = coverage.get('daily_rows')
+            if not isinstance(daily, list) or any(not isinstance(r, dict) for r in daily):
+                return set()
+            days = [r['operation_date'] for r in daily]
+            if len(set(days)) != len(days) or any(date.fromisoformat(d).isoformat() != d or not start <= d <= end for d in days):
+                return set()
+            for field in fields:
+                total = _decimal_or_none(coverage.get(field))
+                values = [_decimal_or_none(r.get(field)) for r in daily]
+                if total is None or any(v is None for v in values) or sum(values, Decimal(0)) != total:
+                    return set()
+            if nm == '__account__':
+                # Unattributed merchandise could belong to any enabled SKU.
+                if any(_decimal_or_none(coverage[field]) != 0 for field in fields):
+                    return set()
+            elif as_of_date.isoformat() not in days:
+                absent.add(int(nm))
+        return absent
+    except (sqlite3.DatabaseError, ValueError, TypeError, KeyError, InvalidOperation):
+        return set()
+
+
 def load_canonical_wb_cost_lookup(
     conn: sqlite3.Connection,
     *,
