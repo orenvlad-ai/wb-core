@@ -4,6 +4,7 @@ HTTP callers only enqueue commands or read saved state. A separately invoked
 worker uses the read-only source port. The write boundary is added in stage D.
 """
 from __future__ import annotations
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -504,9 +505,9 @@ class KeywordCleaner:
             return dict(batch_id=batch_id,state='queued',selected_count=len(frozen),created_at=created_at)
         return self._command(principal,'manual-batches',payload,command)
 
-    def manual_batch_snapshot(self,batch_id:str,principal:Principal) -> dict:
+    def manual_batch_snapshot(self,batch_id:str,principal:Principal,*,_conn=None) -> dict:
         principal.require_read()
-        with self.store.read() as c:
+        with nullcontext(_conn) if _conn is not None else self.store.read() as c:
             request=c.execute("SELECT actor,outcome,created_at FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-batches'",(self.key,batch_id)).fetchone()
             if not request or request['actor']!=principal.username.strip().casefold():
                 raise CleanerError('not_found','Массовая чистка не найдена',404)
@@ -680,14 +681,16 @@ class KeywordCleaner:
                         review_required_target=plan['proof']['target'])
         return self._command(principal,f'manual-batches/{batch_id}/resume',payload,command)
 
-    def manual_job(self,job_id:str,principal:Principal) -> dict:
+    def manual_job(self,job_id:str,principal:Principal,*,_conn=None,_events=None) -> dict:
         principal.require_read()
-        with self.store.read() as c:
+        with nullcontext(_conn) if _conn is not None else self.store.read() as c:
             request=c.execute("SELECT actor,outcome FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-clean'",(self.key,job_id)).fetchone()
             if not request or request['actor']!=principal.username.strip().casefold():
                 raise CleanerError('not_found','Ручная чистка не найдена',404)
             initial=json.loads(request['outcome'])
-            events=[dict(row) for row in c.execute("SELECT kind,created_at,facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence",(self.key,job_id))]
+            if _events is not None and _events['account']!=self.key:raise CleanerError('account_mismatch','Снимок другого аккаунта',409)
+            events=([dict(row) for row in c.execute("SELECT kind,created_at,facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence",(self.key,job_id))]
+                    if _events is None else _events['jobs'].get(job_id,[]))
             latest=json.loads(events[-1]['facts']) if events else {}
             result=dict(initial)
             result.update(latest)
@@ -703,18 +706,22 @@ class KeywordCleaner:
               LEFT JOIN cleaner_auto_decisions d ON d.decision_id=o.decision_id
               WHERE o.account=? AND o.last_run_id=? AND o.target=? ORDER BY o.query""",
               (self.key,result['scan_run_id'],f"{result['advert_id']}:{result['nm_id']}"))]
-            preview=c.execute("""SELECT facts FROM cleaner_events WHERE account=? AND run_id=?
+            run_events=None if _events is None else _events['runs'].get(result['scan_run_id'],[])
+            preview=(c.execute("""SELECT facts FROM cleaner_events WHERE account=? AND run_id=?
               AND kind='partial_snapshot_preview' AND json_extract(facts,'$.target')=? ORDER BY sequence DESC LIMIT 1""",
-              (self.key,result['scan_run_id'],f"{result['advert_id']}:{result['nm_id']}")).fetchone()
+              (self.key,result['scan_run_id'],f"{result['advert_id']}:{result['nm_id']}")).fetchone() if run_events is None else
+              next((e for e in reversed(run_events) if e['kind']=='partial_snapshot_preview'
+                    and json.loads(e['facts']).get('target')==f"{result['advert_id']}:{result['nm_id']}"),None))
             if preview:
                 facts=json.loads(preview['facts'])
                 result['scan_decisions']=facts['queries']
                 result['scan_minus_known']=False
                 result['observed_only']=len(facts['queries'])
                 result['scan_blocked_reason']=facts['reason']
-            basis=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='initial_empty_basis' ORDER BY sequence DESC LIMIT 1",
-                            (self.key,result['scan_run_id'])).fetchone()
-            if basis:result['scan_initial_empty_evidence']=json.loads(basis[0])['evidence']
+            basis=(c.execute("SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='initial_empty_basis' ORDER BY sequence DESC LIMIT 1",
+                            (self.key,result['scan_run_id'])).fetchone() if run_events is None else
+                   next((e for e in reversed(run_events) if e['kind']=='initial_empty_basis'),None))
+            if basis:result['scan_initial_empty_evidence']=json.loads(basis['facts'])['evidence']
             return result
 
     def record_manual_job(self,job_id:str,**facts) -> None:
@@ -1328,22 +1335,27 @@ class KeywordCleaner:
             c.execute("UPDATE cleaner_readback_jobs SET state='running',worker_token=?,lease_expires_at=?,attempts=attempts+1 WHERE operation_id=?",(token,plus_seconds(now,lease_seconds),row["operation_id"]))
             return dict(operation_id=row["operation_id"],worker_token=token,rights="readback_only",attempt=row["attempts"]+1)
 
-    def run_detail(self,run_id:str,principal:Principal) -> dict:
+    def run_detail(self,run_id:str,principal:Principal,*,_conn=None,_events=None) -> dict:
         principal.require_read()
-        with self.store.read() as c:
+        with nullcontext(_conn) if _conn is not None else self.store.read() as c:
             row=c.execute("SELECT * FROM cleaner_runs WHERE account=? AND run_id=?",(self.key,run_id)).fetchone()
             if row is None: raise CleanerError("not_found","Запуск не найден",404)
             result=self._run_payload(row)
             result["settlement"]=dict(confirmed_automatic=0,confirmed_manual=0,confirmed_pilot=0,returned=0)
-            for event in c.execute("SELECT facts FROM cleaner_events WHERE run_id=? AND kind='late_confirmation'",(run_id,)):
-                facts=json.loads(event[0])
+            if _events is not None and _events['account']!=self.key:raise CleanerError('account_mismatch','Снимок другого аккаунта',409)
+            run_events=None if _events is None else _events['runs'].get(run_id,[])
+            for event in (c.execute("SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='late_confirmation'",(self.key,run_id)) if run_events is None else
+                          (e for e in run_events if e['kind']=='late_confirmation')):
+                facts=json.loads(event['facts'])
                 for field in result['settlement']:result['settlement'][field]+=facts.get(field,0)
             result["targets"]=[dict(r) for r in c.execute("SELECT * FROM cleaner_run_targets WHERE run_id=? ORDER BY target",(run_id,))]
-            result['initial_empty_basis']=[json.loads(event[0]) for event in c.execute(
-                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='initial_empty_basis' ORDER BY sequence",(self.key,run_id))]
-            result['partial_previews']=[json.loads(event[0]) for event in c.execute(
+            result['initial_empty_basis']=[json.loads(event['facts']) for event in (c.execute(
+                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='initial_empty_basis' ORDER BY sequence",(self.key,run_id)) if run_events is None else
+                (e for e in run_events if e['kind']=='initial_empty_basis'))]
+            result['partial_previews']=[json.loads(event['facts']) for event in (c.execute(
                 "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='partial_snapshot_preview' ORDER BY sequence",
-                (self.key,run_id))]
+                (self.key,run_id)) if run_events is None else
+                (e for e in run_events if e['kind']=='partial_snapshot_preview'))]
             operations=[]
             for operation in c.execute("SELECT operation_id,target,state,additions,before_json,versions,evidence FROM cleaner_write_operations WHERE account=? AND run_id=? ORDER BY created_at,operation_id",(self.key,run_id)):
                 actions={item['query_hash']:item['action'] for item in json.loads(operation['versions']).get('items',[]) if item.get('action')}
