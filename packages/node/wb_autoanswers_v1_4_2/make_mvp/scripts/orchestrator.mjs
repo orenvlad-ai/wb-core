@@ -12,6 +12,7 @@ import {calculateJobCost, usageRecord} from "./cost_accounting.mjs";
 import {runDraftGuard} from "./draft_guard.mjs";
 import {applyReturnQuestionPolicy, RETURN_QUESTION_POLICY} from "./return_question_policy.mjs";
 import {isUnspecifiedMissingKit, missingKitReplacement, MISSING_KIT_POLICY} from "./missing_kit_policy.mjs";
+import {useNoframeGapReply, NOFRAME_GAP_POLICY, NOFRAME_GAP_REPLY} from "./noframe_gap_policy.mjs";
 import {selectApprovedFallback} from "./fallback.mjs";
 import {isReusableJob, makeIdempotencyKey} from "./idempotency.mjs";
 import {MemoryStore} from "./memory_store.mjs";
@@ -287,6 +288,42 @@ export async function runJob(rawInput, dependencies = {}) {
     const classifierRequest = await buildClassifierRequest(reviewInput);
     const rawClassification = await callRole("classifier", classifierRequest);
     await transition("classified");
+
+    // Explicit owner policy for a sole expected gap complaint. Do not run the
+    // frozen general SIZE_FIT escalation on this narrowly qualified decision.
+    if (useNoframeGapReply(reviewInput, rawClassification)) {
+      const draft = {route: "public_only", case_code: null, draft_reply: NOFRAME_GAP_REPLY,
+        applied_cta: "none", requested_materials: []};
+      const errors = runDraftGuard(draft, {final_route: "public_only", case_code: null});
+      if (errors.length) throw new Error(`NOFRAME_GAP_GUARD:${errors.join("|")}`);
+      for (const next of ["guarded", "drafted", "validated", "ready"]) {
+        await transition(next, {policy_version: NOFRAME_GAP_POLICY});
+      }
+      const result = replyResult({reviewInput, classification: rawClassification, caseCode: null,
+        drafts: [draft], validations: ["pass"], finalDraft: draft, outcome: "ready", modelCallCount});
+      await assertContract("pipeline_result.schema.json", result);
+      const cost = calculateJobCost(trace, pricingProfile);
+      await store.appendAudit(idempotencyKey, auditEvent("noframe_gap_explanation", {
+        policy_version: NOFRAME_GAP_POLICY, classification: rawClassification,
+        final_reply: NOFRAME_GAP_REPLY}, nowDate(now)));
+      await store.appendAudit(idempotencyKey, auditEvent("job_complete", {
+        outcome: "ready", fallback_id: null, model_call_count: modelCallCount, cost,
+        final_reply: NOFRAME_GAP_REPLY}, nowDate(now)));
+      await store.rememberReply({idempotency_key: idempotencyKey, route: "public_only",
+        primary_issue: "SIZE_FIT", reply: NOFRAME_GAP_REPLY, created_at: nowDate(now).toISOString()});
+      job.result = result;
+      job.outcome = "ready";
+      job.manager_message = NOFRAME_GAP_REPLY;
+      await persist();
+      if (deliverToManager) {
+        await deliverToManager({text: NOFRAME_GAP_REPLY, publication_action: "reply", idempotency_key: idempotencyKey});
+        await transition("delivered_to_telegram");
+      }
+      return {idempotency_key: idempotencyKey, idempotent_reuse: false,
+        model_calls_this_run: modelCallCount, state: job.state, result,
+        manager_message: job.manager_message, usage: cost.usage,
+        estimated_cost_usd: cost.estimated_cost_usd, fallback_id: null};
+    }
 
     const ownerClassification = applyReturnQuestionPolicy(rawClassification, reviewInput);
     const builtWriter = await buildWriterRequest(reviewInput, ownerClassification);

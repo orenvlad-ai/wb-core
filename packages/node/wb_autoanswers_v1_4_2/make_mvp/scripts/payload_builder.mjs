@@ -11,6 +11,7 @@ import {
   ROLE_OUTPUT_SCHEMA
 } from "./constants.mjs";
 import {bundleRoot} from "./schema_validation.mjs";
+import {noframeClassifierInstructions} from "./noframe_gap_policy.mjs";
 
 const CACHEABLE_ROLES = new Set(["classifier", "writer", "validator"]);
 const MAX_CLASSIFIER_PHOTOS = 8;
@@ -47,7 +48,9 @@ async function roleAssets(role) {
 
 /** Builds the same Responses API body shape as the frozen evaluator, without credentials. */
 export async function buildResponsesPayload(role, request, reviewId) {
-  const {instructions, schema} = await roleAssets(role);
+  const assets = await roleAssets(role);
+  const schema = assets.schema;
+  const instructions = assets.instructions + (role === "classifier" ? noframeClassifierInstructions(request.review_input) : "");
   const cachePlan = buildCacheableInput(role, withoutEmbeddedMedia(request));
   const body = {
     model: MODEL_ID,

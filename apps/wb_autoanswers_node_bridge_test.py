@@ -21,6 +21,28 @@ class NodeBridgeTest(unittest.TestCase):
     def bridge(self) -> NodeAutoanswersBridge:
         return NodeAutoanswersBridge(env={**os.environ, "WB_AUTOANSWERS_TEST_MODE": "1"})
 
+    def test_noframe_gap_crosses_bridge_and_server_policy_without_chat(self) -> None:
+        from packages.application.wb_autoanswers_owner_policy import apply_owner_policy
+
+        raw = {"ingestion_id": "noframe-gap", "review_id": "noframe-gap", "review_version": "1",
+               "rating": 2, "text": "Стекло не по размеру, меньше экрана", "pros": "", "cons": "",
+               "seller_article": "No Frame Clean iPhone 15 / 16", "nm_id": None,
+               "media": {"photos": [], "video": {"present": False}}}
+        data = self.bridge().run(processing_key="noframe-gap|1|1.4.2", raw_input=raw,
+                                 execution_mode="fixture", fixture_scenario="noframe_gap")
+        pipeline = data["pipeline"]
+        self.assertEqual(pipeline["model_calls_this_run"], 1)
+        self.assertGreater(pipeline["estimated_cost_usd"], 0)
+        result = pipeline["result"]
+        self.assertEqual(result["outcome"], "ready")
+        self.assertEqual(result["route"], "public_only")
+        self.assertIsNone(result["case_code"])
+        self.assertIn("No Frame (без рамок)", result["final_reply"])
+        transformed = apply_owner_policy(feedback_id="noframe-gap", rating=2, content_json=raw,
+                                         result={"final_route": result["route"], "final_reply": result["final_reply"]})
+        self.assertEqual(transformed["final_route"], "public_only")
+        self.assertEqual(transformed["final_reply"], result["final_reply"])
+
     def test_frozen_identity_verification(self) -> None:
         result = self.bridge().verify()
         self.assertEqual(result["verified"]["artifact_count"], 28)
