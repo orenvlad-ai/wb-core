@@ -22,7 +22,8 @@ def _number(value):
 
 def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list[int] | None,
                                     day: str, now: datetime,
-                                    planning_max_age_seconds: int | None = None) -> dict:
+                                    planning_max_age_seconds: int | None = None,
+                                    generation_id: str | None = None) -> dict:
     freshness = resolve_current_snapshot_policy(connection=conn)
     if planning_max_age_seconds is not None and (isinstance(planning_max_age_seconds, bool)
             or not isinstance(planning_max_age_seconds, int)
@@ -36,7 +37,7 @@ def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list
         # A last-good generation may predate a newly added SKU. It remains
         # useful for covered subsets, but cannot certify today's entire catalog.
         universe = current_scope["nm_ids"]
-    generation = _complete_source_generation(conn)
+    generation = _complete_source_generation(conn, generation_id=generation_id)
     if not generation.get("complete"):
         raise ValueError("complete_official_generation_unavailable")
     run = conn.execute(f"SELECT * FROM {REGISTRY_RUNS_TABLE} WHERE run_id=?",

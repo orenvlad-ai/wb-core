@@ -6,6 +6,7 @@ change the six warehouse stages, sale COGS, or historical columns.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, localcontext
@@ -25,6 +26,7 @@ from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
 
 
 SOURCE = "official_fbs_management_inventory_v1"
+WB_TOTAL = "inventory_wb_total_qty_v1"
 FBS_TOTAL = "inventory_fbs_total_qty_v1"
 FBS_FACILITY = "inventory_fbs_facility_available_qty_v1:"
 COST = "our_wb_unit_cost_rub"
@@ -40,7 +42,7 @@ def _number(value: Any) -> Decimal:
 
 def build_current_official_fbs_estimate(
     db_path: Path, *, nm_ids: Iterable[int], now: datetime,
-    connection: sqlite3.Connection | None = None,
+    connection: sqlite3.Connection | None = None, quantity_only: bool = False,
 ) -> dict[str, Any]:
     """Read one SQLite snapshot; all totals use the exact displayed SKU set."""
     universe = sorted(set(int(nm) for nm in nm_ids))
@@ -55,11 +57,11 @@ def build_current_official_fbs_estimate(
         if connection is not None:
             with localcontext() as context:
                 context.prec = 50
-                return _build(connection, universe=universe, day=day, now=now)
+                return _build(connection, universe=universe, day=day, now=now, quantity_only=quantity_only)
         with _connect_readonly(Path(db_path)) as conn, localcontext() as context:
             context.prec = 50
             conn.execute("BEGIN")
-            return _build(conn, universe=universe, day=day, now=now)
+            return _build(conn, universe=universe, day=day, now=now, quantity_only=quantity_only)
     except (sqlite3.OperationalError, ValueError, TypeError, KeyError, InvalidOperation) as exc:
         from packages.application.web_vitrina_window_read_context import active_window_read_context
         if active_window_read_context() is not None and isinstance(exc, sqlite3.OperationalError):
@@ -68,7 +70,9 @@ def build_current_official_fbs_estimate(
 
 
 def _build(conn: sqlite3.Connection, *, universe: list[int], day: str,
-           now: datetime) -> dict[str, Any]:
+           now: datetime, quantity_only: bool = False) -> dict[str, Any]:
+    if quantity_only:
+        return _build_quantities(conn, universe=universe, day=day, now=now)
     result = read_complete_official_fbs_stock(conn, universe=universe, day=day, now=now)
     result["source"] = SOURCE
     stocks = {nm: item["facilities"] for nm, item in result["skus"].items()}
@@ -152,6 +156,44 @@ def _build(conn: sqlite3.Connection, *, universe: list[int], day: str,
         quantity = sum((r["quantity"] for r in result["skus"].values()), ZERO)
         capital = sum((r["capital"] for r in result["skus"].values()), ZERO)
         result["total"].update(quantity=quantity, capital=capital, cost=capital / quantity if quantity else None)
+    return result
+
+
+def add_official_wb_quantities(estimate: dict, wb_source: dict) -> dict:
+    """Join independently verified, same-date and same-roster physical WB."""
+    result = deepcopy(estimate)
+    if wb_source['date'] != result['date'] or set(wb_source['skus']) != {str(nm) for nm in result['skus']}:
+        raise ValueError('wb_fbs_quantity_date_scope_mismatch')
+    result.update(available=True,quantity_only=True,wb_source=deepcopy(wb_source))
+    for nm,item in result['skus'].items():
+        item['wb_quantity'] = _number(wb_source['skus'][str(nm)])
+        if item.get('fbs_quantity') is not None:
+            item['stock_quantity'] = item['wb_quantity'] + item['fbs_quantity']
+    result['total']['wb_quantity'] = sum((item['wb_quantity'] for item in result['skus'].values()),ZERO)
+    if all(item.get('stock_quantity') is not None for item in result['skus'].values()):
+        result['total']['stock_quantity'] = sum((item['stock_quantity'] for item in result['skus'].values()),ZERO)
+    return result
+
+
+def _build_quantities(conn, *, universe, day, now):
+    from packages.application.official_wb_physical_read import read_official_wb_physical_snapshot
+    try:
+        result = read_complete_official_fbs_stock(conn, universe=universe, day=day, now=now)
+        result.update(fbs_available=True)
+        for item in result['skus'].values():
+            item['fbs_quantity'] = sum(item['facilities'].values(),ZERO)
+        result['total'] = {
+            'facilities': {f:sum((item['facilities'][f] for item in result['skus'].values()),ZERO) for f in result['facilities']},
+            'fbs_quantity':sum((item['fbs_quantity'] for item in result['skus'].values()),ZERO)}
+    except (sqlite3.OperationalError, ValueError, TypeError, KeyError, InvalidOperation):
+        result = dict(available=False,date=day,facilities=[],skus={nm:{} for nm in universe},total={},
+            generation_id='',generation_digest='',captured_at='',fbs_available=False)
+    result.update(quantity_only=True,source=SOURCE,functional_version_id='')
+    try:
+        wb = read_official_wb_physical_snapshot(conn,universe=universe,day=day,now=now)
+        result = add_official_wb_quantities(result,wb)
+    except (sqlite3.OperationalError, ValueError, TypeError, KeyError, InvalidOperation):
+        pass  # No WB operand is inferred from its cost or contour quantity.
     return result
 
 
@@ -275,6 +317,60 @@ def _estimate_cost(wb: dict[str, Any], ff: dict[str, Any], stocks: dict[str, Dec
             "cost": capital / quantity if quantity else retained, "reason": ""}
 
 
+def is_official_fbs_quantity_metric(metric: str) -> bool:
+    key = metric.removeprefix("total_")
+    return key == FBS_TOTAL or key.startswith(FBS_FACILITY)
+
+
+def is_official_inventory_quantity_metric(metric: str) -> bool:
+    return is_official_fbs_quantity_metric(metric) or metric.removeprefix('total_') in {WB_TOTAL,'stock_total'}
+
+
+def is_frozen_official_fbs_quantity(metric: str, day: str, cell: dict) -> bool:
+    """Read-side provenance for an already materialized exact-date quantity."""
+    if not (is_official_fbs_quantity_metric(metric) and cell.get("source") == SOURCE
+            and cell.get("source_as_of_date") == day
+            and cell.get("quality_state") == "official_declared_stock"
+            and cell.get("source_generation_id") and cell.get("source_digest")
+            and cell.get("captured_at")):
+        return False
+    try:
+        return _number(cell["management_value"]) >= ZERO
+    except (KeyError, ValueError, TypeError, InvalidOperation):
+        return False
+
+
+def is_frozen_official_inventory_quantity(metric: str, day: str, cell: dict) -> bool:
+    if is_frozen_official_fbs_quantity(metric,day,cell):
+        return True
+    key = metric.removeprefix('total_')
+    wb = cell.get('wb_source') or {}
+    if not (key in {WB_TOTAL,'stock_total'} and cell.get('source') == SOURCE
+            and cell.get('source_as_of_date') == day and wb.get('date') == day
+            and wb.get('quantity_basis') == 'physical_quantity_only'
+            and all(wb.get(k) for k in ('snapshot_id','source_digest','version_id','observed_at'))
+            and cell.get('quality_state') == ('official_wb_physical_stock' if key == WB_TOTAL else 'official_combined_stock')):
+        return False
+    try:
+        value = _number(cell['management_value'])
+        if key == WB_TOTAL:
+            return value == _number(cell['wb_component_value'])
+        return (value == _number(cell['wb_component_value'])+_number(cell['fbs_component_value'])
+            and bool(cell.get('source_generation_id') and cell.get('source_digest') and cell.get('captured_at')))
+    except (KeyError, ValueError, TypeError, InvalidOperation):
+        return False
+
+
+def _quantity_keys(estimate):
+    keys = ([FBS_TOTAL,*(FBS_FACILITY+f for f in estimate['facilities'])]
+            if estimate.get('fbs_available', bool(estimate.get('generation_id'))) else [])
+    if estimate.get('wb_source'):
+        keys.append(WB_TOTAL)
+        if 'stock_quantity' in estimate['total']:
+            keys.append('stock_total')
+    return keys
+
+
 def apply_current_official_fbs_estimate(
     rows: Iterable[WebVitrinaContractRow], *, estimate: dict[str, Any],
     compact_operands: dict[str, dict[str, Any]] | None = None,
@@ -286,7 +382,11 @@ def apply_current_official_fbs_estimate(
     day = estimate["date"]
     for row in rows:
         key = row.metric_key.removeprefix("total_")
-        if day not in row.values_by_date or not (key in {FBS_TOTAL, COST, "stock_total"} or key.startswith(FBS_FACILITY)):
+        if day not in row.values_by_date or not (key in {FBS_TOTAL, COST, "stock_total"} or key.startswith(FBS_FACILITY)
+                or (estimate.get("quantity_only") and key == WB_TOTAL)):
+            result.append(row)
+            continue
+        if estimate.get("quantity_only") and key not in _quantity_keys(estimate):
             result.append(row)
             continue
         item = estimate["total"] if row.scope_kind == "TOTAL" else estimate["skus"].get(row.nm_id)
@@ -302,7 +402,10 @@ def apply_current_official_fbs_estimate(
                 continue
             scope, metric = row_id.split("|", 1)
             key = metric.removeprefix("total_")
-            if not (key in {FBS_TOTAL, COST, "stock_total"} or key.startswith(FBS_FACILITY)):
+            if not (key in {FBS_TOTAL, COST, "stock_total"} or key.startswith(FBS_FACILITY)
+                or (estimate.get("quantity_only") and key == WB_TOTAL)):
+                continue
+            if estimate.get("quantity_only") and key not in _quantity_keys(estimate):
                 continue
             if scope == "TOTAL":
                 item = estimate["total"]
@@ -321,6 +424,20 @@ def apply_current_official_fbs_estimate(
 def _official_estimated_cell(
     item: dict[str, Any], *, key: str, estimate: dict[str, Any], day: str,
 ) -> tuple[Any, dict[str, Any]]:
+    if estimate.get('quantity_only') and key in {WB_TOTAL,'stock_total'}:
+        wb = estimate['wb_source']
+        value = item['wb_quantity'] if key == WB_TOTAL else item['stock_quantity']
+        reason = ('Физический остаток на складах WB; товар в пути не включён.' if key == WB_TOTAL else
+                  'Физический остаток WB плюс заявленный в WB остаток FBS; датированные независимые снимки.')
+        presentation = dict(source=SOURCE,source_as_of_date=day,state='unconfirmed',tone='warning',
+            quality_state='official_wb_physical_stock' if key == WB_TOTAL else 'official_combined_stock',
+            quality_label='Остаток по WB',reason=reason,quality_reason=reason,management_value=str(value),
+            wb_source={k:wb[k] for k in ('date','snapshot_id','source_digest','version_id','observed_at','quantity_basis')},
+            wb_component_value=str(item['wb_quantity']),source_generation_id=estimate.get('generation_id',''),
+            source_digest=estimate.get('generation_digest',''),captured_at=estimate.get('captured_at','') or wb['observed_at'])
+        if key == 'stock_total':
+            presentation['fbs_component_value'] = str(item['fbs_quantity'])
+        return float(value),presentation
     value = item.get("stock_quantity") if key == "stock_total" else item.get("cost") if key == COST else (
         item["fbs_quantity"] if key == FBS_TOTAL else item["facilities"].get(key[len(FBS_FACILITY):]))
     reason = ("Управленческая оценка: капитал WB и FBO FF плюс остатки FBS из WB × "
@@ -365,14 +482,19 @@ def materialize_current_official_fbs_estimate(
     presentation = {key: dict(value) for key, value in metadata.get("server_cell_presentation", {}).items()}
     for row_id, by_date in (previous_presentation or {}).items():
         for day, cell in by_date.items():
-            if day in plan.date_columns and cell.get("source") == SOURCE:
+            if (day in plan.date_columns and cell.get("source") == SOURCE
+                    and (not estimate.get("quantity_only") or is_official_inventory_quantity_metric(row_id.split("|")[-1]))):
                 presentation.setdefault(row_id, {})[day] = dict(cell)
     if estimate.get("available") and estimate["date"] in plan.date_columns:
         day = estimate["date"]
         skeletons = []
         for nm in [None, *estimate["skus"]]:
             scope = "TOTAL" if nm is None else f"SKU:{nm}"
-            for key in [COST, FBS_TOTAL, "stock_total", *(FBS_FACILITY + f for f in estimate["facilities"])]:
+            keys = (_quantity_keys(estimate) if estimate.get("quantity_only") else
+                    [FBS_TOTAL, *(FBS_FACILITY + f for f in estimate["facilities"])])
+            if not estimate.get("quantity_only"):
+                keys.extend([COST, "stock_total"])
+            for key in keys:
                 metric = "total_" + key if nm is None else key
                 skeletons.append(WebVitrinaContractRow(
                     row_id=f"{scope}|{metric}", row_order=0, scope_kind="TOTAL" if nm is None else "SKU",
@@ -390,7 +512,8 @@ def materialize_current_official_fbs_estimate(
         new_rows = []
         for row in sheet.rows:
             updated = list(row)
-            if sheet.sheet_name == "DATA_VITRINA" and len(row) > 1:
+            if (sheet.sheet_name == "DATA_VITRINA" and len(row) > 1
+                    and (not estimate.get("quantity_only") or is_official_inventory_quantity_metric(str(row[1]).split("|")[-1]))):
                 for day in plan.date_columns:
                     cell = presentation.get(str(row[1]), {}).get(day, {})
                     if cell.get("source") != SOURCE:
@@ -403,6 +526,8 @@ def materialize_current_official_fbs_estimate(
         if sheet.sheet_name == "DATA_VITRINA":
             existing = {str(row[1]) for row in new_rows if len(row) > 1}
             for row_id, by_date in presentation.items():
+                if estimate.get("quantity_only") and not is_official_inventory_quantity_metric(row_id.split("|")[-1]):
+                    continue
                 if row_id in existing or not any(cell.get("source") == SOURCE for cell in by_date.values()):
                     continue
                 values = []
@@ -441,14 +566,15 @@ def load_materialized_official_fbs_presentation(
 
 
 def restore_materialized_official_fbs_estimates(
-    rows: Iterable[WebVitrinaContractRow], *, presentation: dict[str, Any],
+    rows: Iterable[WebVitrinaContractRow], *, presentation: dict[str, Any], quantity_only: bool = False,
 ) -> list[WebVitrinaContractRow]:
     """Restore only frozen exact-date observations, never today's stock backward."""
     result = []
     for row in rows:
         values, cells = dict(row.values_by_date), dict(row.presentation_by_date)
         for day, cell in presentation.get(row.row_id, {}).items():
-            if day in values and cell.get("source") == SOURCE and "management_value" in cell:
+            if (day in values and cell.get("source") == SOURCE and "management_value" in cell
+                    and (not quantity_only or is_frozen_official_inventory_quantity(row.metric_key, day, cell))):
                 value = cell["management_value"]
                 values[day] = float(value) if value != "" else ""
                 cells[day] = dict(cell)

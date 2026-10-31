@@ -2,10 +2,10 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:db378291e5e41499c5634b6b17f24c81846f89a7d5d8bbae860acdd320696cf9",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:67e51d069ae229da898196fdaf5e1d42e475565812e34fa6b1dba93bcdba2e21",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
-    "packages/application/sheet_vitrina_v1_web_vitrina.py": "8187bb0533e54230f4cca9bd8f681957399043f299bc09c8fbb7b4e00f1fd4e3",
+    "packages/application/sheet_vitrina_v1_web_vitrina.py": "2c0bc5436a9dd8c2e06e449ac01c6bdca168540859f2dd6c7572ee61a1901451",
     "packages/application/sheet_vitrina_v1_inventory_planning.py": "379b513e50bc13c4c4bc616e9c17a6b7d37ec5253bc08c303964fcc6d5ec1701",
     "packages/application/management_inventory_history.py": "bb1ea1c6d5fb873d0169bfe20a5e691cfc820d90eef3fc6b752ee4edf36aa2a4",
     "packages/application/inventory_planning_read_model.py": "b2b3be72731af1a730c949683c85931241d7a995a9a44679ab67985da22341bf",
@@ -37,7 +37,11 @@
     "packages/application/vitrina_incident_rematerialization.py": "7beb9eeb4da162e48681c19c2b4416335088b6636541242a401b23a877b48635",
     "packages/application/wb_incident_policy.py": "f4aed79b712002dffe39dd2adcb42f7a8574a67762c5e406092af95c23ea4c3d",
     "packages/application/fbs_accounting_gap_archive.py": "fc48981f0bcb5edf71a5c852f430271f895c383b0937850e1f2abcf4f6e1934f",
-    "packages/application/fbs_accounting_degraded.py": "00a7867efa8594ddc0bc0ea1590d6b7c6d2cbebb7b491a8f5e30f5bb97d58a11"
+    "packages/application/fbs_accounting_degraded.py": "47b95199b4d4b042a75dc40a45617168ed35b3005efa5ebd5509da19aa72bc84",
+    "packages/application/web_vitrina_official_fbs.py": "0f1ee3f16615a85d92995271367e3846624ac8fcfc005a0c3f26e553986ad70c",
+    "packages/application/official_fbs_stock_read.py": "db5fa2f431f7a193d2da583dc978544e0c584c3d6a90e07c2ae78483af2aaeb1",
+    "packages/application/official_wb_physical_read.py": "4588fcc5c85a8ba63eb92f7bec14b0c27f46cf6c9b52686be5c2dbc179de9b2e",
+    "packages/application/wb_fbs_warehouse_registry.py": "979a7a06ca0f777b598a074fd3eb76a3e3995c1312894e56ecec83e36d5d003e"
   },
   "group_migration_root": "/mnt/wb-core-extra100/web-vitrina-history-groups-candidate",
   "repair_code_hashes": {

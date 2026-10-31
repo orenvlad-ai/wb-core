@@ -680,6 +680,17 @@ class SheetVitrinaV1WebVitrinaBlock:
         from packages.application.fbs_accounting_degraded import apply_degraded_rows
         rows = apply_degraded_rows(rows,
             presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}))
+        if (management_book_mode and current_business_date_iso(now) in snapshot.date_columns
+                and (inventory_snapshot is None or inventory_snapshot.payload().get("quality") == "unavailable")):
+            rows = restore_materialized_official_fbs_estimates(rows,
+                presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}), quantity_only=True)
+            # The accounting book can withhold valuation, but does not own the
+            # independently proven official declared FBS quantity.
+            quantity = build_current_official_fbs_estimate(
+                self.runtime.db_path, nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
+                now=now, quantity_only=True,
+            )
+            rows = apply_current_official_fbs_estimate(rows, estimate=quantity, compact_operands=window_operands)
         if output_row_ids is not None:
             rows = [row for row in rows if row.row_id in output_row_ids]
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)

@@ -181,6 +181,64 @@ class DegradedTests(unittest.TestCase):
             self.assertEqual(item.values_by_date, {'2026-09-07': 17, '2026-09-09': ''})
         self.assertEqual(masked[-1].values_by_date['2026-09-09'], 999)
 
+    def test_official_quantity_survives_unavailable_book_without_valuing_it(self):
+        from decimal import Decimal
+        from packages.application.web_vitrina_official_fbs import SOURCE, restore_materialized_official_fbs_estimates
+        from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
+        from packages.contracts.web_vitrina_contract import WebVitrinaContractRow
+        day = '2026-09-10'
+        now = datetime(2026, 9, 10, 14, tzinfo=timezone.utc)
+        plan = make_plan(as_of_date='2026-09-09', day=day)
+        model = dict(available=True, quantity_only=True, date=day, source=SOURCE,
+            generation_id='complete-generation', generation_digest='sha256:complete',
+            captured_at='2026-09-10T13:59:00Z', functional_version_id='', facilities=['ff-1'],
+            skus={1:dict(facilities={'ff-1':Decimal(8)},fbs_quantity=Decimal(8))},
+            total=dict(facilities={'ff-1':Decimal(8)},fbs_quantity=Decimal(8)))
+        from packages.application.web_vitrina_official_fbs import add_official_wb_quantities
+        model = add_official_wb_quantities(model,dict(date=day,snapshot_id='wb1',source_digest='sha256:wb1',
+            version_id='version1',observed_at='2026-09-10T13:58:00Z',quantity_basis='physical_quantity_only',
+            skus={'1':5},total=5))
+        with heavy_admitted(self.root, operation='cycle'), self.scope(), patch(
+                'packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate', return_value=model) as source:
+            save(self.runtime, plan, now=now)
+        self.assertTrue(source.call_args.kwargs['quantity_only'])
+        self.assertEqual(accounting.load(self.root), (self.book,self.version))
+        saved = self.runtime.load_sheet_vitrina_ready_snapshot(plan.as_of_date)
+        values = {r[1]:r[2:] for r in saved.sheets[0].rows}
+        identity = 'TOTAL|total_inventory_fbs_total_qty_v1'
+        self.assertEqual(values[identity], ['',8.0])
+        self.assertEqual(values['TOTAL|total_inventory_wb_total_qty_v1'],['',5.0])
+        self.assertEqual(values['TOTAL|total_stock_total'],['',13.0])
+        self.assertEqual(values['SKU:1|our_wb_unit_cost_rub'],['',''])
+        self.assertEqual(values['SKU:1|own_capital_FF_capital_rub'],['',''])
+        self.assertFalse(saved.metadata.get('fbs_accounting_bindings'))
+        with patch('packages.application.sheet_vitrina_v1_web_vitrina.build_current_official_fbs_estimate', return_value=model) as source:
+            result=SheetVitrinaV1WebVitrinaBlock(runtime=self.runtime,now_factory=lambda:now).build(
+                page_route='/vitrina',read_route='/read',as_of_date=plan.as_of_date)
+        self.assertTrue(source.call_args.kwargs['quantity_only'])
+        self.assertEqual(next(r for r in result.rows if r.row_id==identity).values_by_date[day],8.0)
+        self.assertEqual(next(r for r in result.rows if r.row_id=='TOTAL|total_inventory_wb_total_qty_v1').values_by_date[day],5.0)
+        self.assertEqual(next(r for r in result.rows if r.row_id=='TOTAL|total_stock_total').values_by_date[day],13.0)
+        # Native history reads the frozen source date, without today's source.
+        row=WebVitrinaContractRow(identity,1,'TOTAL','TOTAL','Total','total_inventory_fbs_total_qty_v1',
+            'FBS','','test',None,None,'number',{'2026-09-09':'',day:''},{})
+        frozen=restore_materialized_official_fbs_estimates([row],presentation=saved.metadata['server_cell_presentation'],quantity_only=True)
+        frozen=degraded.apply_degraded_rows(frozen,presentation=saved.metadata['server_cell_presentation'])
+        self.assertEqual(frozen[0].values_by_date,{'2026-09-09':'',day:8.0})
+        for metric,amount in [('inventory_wb_total_qty_v1',5.0),('stock_total',13.0)]:
+            identity2='TOTAL|total_'+metric
+            row2=replace(row,row_id=identity2,metric_key='total_'+metric)
+            restored=restore_materialized_official_fbs_estimates([row2],presentation=saved.metadata['server_cell_presentation'],quantity_only=True)
+            checked=degraded.apply_degraded_rows(restored,presentation=saved.metadata['server_cell_presentation'])
+            self.assertEqual(checked[0].values_by_date[day],amount)
+            invalid=deepcopy(saved.metadata['server_cell_presentation'])
+            del invalid[identity2][day]['wb_source']
+            self.assertEqual(degraded.apply_degraded_rows(restored,presentation=invalid)[0].values_by_date[day],'')
+        # Source label alone cannot bypass the mask or unmask a cost metric.
+        broken=deepcopy(saved.metadata['server_cell_presentation'])
+        del broken[identity][day]['source_digest']
+        self.assertEqual(degraded.apply_degraded_rows(frozen,presentation=broken)[0].values_by_date[day],'')
+
     def test_older_plan_is_untouched(self):
         plan = make_plan(as_of_date='2026-09-06', day='2026-09-07')
         with heavy_admitted(self.root, operation='cycle'), self.scope():
