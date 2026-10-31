@@ -768,6 +768,48 @@ def _assert_per_payment_fee_blocks() -> None:
     if [item["status"] for item in blocks] != ["complete", "complete", "missing"]:
         raise AssertionError(f"each actual payment must have one fail-closed fee block: {projection}")
 
+    stored_assignments = []
+    for index, (payment_id, amount) in enumerate((("payment_1", 948.60), ("payment_1", 13668.11), ("payment_2", 20000), ("payment_2", 58113.66))):
+        operation_id = f"stored_fee_{index}"
+        stored_assignments.append({
+            "semantic_operation_id": operation_id, "financial_document_id": "fees_1",
+            "raw_json": json.dumps({
+                "source": "bank_fee_statement", "semantic_operation_id": operation_id,
+                "matched_anchor_document_id": payment_id, "match_confidence": "strong",
+                "row": {"semantic_operation_id": operation_id, "matched_anchor_document_id": payment_id,
+                        "confidence": "strong", "amount": amount, "currency": "RUB", "fee_category": "bank_transfer_fee"},
+            }),
+        })
+    def stored_projection(items, documents=financial_documents[:1]):
+        return build_supplier_payment_fee_blocks(payment_readiness=readiness, payment_documents=payments,
+            financial_documents=documents, bank_operation_assignments=items)["blocks"]
+    stored = stored_projection(stored_assignments)
+    assert [b["status"] for b in stored] == ["complete", "complete", "missing"]
+    assert [b["fee_totals"] for b in stored[:2]] == [{"RUB": 14616.71}, {"RUB": 78113.66}]
+    for field, value in (("confidence", "weak"), ("matched_anchor_document_id", "other_payment"), ("semantic_operation_id", "other_operation")):
+        invalid = [dict(a) for a in stored_assignments]
+        raw = json.loads(invalid[0]["raw_json"]); raw["row"][field] = value
+        invalid[0]["raw_json"] = json.dumps(raw)
+        assert stored_projection(invalid)[0]["status"] == "needs_review", field
+    invalid = [dict(a) for a in stored_assignments]
+    raw = json.loads(invalid[0]["raw_json"]); raw["confidence"] = "weak"
+    invalid[0]["raw_json"] = json.dumps(raw)
+    assert stored_projection(invalid)[0]["status"] == "needs_review"
+    assert stored_projection(stored_assignments, [{**financial_documents[0], "parse_status": "needs_review"}])[0]["status"] == "needs_review"
+    for field, value in (("amount", 999), ("amount", "invalid"), ("currency", "CNY"), ("fee_category", "currency_control_fee")):
+        invalid = [dict(a) for a in stored_assignments]
+        raw = json.loads(invalid[0]["raw_json"]); raw[field] = value
+        invalid[0]["raw_json"] = json.dumps(raw)
+        conflict_blocks = stored_projection(invalid)
+        assert conflict_blocks[0]["status"] == "needs_review", field
+        conflict_readiness = build_supplier_financial_readiness(
+            payment_readiness=readiness,
+            financial_documents=[{"document_type": kind, "parse_status": "confirmed"}
+                                 for kind in ("logistics_invoice", "customs_declaration")],
+            payment_fee_blocks=conflict_blocks[:2],
+        )
+        assert not conflict_readiness["ready"], field
+
     zero_confirmation = {
         "payment_document_id": "payment_3",
         "payment_fingerprint": supplier_payment_fee_fingerprint(payments[2]),
