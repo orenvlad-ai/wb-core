@@ -3,10 +3,12 @@
 No accounting book, inventory finalization, movement, cost or profit is changed.
 The existing ready-plan adapter supplies CAS, before images and exact readback.
 """
+from contextlib import closing
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import json
+from pathlib import Path
 
 from apps.web_vitrina_management_history import WebVitrinaManagementHistoryAdapter, readonly
 from apps.production_apply_contract import AmbiguousSubmit
@@ -18,6 +20,7 @@ from packages.application.web_vitrina_official_fbs import (
 )
 from packages.application.official_wb_physical_read import read_official_wb_physical_snapshot
 from packages.business_time import current_business_date_iso
+from packages.application.fbs_current_snapshot_policy import open_current_snapshot_readonly
 
 
 def capture_source(conn, *, dates, bundle_version, nm_ids, now):
@@ -143,8 +146,23 @@ class FbsQuantityPublicationAdapter(WebVitrinaManagementHistoryAdapter):
         active = conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()
         if not active or active[0] != source['bundle_version']:
             raise ValueError('fbs-quantity-bundle-drift')
-        fresh = capture_source(conn, dates=request['dates'], bundle_version=source['bundle_version'],
-                               nm_ids=source['nm_ids'], now=datetime.now(timezone.utc))
+        # The inherited writer owns BEGIN IMMEDIATE on a plain connection.
+        # It cannot prove the opened inode required by the selected 9h policy.
+        # Read sources independently through the exact admitted canonical file;
+        # retain the caller's transaction solely for ready-plan CAS and writes.
+        runtime, db = self.target(request)
+        caller_path = next((Path(r[2]).resolve() for r in conn.execute('PRAGMA database_list') if r[1]=='main' and r[2]),None)
+        if caller_path != db.resolve():
+            raise ValueError('fbs-quantity-caller-target-mismatch')
+        with closing(open_current_snapshot_readonly(db)) as source_conn:
+            source_conn.execute('BEGIN')
+            source_bundle = source_conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()
+            if not source_bundle or source_bundle[0] != source['bundle_version']:
+                raise ValueError('fbs-quantity-source-bundle-drift')
+            fresh = capture_source(source_conn, dates=request['dates'], bundle_version=source['bundle_version'],
+                                   nm_ids=source['nm_ids'], now=datetime.now(timezone.utc))
+            if self.target(request) != (runtime, db):
+                raise ValueError('fbs-quantity-source-authority-drift')
         if digest(fresh) != request['source_sha256']:
             raise ValueError('fbs-quantity-source-drift')
         marks = ','.join('?' for _ in request['dates'])

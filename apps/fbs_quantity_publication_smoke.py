@@ -1,4 +1,5 @@
 """Dated source selection, missing-only mask, source CAS and readback/rollback."""
+from contextlib import closing
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
@@ -6,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from apps.web_vitrina_official_fbs_smoke import fixture, zero_wb_snapshot
@@ -15,7 +17,52 @@ from packages.application.web_vitrina_management_history import digest
 from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
 
 
+def check_selected_policy_source_read():
+    from apps.fbs_current_snapshot_policy_smoke import canonical, select
+    from packages.application.fbs_current_snapshot_policy import open_current_snapshot_readonly
+    with TemporaryDirectory() as tmp:
+        root=Path(tmp).resolve();db=root/'generations'/'op.sqlite3';db.parent.mkdir()
+        c=fixture(db);c.row_factory=sqlite3.Row
+        zero_wb_snapshot(c)
+        c.execute('CREATE TABLE registry_upload_current_state(slot,bundle_version)')
+        c.execute("INSERT INTO registry_upload_current_state VALUES(1,'b')")
+        c.execute('CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version,as_of_date,snapshot_id,plan_json)')
+        day='2026-09-05';now=datetime(2026,9,5,12,5,tzinfo=timezone.utc)
+        plan={'date_columns':[day],'metadata':{},'sheets':[{'sheet_name':'DATA_VITRINA','header':['label','key',day],
+            'rows':[['x','SKU:1|inventory_fbs_total_qty_v1',''],['x','SKU:2|inventory_fbs_total_qty_v1','']]}]}
+        c.execute('INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?)',('b',day,'s',json.dumps(plan)));c.commit()
+        canonical(root,db,c);select(root)
+        # Even at the canonical path, an unproven plain connection keeps30m.
+        try:capture_source(c,dates=[day],bundle_version='b',nm_ids=[1,2],now=now)
+        except ValueError as exc:assert 'not_fresh' in str(exc)
+        else:raise AssertionError('raw connection gained selected freshness')
+        with closing(open_current_snapshot_readonly(db)) as source_conn:
+            source_conn.execute('BEGIN')
+            source=capture_source(source_conn,dates=[day],bundle_version='b',nm_ids=[1,2],now=now)
+        adapter=FbsQuantityPublicationAdapter();adapter.target=lambda request:(root,db)
+        request=dict(source=source,dates=[day],source_sha256=digest(source),runtime_sha='test')
+        class Clock(datetime):
+            @classmethod
+            def now(cls,tz=None):return now
+        before=c.execute('SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots').fetchone()[0]
+        with patch('apps.fbs_quantity_publication.datetime',Clock):
+            c.execute('BEGIN IMMEDIATE')
+            candidate=adapter.build(request,'selected-quantity',c)
+            assert len(candidate['changes'])==2 and c.in_transaction
+            assert c.execute('PRAGMA query_only').fetchone()[0]==0  # caller ownership unchanged
+            assert c.execute('SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots').fetchone()[0]==before
+            c.rollback()
+            # Exercise the inherited actual write path, where the writer itself
+            # is plain sqlite but source admission must retain the selected age.
+            p=execute(action='preview',adapter_name='test',operation_id='selected-quantity',request=request,adapters={'test':adapter})
+            result=execute(action='apply',adapter_name='test',operation_id='selected-quantity',request=request,adapters={'test':adapter},
+                expected_prestate=p['prestate_sha256'],expected_candidate=p['candidate_sha256'])
+            assert result['state']=='applied'
+        c.close()
+
+
 def main():
+    check_selected_policy_source_read()
     with TemporaryDirectory() as tmp:
         root = Path(tmp); db = root / 'fixture.sqlite3'
         c = fixture(db); c.row_factory = sqlite3.Row
