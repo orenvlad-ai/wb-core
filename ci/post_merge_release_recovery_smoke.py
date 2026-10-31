@@ -1562,8 +1562,59 @@ def test_predependency_exact_source_and_dependency_proofs() -> None:
         recovery._git = original
 
 
-def test_predependency_previous_success_receipt() -> None:
-    profile = recovery.PREDEPENDENCY_PREVIOUS_PROFILE
+def test_pr1512_predependency_profile_and_unit_transition() -> None:
+    run = 41205730174
+    profile = recovery._predependency_profile(run)
+    receipt = profile['receipt']
+    case = recovery.RecoveryCase.PREDEPENDENCY_STORAGE
+    assert recovery.recovery_case(run) is case
+    assert profile['previous_receipt']['deployed_sha'] == '167916cc38ec11a95a303493a324977579a806b1'
+    assert profile['previous_receipt']['deployed_sha'] != receipt['base_sha']
+    raw = predependency_log(line=1231,gate=receipt['gate_run_id'])
+    assert recovery._prove_failed_stage(raw,receipt['gate_run_id'],'release',case=case,release_run_id=run)['exit_status'] == 2
+    for line in (1206,1238,1263):
+        expect_reason('failed-stage-not-exact-predependency-storage-exit2',lambda line=line: recovery._prove_failed_stage(predependency_log(line=line,gate=receipt['gate_run_id']),receipt['gate_run_id'],'release',case=case,release_run_id=run))
+    expect_reason('failed-stage-not-definite-single-exit2',lambda: recovery._prove_failed_stage(raw+b'line 1263, in deploy_current_checkout',receipt['gate_run_id'],'release',case=case,release_run_id=run))
+    assert recovery._validate_original_receipt({**receipt,'schema':recovery.release.RECEIPT_SCHEMA,'state':'blocked','reason':'CalledProcessError','release_kind':'live_runtime','deployed_sha':None},case=case,release_run_id=run)['merge_sha']==receipt['merge_sha']
+    original = recovery._git
+    lines=['# immutable fixture']*1263
+    lines[1230]='run_stage("root-storage-status", root_storage_commands["status"])'
+    lines[1231]='run_stage("dependencies", seller_recovery_os_dependencies_command)'
+    lines[1262]=lines[1230]
+    path,transition=next(iter(profile['unit_transitions'].items()))
+    def git(args):
+        if args[0]=='diff':
+            assert args[-1] == profile['previous_receipt']['deployed_sha']+'..'+receipt['merge_sha']
+            return _completed(args,stdout=path+'\npackages/application/example.py\n')
+        if args[0]=='show':return _completed(args,stdout='\n'.join(lines))
+        if args[0]=='ls-tree':return _completed(args,stdout=path+'\n')
+        if args[0]=='rev-parse':return _completed(args,stdout=transition['before'] if args[-1].startswith(profile['previous_receipt']['deployed_sha']+':') else transition['after'])
+        raise AssertionError(args)
+    recovery._git=git
+    try:
+        proof=recovery._predependency_diff_proof(run)
+        assert proof['failed_source_line']==1231 and proof['reviewed_unit_transitions']==profile['unit_transitions']
+        recovery._git=lambda args: _completed(args,stdout='0'*40) if args[0]=='rev-parse' else git(args)
+        expect_reason('predependency-unit-transition-not-exact',lambda:recovery._predependency_diff_proof(run))
+        recovery._git=lambda args: _completed(args,stdout=path+'\nrequirements.txt\n') if args[0]=='diff' else git(args)
+        expect_reason('predependency-dependency-or-deploy-contract-changed',lambda:recovery._predependency_diff_proof(run))
+        recovery._git=git
+        from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+        target=hosted.load_hosted_runtime_target(recovery.TARGET_FILE)
+        before=recovery._predependency_live_contract_script(target,merge=receipt['merge_sha'])
+        after=recovery._predependency_live_contract_script(target,merge=receipt['merge_sha'],require_complete=True)
+        ast.parse(before);ast.parse(after)
+        assert transition['before'] in before and transition['before'] not in after
+        assert transition['after'] in before and transition['after'] in after
+        assert "\"wb-core-autoanswers-worker.timer\":'disabled'" in before
+        assert "\"wb-core-autoanswers-readonly-sync.timer\":'disabled'" in after
+        assert 'pip install' not in before and 'apt-get' not in before
+    finally:recovery._git=original
+
+
+def test_predependency_previous_success_receipt(run=recovery.PREDEPENDENCY_RELEASE_RUN_ID) -> None:
+    case_profile = recovery._predependency_profile(run)
+    profile = case_profile["previous_receipt"]
     class Client:
         bad_run = False
         expired = False
@@ -1571,27 +1622,28 @@ def test_predependency_previous_success_receipt() -> None:
         def get(self, path):
             if '/artifacts?' in path:
                 return {'artifacts': [{'name': f"release-receipt-{profile['gate_run_id']}", 'expired': self.expired, 'id': 1}]}
-            return {'name': recovery.RELEASE_WORKFLOW, 'path': recovery.RELEASE_WORKFLOW_PATH, 'event': 'workflow_run', 'run_attempt': 1, 'status': 'completed', 'conclusion': 'failure' if self.bad_run else 'success', 'head_sha': profile['base_sha']}
+            return {'name': recovery.RELEASE_WORKFLOW, 'path': recovery.RELEASE_WORKFLOW_PATH, 'event': case_profile['previous_event'], 'run_attempt': 1, 'status': 'completed', 'conclusion': 'failure' if self.bad_run else 'success', 'head_sha': case_profile['previous_run_head']}
         def request(self, *_args, **_kwargs):
             result = recovery.io.BytesIO()
             with recovery.zipfile.ZipFile(result, 'w') as archive:
                 archive.writestr('release-receipt.json', json.dumps(self.receipt))
             return result.getvalue()
     client = Client()
-    assert recovery._predependency_previous_release_proof(client)['previous_deployed_sha'] == recovery.PREDEPENDENCY_PROFILE['base_sha']
+    assert recovery._predependency_previous_release_proof(client,run)['previous_deployed_sha'] == profile['deployed_sha']
     client.bad_run = True
-    expect_reason('predependency-previous-release-run-invalid', lambda: recovery._predependency_previous_release_proof(client))
+    expect_reason('predependency-previous-release-run-invalid', lambda: recovery._predependency_previous_release_proof(client,run))
     client.bad_run = False; client.expired = True
-    expect_reason('predependency-previous-release-artifact-invalid', lambda: recovery._predependency_previous_release_proof(client))
+    expect_reason('predependency-previous-release-artifact-invalid', lambda: recovery._predependency_previous_release_proof(client,run))
     client.expired = False
     for key, wrong in [('state', 'blocked'), ('deployed_sha', M), ('operation_id', 'release-v3-wrong')]:
         client.receipt = {**Client.receipt, key: wrong}
-        expect_reason('predependency-previous-release-receipt-invalid', lambda: recovery._predependency_previous_release_proof(client))
+        expect_reason('predependency-previous-release-receipt-invalid', lambda: recovery._predependency_previous_release_proof(client,run))
 
 
-def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = False, already_installed: bool = False) -> None:
+def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = False, already_installed: bool = False, unit_transition=False, wrong_unit=False) -> None:
     value = preview()
     value['recovery_case'] = recovery.RecoveryCase.PREDEPENDENCY_STORAGE.value
+    value['release_run_id'] = 41205730174 if unit_transition else recovery.PREDEPENDENCY_RELEASE_RUN_ID
     value['predependency_diff'] = {'exact': True}
     missing = {'installed': False, 'versions': None}
     present = {'installed': True, 'versions': '8.17.1 3.0.1'}
@@ -1602,11 +1654,16 @@ def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = F
     commands_value['cleaner_precomplete_probe'] = ['cleaner-probe']
     commands_value['normal_activation_tail'] = {name: [name] for name in ('prepare', 'install', 'daemon_reload', 'nginx', 'restart', 'reconcile', 'barrier', 'storage', 'storage_readback', 'status', 'auth')}
     initial = value['prestate']
+    if unit_transition:
+        unit_path, change = next(iter(recovery._predependency_profile(41205730174)['unit_transitions'].items()))
+        initial['predependency_live_contract']['installed_unit_blob_hashes'] = {Path(unit_path).name:change['before'], 'other.service':'unchanged'}
     installed = json.loads(json.dumps(initial))
     installed['predependency_live_contract']['dependency_versions']['npm_modules'] = present
     if drift:
         installed['predependency_live_contract']['dependency_versions']['system'] = 'changed'
-    restarted = {**installed, 'main_pid': 43}
+    restarted = json.loads(json.dumps(installed)); restarted['main_pid'] = 43
+    if unit_transition:
+        restarted['predependency_live_contract']['installed_unit_blob_hashes'][Path(unit_path).name] = 'wrong' if wrong_unit else change['after']
     complete = {**restarted, 'metadata': {**restarted['metadata'], 'deployment_complete': True}, 'metadata_sha256': '7' * 64}
     states = [initial, restarted, restarted, complete] if already_installed else [initial, installed, restarted, restarted, complete]
     calls = []
@@ -1615,14 +1672,17 @@ def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = F
     recovery._run_stage = lambda command, **_kwargs: (calls.append(command[0]) or subprocess.CompletedProcess(command, 255 if fail and command[0] == 'npm-locked' else 0, stdout=command[0], stderr=''))
     recovery.collect_prestate = lambda *_args, **_kwargs: states.pop(0)
     recovery.prove_repo_only_descendant = lambda *_args, **_kwargs: value['runner']
-    recovery._predependency_diff_proof = lambda: value['predependency_diff']
+    recovery._predependency_diff_proof = lambda *_args: value['predependency_diff']
     client = CommentsClient()
     try:
         result = recovery.apply_recovery(client, value, FINGERPRINT, object())
-        assert result['state'] == ('ambiguous' if fail or drift else 'complete'), result
+        assert result['state'] == ('ambiguous' if fail or drift or wrong_unit else 'complete'), result
         assert calls.count('npm-locked') == (0 if already_installed else 1)
         if fail or drift:
             assert 'restart' not in calls and 'completion' not in calls
+        elif wrong_unit:
+            assert 'restart' in calls and 'completion' not in calls
+            assert result['reason']=='normal-tail-unit-transition-not-exact'
         else:
             assert calls.index('prepare') < calls.index('restart') < calls.index('cleaner-probe') < calls.index('completion')
             if not already_installed:
@@ -1904,11 +1964,15 @@ def legacy_tail_regressions() -> None:
         test_cleaner_completion_exact_evidence_and_no_replay(run_id)
     test_manual_release_full_evidence_chain()
     test_predependency_exact_source_and_dependency_proofs()
+    test_pr1512_predependency_profile_and_unit_transition()
     test_predependency_previous_success_receipt()
+    test_predependency_previous_success_receipt(41205730174)
     test_predependency_npm_once_then_tail()
     test_predependency_npm_once_then_tail(already_installed=True)
     test_predependency_npm_once_then_tail(fail=True)
     test_predependency_npm_once_then_tail(drift=True)
+    test_predependency_npm_once_then_tail(unit_transition=True)
+    test_predependency_npm_once_then_tail(unit_transition=True,wrong_unit=True)
     test_failure_evidence()
     test_every_intervening_commit_is_repo_only()
     test_empty_intervening_commit_is_rejected()
