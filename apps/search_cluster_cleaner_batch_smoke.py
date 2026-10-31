@@ -367,8 +367,27 @@ def main():
                                         targets=[dict(advert_id=11,nm_id=101),dict(advert_id=12,nm_id=101)]),owner,snapshot=snapshot)
         parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,fixture_admission=admitted)
         job_id=parent.tick()['items'][0]['job_id']
-        service.record_manual_job(job_id,state='running',stage='scan_apply_claimed')
         child=ManualCleanerCoordinator(service,object())
+        job=service.manual_job(job_id,owner)
+        operation=child.operation_id(job_id,'scan')
+        target=Target(11,101)
+        service.claim_exact_manual_run(run_id=job['scan_run_id'],targets=[target],generation='monolith',
+            production_operation_id=operation,lease_seconds=1)
+        assert not service.stop_unsubmitted_manual_run(job['scan_run_id'],operation_id=operation,target=target)
+        # Reproduce a committed binding followed by native unsent recovery.
+        from packages.application.search_cluster_cleaner_admission import AdmissionGuard
+        service.clock=lambda:(datetime.now(timezone.utc)+timedelta(seconds=5)).isoformat()
+        # A recovery event for another operation cannot certify this binding.
+        with service.store.transaction() as c:
+            service._event(c,'stage_e_unsent_recovered',dict(production_operation_id='different-operation',
+                cancelled_operations=[],kind='scan'),run_id=job['scan_run_id'])
+        assert not service.exact_manual_run_unclaimed(job['scan_run_id'],operation,target)
+        AdmissionGuard(box.admission,service.store).recover_unsubmitted_manual_run(cleaner=service,
+            generation='monolith',production_operation_id=operation,run_id=job['scan_run_id'])
+        assert not service.stop_unsubmitted_manual_run(job['scan_run_id'])
+        assert not service.stop_unsubmitted_manual_run(job['scan_run_id'],operation_id='wrong',target=target)
+        assert not service.stop_unsubmitted_manual_run(job['scan_run_id'],operation_id=operation,target=Target(12,101))
+        service.record_manual_job(job_id,state='running',stage='scan_apply_claimed')
         assert child._retry_unclaimed(job_id,'scan',{'state':'not_submitted'})
         parked=service.manual_job(job_id,owner)
         assert parked['state']=='failed' and parked['error_code']=='local_not_submitted_retry'

@@ -733,13 +733,18 @@ class KeywordCleaner:
             return dict(job_id=job_id,state='ambiguous',stage=value['stage'])
         return self._command(principal,f'manual-clean/{job_id}/recheck',payload,command)
 
-    def stop_unsubmitted_manual_run(self,run_id:str) -> bool:
-        """Release only a queued exact run with no binding or write intent."""
+    def stop_unsubmitted_manual_run(self,run_id:str,*,operation_id:str|None=None,target:Target|None=None) -> bool:
+        """Release a queued exact run; recovered scan bindings need exact unsent proof."""
         with self.store.transaction(timeout_ms=30000) as c:
             run=c.execute("SELECT state,trigger FROM cleaner_runs WHERE account=? AND run_id=?",(self.key,run_id)).fetchone()
             if not run or run['state']!='queued' or run['trigger'] not in {'manual_exact','manual_exact_candidates'}:return False
             if c.execute('SELECT 1 FROM cleaner_write_operations WHERE account=? AND run_id=?',(self.key,run_id)).fetchone():return False
-            if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",(self.key,run_id)).fetchone():return False
+            if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",(self.key,run_id)).fetchone():
+                # A recovered scan retains immutable binding history. Recheck
+                # exact unsent proof under this transaction before releasing it.
+                kind=c.execute('SELECT kind FROM cleaner_runs WHERE run_id=?',(run_id,)).fetchone()[0]
+                if (kind!='scan' or not operation_id or target is None
+                        or not self._exact_manual_run_unclaimed(c,run_id,operation_id,target)):return False
             c.execute("UPDATE cleaner_runs SET state='stopped',phase='finished',scan_finished_at=?,reason='manual_not_submitted' WHERE run_id=?",(self.clock(),run_id))
             self._event(c,'run_finished',dict(state='stopped',reason='manual_not_submitted'),run_id=run_id)
             return True
@@ -753,30 +758,33 @@ class KeywordCleaner:
         immutably cancelled every proven-unsent preparation.
         """
         with self.store.read() as c:
-            run=c.execute("SELECT state,trigger,targets,worker_token,started_at FROM cleaner_runs WHERE account=? AND run_id=?",
-                          (self.key,run_id)).fetchone()
-            if (not run or run['state']!='queued' or run['trigger'] not in {'manual_exact','manual_exact_candidates'}
-                    or run['worker_token'] or run['started_at']):return False
-            declared={str(row.get('target') or '') for row in json.loads(run['targets'])}
-            if declared!={target.key}:return False
-            bindings=[json.loads(row[0]) for row in c.execute(
-                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",
-                (self.key,run_id))]
-            operations=c.execute('SELECT operation_id,state,dispatch_count FROM cleaner_write_operations WHERE account=? AND run_id=?',
-                                 (self.key,run_id)).fetchall()
-            if not bindings and not operations:
-                return not c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='stage_e_manual_binding' AND json_extract(facts,'$.operation_id')=?",
-                                     (self.key,operation_id)).fetchone()
-            if (not bindings or any(row.get('operation_id')!=operation_id or set(row.get('targets') or [])!=declared for row in bindings)
-                    or any(row['state']!='cancelled_before_send' or row['dispatch_count']!=0 for row in operations)
-                    or any(c.execute('SELECT 1 FROM cleaner_readback_jobs WHERE operation_id=?',(row['operation_id'],)).fetchone() for row in operations)):
-                return False
-            events=[json.loads(event[0]) for event in c.execute(
-                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_unsent_recovered'",
-                (self.key,run_id))]
-            recovered={op for event in events if event.get('production_operation_id')==operation_id
-                       for op in event.get('cancelled_operations',[])}
-            return bool(events) and all(row['operation_id'] in recovered for row in operations)
+            return self._exact_manual_run_unclaimed(c,run_id,operation_id,target)
+
+    def _exact_manual_run_unclaimed(self,c,run_id:str,operation_id:str,target:Target) -> bool:
+        run=c.execute("SELECT state,trigger,targets,worker_token,started_at FROM cleaner_runs WHERE account=? AND run_id=?",
+                      (self.key,run_id)).fetchone()
+        if (not run or run['state']!='queued' or run['trigger'] not in {'manual_exact','manual_exact_candidates'}
+                or run['worker_token'] or run['started_at']):return False
+        declared={str(row.get('target') or '') for row in json.loads(run['targets'])}
+        if declared!={target.key}:return False
+        bindings=[json.loads(row[0]) for row in c.execute(
+            "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",
+            (self.key,run_id))]
+        operations=c.execute('SELECT operation_id,state,dispatch_count FROM cleaner_write_operations WHERE account=? AND run_id=?',
+                             (self.key,run_id)).fetchall()
+        if not bindings and not operations:
+            return not c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='stage_e_manual_binding' AND json_extract(facts,'$.operation_id')=?",
+                                 (self.key,operation_id)).fetchone()
+        if (not bindings or any(row.get('operation_id')!=operation_id or set(row.get('targets') or [])!=declared for row in bindings)
+                or any(row['state']!='cancelled_before_send' or row['dispatch_count']!=0 for row in operations)
+                or any(c.execute('SELECT 1 FROM cleaner_readback_jobs WHERE operation_id=?',(row['operation_id'],)).fetchone() for row in operations)):
+            return False
+        events=[json.loads(event[0]) for event in c.execute(
+            "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_unsent_recovered'",
+            (self.key,run_id))]
+        recovered={op for event in events if event.get('production_operation_id')==operation_id
+                   for op in event.get('cancelled_operations',[])}
+        return any(event.get('production_operation_id')==operation_id for event in events) and all(row['operation_id'] in recovered for row in operations)
 
     def decide(self,review_id:str,payload:Mapping,principal:Principal) -> dict:
         def command(c,actor):
