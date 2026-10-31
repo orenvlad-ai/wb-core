@@ -290,5 +290,44 @@
     ],
     "expected_route": "seller_chat",
     "expected_calls": 3
+  },
+  "noframe_gap": {
+    "raw": {
+      "ingestion_id": "noframe-gap",
+      "review_id": "noframe-gap",
+      "review_version": "1",
+      "rating": 3,
+      "text": "Стекло не по размеру, меньше экрана",
+      "pros": "",
+      "cons": "",
+      "seller_article": "No Frame Clean iPhone 15 / 16",
+      "nm_id": null,
+      "media": {
+        "photos": [],
+        "video": {
+          "present": false
+        }
+      }
+    },
+    "classification": {
+      "review_mode": "negative",
+      "primary_issue": "SIZE_FIT",
+      "issue_codes": [
+        "SIZE_FIT"
+      ],
+      "route": "public_only",
+      "seller_investigation_subject": false,
+      "evidence_potential": false,
+      "required_evidence": [],
+      "route_reason": "Предусмотренный отступ [noframe-case-gap-2026-10-31-v1]"
+    },
+    "drafts": [
+      "Здравствуйте. Понимаем, что небольшие пузыри после установки портят впечатление. Если под ними нет пыли, они могут уменьшиться в течение суток."
+    ],
+    "validator_statuses": [
+      "pass"
+    ],
+    "expected_route": "public_only",
+    "expected_calls": 1
   }
 }
