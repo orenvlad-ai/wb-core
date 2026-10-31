@@ -78,9 +78,22 @@ def _write_proof(conn,account,run_id,*,target=None):
     return bool(confirmed and actual==expected),len(expected)
 
 
-def _manual_result(conn,row,job_id,*,expected_target=None):
-    initial=_facts(conn,row['account'],'self_service_requested','job_id',job_id)
-    latest=_facts(conn,row['account'],'self_service_%','job_id',job_id)
+def _batch_job_facts(conn,account,job_ids):
+    """Read child events once in the receipt's existing read snapshot."""
+    result={}
+    if not job_ids:return result
+    for event in conn.execute("SELECT kind,facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id') IN (SELECT value FROM json_each(?)) ORDER BY sequence DESC",(account,json.dumps(job_ids))):
+        facts=json.loads(event['facts']);job_id=facts['job_id']
+        result.setdefault((job_id,'latest'),facts)
+        if event['kind']=='self_service_requested':result.setdefault((job_id,'initial'),facts)
+    return result
+
+
+def _manual_result(conn,row,job_id,*,expected_target=None,event_facts=None):
+    initial=(_facts(conn,row['account'],'self_service_requested','job_id',job_id)
+        if event_facts is None else event_facts.get((job_id,'initial'),{}))
+    latest=(_facts(conn,row['account'],'self_service_%','job_id',job_id)
+        if event_facts is None else event_facts.get((job_id,'latest'),{}))
     if not initial or initial.get('actor')!=row['actor'] or initial.get('account_key')!=row['account'] or (expected_target is not None and (initial.get('advert_id'),initial.get('nm_id'))!=expected_target):
         return dict(state='needs_attention',native_state='source_proof_missing',external_confirmed=False,
             reason_ru='Задание сохранено, но точная исходная привязка пока не подтверждена.')
@@ -113,10 +126,11 @@ def public(conn,row):
         initial=_facts(conn,row['account'],'self_service_batch_requested','batch_id',batch_id)
         latest=_facts(conn,row['account'],'self_service_batch_%','batch_id',batch_id)
         from packages.application.search_cluster_cleaner import batch_child_id
+        event_facts=_batch_job_facts(conn,row['account'],[batch_child_id(batch_id,index) for index in range(len(initial.get('items') or []))])
         children=[]
         for index,target in enumerate(initial.get('items') or []):
             child_id=batch_child_id(batch_id,index)
-            child=_manual_result(conn,row,child_id,expected_target=(target['advert_id'],target['nm_id']))
+            child=_manual_result(conn,row,child_id,expected_target=(target['advert_id'],target['nm_id']),event_facts=event_facts)
             child.update(label_ru='Кампания '+str(target['advert_id'])+' · WB '+str(target['nm_id']))
             children.append(child)
         native=latest.get('state','queued')
