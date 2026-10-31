@@ -75,7 +75,9 @@ def main():
         admission=root/'admission';admission.mkdir()
         store=Store()
         cleaner=SimpleNamespace(store=store,key='seller:scope')
-        child=SimpleNamespace(calls=0,consumed=False)
+        child=SimpleNamespace(calls=0,consumed=False,released=0)
+        def release():child.released+=1;return 0
+        child.release_terminal_unsent_scans=release
         child.pending_jobs=lambda: ['manual-intent'] if store.connection.execute(
             'SELECT 1 FROM cleaner_events LIMIT 1').fetchone() and not child.consumed else []
         def consume():child.calls+=1;child.consumed=True
@@ -102,7 +104,7 @@ def main():
             try:worker.run(runtime_dir=runtime,env_file=root/'env',admission_dir=admission)
             except KeyboardInterrupt:pass
         assert daily.ticks==3,daily.ticks  # cold start, manual event, then drain to idle
-        assert child.calls==1
+        assert child.calls==1 and child.released==daily.ticks
         assert json.loads((admission/'self-service-worker-health.json').read_text())['state']=='ready'
 
         wake=worker.IdleWake(cleaner,runtime)

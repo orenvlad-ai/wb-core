@@ -125,6 +125,7 @@ builtins.__import__ = without_openpyxl
 
 from apps.production_apply_adapters import ADAPTERS
 expected = {
+    "fbs_quantity_publication_v1",
     "wb_autoanswers_recovery_v1",
     "inventory_retention_publication_v1",
     "web_source_publication_v1",

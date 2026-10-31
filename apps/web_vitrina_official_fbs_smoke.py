@@ -13,7 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.web_vitrina_official_fbs import (
-    SOURCE, _estimate_cost, build_current_official_fbs_estimate,
+    SOURCE, _estimate_cost, build_current_official_fbs_estimate, apply_current_official_fbs_estimate,
     materialize_current_official_fbs_estimate, restore_materialized_official_fbs_estimates,
 )
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVitrinaWriteTarget, SheetVitrinaV1TemporalSlot
@@ -183,15 +183,97 @@ def check_proven_wb_zero(tmp, now):
     conn.close()
 
 
+def check_independent_wb_physical(tmp, now):
+    from packages.application.official_wb_physical_read import read_official_wb_physical_snapshot
+    from packages.application.web_vitrina_official_fbs import add_official_wb_quantities
+    path = Path(tmp)/'physical-wb.sqlite3'
+    conn = fixture(path)
+    conn.row_factory = sqlite3.Row
+    raw = [dict(nmId=1,quantity=6,inWayToClient=3,inWayFromClient=1)]
+    items = [dict(nm_id=1,quantity='6',in_way_to_client='3',in_way_from_client='1',wb_contour_quantity='10'),
+             dict(nm_id=2,quantity='0',in_way_to_client='0',in_way_from_client='0',wb_contour_quantity='0')]
+    zero_wb_snapshot(conn,items=items,raw=raw)
+    conn.commit()
+    proof = read_official_wb_physical_snapshot(conn,universe=[1,2],day='2026-09-05',now=now)
+    assert proof['total'] == 6 and proof['skus'] == {'1':6,'2':0}  # never contour10
+    # Historical observations survive age, retaining their original source time.
+    assert read_official_wb_physical_snapshot(conn,universe=[1,2],day='2026-09-05',now=now+timedelta(days=2)) == proof
+    for kwargs in [dict(now=now+timedelta(hours=1)),dict(day='2026-09-04'),dict(universe=[1]),dict(snapshot_id='wrong')]:
+        args=dict(universe=[1,2],day='2026-09-05',now=now);args.update(kwargs)
+        try:read_official_wb_physical_snapshot(conn,**args)
+        except ValueError:pass
+        else:raise AssertionError('invalid physical WB source accepted')
+    conn.execute('DROP TABLE sheet_vitrina_v1_warehouse_functional_balances')
+    conn.execute('DROP TABLE sheet_vitrina_v1_warehouse_business_projection_current_rows')
+    conn.commit()
+    model = build_current_official_fbs_estimate(path,nm_ids=[1,2],now=now,quantity_only=True)
+    assert model['total']['wb_quantity'] == 6 and model['total']['stock_quantity'] == 14
+    assert 'cost' not in model['total'] and model['wb_source'] == proof
+    try:add_official_wb_quantities(model,{**proof,'date':'2026-09-06'})
+    except ValueError:pass
+    else:raise AssertionError('cross-date combined quantity accepted')
+    conn.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_runs SET complete=0 WHERE run_id='B'")
+    conn.commit()
+    model = build_current_official_fbs_estimate(path,nm_ids=[1,2],now=now,quantity_only=True)
+    assert model['available'] and model['total']['wb_quantity'] == 6
+    assert 'stock_quantity' not in model['total'] and not model['fbs_available']
+    for statement in ["UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET raw_rows_digest='wrong'",
+                      "UPDATE sheet_vitrina_v1_warehouse_functional_versions SET status='bad'",
+                      "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET pagination_complete=0",
+                      "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET items_json='[]'",
+                      "UPDATE sheet_vitrina_v1_warehouse_functional_versions SET source_watermarks_json='{}'"]:
+        conn.execute('SAVEPOINT invalid_source');conn.execute(statement)
+        try:read_official_wb_physical_snapshot(conn,universe=[1,2],day='2026-09-05',now=now)
+        except ValueError:pass
+        else:raise AssertionError('corrupt physical WB source accepted')
+        conn.execute('ROLLBACK TO invalid_source');conn.execute('RELEASE invalid_source')
+    conn.close()
+
+
+def check_quantity_without_valuation(tmp, now):
+    path = Path(tmp) / "quantity-only.sqlite3"
+    conn = fixture(path)
+    conn.execute("DROP TABLE sheet_vitrina_v1_warehouse_functional_balances")
+    conn.execute("DROP TABLE sheet_vitrina_v1_warehouse_business_projection_current_rows")
+    conn.commit()
+    before = path.read_bytes()
+    model = build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now, quantity_only=True)
+    assert model["available"] and model["quantity_only"]
+    assert model["total"]["fbs_quantity"] == 8 and model["skus"][2]["fbs_quantity"] == 0
+    assert set(model["total"]) == {"facilities", "fbs_quantity"}
+    from apps.ready_publication_smoke import make_plan
+    plan = make_plan(as_of_date="2026-09-04", day="2026-09-05")
+    plan = replace(plan,metadata={"server_cell_presentation":{
+        "SKU:1|our_wb_unit_cost_rub":{"2026-09-05":dict(source=SOURCE,management_value="999")}}})
+    frozen = materialize_current_official_fbs_estimate(plan,estimate=model)
+    assert frozen.sheets[0].rows[0] == plan.sheets[0].rows[0]  # no cost rewrite, even from prior metadata
+    assert frozen.metadata['server_cell_presentation']['SKU:1|our_wb_unit_cost_rub'] == plan.metadata['server_cell_presentation']['SKU:1|our_wb_unit_cost_rub']
+    assert not build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now)["available"]
+    assert not build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now+timedelta(hours=1), quantity_only=True)["available"]
+    assert not build_current_official_fbs_estimate(path, nm_ids=[1, 2, 3], now=now, quantity_only=True)["available"]
+    assert path.read_bytes() == before
+    conn.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_runs SET complete=0 WHERE run_id='B'")
+    conn.commit()
+    assert not build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now, quantity_only=True)["available"]
+    conn.close()
+
+
 def main():
     now = datetime(2026, 9, 5, 10, 10, tzinfo=timezone.utc)
     with TemporaryDirectory(prefix="official-fbs-estimate-") as tmp:
+        check_independent_wb_physical(tmp, now)
+        check_quantity_without_valuation(tmp, now)
         check_proven_wb_zero(tmp, now)
         path = Path(tmp) / "fixture.sqlite3"
         conn = fixture(path)
         before = path.read_bytes()
         model = build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now)
         assert model["available"], model
+        wb_row = WebVitrinaContractRow('TOTAL|total_inventory_wb_total_qty_v1',1,'TOTAL','TOTAL','Total',
+            'total_inventory_wb_total_qty_v1','WB','','test',None,None,'number',{'2026-09-05':55},{})
+        wb_operands={wb_row.row_id:{'values_by_date':{'2026-09-05':55}}}
+        assert apply_current_official_fbs_estimate([wb_row],estimate=model,compact_operands=wb_operands) == [wb_row]
+        assert wb_operands[wb_row.row_id]['values_by_date']['2026-09-05'] == 55
         assert model["skus"][1]["capital"] == 430
         assert model["skus"][2]["cost"] == 40  # WB-only, proven empty FF with no locations
         assert model["total"]["cost"] == Decimal("21.25")  # weighted, not mean of SKU prices

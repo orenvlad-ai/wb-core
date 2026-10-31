@@ -98,6 +98,32 @@ class ManualCleanerCoordinator:
         self.owner=self._actor_for_job(job_id)
         return self.cleaner.manual_job(job_id,self.owner)
 
+    def release_terminal_unsent_scans(self) -> int:
+        """Release recovered scans stranded by an already terminal batch child.
+
+        No child is retried here. The ordinary worker's admission and flock
+        own this bookkeeping, including recovery after a process restart.
+        """
+        with self.cleaner.store.read() as c:
+            rows=c.execute("""SELECT run_id,request_id FROM cleaner_runs
+                WHERE account=? AND kind='scan' AND trigger='manual_exact'
+                AND state='queued' ORDER BY created_at LIMIT 16""",(self.cleaner.key,)).fetchall()
+        released=0
+        for row in rows:
+            try:job=self._job(row['request_id'])
+            except CleanerError as exc:
+                if exc.code in {'manual_job_authority_missing','manual_job_authority_mismatch','not_found'}:continue
+                raise
+            if (job.get('scan_run_id')!=row['run_id'] or not job.get('batch_id')
+                    or job.get('state')!='failed' or job.get('stage')!='finished'
+                    or job.get('error_code')!='local_not_submitted_retry'
+                    or job.get('write_run_id') or job.get('can_recheck')):continue
+            target=stage_e.Target(job['advert_id'],job['nm_id'])
+            operation=self.operation_id(job['job_id'],'scan',int(job.get('scan_attempt') or 0))
+            if self.cleaner.exact_manual_run_unclaimed(row['run_id'],operation,target):
+                released+=self.cleaner.stop_unsubmitted_manual_run(row['run_id'],operation_id=operation,target=target,source_job_id=job['job_id'])
+        return released
+
     def pending_jobs(self) -> list[str]:
         with self.cleaner.store.read() as c:
             from packages.application.change_registry_search_cluster import bidirectional_ready

@@ -159,7 +159,7 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
         adapter=LocalStageEAdapter(runtime_dir=runtime_dir,env_file=env_file,admission_dir=admission_dir)
         bootstrap_owner_username=os.environ.get('WB_CORE_WEB_AUTH_USERNAME','')
         coordinator=ManualCleanerCoordinator(cleaner,adapter,bootstrap_owner_username=bootstrap_owner_username)
-        batch_coordinator=BatchCleanerCoordinator(cleaner,generation=web.generation,bootstrap_owner_username=bootstrap_owner_username)
+        batch_coordinator=BatchCleanerCoordinator(cleaner,generation=web.generation,bootstrap_owner_username=bootstrap_owner_username,project_result=False)
         daily=DailyCleanerScheduler(cleaner,generation=web.generation,bootstrap_owner_username=bootstrap_owner_username,
                                     deployment_check=deployment_ready)
         wake=IdleWake(cleaner,runtime_dir)
@@ -206,6 +206,7 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
                     try:
                         from packages.application.business_data_procedure_admission import admitted_write
                         with admitted_write(runtime_dir):
+                            coordinator.release_terminal_unsent_scans()
                             busy=ready_cycle(coordinator,batch_coordinator,daily)
                     finally:
                         stop.set()

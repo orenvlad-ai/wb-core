@@ -374,6 +374,37 @@ def build_supplier_payment_fee_blocks(
             or ""
         ).strip()
         payload = {**assignment, **assignment_raw}
+        # Older confirmed statement imports stored the matched confidence and
+        # atomic fee amount in their typed row, rather than the flat projection.
+        # Accept only the same persisted operation and payment anchor; a nested
+        # confidence by itself must never turn ambiguous evidence into payment.
+        row = _mapping_or_json(assignment_raw.get("row"))
+        legacy_confidence = assignment_raw.get("match_confidence")
+        operation_id = str(assignment.get("semantic_operation_id") or "")
+        if (
+            not payload.get("confidence")
+            and assignment_raw.get("source") == "bank_fee_statement"
+            and operation_id
+            and assignment_raw.get("semantic_operation_id") == operation_id
+            and row.get("semantic_operation_id") == operation_id
+            and anchor_id
+            and assignment_raw.get("matched_anchor_document_id") == anchor_id
+            and row.get("matched_anchor_document_id") == anchor_id
+            and legacy_confidence in {BANK_FEE_CONFIDENCE_STRONG, BANK_FEE_CONFIDENCE_PROBABLE}
+            and row.get("confidence") == legacy_confidence
+            and _parse_decimal(row.get("amount")) is not None
+            and str(row.get("currency") or "").upper() in {"RUB", "CNY"}
+            and (payload.get("amount") in (None, "")
+                 or _parse_decimal(payload.get("amount")) == _parse_decimal(row.get("amount")))
+            and (payload.get("currency") in (None, "")
+                 or str(payload.get("currency")).upper() == str(row.get("currency")).upper())
+            and (payload.get("fee_category") in (None, "")
+                 or payload.get("fee_category") == row.get("fee_category"))
+        ):
+            payload["confidence"] = legacy_confidence
+            for key in ("amount", "currency", "fee_category"):
+                if payload.get(key) in (None, ""):
+                    payload[key] = row.get(key)
         if anchor_id:
             assignments_by_anchor[anchor_id].append(payload)
             explicitly_assigned_financial_ids.add(

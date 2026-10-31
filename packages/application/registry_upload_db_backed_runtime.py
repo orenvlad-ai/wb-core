@@ -563,6 +563,12 @@ class RegistryUploadDbBackedRuntime:
             # Carry-forward and all dated economics have finished. Apply the
             # unavailable overlay last so no stale numerical operand survives.
             plan = materialize_degraded_accounting(plan, proof=degraded)
+            if degraded is not None and not _retained_closed_replay:
+                quantity = build_current_official_fbs_estimate(
+                    self.db_path, nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
+                    now=publication_now, connection=conn, quantity_only=True,
+                )
+                plan = materialize_current_official_fbs_estimate(plan, estimate=quantity)
             rollover = [] if _retained_closed_replay else ready_rollover.prepare(
                 conn, plan=plan, expected=expected,
                 default_date=default_business_as_of_date(publication_now), degraded=degraded)

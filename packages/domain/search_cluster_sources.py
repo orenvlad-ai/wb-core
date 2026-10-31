@@ -17,6 +17,7 @@ def union_snapshot(target: Target, *, list_entry: Mapping | None, stats_queries:
     reasons: list[str] = []
     sources: dict[str, set[str]] = defaultdict(set)
     states: dict[str, str] = {}
+    archived: set[str] = set()
 
     def rows(value, source):
         if value is None and source in null_means_empty:
@@ -41,6 +42,7 @@ def union_snapshot(target: Target, *, list_entry: Mapping | None, stats_queries:
                 if q in states and states[q] != state:
                     reasons.append("list_conflicting_states")
                 states[q] = state
+                if state == 'archived':archived.add(q)
                 sources[q].add("list")
     stats = rows(stats_queries, "statistics")
     for q in stats:
@@ -57,4 +59,4 @@ def union_snapshot(target: Target, *, list_entry: Mapping | None, stats_queries:
         reasons.append("source_timestamp_missing")
     return Snapshot(target, observed_at, dict(sorted(states.items())), tuple(sorted(set(minus))),
                     {q: tuple(sorted(s)) for q, s in sorted(sources.items())},
-                    not reasons, tuple(sorted(set(reasons))), dict(source_times))
+                    not reasons, tuple(sorted(set(reasons))), dict(source_times), archived=tuple(sorted(archived)))
