@@ -18,6 +18,9 @@ class Adapter(Protocol):
 
 
 _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
+    "finance_absence_publication_v1": (
+        "apps.finance_absence_publication", "FinanceAbsencePublicationAdapter",
+    ),
     "fbs_quantity_publication_v1": (
         "apps.fbs_quantity_publication", "FbsQuantityPublicationAdapter",
     ),

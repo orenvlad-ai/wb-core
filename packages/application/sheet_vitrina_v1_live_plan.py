@@ -483,6 +483,7 @@ class SlotLookups:
     spp_proxy_lookup: dict[int, Any] = field(default_factory=dict)
     authenticated_buyer_lookup: dict[int, Any] = field(default_factory=dict)
     our_wb_cost_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
+    finance_no_operation_skus: set[int] = field(default_factory=set)
     own_product_capital_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     own_product_capital_cutover_date: str = ""
     sku_action_lookup: dict[int, dict[str, float]] = field(default_factory=dict)
@@ -2162,6 +2163,11 @@ class SheetVitrinaV1LivePlanBlock:
                 )
             except Exception:
                 current_lookups.own_product_capital_lookup = {}
+            from packages.application.canonical_wb_cost_resolver import proven_finance_no_operation_skus
+            from packages.application.ready_publication import readonly as finance_readonly
+            with finance_readonly(self.runtime.db_path) as finance_conn:
+                current_lookups.finance_no_operation_skus = proven_finance_no_operation_skus(
+                    finance_conn, as_of_date=date.fromisoformat(slot.column_date))
             current_lookups.our_wb_cost_lookup = build_inventory_cost_blend_lookup(
                 as_of_date=slot.column_date,
                 wb_compat_lookup=current_lookups.our_wb_cost_lookup,
@@ -4417,11 +4423,14 @@ class _MetricEvaluator:
                 self._slot_lookups(temporal_slot).our_wb_cost_lookup.get(nm_id, {}).get("confirmed_share_pct")
             )
         if metric_key == SALES_WITHOUT_COST_RUB_METRIC_KEY:
-            return _optional_float(
+            observed = _optional_float(
                 self._slot_lookups(temporal_slot)
                 .our_wb_cost_lookup.get(nm_id, {})
                 .get("sales_without_cost_rub")
             )
+            if observed is not None:
+                return observed
+            return 0.0 if nm_id in self._slot_lookups(temporal_slot).finance_no_operation_skus else None
         if metric_key == OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY:
             inputs = self._proxy_inputs(nm_id, temporal_slot)
             if inputs is None:

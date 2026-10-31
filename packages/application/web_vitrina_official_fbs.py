@@ -580,3 +580,88 @@ def restore_materialized_official_fbs_estimates(
                 cells[day] = dict(cell)
         result.append(replace(row, values_by_date=values, presentation_by_date=cells))
     return result
+
+
+def restore_frozen_wb_components(rows, *, presentation):
+    """Project a missing generated WB row from an already frozen physical component.
+
+    Older ready envelopes can contain stock_total but no WB metric row. The
+    complete combined observation already freezes both components and their
+    source identities; no accounting or current-day source is consulted here.
+    Explicit WB presentation, even invalid, is never replaced by this fallback.
+    """
+    result = []
+    for row in rows:
+        if row.metric_key.removeprefix('total_') != WB_TOTAL:
+            result.append(row)
+            continue
+        scope = row.row_id.split('|', 1)[0]
+        if scope != 'TOTAL' and not (scope.startswith('SKU:') and scope[4:].isdigit()):
+            result.append(row)
+            continue
+        combined_key = 'total_stock_total' if scope == 'TOTAL' else 'stock_total'
+        combined = presentation.get(scope + '|' + combined_key, {})
+        values, cells = dict(row.values_by_date), dict(row.presentation_by_date)
+        for day in values:
+            if day in presentation.get(row.row_id, {}):
+                continue
+            proof = combined.get(day, {})
+            if not is_frozen_official_inventory_quantity(combined_key, day, proof):
+                continue
+            try:
+                wb_value = _number(proof['wb_component_value'])
+                components = [wb_value, _number(proof['fbs_component_value']), _number(proof['management_value'])]
+                if any(v != v.to_integral_value() for v in components):
+                    continue
+                for stamp in (proof['wb_source']['observed_at'], proof['captured_at']):
+                    observed = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+                    if observed.tzinfo is None or current_business_date_iso(observed) != day:
+                        raise ValueError('cross_date_quantity_component')
+                if values[day] not in ('', None) and _number(values[day]) != wb_value:
+                    continue
+            except (KeyError, ValueError, TypeError, InvalidOperation, AttributeError):
+                continue
+            cell = deepcopy(proof)
+            cell.pop('fbs_component_value', None)
+            reason = 'Физический остаток на складах WB; товар в пути не включён.'
+            cell.update(management_value=str(wb_value), quality_state='official_wb_physical_stock',
+                        reason=reason, quality_reason=reason)
+            values[day], cells[day] = float(wb_value), cell
+        result.append(replace(row, values_by_date=values, presentation_by_date=cells))
+    return result
+
+
+def restore_official_quantity_groups(rows, *, groups, config, metrics, runtime, day):
+    """Reproject only exact dated quantity GROUP cells after the accounting mask.
+
+    Use the canonical group aggregator, but require exact official operands for
+    every member. This cannot supply valuation or relax the accounting mask.
+    """
+    from packages.application.web_vitrina_group_blocks import include_group_rows, accepted_number
+    quantities = [r for r in rows if is_official_inventory_quantity_metric(r.metric_key)]
+    projected = include_group_rows(quantities, groups=groups, config=config, metrics=metrics,
+        formulas={}, dates=[day], runtime=runtime, today=day,
+        parameters3=lambda _: None, parameters4=lambda _: None)
+    sku = {(r.nm_id, r.metric_key): r for r in quantities if r.scope_kind == 'SKU'}
+    replacements = {}
+    for row in projected:
+        if row.scope_kind != 'GROUP':
+            continue
+        members = sorted({c.nm_id for c in config if c.enabled and c.group == row.group})
+        key = row.metric_key.removeprefix('total_')
+        operands = [sku.get((nm, key)) for nm in members]
+        if not members or any(r is None or accepted_number(r, day) is None
+                or not is_frozen_official_inventory_quantity(key, day, r.presentation_by_date.get(day, {}))
+                for r in operands):
+            continue
+        if any(_number(accepted_number(r, day)) != _number(r.presentation_by_date[day]['management_value'])
+                for r in operands):
+            continue
+        proof = {str(r.nm_id): deepcopy(r.presentation_by_date[day]) for r in operands}
+        cell = {**row.presentation_by_date[day],
+            'quantity_aggregation': 'complete_official_group_members_v1',
+            'source_as_of_date': day, 'member_nm_ids': members, 'member_sources': proof}
+        replacements[row.row_id] = (row.values_by_date[day], cell)
+    return [replace(r, values_by_date={**r.values_by_date, day: replacements[r.row_id][0]},
+                    presentation_by_date={**r.presentation_by_date, day: replacements[r.row_id][1]})
+            if r.row_id in replacements and day in r.values_by_date else r for r in rows]

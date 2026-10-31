@@ -71,7 +71,8 @@ def project(plan, *, source, operation_id):
     sheet = data_sheet(result)
     presentation = result.setdefault('metadata', {}).setdefault('server_cell_presentation', {})
     changes = []
-    for day, observation in source['observations'].items():
+    for day in sorted(source['observations']):
+        observation = source['observations'][day]
         if day not in sheet['header']:
             continue
         index = sheet['header'].index(day)

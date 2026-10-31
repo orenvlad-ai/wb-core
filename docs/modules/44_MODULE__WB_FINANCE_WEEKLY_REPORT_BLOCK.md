@@ -173,6 +173,19 @@ profit_after_cogs = covered_net_revenue − profit_period_expenses
 The display retains full `net_revenue`; `sales_without_cost_rub` and the
 coverage order/unit counters explain the excluded sales scope. Period expenses
 remain explicit period facts and are not hidden by incomplete COGS coverage.
+
+For the daily `sales_without_cost_rub` diagnostic only, a missing SKU-day may
+be zero when a repeated complete weekly source proves no operations: one seller
+and week, matching sync/report/projection counts and content identities, current
+projection formula, no identity or date-fallback blockers, complete daily
+decomposition, and no unattributed merchandise. An absent SKU projection or
+unproven week remains unknown. Existing observed values take precedence. This
+does not supply cost, profit, inventory quantity or cost-coverage evidence.
+The historical missing-only `finance_absence_publication_v1` adapter pins that
+evidence, preserves all other cells and requires source/prestate CAS and exact
+readback. Its daily/total diagnostic follows WebCore's accepted cost policy,
+including approved estimates; zero does not certify exact COGS or zero sales.
+
 The warehouse FBS-orders read model may aggregate these values across all
 published non-account SKU-weeks only when it also publishes the exact week
 range/count and latest calculation timestamp. Those Finance amount/order/unit
