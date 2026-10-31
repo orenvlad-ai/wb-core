@@ -395,6 +395,24 @@ def main():
         deferred=parent.tick()
         assert deferred['items'][0]['state']=='retry_wait' and deferred['items'][1]['job_id'] is None
         assert deferred['current_index']==1 and deferred['waiting_count']==1
+        # A second child can be terminal while its parent is already partial.
+        second=parent.tick()['items'][1]['job_id']
+        saved=service.manual_job(second,owner)
+        operation=child.operation_id(second,'scan')
+        service.claim_exact_manual_run(run_id=saved['scan_run_id'],targets=[Target(12,101)],generation='monolith',
+            production_operation_id=operation,lease_seconds=1)
+        service.clock=lambda:(datetime.now(timezone.utc)+timedelta(seconds=15)).isoformat()
+        AdmissionGuard(box.admission,service.store).recover_unsubmitted_manual_run(cleaner=service,
+            generation='monolith',production_operation_id=operation,run_id=saved['scan_run_id'])
+        assert child._retry_unclaimed(second,'scan',{'state':'not_submitted'})
+        service.record_manual_batch(batch_id,state='partial',stage='finished')
+        restarted=ManualCleanerCoordinator(service,object())
+        assert not restarted.pending_jobs() and not parent.pending_batches()
+        assert restarted.release_terminal_unsent_scans()==1
+        assert restarted.release_terminal_unsent_scans()==0
+        assert service.manual_batch_snapshot(batch_id,owner)['state']=='partial'
+        with service.store.read() as c:
+            assert not c.execute("SELECT 1 FROM cleaner_runs WHERE state IN ('queued','running','accepted')").fetchone()
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
