@@ -22,12 +22,22 @@ def allocate(db: Path, thread_id: str) -> int:
         return number
 
 
+def normalize_topic(topic: str) -> str:
+    topic = ' '.join(topic.split()).lstrip('—–-:| ').strip()
+    if not topic:
+        raise ValueError('Укажите краткую тему чата')
+    return topic
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('thread_id', help='ID of the main chat; reuse the original ID when continuing its task')
+    parser.add_argument('--title', help='Short topic; print the complete chat title without a separator')
     args = parser.parse_args()
     try:
-        print(f'{allocate(DEFAULT_DB, args.thread_id):04d}')
+        topic = normalize_topic(args.title) if args.title is not None else None
+        number = allocate(DEFAULT_DB, args.thread_id)
+        print(f'WBC {number:04d} {topic}' if topic is not None else f'{number:04d}')
     except (sqlite3.Error, ValueError, TypeError) as exc:
         parser.exit(1, f'Номер не выдан: {exc}. Не используйте запасной счётчик.\n')
 
