@@ -38,7 +38,7 @@ def _rejected_write_only(c, cleaner, job, frozen):
         if op['target']!=target or op['state']!='rejected' or op['dispatch_count']!=1:return False
         readback=json.loads(op['evidence']).get('readback',{})
         if (readback.get('status')!='read' or readback.get('minus')!=sorted(json.loads(op['before_json']))
-                or readback.get('missing_old')!=[] or readback.get('extra')!=[]):return False
+                or readback.get('missing_old')!=[] or readback.get('extra')!=sorted(set(json.loads(op['before_json']))-set(json.loads(op['expected_json'])))):return False
         items=c.execute('SELECT state,confirmed_at,decision_id,query_hash FROM cleaner_write_items WHERE operation_id=?',(op['operation_id'],)).fetchall()
         if not items or any(i['state']!='rejected' or i['confirmed_at'] is not None for i in items):return False
         proven.update((i['decision_id'],i['query_hash']) for i in items)

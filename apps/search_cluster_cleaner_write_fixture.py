@@ -37,6 +37,7 @@ class FakeWB:
     def __init__(self):
         self.targets={11:dict(nm=101,stats=[Q1,Q2],active=[],minus=[' Старое исключение  ','OLD'],archived=[],bid='manual',status=9,payment='cpm',members=[101])}
         self.calls=[];self.writes=[];self.mode='normal';self.write_modes={};self.codes={};self.slow=False;self.on_call=None
+        self.archived_rejection_queries=['old phrase']
     def response(self,method,path,body):
         endpoint=urlparse(path).path;self.calls.append((method,endpoint,body))
         if self.on_call:self.on_call(endpoint,body)
@@ -54,12 +55,12 @@ class FakeWB:
             elif mode=='extra':v['minus']=new+['Чужая точная строка']
             elif mode=='timeout':v['minus']=new;return 'disconnect',{}
             elif mode=='400_validation':return 400,{'error':"norm_query 'legacy invalid phrase' is not valid for nm 101",'request_id':'synthetic-json-receipt'}
-            elif mode=='400_archived':return 400,{'detail':"cannot exclude archived presets: 'old phrase'",'status':400,'title':'failed to set norm query minus','origin':'camp-api-public-cache','request_id':'synthetic-json-receipt'}
+            elif mode=='400_archived':return 400,{'detail':'cannot exclude archived presets: '+', '.join("'"+q+"'" for q in self.archived_rejection_queries),'status':400,'title':'failed to set norm query minus','origin':'camp-api-public-cache','request_id':'synthetic-json-receipt'}
             elif mode=='malformed_large':return 400,(b'{"pad":"'+b'x'*2040+b'","authorization":"Bearer synthetic-secret-token","tail":"'+b'not-json-'*2000)
             elif mode in {'429','500','401','403','302'}:return int(mode),{}
             return 200,{}
         pair=body['items'][0];aid=pair.get('advert_id',pair.get('advertId'));nm=pair.get('nm_id',pair.get('nmId'));v=self.targets[aid]
-        if endpoint.endswith('/list'):return 200,dict(items=[dict(advertId=aid,nmId=nm,normQueries=dict(active=[q for q in v['active'] if q not in v['minus']],excluded=v['minus'],archived=v['archived']))])
+        if endpoint.endswith('/list'):return 200,dict(items=[dict(advertId=aid,nmId=nm,normQueries=dict(active=[q for q in v['active'] if q not in v['minus']],excluded=[q for q in v['minus'] if q not in v['archived']],archived=v['archived']))])
         if endpoint.endswith('/stats'):return 200,dict(stats=[dict(advert_id=aid,nm_id=nm,stats=[dict(norm_query=q,views=1) for q in v['stats']])])
         if endpoint.endswith('/get-minus'):return 200,dict(items=[dict(advert_id=aid,nm_id=nm,norm_queries=v['minus'])])
         return 404,{}

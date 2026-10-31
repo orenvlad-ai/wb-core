@@ -12,6 +12,7 @@ from packages.application.change_registry import ChangeRegistryRepository
 from packages.application.business_data_procedure_admission import business_write_is_blocked
 from packages.contracts.search_cluster_cleaner import CleanerError, Target, canonical, digest, query_hash
 from packages.adapters.search_cluster_cleaner_wb import WriteResponse, archived_minus_rejection
+from packages.application.search_cluster_cleaner_archived import POLICY as ARCHIVE_POLICY
 
 READBACK_PENDING_STATES=frozenset({'dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error'})
 TYPED_OUTCOME_STATES=frozenset({'validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error'})
@@ -154,13 +155,16 @@ class CleanerWriter:
         d=c.execute('SELECT * FROM cleaner_auto_decisions WHERE decision_id=?',(obs['decision_id'],)).fetchone()
         p=app._profile(c,obs['nm_id'])
         action='exclude' if obs['state']=='pending_exclude' else 'return'
+        retirement=bool(d and d['source']=='archive_retirement')
         if (not d or d['verdict']!=('exclude' if action=='exclude' else 'allow') or not p or p.version!=d['profile_version'] or p.semantic_fingerprint!=d['fingerprint']
                 or d['rules_version']!=app._settings(c)['rules_version']):raise CleanerError('profile_changed','Версия решения устарела',409)
+        if retirement and (action!='return' or d['rule_id']!='WB_ARCHIVED_RETIREMENT' or json.loads(d['facts']).get('archived') is not True or json.loads(d['facts']).get('archive_policy')!=ARCHIVE_POLICY):
+            raise CleanerError('archive_decision_invalid','Нет точного решения об архивной фразе',409)
         override=c.execute('''SELECT h.revision,h.needs_revalidation,o.verdict,o.fingerprint FROM cleaner_override_heads h
             JOIN cleaner_manual_overrides o ON o.account=h.account AND o.nm_id=h.nm_id AND o.query_hash=h.query_hash AND o.revision=h.revision
             WHERE h.account=? AND h.nm_id=? AND h.query_hash=?''',(app.key,obs['nm_id'],obs['query_hash'])).fetchone()
         if override:
-            if (override['revision']!=d['override_revision'] or override['needs_revalidation'] or override['verdict']!=d['verdict']
+            if (override['revision']!=d['override_revision'] or override['needs_revalidation'] or (not retirement and override['verdict']!=d['verdict'])
                     or override['fingerprint']!=p.semantic_fingerprint):raise CleanerError('override_changed','Решение владельца изменилось',409)
         elif d['override_revision'] is not None:raise CleanerError('override_changed','Нет исходной версии решения',409)
         return dict(target=obs['target'],query=obs['query'],query_hash=obs['query_hash'],decision_id=d['decision_id'],
@@ -184,6 +188,8 @@ class CleanerWriter:
                 if row['target']!=t.key:raise CleanerError('wrong_target','Смешение целей запрещено')
                 if scope is not None and (row['target'],row['query_hash'],row['decision_id']) not in scope:raise CleanerError('wrong_target','Вхождение не было в ручном задании')
                 current=self._current(c,row)
+                if current['source']=='archive_retirement' and row['query'] not in snapshot.archived:
+                    raise CleanerError('archive_not_confirmed','WB больше не подтверждает архивный статус',409)
                 if current['action']=='exclude' and (row['query'] in snapshot.minus or snapshot.queries.get(row['query']) not in {'active','statistics'} or 'statistics' not in snapshot.sources.get(row['query'],())):
                     raise CleanerError('candidate_not_observed','Нет свежей точной статистики кандидата')
                 if current['action']=='return' and row['query'] not in snapshot.minus:
@@ -203,6 +209,8 @@ class CleanerWriter:
             versions=dict(settings_revision=s['revision'],rules_digest=app.rules_digest,items=sorted(exact,key=lambda r:r['query_hash']),removals=removals,
                           target=asdict(t),membership=list(membership),before_at=snapshot.observed_at,source=source,
                           initial_empty_evidence=snapshot.initial_empty_evidence)
+            retired=sorted(r['query'] for r in exact if r['source']=='archive_retirement')
+            if retired:versions['archive_retirement']=dict(policy=ARCHIVE_POLICY,queries=retired,archived=list(snapshot.archived),source_times=dict(snapshot.source_times))
             basis=dict(account=app.key,target=t.key,run_id=run_id,before=before,expected=expected,additions=additions,versions=versions)
             op=new_id();now=app.clock()
             c.execute('''INSERT INTO cleaner_write_operations(operation_id,account,target,run_id,state,before_json,expected_json,additions,candidate_digest,versions,worker_token,worker_generation,created_at,updated_at)
@@ -247,8 +255,14 @@ class CleanerWriter:
             if len(times)<4 or any(not 0<=(timestamp(app.clock())-timestamp(t)).total_seconds()<=self.preflight_max_age for t in times):raise CleanerError('preflight_stale','Предварительное чтение устарело',409)
             for item in versions['items']:
                 if self._current(c,item)!=item:raise CleanerError('decision_changed','Версия решения изменилась',409)
+                if item['source']=='archive_retirement' and item['query'] not in fresh.archived:
+                    raise CleanerError('archive_not_confirmed','WB больше не подтверждает архивный статус',409)
                 if item['action']=='exclude' and (fresh.queries.get(item['query']) not in {'active','statistics'} or 'statistics' not in fresh.sources.get(item['query'],())):raise CleanerError('candidate_not_observed','Исключение больше не подтверждено свежей статистикой',409)
                 if item['action']=='return' and item['query'] not in fresh.minus:raise CleanerError('candidate_not_observed','Возврат больше не подтверждён WB',409)
+            retired=sorted(r['query'] for r in versions['items'] if r['source']=='archive_retirement')
+            archive=versions.get('archive_retirement',{})
+            if retired and (archive.get('policy')!=ARCHIVE_POLICY or archive.get('queries')!=retired or not set(retired)<=set(archive.get('archived',[]))):
+                raise CleanerError('archive_decision_invalid','Архивное основание кандидата изменилось',409)
             ids=self.registry.prepare_search_cluster_operation_in_transaction(c,operation_id=operation,account=app.account,target=fresh.target,
                 queries=additions,returns=removals,created_at=app.clock(),before_at=fresh.observed_at,provenance=basis,
                 actor=app.owner_username if versions['source'] in {'owner_decision','manual_rules_pilot'} else 'cleaner',source=versions['source'])
@@ -386,7 +400,7 @@ class CleanerReadback:
             readback_evidence=dict(status='read',minus=sorted(actual),missing_old=missing_old,extra=extra,
                 present=present,returned=returned,missing=missing,still_excluded=still_excluded,observed_at=observed,attempt=row['attempts'])
             validation_rejected=_known_validation_rejection(op)
-            if validation_rejected and actual==before and not missing_old and not extra:
+            if validation_rejected and actual==before:
                 previously_confirmed=c.execute("SELECT count(*) FROM cleaner_write_items WHERE operation_id=? AND confirmed_at IS NOT NULL",(op['operation_id'],)).fetchone()[0]
                 if previously_confirmed:
                     # A previous partial readback already made immutable registry
