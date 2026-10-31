@@ -22,16 +22,26 @@ export function noframeClassifierInstructions(input) {
 }
 
 export function useNoframeGapReply(input, classification) {
+  // The owner's explicit short complaints need no inferred model mismatch.
+  // Match the entire combined content, not a substring of a mixed review.
+  const text = [input.review.text, input.review.pros, input.review.cons].join(" ")
+    .normalize("NFKC").toLowerCase().replaceAll("ё", "е")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const explicitShortComplaint = new Set([
+    "стекло не по размеру", "не по размеру", "стекло меньше экрана",
+    "меньше экрана", "стекло не по размеру меньше экрана"
+  ]).has(text);
   return noframeGapCandidate(input)
     && classification.publication_action === "reply"
-    && classification.route === "public_only"
     && classification.primary_issue === "SIZE_FIT"
     && classification.issues?.length === 1 && classification.issues[0].code === "SIZE_FIT"
     && classification.review_mode === "negative"
-    && classification.classification_confidence >= 0.9
     && classification.media_status === "none"
     && !classification.risk_flags?.length
-    && !classification.seller_investigation_subject && !classification.evidence_potential
-    && !classification.required_evidence?.length
-    && classification.route_reason.includes(`[${NOFRAME_GAP_POLICY}]`);
+    && (explicitShortComplaint || (
+      classification.route === "public_only"
+      && classification.classification_confidence >= 0.9
+      && !classification.seller_investigation_subject && !classification.evidence_potential
+      && !classification.required_evidence?.length
+      && classification.route_reason.includes(`[${NOFRAME_GAP_POLICY}]`)));
 }

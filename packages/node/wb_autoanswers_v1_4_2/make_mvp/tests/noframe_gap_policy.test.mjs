@@ -67,12 +67,40 @@ test("other products and explicit defects cannot receive the gap template even w
   for (const patch of [{risk_flags: ["safety"]}, {route: "wb_return"}, {classification_confidence: 0.6},
     {issues: [{code: "SIZE_FIT"}, {code: "ADHESION"}]}, {route_reason: "General size complaint"},
     {review_mode: "positive"}, {seller_investigation_subject: true}]) {
-    assert.equal(useNoframeGapReply(input, {...classification, ...patch}), false);
+    const nonExact = {...input, review: {...input.review, text: "Остаются зазоры у краёв экрана"}};
+    assert.equal(useNoframeGapReply(nonExact, {...classification, ...patch}), false);
   }
   for (const patch of [{status: "unclear"}, {photos: [{}]}, {video: {present: true}}]) {
     assert.equal(useNoframeGapReply({...input, media: {...input.media, ...patch}}, classification), false);
   }
   assert.equal(useNoframeGapReply({...input, review: {...input.review, wb_tags: ["неполный комплект"]}}, classification), false);
+});
+
+test("approved short complaint overrides speculative model-check chat without swallowing extra content", async () => {
+  const s = scenario("Стекло не по размеру");
+  s.classification.route = "seller_chat";
+  s.classification.seller_investigation_subject = true;
+  s.classification.evidence_potential = true;
+  s.classification.required_evidence = ["installed_glass_photo", "package_label_photo"];
+  let input, classification;
+  const runner = createFixtureRunner(s);
+  const result = await runJob(s.raw, {roleRunner: async args => {
+    assert.equal(args.role, "classifier");
+    const response = await runner(args);
+    response.output.classification_confidence = 0.88;
+    input = args.request.review_input; classification = response.output;
+    return response;
+  }});
+  assert.equal(result.model_calls_this_run, 1);
+  assert.equal(result.result.route, "public_only");
+  assert.equal(result.result.final_reply, NOFRAME_GAP_REPLY);
+  assert.equal(result.result.case_code, null);
+  for (const field of ["text", "pros", "cons"]) {
+    const review = {...input.review, [field]: `${input.review[field]} Еще одна проблема`};
+    assert.equal(useNoframeGapReply({...input, review}, classification), false);
+  }
+  assert.equal(useNoframeGapReply(input, {...classification, issues: [{code:"SIZE_FIT"},{code:"WRONG_ITEM"}]}), false);
+  assert.equal(useNoframeGapReply(input, {...classification, risk_flags:["wrong_item"]}), false);
 });
 
 test("wrong-model No Frame complaint keeps existing return route, and old line has no new instructions", async () => {
