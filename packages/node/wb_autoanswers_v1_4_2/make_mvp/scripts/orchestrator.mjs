@@ -299,7 +299,10 @@ export async function runJob(rawInput, dependencies = {}) {
       for (const next of ["guarded", "drafted", "validated", "ready"]) {
         await transition(next, {policy_version: NOFRAME_GAP_POLICY});
       }
-      const result = replyResult({reviewInput, classification: rawClassification, caseCode: null,
+      const classification = {...rawClassification, route: "public_only",
+        route_reason: `Предусмотренный отступ для чехла [${NOFRAME_GAP_POLICY}]`,
+        seller_investigation_subject: false, evidence_potential: false, required_evidence: []};
+      const result = replyResult({reviewInput, classification, caseCode: null,
         drafts: [draft], validations: ["pass"], finalDraft: draft, outcome: "ready", modelCallCount});
       await assertContract("pipeline_result.schema.json", result);
       const cost = calculateJobCost(trace, pricingProfile);
