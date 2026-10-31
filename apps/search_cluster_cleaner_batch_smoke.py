@@ -207,6 +207,7 @@ def archived_rejection_continues_batch():
                     if parent.pending_batches():parent.tick()
                     if child.pending_jobs():child.tick()
                     result=batch_status(service,batch_id,owner)
+                    assert result==batch_status(service,batch_id,owner,_prefetch=False)
                     if result['state'] in {'complete','partial','failed'}:break
                 else:raise AssertionError('archived rejection batch did not finish')
                 assert result['state']=='partial' and result['completed_count']==1 and result['not_started_count']==0,result
@@ -247,6 +248,7 @@ def archived_rejection_continues_batch():
                     if parent.pending_batches():parent.tick()
                     if child.pending_jobs():child.tick()
                     recovered=batch_status(service,recovery_id,owner)
+                    assert recovered==batch_status(service,recovery_id,owner,_prefetch=False)
                     if recovered['state'] in {'complete','partial','failed'}:break
                 else:raise AssertionError('archive retirement batch did not finish')
                 assert recovered['state']=='complete',recovered
@@ -257,7 +259,110 @@ def archived_rejection_continues_batch():
                     assert c.execute('SELECT count(*) FROM cleaner_target_holds').fetchone()[0]==0
 
 
+def batched_status_event_reads():
+    """64 children preserve the exact public view without per-child event scans."""
+    with Sandbox() as box:
+        preview=box.execute('preview')
+        box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
+        service=ready_service(box);owner=Principal('owner',True,True,True)
+        targets=[Target(100+i,101,name='Pair '+str(i),contract_verified=True) for i in range(64)]
+        admitted=[dict(advert_id=t.advert_id,nm_id=101,state='verified') for t in targets]
+        rows=eligibility_rows(service,'monolith',targets,fixture_admission=admitted)
+        batch='synthetic-64-child-projection'
+        service.start_manual_batch(dict(request_id=batch,selected_categories=['active'],
+            targets=[dict(advert_id=t.advert_id,nm_id=101) for t in targets]),owner,snapshot=rows)
+        with service.store.transaction() as c:
+            for index,target in enumerate(targets[:-1]):
+                job=batch_child_id(batch,index)
+                scan=service._new_run(c,'scan','manual_exact',request_id=job,
+                    targets=[dict(target=target.key,advert_id=target.advert_id,nm_id=101)])
+                c.execute("UPDATE cleaner_runs SET state='complete',phase='finished',scan_finished_at=? WHERE run_id=?",(service.clock(),scan))
+                outcome=dict(job_id=job,run_id=scan,scan_run_id=scan,advert_id=target.advert_id,nm_id=101,batch_id=batch,batch_index=index)
+                if index==61:outcome['nm_id']=999  # Preserve collision protection.
+                actor='other' if index==62 else 'owner'
+                c.execute('INSERT INTO cleaner_requests VALUES(?,?,?,?,?,?,?)',
+                    (service.key,actor,job,'manual-clean','fixture',json.dumps(outcome),service.clock()))
+                facts=dict(outcome,scan_run_id=scan,actor=actor,account_key=service.key,state='queued',stage='fetching')
+                if index!=60:service._event(c,'self_service_requested',facts,run_id=scan)
+                final=dict(facts,state='no_change',stage='finished')
+                if index%2:
+                    write=service._new_run(c,'manual_apply','manual_exact_candidates',targets=[])
+                    c.execute("UPDATE cleaner_runs SET state='partial',phase='finished',scan_finished_at=? WHERE run_id=?",(service.clock(),write))
+                    final.update(write_run_id=write,state='partial')
+                    service._event(c,'late_confirmation',dict(confirmed_pilot=index,returned=1),run_id=write)
+                    c.execute('INSERT INTO cleaner_events(event_id,account,run_id,kind,created_at,facts) VALUES(?,?,?,?,?,?)',
+                        ('foreign-late-'+str(index),'foreign-account',write,'late_confirmation',service.clock(),
+                         json.dumps(dict(confirmed_pilot=999999,returned=999999))))
+                    service._event(c,'initial_empty_basis',dict(evidence={'fixture':index}),run_id=write)
+                    service._event(c,'partial_snapshot_preview',dict(target=target.key,queries=[],reason='fixture'),run_id=write)
+                if index%3==0:
+                    service._event(c,'partial_snapshot_preview',dict(target=target.key,queries=[],reason='minus_pair_omitted'),run_id=scan)
+                    service._event(c,'initial_empty_basis',dict(evidence={'fixture':index}),run_id=scan)
+                if index!=60:service._event(c,'self_service_finished',final,run_id=scan)
+                # Newest unrelated-account facts cannot replace current children.
+                c.execute('INSERT INTO cleaner_events(event_id,account,run_id,kind,created_at,facts) VALUES(?,?,?,?,?,?)',
+                    ('foreign-'+str(index),'foreign-account',scan,'self_service_finished',service.clock(),json.dumps(dict(final,state='failed'))))
+        from contextlib import contextmanager
+        original_read=service.store.read;statements=[]
+        @contextmanager
+        def traced_read():
+            with original_read() as c:
+                c.set_trace_callback(statements.append)
+                yield c
+        with patch.object(service.store,'read',traced_read):
+            actual=batch_status(service,batch,owner)
+        event_reads=[q for q in statements if 'SELECT' in q and 'FROM cleaner_events' in q]
+        assert len(event_reads)<=8,(len(event_reads),event_reads)
+        assert actual==batch_status(service,batch,owner,_prefetch=False)
+        assert actual['items'][60]['minus_known'] is False
+        assert service.run_detail(actual['items'][1]['write_run_id'],owner)['settlement']['confirmed_pilot']==1
+        assert len(actual['items'])==64 and actual['items'][61]['error_code']=='batch_child_collision'
+        assert actual['items'][62]['job_id'] is None and actual['items'][63]['job_id'] is None
+        rejects(lambda:batch_status(service,batch,Principal('other',True,True,True)),'not_found')
+
+
+def worker_skips_unused_projection():
+    import packages.application.search_cluster_cleaner_batch as module
+    transitions=[]
+    for project in (True,False):
+        with Sandbox() as box:
+            preview=box.execute('preview')
+            box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
+            service=ready_service(box);owner=Principal('owner',True,True,True)
+            target=Target(12,101,name='Pair',contract_verified=True)
+            admitted=[dict(advert_id=12,nm_id=101,state='verified')]
+            rows=eligibility_rows(service,'monolith',[target],fixture_admission=admitted)
+            batch='synthetic-worker-projection'
+            service.start_manual_batch(dict(request_id=batch,selected_categories=['active'],targets=[dict(advert_id=12,nm_id=101)]),owner,snapshot=rows)
+            parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:Source([target]),
+                fixture_admission=admitted,project_result=project)
+            observed=[]
+            def step():
+                if project:result=parent.tick()
+                else:
+                    with patch.object(module,'batch_status',side_effect=AssertionError('unused projection')):
+                        result=parent.tick()
+                    assert result is None
+                state=service.manual_batch_snapshot(batch,owner)
+                observed.append((state['state'],state['stage'],state['current_index']))
+            step()
+            job=service.manual_job(batch_child_id(batch,0),owner)
+            run=service.claim_exact_manual_run(run_id=job['scan_run_id'],targets=[target],generation='monolith',production_operation_id='synthetic-projection-scan')
+            now=service.clock()
+            snap=union_snapshot(target,list_entry=dict(active=[],excluded=[],archived=[]),stats_queries=[],minus_queries=[],
+                observed_at=now,source_times={k:now for k in ('list','statistics','minus')})
+            service.record_snapshot(run['run_id'],run['worker_token'],'monolith',snap,manual_only=True)
+            service.finish_run(run['run_id'],run['worker_token'],'monolith',manual_only=True)
+            service.record_manual_job(job['job_id'],state='no_change',stage='finished')
+            step();step()
+            assert batch_status(service,batch,owner)['state']=='complete'
+            transitions.append(observed)
+    assert transitions[0]==transitions[1],transitions
+
+
 def main():
+    batched_status_event_reads()
+    worker_skips_unused_projection()
     archived_rejection_continues_batch()
     all_card_drift_is_failed()
     drift_scan_admission()
