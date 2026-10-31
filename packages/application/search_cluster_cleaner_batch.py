@@ -577,7 +577,8 @@ class BatchCleanerCoordinator:
                     operation=ManualCleanerCoordinator.operation_id(child['job_id'],'scan',int(child.get('scan_attempt') or 0))
                     if self.cleaner.exact_manual_run_unclaimed(child['scan_run_id'],operation,
                             Target(item['advert_id'],item['nm_id'])):
-                        self.cleaner.stop_unsubmitted_manual_run(child['scan_run_id'])
+                        self.cleaner.stop_unsubmitted_manual_run(child['scan_run_id'],operation_id=operation,
+                            target=Target(item['advert_id'],item['nm_id']),source_job_id=child['job_id'])
                 with self.cleaner.store.read() as c:drift=_drift_only_scan(c,self.cleaner,child,item)
                 if drift:
                     self.cleaner.record_manual_batch(batch['batch_id'],state='running',stage='next_target',current_index=index+1,

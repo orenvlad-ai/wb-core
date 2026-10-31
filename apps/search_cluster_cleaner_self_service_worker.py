@@ -206,6 +206,7 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
                     try:
                         from packages.application.business_data_procedure_admission import admitted_write
                         with admitted_write(runtime_dir):
+                            coordinator.release_terminal_unsent_scans()
                             busy=ready_cycle(coordinator,batch_coordinator,daily)
                     finally:
                         stop.set()

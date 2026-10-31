@@ -367,8 +367,27 @@ def main():
                                         targets=[dict(advert_id=11,nm_id=101),dict(advert_id=12,nm_id=101)]),owner,snapshot=snapshot)
         parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,fixture_admission=admitted)
         job_id=parent.tick()['items'][0]['job_id']
-        service.record_manual_job(job_id,state='running',stage='scan_apply_claimed')
         child=ManualCleanerCoordinator(service,object())
+        job=service.manual_job(job_id,owner)
+        operation=child.operation_id(job_id,'scan')
+        target=Target(11,101)
+        service.claim_exact_manual_run(run_id=job['scan_run_id'],targets=[target],generation='monolith',
+            production_operation_id=operation,lease_seconds=1)
+        assert not service.stop_unsubmitted_manual_run(job['scan_run_id'],operation_id=operation,target=target)
+        # Reproduce a committed binding followed by native unsent recovery.
+        from packages.application.search_cluster_cleaner_admission import AdmissionGuard
+        service.clock=lambda:(datetime.now(timezone.utc)+timedelta(seconds=5)).isoformat()
+        # A recovery event for another operation cannot certify this binding.
+        with service.store.transaction() as c:
+            service._event(c,'stage_e_unsent_recovered',dict(production_operation_id='different-operation',
+                cancelled_operations=[],kind='scan'),run_id=job['scan_run_id'])
+        assert not service.exact_manual_run_unclaimed(job['scan_run_id'],operation,target)
+        AdmissionGuard(box.admission,service.store).recover_unsubmitted_manual_run(cleaner=service,
+            generation='monolith',production_operation_id=operation,run_id=job['scan_run_id'])
+        assert not service.stop_unsubmitted_manual_run(job['scan_run_id'])
+        assert not service.stop_unsubmitted_manual_run(job['scan_run_id'],operation_id='wrong',target=target)
+        assert not service.stop_unsubmitted_manual_run(job['scan_run_id'],operation_id=operation,target=Target(12,101))
+        service.record_manual_job(job_id,state='running',stage='scan_apply_claimed')
         assert child._retry_unclaimed(job_id,'scan',{'state':'not_submitted'})
         parked=service.manual_job(job_id,owner)
         assert parked['state']=='failed' and parked['error_code']=='local_not_submitted_retry'
@@ -376,6 +395,40 @@ def main():
         deferred=parent.tick()
         assert deferred['items'][0]['state']=='retry_wait' and deferred['items'][1]['job_id'] is None
         assert deferred['current_index']==1 and deferred['waiting_count']==1
+        # A second child can be terminal while its parent is already partial.
+        second=parent.tick()['items'][1]['job_id']
+        saved=service.manual_job(second,owner)
+        operation=child.operation_id(second,'scan')
+        service.claim_exact_manual_run(run_id=saved['scan_run_id'],targets=[Target(12,101)],generation='monolith',
+            production_operation_id=operation,lease_seconds=1)
+        service.clock=lambda:(datetime.now(timezone.utc)+timedelta(seconds=15)).isoformat()
+        AdmissionGuard(box.admission,service.store).recover_unsubmitted_manual_run(cleaner=service,
+            generation='monolith',production_operation_id=operation,run_id=saved['scan_run_id'])
+        assert child._retry_unclaimed(second,'scan',{'state':'not_submitted'})
+        service.record_manual_batch(batch_id,state='partial',stage='finished')
+        restarted=ManualCleanerCoordinator(service,object())
+        assert not restarted.pending_jobs() and not parent.pending_batches()
+        assert restarted.release_terminal_unsent_scans()==1
+        assert restarted.release_terminal_unsent_scans()==0
+        assert service.manual_batch_snapshot(batch_id,owner)['state']=='partial'
+        # A user may adopt the queued run between discovery and recovery.
+        batch2='synthetic-orphan-adopted-batch'
+        service.start_manual_batch(dict(request_id=batch2,selected_categories=['active'],
+            targets=[dict(advert_id=11,nm_id=101)]),owner,snapshot=snapshot)
+        third=parent.tick()['items'][0]['job_id']
+        saved=service.manual_job(third,owner)
+        service.record_manual_job(third,state='failed',stage='finished',error_code='local_not_submitted_retry')
+        service.record_manual_batch(batch2,state='partial',stage='finished')
+        proof=service.exact_manual_run_unclaimed
+        def racing_adoption(*args):
+            result=proof(*args)
+            accepted=service.start_manual_clean(dict(request_id='synthetic-orphan-new-adopter',advert_id=11,nm_id=101),owner)
+            assert accepted['adopted'] and accepted['run_id']==saved['scan_run_id']
+            return result
+        with patch.object(service,'exact_manual_run_unclaimed',side_effect=racing_adoption):
+            assert restarted.release_terminal_unsent_scans()==0
+        with service.store.read() as c:
+            assert c.execute('SELECT state FROM cleaner_runs WHERE run_id=?',(saved['scan_run_id'],)).fetchone()[0]=='queued'
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
