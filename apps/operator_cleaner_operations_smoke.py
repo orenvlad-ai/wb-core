@@ -31,6 +31,34 @@ class CleanerTests(unittest.TestCase):
     def listing(self,scope=None,allowed=None,**kwargs):
         return journal.journal(self.registry.resolve('operational'),allowed_domains={source.DOMAIN} if allowed is None else allowed,
             cleaner_scope=self.scope if scope is None else scope,**kwargs)
+    def test_large_batch_receipt_preserves_proofs_with_one_child_event_read(self):
+        from packages.application.search_cluster_cleaner import batch_child_id
+        identity='fixture-64-pair-batch'
+        items=[dict(advert_id=100+i,nm_id=200+i) for i in range(64)]
+        row=dict(account=self.cleaner.key,actor='owner',outcome=json.dumps(dict(batch_id=identity)),
+            route='manual-batches',operation_id='cleaner-request:'+identity,request_id=identity,
+            accepted_at='2026-01-01',digest='fixture')
+        with self.cleaner.store.transaction() as c:
+            self.cleaner._event(c,'self_service_batch_requested',dict(batch_id=identity,items=items,actor='owner',account_key=self.cleaner.key,state='queued'))
+            for i,item in enumerate(items[:-1]):
+                facts=dict(job_id=batch_child_id(identity,i),actor='other' if i==1 else 'owner',account_key=self.cleaner.key,
+                    advert_id=item['advert_id'],nm_id=item['nm_id'],scan_run_id='missing-scan',state='queued')
+                self.cleaner._event(c,'self_service_requested',facts)
+                self.cleaner._event(c,'self_service_finished',dict(facts,state='complete' if i%2 else 'partial'))
+            # Same identity in a different account must not overwrite the proof.
+            c.execute("INSERT INTO cleaner_events(event_id,account,kind,created_at,facts) VALUES(?,?,?,?,?)",
+                ('foreign-event','foreign-account','self_service_requested','2026-01-02',json.dumps(dict(facts,actor='owner'))))
+            self.cleaner._event(c,'self_service_batch_stage',dict(batch_id=identity,state='complete'))
+        with self.cleaner.store.read() as c:
+            statements=[];c.set_trace_callback(statements.append)
+            result=source.public(c,row)
+            event_reads=[q for q in statements if 'SELECT' in q and 'FROM cleaner_events' in q]
+            self.assertEqual(len(event_reads),3)
+            with patch.object(source,'_batch_job_facts',return_value=None):legacy=source.public(c,row)
+            self.assertEqual(result,legacy)
+            self.assertEqual(result['state'],'needs_attention');self.assertFalse(result['external_confirmed'])
+            self.assertEqual(len(result['children']),64)
+            for i in (1,63):self.assertEqual(result['children'][i]['native_state'],'source_proof_missing')
     def test_native_settings_same_ID_ABA_and_immutable_proof_source_only(self):
         self.save();first=source.receipt(self.web,OWNER,'fixture-settings-001')
         self.save('fixture-settings-002',2,time='08:00');self.save('fixture-settings-003',3)
