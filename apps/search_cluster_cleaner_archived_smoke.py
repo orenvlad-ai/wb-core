@@ -45,7 +45,7 @@ class ArchiveTests(unittest.TestCase):
                 with f.worker() as (worker,_,__):worker.tick()
                 self.assertEqual(len(f.fake.writes),2);self.assertIn(q,f.fake.targets[11]['minus'])
                 self.assertEqual(f.rows('cleaner_manual_overrides')+f.rows('cleaner_baselines'),saved)
-    
+
     def test_archive_and_override_drift_cancel_before_post(self):
         for mutation in ('reactivated','override','missing_minus','incomplete','legacy_snapshot'):
             with self.subTest(mutation=mutation),fixture() as f:
