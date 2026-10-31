@@ -147,6 +147,40 @@ class WriteTests(unittest.TestCase):
             with f.worker() as (worker,_,__):worker.tick()
             self.assertEqual(len(f.fake.writes),2)
 
+    def test_archived_400_and_legacy_receipt_settle_without_resubmission(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy),fixture() as f:
+                f.fake.write_modes[11]='400_archived'
+                before=list(f.fake.targets[11]['minus'])
+                def hook(stage,operation):
+                    if legacy and stage=='after_receipt':
+                        with f.store.transaction() as c:
+                            row=c.execute('SELECT evidence FROM cleaner_write_operations WHERE operation_id=?',(operation,)).fetchone()
+                            evidence=json.loads(row['evidence']);evidence['receipt']['error']='http_error'
+                            c.execute("UPDATE cleaner_write_operations SET state='http_error',evidence=? WHERE operation_id=?",(json.dumps(evidence),operation))
+                f.start()
+                with f.worker(hook=hook) as (worker,_,readback):worker.tick()
+                operation=f.rows('cleaner_write_operations')[0]
+                self.assertEqual(operation['state'],'rejected')
+                self.assertEqual(f.fake.targets[11]['minus'],before)
+                self.assertEqual(operation['dispatch_count'],1)
+                self.assertEqual(f.count('change_registry_facts'),0)
+                self.assertEqual(f.rows('cleaner_readback_jobs')[0]['state'],'done')
+                self.assertEqual(f.count('cleaner_target_holds'),1)
+                self.assertEqual(json.loads(operation['evidence'])['receipt']['error'],'http_error' if legacy else 'validation_rejected')
+                f.clock.advance(400);f.start()
+                with f.worker() as (worker,_,__):worker.tick()
+                self.assertEqual(len(f.fake.writes),1)
+
+    def test_archived_rejection_requires_complete_exact_structured_receipt(self):
+        from packages.adapters.search_cluster_cleaner_wb import archived_minus_rejection
+        body=dict(detail="cannot exclude archived presets: 'old phrase'",status=400,title='failed to set norm query minus',origin='camp-api-public-cache')
+        self.assertTrue(archived_minus_rejection(400,json.dumps(body)))
+        for status,value,extra in [(500,body,{}),(400,body,{'truncated':True}),(400,body,{'capture_error':'failed'}),(400,dict(body,detail='unknown failure'),{}),(400,dict(body,origin='other'),{}),(400,dict(body,title='other'),{}),(400,dict(body,status=500),{})]:
+            self.assertFalse(archived_minus_rejection(status,json.dumps(value),**extra))
+        self.assertFalse(archived_minus_rejection(400,'cannot exclude archived presets: old'))
+        self.assertFalse(archived_minus_rejection(400,json.dumps(body)[:-2]))
+
     def test_validation_400_readback_remains_source_of_truth_for_expected_and_partial(self):
         for mode,expected_state,facts,hold in [('normal','confirmed',2,0),('partial','validation_rejected',1,1)]:
             with self.subTest(mode=mode),fixture() as f:

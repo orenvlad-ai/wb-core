@@ -173,7 +173,71 @@ def all_card_drift_is_failed():
         assert final['partial_count']==2 and final['completed_count']==0
 
 
+def archived_rejection_continues_batch():
+    with Sandbox() as box:
+        box.package['manual_admission'].append(dict(box.package['manual_admission'][0],advert_id=12))
+        characteristics=[dict(id=746,name='Совместимость',value=['Apple','iPhone 16 Pro Max']),
+                         dict(id=12223252,name='Производитель телефона',value=['Apple']),
+                         dict(id=195594,name='Цвет рамки',value=['черный'])]
+        card=dict(nm_id='101',title='Защитное стекло iPhone 16 Pro Max',vendor_code='(Clean) iPhone 16 Pro Max',
+                  description='Защитное стекло для телефона',characteristics=characteristics)
+        raw=json.dumps(dict(cards=[dict(card,card_digest='sha256:'+'1'*64)]),sort_keys=True).encode()
+        path=box.admission/'card-source-approved.json';path.write_bytes(raw);path.chmod(0o600)
+        box.package['provenance']['fresh_cards_sha256']='sha256:'+hashlib.sha256(raw).hexdigest();box.write_package()
+        preview=box.execute('preview');box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
+        ChangeRegistryRepository(box.runtime).initialize_schema()
+        fake=FakeWB();fake.targets[12]=copy.deepcopy(fake.targets[11]);fake.write_modes[11]='400_archived'
+        before=list(fake.targets[11]['minus']);clock=Clock();clock.base=datetime.now(timezone.utc)+timedelta(seconds=1)
+        with fake.server() as url:
+            source=CleanerWbSource(account=ready_service(box).account,runtime=OfficialApiRuntimeConfig('synthetic',url,2),fixture=True,
+                clock=clock,monotonic=clock.monotonic,limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
+            original=stage_e.KeywordCleaner
+            with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
+                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,subject_id=1571)), \
+                 patch.object(stage_e,'KeywordCleaner',side_effect=lambda *a,**kw:original(*a,clock=clock,**kw)):
+                service=ready_service(box);owner=Principal('owner',True,True,True)
+                admitted=[dict(advert_id=i,nm_id=101,state='verified') for i in (11,12)]
+                snapshot=eligibility_rows(service,'monolith',source._adverts([11,12],source.monotonic()+120),fixture_admission=admitted)
+                batch_id='synthetic-archived-rejection-0001'
+                service.start_manual_batch(dict(request_id=batch_id,selected_categories=['active'],targets=[dict(advert_id=i,nm_id=101) for i in (11,12)]),owner,snapshot=snapshot)
+                adapter=LocalStageEAdapter(runtime_dir=box.runtime,env_file=box.env,admission_dir=box.admission)
+                for _ in range(60):
+                    parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,fixture_admission=admitted)
+                    child=ManualCleanerCoordinator(service,adapter)
+                    if parent.pending_batches():parent.tick()
+                    if child.pending_jobs():child.tick()
+                    result=batch_status(service,batch_id,owner)
+                    if result['state'] in {'complete','partial','failed'}:break
+                else:raise AssertionError('archived rejection batch did not finish')
+                assert result['state']=='partial' and result['completed_count']==1 and result['not_started_count']==0,result
+                assert result['items'][0]['review_required'] and result['items'][0]['error_code']=='known_validation_rejected',result
+                assert result['items'][1]['state']=='complete',result
+                assert fake.targets[11]['minus']==before and [w['advert_id'] for w in fake.writes]==[11,12]
+                from packages.application.search_cluster_cleaner_batch import _rejected_write_only
+                rejected=service.manual_job(batch_child_id(batch_id,0),owner)
+                target=dict(advert_id=11,nm_id=101)
+                with service.store.read() as c:assert _rejected_write_only(c,service,rejected,target)
+                # Negative evidence must not require violating the production
+                # trigger that forbids a rejected operation regaining dispatch.
+                class ChangedEvidence:
+                    def __init__(self,c,state):self.c,self.state=c,state
+                    def execute(self,sql,args):
+                        rows=self.c.execute(sql,args)
+                        if sql.startswith('SELECT * FROM cleaner_write_operations'):
+                            values=[dict(r,state=self.state) for r in rows]
+                            class Result:
+                                def fetchall(self):return values
+                            return Result()
+                        return rows
+                with service.store.read() as c:
+                    for state in ('requires_review','confirmed','http_error','prepared'):
+                        assert not _rejected_write_only(ChangedEvidence(c,state),service,rejected,target)
+                    assert not _rejected_write_only(c,service,dict(rejected,can_recheck=True),target)
+                assert not parent.pending_batches() and len(fake.writes)==2
+
+
 def main():
+    archived_rejection_continues_batch()
     all_card_drift_is_failed()
     drift_scan_admission()
     technical_deferred_path()

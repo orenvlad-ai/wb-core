@@ -54,6 +54,7 @@ class FakeWB:
             elif mode=='extra':v['minus']=new+['Чужая точная строка']
             elif mode=='timeout':v['minus']=new;return 'disconnect',{}
             elif mode=='400_validation':return 400,{'error':"norm_query 'legacy invalid phrase' is not valid for nm 101",'request_id':'synthetic-json-receipt'}
+            elif mode=='400_archived':return 400,{'detail':"cannot exclude archived presets: 'old phrase'",'status':400,'title':'failed to set norm query minus','origin':'camp-api-public-cache','request_id':'synthetic-json-receipt'}
             elif mode=='malformed_large':return 400,(b'{"pad":"'+b'x'*2040+b'","authorization":"Bearer synthetic-secret-token","tail":"'+b'not-json-'*2000)
             elif mode in {'429','500','401','403','302'}:return int(mode),{}
             return 200,{}
