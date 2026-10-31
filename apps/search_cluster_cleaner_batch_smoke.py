@@ -411,8 +411,24 @@ def main():
         assert restarted.release_terminal_unsent_scans()==1
         assert restarted.release_terminal_unsent_scans()==0
         assert service.manual_batch_snapshot(batch_id,owner)['state']=='partial'
+        # A user may adopt the queued run between discovery and recovery.
+        batch2='synthetic-orphan-adopted-batch'
+        service.start_manual_batch(dict(request_id=batch2,selected_categories=['active'],
+            targets=[dict(advert_id=11,nm_id=101)]),owner,snapshot=snapshot)
+        third=parent.tick()['items'][0]['job_id']
+        saved=service.manual_job(third,owner)
+        service.record_manual_job(third,state='failed',stage='finished',error_code='local_not_submitted_retry')
+        service.record_manual_batch(batch2,state='partial',stage='finished')
+        proof=service.exact_manual_run_unclaimed
+        def racing_adoption(*args):
+            result=proof(*args)
+            accepted=service.start_manual_clean(dict(request_id='synthetic-orphan-new-adopter',advert_id=11,nm_id=101),owner)
+            assert accepted['adopted'] and accepted['run_id']==saved['scan_run_id']
+            return result
+        with patch.object(service,'exact_manual_run_unclaimed',side_effect=racing_adoption):
+            assert restarted.release_terminal_unsent_scans()==0
         with service.store.read() as c:
-            assert not c.execute("SELECT 1 FROM cleaner_runs WHERE state IN ('queued','running','accepted')").fetchone()
+            assert c.execute('SELECT state FROM cleaner_runs WHERE run_id=?',(saved['scan_run_id'],)).fetchone()[0]=='queued'
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])

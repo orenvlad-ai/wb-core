@@ -121,7 +121,7 @@ class ManualCleanerCoordinator:
             target=stage_e.Target(job['advert_id'],job['nm_id'])
             operation=self.operation_id(job['job_id'],'scan',int(job.get('scan_attempt') or 0))
             if self.cleaner.exact_manual_run_unclaimed(row['run_id'],operation,target):
-                released+=self.cleaner.stop_unsubmitted_manual_run(row['run_id'],operation_id=operation,target=target)
+                released+=self.cleaner.stop_unsubmitted_manual_run(row['run_id'],operation_id=operation,target=target,source_job_id=job['job_id'])
         return released
 
     def pending_jobs(self) -> list[str]:

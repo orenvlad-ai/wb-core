@@ -733,11 +733,15 @@ class KeywordCleaner:
             return dict(job_id=job_id,state='ambiguous',stage=value['stage'])
         return self._command(principal,f'manual-clean/{job_id}/recheck',payload,command)
 
-    def stop_unsubmitted_manual_run(self,run_id:str,*,operation_id:str|None=None,target:Target|None=None) -> bool:
+    def stop_unsubmitted_manual_run(self,run_id:str,*,operation_id:str|None=None,target:Target|None=None,source_job_id:str|None=None) -> bool:
         """Release a queued exact run; recovered scan bindings need exact unsent proof."""
         with self.store.transaction(timeout_ms=30000) as c:
             run=c.execute("SELECT state,trigger FROM cleaner_runs WHERE account=? AND run_id=?",(self.key,run_id)).fetchone()
             if not run or run['state']!='queued' or run['trigger'] not in {'manual_exact','manual_exact_candidates'}:return False
+            if source_job_id and c.execute("""SELECT 1 FROM cleaner_events
+                    WHERE account=? AND run_id=? AND kind='self_service_requested'
+                    AND json_extract(facts,'$.job_id')!=? LIMIT 1""",
+                    (self.key,run_id,source_job_id)).fetchone():return False
             if c.execute('SELECT 1 FROM cleaner_write_operations WHERE account=? AND run_id=?',(self.key,run_id)).fetchone():return False
             if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",(self.key,run_id)).fetchone():
                 # A recovered scan retains immutable binding history. Recheck
