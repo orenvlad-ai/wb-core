@@ -585,6 +585,9 @@
     },
     "fbs_current_snapshot_policy": {
       "patterns": [
+        "apps/fbs_quantity_publication.py",
+        "apps/fbs_quantity_publication_smoke.py",
+        "packages/application/official_wb_physical_read.py",
         "apps/fbs_current_snapshot_policy_smoke.py",
         "packages/application/fbs_current_snapshot_policy.py",
         "packages/application/ready_publication.py",
@@ -604,6 +607,7 @@
         "packages/application/web_vitrina_window_read_context.py"
       ],
       "commands": [
+        ["python3", "apps/fbs_quantity_publication_smoke.py"],
         ["python3", "apps/fbs_current_snapshot_policy_smoke.py"],
         ["python3", "apps/fbs_fulfillment_official_source_smoke.py"],
         ["python3", "apps/fbs_accounting_runtime_smoke.py"],
