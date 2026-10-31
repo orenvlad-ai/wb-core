@@ -37,7 +37,7 @@ function classificationOutput(specification, reviewInput) {
     text_image_consistency: reviewInput.media.status === "none" ? "not_applicable" : "unknown",
     risk_flags: spec.risk_flags || [],
     route: spec.route,
-    route_reason: `Fixture route ${spec.route}`,
+    route_reason: spec.route_reason || `Fixture route ${spec.route}`,
     seller_investigation_subject: spec.seller_investigation_subject,
     evidence_potential: spec.evidence_potential,
     required_evidence: spec.required_evidence,
