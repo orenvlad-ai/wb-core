@@ -11,7 +11,7 @@ from packages.application.search_cluster_cleaner import new_id, timestamp, plus_
 from packages.application.change_registry import ChangeRegistryRepository
 from packages.application.business_data_procedure_admission import business_write_is_blocked
 from packages.contracts.search_cluster_cleaner import CleanerError, Target, canonical, digest, query_hash
-from packages.adapters.search_cluster_cleaner_wb import WriteResponse
+from packages.adapters.search_cluster_cleaner_wb import WriteResponse, archived_minus_rejection
 
 READBACK_PENDING_STATES=frozenset({'dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error'})
 TYPED_OUTCOME_STATES=frozenset({'validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error'})
@@ -19,6 +19,19 @@ TYPED_OUTCOME_STATES=frozenset({'validation_rejected','rate_limited','unauthoriz
 # forensic readback.  Ambiguous/200-partial outcomes retain the established
 # durable late-readback behaviour and never receive a new POST.
 MAX_VALIDATION_READBACK_ATTEMPTS=3
+
+
+def _known_validation_rejection(op):
+    if op['state'] == 'validation_rejected':
+        return True
+    # Old versions saved this specific 400 as http_error. Reinterpret only its
+    # durable receipt; fresh readback still decides the outcome, never a POST.
+    if op['state'] != 'http_error':
+        return False
+    receipt = json.loads(op['evidence']).get('receipt', {})
+    return archived_minus_rejection(receipt.get('status'), receipt.get('body_excerpt'),
+                                    truncated=receipt.get('body_truncated', True),
+                                    capture_error=receipt.get('body_capture_error', ''))
 
 
 class CleanerWriter:
@@ -347,7 +360,7 @@ class CleanerReadback:
             row=self._job(c,job)
             op=c.execute('SELECT * FROM cleaner_write_operations WHERE operation_id=?',(job['operation_id'],)).fetchone()
             readback=dict(status='unavailable',reason=reason,attempt=row['attempts'],observed_at=self.app.clock())
-            if op['state']=='validation_rejected' and row['attempts']>=MAX_VALIDATION_READBACK_ATTEMPTS:
+            if _known_validation_rejection(op) and row['attempts']>=MAX_VALIDATION_READBACK_ATTEMPTS:
                 return self._require_review(c,op,row,reason,readback)
             c.execute("UPDATE cleaner_readback_jobs SET state='queued',worker_token=NULL,lease_expires_at=NULL,retry_not_before=? WHERE operation_id=?",(plus_seconds(self.app.clock(),int(max(delay,self._retry(row['attempts'])))+1),job['operation_id']))
             state=op['state'] if op['state'] in TYPED_OUTCOME_STATES else 'unresolved'
@@ -372,7 +385,7 @@ class CleanerReadback:
             missing=sorted(added-actual);still_excluded=sorted(removed&actual)
             readback_evidence=dict(status='read',minus=sorted(actual),missing_old=missing_old,extra=extra,
                 present=present,returned=returned,missing=missing,still_excluded=still_excluded,observed_at=observed,attempt=row['attempts'])
-            validation_rejected=op['state']=='validation_rejected'
+            validation_rejected=_known_validation_rejection(op)
             if validation_rejected and actual==before and not missing_old and not extra:
                 previously_confirmed=c.execute("SELECT count(*) FROM cleaner_write_items WHERE operation_id=? AND confirmed_at IS NOT NULL",(op['operation_id'],)).fetchone()[0]
                 if previously_confirmed:

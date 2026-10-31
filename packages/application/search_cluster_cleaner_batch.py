@@ -19,6 +19,35 @@ READ_RETRY_DELAYS=(5*60,15*60,30*60,60*60,120*60)
 READ_RETRY_POLL_GRACE=2*60
 
 
+def _rejected_write_only(c, cleaner, job, frozen):
+    """Allow unrelated pairs past a proven rejection, preserving this hold."""
+    if (job.get('state')!='partial' or job.get('stage')!='finished' or job.get('can_recheck')
+            or job.get('advert_id')!=frozen['advert_id'] or job.get('nm_id')!=frozen['nm_id']):return False
+    run_id=job.get('write_run_id');target=f"{frozen['advert_id']}:{frozen['nm_id']}"
+    run=c.execute('SELECT * FROM cleaner_runs WHERE account=? AND run_id=?',(cleaner.key,run_id)).fetchone()
+    if (not run or run['kind']!='manual_apply' or run['trigger']!='manual_exact_candidates'
+            or run['state']!='partial' or run['phase']!='finished' or not run['scan_finished_at']):return False
+    refs=json.loads(run['targets'])
+    if not refs or any(r.get('target')!=target or not r.get('decision_id') or not r.get('query_hash') for r in refs):return False
+    hold=c.execute('SELECT reason FROM cleaner_target_holds WHERE account=? AND target=?',(cleaner.key,target)).fetchone()
+    if not hold or hold['reason']!='known_validation_rejected':return False
+    ops=c.execute('SELECT * FROM cleaner_write_operations WHERE account=? AND run_id=?',(cleaner.key,run_id)).fetchall()
+    if not ops:return False
+    proven=set()
+    for op in ops:
+        if op['target']!=target or op['state']!='rejected' or op['dispatch_count']!=1:return False
+        readback=json.loads(op['evidence']).get('readback',{})
+        if (readback.get('status')!='read' or readback.get('minus')!=sorted(json.loads(op['before_json']))
+                or readback.get('missing_old')!=[] or readback.get('extra')!=[]):return False
+        items=c.execute('SELECT state,confirmed_at,decision_id,query_hash FROM cleaner_write_items WHERE operation_id=?',(op['operation_id'],)).fetchall()
+        if not items or any(i['state']!='rejected' or i['confirmed_at'] is not None for i in items):return False
+        proven.update((i['decision_id'],i['query_hash']) for i in items)
+        rb=c.execute('SELECT state FROM cleaner_readback_jobs WHERE operation_id=?',(op['operation_id'],)).fetchone()
+        event=c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND operation_id=? AND kind='write_rejected' AND json_extract(facts,'$.target')=? AND json_extract(facts,'$.reason')='known_validation_rejected'",(cleaner.key,run_id,op['operation_id'],target)).fetchone()
+        if not rb or rb['state']!='done' or not event:return False
+    return proven=={(r['decision_id'],r['query_hash']) for r in refs}
+
+
 def _drift_only_scan(c, cleaner, job:dict, frozen:dict) -> dict|None:
     """Prove that this child only observed external drift and never wrote WB.
 
@@ -564,6 +593,12 @@ class BatchCleanerCoordinator:
                                                  item_update=(index,update))
                 return batch_status(self.cleaner,batch['batch_id'],self.owner)
             if child['state'] in {'failed','partial'}:
+                with self.cleaner.store.read() as c:rejected=_rejected_write_only(c,self.cleaner,child,item)
+                if rejected:
+                    self.cleaner.record_manual_batch(batch['batch_id'],state='running',stage='next_target',current_index=index+1,
+                        error=None,error_code=None,item_update=(index,dict(state='partial',stage='finished',job_id=child['job_id'],
+                            error_code='known_validation_rejected',error='WB отклонил запись; прежние исключения сохранены, пара требует разбора',review_required=True)))
+                    return batch_status(self.cleaner,batch['batch_id'],self.owner)
                 if (child['state']=='failed' and child.get('error_code')=='local_not_submitted_retry'
                         and child.get('local_retry_phase')=='write' and child.get('write_run_id')):
                     try:return self._defer_write(batch,index,child)
