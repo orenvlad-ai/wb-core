@@ -1,5 +1,8 @@
 """Archive retirement through native classifier, guarded writer and readback."""
 import json
+import sys
+from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import unittest
 from dataclasses import replace
 from apps.search_cluster_cleaner_write_fixture import fixture,Q1,Q2
