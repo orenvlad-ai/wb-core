@@ -583,10 +583,26 @@
       ],
       "pip": ["openpyxl==3.1.5", "xlrd==2.0.1"]
     },
+    "finance_daily_absence": {
+      "patterns": [
+        "packages/application/canonical_wb_cost_resolver.py",
+        "packages/application/sheet_vitrina_v1_live_plan.py",
+        "apps/finance_daily_absence_smoke.py",
+        "apps/finance_absence_publication.py",
+        "apps/finance_absence_publication_smoke.py"
+      ],
+      "commands": [
+        ["python3", "apps/finance_daily_absence_smoke.py"],
+        ["python3", "apps/finance_absence_publication_smoke.py"],
+        ["python3", "apps/our_wb_costs_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "fbs_current_snapshot_policy": {
       "patterns": [
         "apps/fbs_quantity_publication.py",
         "apps/fbs_quantity_publication_smoke.py",
+        "apps/official_quantity_groups_smoke.py",
         "packages/application/official_wb_physical_read.py",
         "apps/fbs_current_snapshot_policy_smoke.py",
         "packages/application/fbs_current_snapshot_policy.py",
@@ -612,7 +628,8 @@
         ["python3", "apps/fbs_fulfillment_official_source_smoke.py"],
         ["python3", "apps/fbs_accounting_runtime_smoke.py"],
         ["python3", "apps/wb_fbs_warehouse_registry_smoke.py"],
-        ["python3", "apps/web_vitrina_official_fbs_smoke.py"]
+        ["python3", "apps/web_vitrina_official_fbs_smoke.py"],
+        ["python3", "apps/official_quantity_groups_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5", "xlrd==2.0.1"]
     },

@@ -234,6 +234,59 @@ class DegradedTests(unittest.TestCase):
             invalid=deepcopy(saved.metadata['server_cell_presentation'])
             del invalid[identity2][day]['wb_source']
             self.assertEqual(degraded.apply_degraded_rows(restored,presentation=invalid)[0].values_by_date[day],'')
+        # Production recovery has frozen combined rows, but no raw WB rows.
+        # Exercise the actual historical reader, whose inventory catalog creates
+        # WB rows and whose last accounting overlay used to blank them again.
+        import json
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            packed=json.loads(conn.execute('SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?',
+                (plan.as_of_date,)).fetchone()[0])
+            for sheet in packed['sheets']:
+                if sheet['sheet_name']=='DATA_VITRINA':
+                    sheet['rows']=[r for r in sheet['rows'] if 'inventory_wb_total_qty_v1' not in r[1]]
+                    sheet['row_count']=len(sheet['rows'])
+            packed['metadata']['server_cell_presentation']={k:v for k,v in packed['metadata']['server_cell_presentation'].items()
+                if 'inventory_wb_total_qty_v1' not in k}
+            conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?',
+                (json.dumps(packed),plan.as_of_date))
+        future=datetime(2026,9,11,14,tzinfo=timezone.utc)
+        with patch('packages.application.sheet_vitrina_v1_web_vitrina.build_current_official_fbs_estimate',
+                side_effect=AssertionError('historical reader must not use current stock')):
+            context={'template_rows':[r[:2] for r in packed['sheets'][0]['rows']],
+                'facilities':[], 'legacy_wb_present':True, 'inventory_catalog_present':True,
+                'history_scope_keys':['SKU:1'], 'history_scope_identities':{}}
+            historical=SheetVitrinaV1WebVitrinaBlock(runtime=self.runtime,now_factory=lambda:future,dated_cell_context=context).build(
+                page_route='/vitrina',read_route='/read',date_from=day,date_to=day)
+        historical_rows={r.row_id:r for r in historical.rows}
+        for wb_id in ('SKU:1|inventory_wb_total_qty_v1','TOTAL|total_inventory_wb_total_qty_v1'):
+            wb_row=historical_rows[wb_id]
+            self.assertEqual(wb_row.values_by_date[day],5.0)
+            self.assertEqual(wb_row.presentation_by_date[day]['quality_state'],'official_wb_physical_stock')
+            self.assertEqual(wb_row.presentation_by_date[day]['wb_source']['snapshot_id'],'wb1')
+        self.assertEqual(historical_rows['SKU:1|our_wb_unit_cost_rub'].values_by_date[day],'')
+        self.assertEqual(historical_rows['SKU:1|own_capital_FF_capital_rub'].values_by_date[day],'')
+        self.assertEqual(accounting.load(self.root),(self.book,self.version))
+        from packages.application.web_vitrina_official_fbs import restore_frozen_wb_components
+        wbrow=replace(row,row_id='TOTAL|total_inventory_wb_total_qty_v1',metric_key='total_inventory_wb_total_qty_v1')
+        proof=packed['metadata']['server_cell_presentation']
+        for key,new in [('wb_source',{}),('wb_component_value','-1'),('fbs_component_value','99'),
+                ('management_value','99'),('captured_at','2026-09-09T13:00:00Z'),('source_generation_id',''),
+                ('source_as_of_date','2026-09-09')]:
+            bad=deepcopy(proof);bad['TOTAL|total_stock_total'][day][key]=new
+            self.assertEqual(restore_frozen_wb_components([wbrow],presentation=bad)[0].values_by_date[day],'')
+        for key,new in [('date','2026-09-09'),('snapshot_id',''),('source_digest',''),('version_id',''),
+                ('quantity_basis','contour_quantity'),('observed_at','2026-09-09T13:00:00Z')]:
+            bad=deepcopy(proof);bad['TOTAL|total_stock_total'][day]['wb_source'][key]=new
+            self.assertEqual(restore_frozen_wb_components([wbrow],presentation=bad)[0].values_by_date[day],'')
+        fractional=deepcopy(proof)
+        fractional['TOTAL|total_stock_total'][day].update(wb_component_value='4.5',fbs_component_value='8.5')
+        self.assertEqual(restore_frozen_wb_components([wbrow],presentation=fractional)[0].values_by_date[day],'')
+        populated=replace(wbrow,values_by_date={day:99})
+        self.assertEqual(restore_frozen_wb_components([populated],presentation=proof)[0].values_by_date[day],99)
+        bad=deepcopy(proof);bad[wbrow.row_id]={day:{'source':'explicit-unavailable'}}
+        self.assertEqual(restore_frozen_wb_components([wbrow],presentation=bad)[0].values_by_date[day],'')
+        costrow=replace(wbrow,row_id='TOTAL|our_wb_unit_cost_rub',metric_key='our_wb_unit_cost_rub')
+        self.assertIs(restore_frozen_wb_components([costrow],presentation=proof)[0],costrow)
         # Source label alone cannot bypass the mask or unmask a cost metric.
         broken=deepcopy(saved.metadata['server_cell_presentation'])
         del broken[identity][day]['source_digest']

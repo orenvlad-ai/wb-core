@@ -61,7 +61,48 @@ def check_selected_policy_source_read():
         c.close()
 
 
+def check_request_json_roundtrip_candidate_order():
+    with TemporaryDirectory() as tmp:
+        root=Path(tmp).resolve();db=root/'fixture.sqlite3'
+        c=fixture(db);c.row_factory=sqlite3.Row
+        zero_wb_snapshot(c)
+        c.execute('CREATE TABLE registry_upload_current_state(slot,bundle_version)')
+        c.execute("INSERT INTO registry_upload_current_state VALUES(1,'b')")
+        c.execute('CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version,as_of_date,snapshot_id,plan_json)')
+        days=['2026-09-05','2026-09-06']
+        source=capture_source(c,dates=[days[0]],bundle_version='b',nm_ids=[1,2],now=datetime(2026,9,7,10,5,tzinfo=timezone.utc))
+        observation=source['observations'][days[0]]
+        later=json.loads(json.dumps(observation).replace(days[0],days[1]))
+        # Collector visits newest generations first; the private JSON writer
+        # sorts keys. Both request representations must bind one candidate.
+        source['dates']=days
+        source['observations']={days[1]:later,days[0]:observation}
+        source['snapshot_id']='roundtrip-fixture'
+        plan={'date_columns':days,'metadata':{},'sheets':[{'sheet_name':'DATA_VITRINA',
+            'header':['label','key',*days],'rows':[['x',key,'',''] for key in (
+                'SKU:1|inventory_fbs_total_qty_v1','SKU:2|inventory_fbs_total_qty_v1',
+                'TOTAL|total_inventory_fbs_total_qty_v1','TOTAL|total_inventory_wb_total_qty_v1',
+                'TOTAL|total_stock_total','SKU:1|our_wb_unit_cost_rub')]}]}
+        c.execute('INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?)',('b',days[0],'s',json.dumps(plan)));c.commit()
+        request=dict(source=source,dates=days,source_sha256=digest(source),runtime_sha='fixture')
+        reloaded=json.loads(json.dumps(request,sort_keys=True))
+        assert list(request['source']['observations'])==list(reversed(days))
+        assert list(reloaded['source']['observations'])==days
+        adapter=FbsQuantityPublicationAdapter();adapter.target=lambda request:(root,db)
+        # Source acquisition is tested separately; isolate candidate ordering
+        # while still exercising real build, full plan serialization and digest.
+        with patch('apps.fbs_quantity_publication.capture_source',return_value=source):
+            before=adapter.build(request,'roundtrip-operation',c)
+            after=adapter.build(reloaded,'roundtrip-operation',c)
+        assert before==after and digest(before)==digest(after)
+        assert [change['date'] for change in before['changes']]==sorted(change['date'] for change in before['changes'])
+        assert len(before['changes'])==10
+        assert c.execute('SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots').fetchone()[0]==json.dumps(plan)
+        c.close()
+
+
 def main():
+    check_request_json_roundtrip_candidate_order()
     check_selected_policy_source_read()
     with TemporaryDirectory() as tmp:
         root = Path(tmp); db = root / 'fixture.sqlite3'
