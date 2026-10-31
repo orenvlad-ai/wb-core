@@ -23,6 +23,22 @@ from packages.contracts.search_cluster_cleaner import Account, CleanerError, Tar
 from packages.domain.search_cluster_sources import union_snapshot
 
 
+def archived_minus_rejection(status, body, *, truncated=False, capture_error=''):
+    """Recognize only WB's complete structured archived-preset rejection."""
+    if status != 400 or truncated or capture_error or not isinstance(body, str):
+        return False
+    try:
+        value = json.loads(body)
+    except (ValueError, TypeError):
+        return False
+    return (isinstance(value, dict) and value.get('status') == 400
+            and value.get('title') == 'failed to set norm query minus'
+            and value.get('origin') == 'camp-api-public-cache'
+            and isinstance(value.get('detail'), str)
+            and value['detail'].startswith('cannot exclude archived presets: ')
+            and bool(value['detail'][len('cannot exclude archived presets: '):].strip()))
+
+
 class WbReadError(CleanerError):
     def __init__(self,code,status=None,retry_after=0,*,endpoint='',category=''):
         super().__init__(code,'WB: '+code,503)
@@ -187,6 +203,7 @@ class CleanerWbSource:
                 body=receipt['body_excerpt'].casefold()
                 validation=(status==400 and 'norm_query' in body
                             and ('not valid' in body or 'invalid' in body or 'невалид' in body))
+                validation = validation or archived_minus_rejection(status, receipt['body_excerpt'], truncated=receipt['body_truncated'])
                 return WriteResponse(status,delay,'validation_rejected' if validation else 'http_error',
                     request_id=receipt.pop('request_id'),request_id_header=request_id_header,**receipt)
             if status!=200:

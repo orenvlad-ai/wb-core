@@ -124,6 +124,9 @@ def materialize_degraded_accounting(plan, *, proof):
         affected = {identity for identity in identities if _dependent_metric(identity.split('|')[-1])}
         for identity in affected:
             for day in days:
+                from packages.application.web_vitrina_official_fbs import is_frozen_official_inventory_quantity
+                if is_frozen_official_inventory_quantity(identity.split("|")[-1], day, cells.get(identity, {}).get(day, {})):
+                    continue
                 cells.setdefault(identity, {})[day] = {
                     'source': SOURCE, 'source_as_of_date': day,
                     'state': 'unavailable', 'quality_state': 'unavailable', 'completeness_state': 'unavailable',
@@ -133,7 +136,8 @@ def materialize_degraded_accounting(plan, *, proof):
         for row in rows:
             if len(row) > 1 and str(row[1]) in affected:
                 for day in days:
-                    row[sheet.header.index(day)] = ''
+                    if not is_frozen_official_inventory_quantity(str(row[1]).split('|')[-1], day, cells.get(str(row[1]), {}).get(day, {})):
+                        row[sheet.header.index(day)] = ''
         sheets.append(replace(sheet, rows=rows))
     return replace(plan, sheets=sheets, metadata=metadata)
 
@@ -192,7 +196,10 @@ def apply_degraded_rows(rows, *, presentation):
         if not _dependent_metric(row.metric_key):
             result.append(row)
             continue
-        affected = {day: deepcopy(cell) for day, cell in dates.items() if day in row.values_by_date}
+        from packages.application.web_vitrina_official_fbs import is_frozen_official_inventory_quantity
+        affected = {day: deepcopy(cell) for day, cell in dates.items() if day in row.values_by_date
+            and not is_frozen_official_inventory_quantity(row.metric_key, day,
+                presentation.get(row.row_id, {}).get(day, {}))}
         result.append(replace(row,
             values_by_date={**row.values_by_date, **{day: '' for day in affected}},
             presentation_by_date={**row.presentation_by_date, **affected}))

@@ -18,6 +18,9 @@ class Adapter(Protocol):
 
 
 _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
+    "fbs_quantity_publication_v1": (
+        "apps.fbs_quantity_publication", "FbsQuantityPublicationAdapter",
+    ),
     "wb_autoanswers_recovery_v1": (
         "apps.wb_autoanswers_recovery_production_adapter", "WbAutoanswersRecoveryProductionAdapter",
     ),

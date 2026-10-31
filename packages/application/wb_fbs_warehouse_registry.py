@@ -1465,7 +1465,7 @@ class WbFbsWarehouseRegistry:
         }
 
 
-def _complete_source_generation(conn: sqlite3.Connection) -> dict[str, Any]:
+def _complete_source_generation(conn: sqlite3.Connection, *, generation_id: str | None = None) -> dict[str, Any]:
     required_run_columns = {
         "policy_version",
         "catalog_scope_json",
@@ -1481,8 +1481,9 @@ def _complete_source_generation(conn: sqlite3.Connection) -> dict[str, Any]:
     run = conn.execute(
         f"""SELECT * FROM {REGISTRY_RUNS_TABLE}
              WHERE status='success' AND complete=1 AND policy_version=?
+               AND (? IS NULL OR run_id=?)
              ORDER BY run_sequence DESC LIMIT 1""",
-        (COMPLETE_CATALOG_OMISSION_ZERO_POLICY,),
+        (COMPLETE_CATALOG_OMISSION_ZERO_POLICY, generation_id, generation_id),
     ).fetchone()
     if run is None:
         return {
