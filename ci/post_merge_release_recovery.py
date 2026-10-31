@@ -126,6 +126,44 @@ PREDEPENDENCY_PREVIOUS_PROFILE = {
     "operation_id": "release-v3-54152c265a0e767031310ac6a80fe55c",
 }
 
+PREDEPENDENCY_PROFILES = {
+    PREDEPENDENCY_RELEASE_RUN_ID: {
+        "receipt": PREDEPENDENCY_PROFILE,
+        "previous_run_id": PREDEPENDENCY_PREVIOUS_RUN_ID,
+        "previous_receipt": PREDEPENDENCY_PREVIOUS_PROFILE,
+        "previous_event": "workflow_run", "previous_run_head": PREDEPENDENCY_PREVIOUS_PROFILE["base_sha"],
+        "first_storage_line": 1206, "final_storage_line": 1238, "unit_transitions": {},
+        "autoanswers_timer_state": "enabled",
+    },
+    41205730174: {
+        "receipt": {'pull_request': 1512, 'gate_run_id': 41203878113, 'base_sha': '5af5f71f8bcb6d4eddef822f6665d87565ef8481', 'head_sha': '320f145fe5dcc9893ce427c0870c85f6e6640103', 'merge_sha': 'd9a30f31b1efd68b83305a987af09cd0255de1b5', 'operation_id': 'release-v3-199d1053ceb3afc47878fad531f82292'},
+        "previous_run_id": 40951711462, "previous_receipt": {'pull_request': 1508, 'gate_run_id': 40946575270, 'base_sha': 'a6a73ebf3bba58cdba4ee4681182a20d81c0a77d', 'head_sha': '5f6af410ce6b265d0924c3c5f340e20f9379863b', 'merge_sha': '167916cc38ec11a95a303493a324977579a806b1', 'deployed_sha': '167916cc38ec11a95a303493a324977579a806b1', 'operation_id': 'release-v3-922612b688a5026f38c7799dc7cd89be'},
+        "previous_event": 'workflow_dispatch', "previous_run_head": 'a6a73ebf3bba58cdba4ee4681182a20d81c0a77d',
+        "first_storage_line": 1231, "final_storage_line": 1263,
+        "autoanswers_timer_state": "disabled",
+        "unit_transitions": {
+            "artifacts/registry_upload_http_entrypoint/systemd/wb-core-web-vitrina-finished-snapshot.service": {
+                "before": "e6941501a01edccdff523c511805d048c1f87ff7",
+                "after": "a81fd77e0ab57c7e3a33641c95a412ae9cddc9e4",
+            },
+        },
+    },
+}
+
+
+def _predependency_profile(release_run_id=PREDEPENDENCY_RELEASE_RUN_ID):
+    if release_run_id not in PREDEPENDENCY_PROFILES:
+        raise RecoveryError("predependency-release-not-reviewed")
+    return PREDEPENDENCY_PROFILES[release_run_id]
+
+
+def _predependency_profile_for_merge(merge):
+    matches = [p for p in PREDEPENDENCY_PROFILES.values() if p["receipt"]["merge_sha"] == merge]
+    if len(matches) != 1:
+        raise RecoveryError("predependency-target-not-exact")
+    return matches[0]
+
+
 # Only these reviewed receipts admit the local commit-before-job failure lane.
 SQLITE_ACTIVATION_PROFILES = {
     EXPECTED_ACTIVATION_RELEASE_RUN_ID: {
@@ -161,7 +199,7 @@ class RecoveryCase(str, Enum):
 
 
 def recovery_case(release_run_id: int) -> RecoveryCase:
-    if release_run_id == PREDEPENDENCY_RELEASE_RUN_ID:
+    if release_run_id in PREDEPENDENCY_PROFILES:
         return RecoveryCase.PREDEPENDENCY_STORAGE
     if release_run_id in SQLITE_ACTIVATION_PROFILES:
         return RecoveryCase.SQLITE_ACTIVATION
@@ -355,7 +393,7 @@ def _validate_original_receipt(
     ):
         raise RecoveryError("original-receipt-not-exact-selective-b9")
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
-        if release_run_id != PREDEPENDENCY_RELEASE_RUN_ID or any(normalized.get(key) != expected for key, expected in PREDEPENDENCY_PROFILE.items()):
+        if release_run_id not in PREDEPENDENCY_PROFILES or any(normalized.get(key) != expected for key, expected in _predependency_profile(release_run_id)["receipt"].items()):
             raise RecoveryError("original-receipt-not-exact-predependency-storage")
     if cleaner_completion_case(case, release_run_id):
         if release_run_id not in CLEANER_PROFILES or any(normalized.get(k) != v for k, v in CLEANER_PROFILES[release_run_id].items()):
@@ -420,16 +458,17 @@ def _prove_failed_stage(
         return {"job_name": job_name, "job_log_sha256": digest(raw_log),
                 "stage": "cleaner-before-complete", "exit_status": 1}
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+        profile = _predependency_profile(release_run_id)
         required = (
-            "deploy_current_checkout", "line 1206, in deploy_current_checkout",
+            "deploy_current_checkout", f"line {profile['first_storage_line']}, in deploy_current_checkout",
             'run_stage("root-storage-status", root_storage_commands["status"])',
             "apps/root_storage_policy.py", "status --output", "--fail-on-unregistered",
             "returned non-zero exit status 2.", f'--workflow-run-id "{gate_run_id}"',
         )
-        if release_run_id != PREDEPENDENCY_RELEASE_RUN_ID or gate_run_id != PREDEPENDENCY_PROFILE["gate_run_id"] or any(item not in text for item in required):
+        if gate_run_id != profile["receipt"]["gate_run_id"] or any(item not in text for item in required):
             raise RecoveryError("failed-stage-not-exact-predependency-storage-exit2")
         failures = re.findall(r"(?:subprocess\.)?CalledProcessError:.*?returned non-zero exit status (\d+)", text, re.DOTALL)
-        if failures != ["2"] or "exit status 255" in text or "line 1238, in deploy_current_checkout" in text:
+        if failures != ["2"] or "exit status 255" in text or f"line {profile['final_storage_line']}, in deploy_current_checkout" in text:
             raise RecoveryError("failed-stage-not-definite-single-exit2")
         return {"job_name": job_name, "job_log_sha256": digest(raw_log),
                 "stage": "first-root-storage-status-before-dependencies", "exit_status": 2}
@@ -1149,7 +1188,7 @@ def _selective_b9_diff_proof() -> dict[str, Any]:
             "paths_sha256": digest(canonical_bytes(paths)), "immutable_paths_changed": changed}
 
 
-def _selective_live_contract_script(target: Any, *, merge: str = EXPECTED_SELECTIVE_MERGE_SHA) -> str:
+def _selective_live_contract_script(target: Any, *, merge: str = EXPECTED_SELECTIVE_MERGE_SHA, installed_unit_blobs=None, autoanswers_timer_state="enabled") -> str:
     # Commands are read-only: file hashes, stable unit metadata, installed versions, and nginx config.
     prefixes = ("apps/wb_autoanswers", "packages/application/wb_autoanswers", "packages/adapters/wb_autoanswers", "packages/node/wb_autoanswers", "artifacts/registry_upload_http_entrypoint/systemd/")
     direct = ("apps/registry_upload_http_entrypoint_hosted_runtime.py", "apps/change_registry_observer.py", "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json", "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json")
@@ -1160,16 +1199,19 @@ def _selective_live_contract_script(target: Any, *, merge: str = EXPECTED_SELECT
     return f'''import hashlib,json,subprocess
 from importlib.metadata import version
 from pathlib import Path
-e={{"target":{target.target_dir!r},"unit_dir":{target.systemd_unit_directory!r},"blobs":{blobs!r},"units":{expected["units"]!r},"autoanswers_units":{expected["autoanswers_units"]!r}}}
+e={{"target":{target.target_dir!r},"unit_dir":{target.systemd_unit_directory!r},"blobs":{blobs!r},"units":{expected["units"]!r},"autoanswers_units":{expected["autoanswers_units"]!r},"installed_unit_blobs":{(installed_unit_blobs or {})!r}}}
 def h(path): return subprocess.run(["git","hash-object",str(path)],check=True,text=True,capture_output=True).stdout.strip()
 for rel,want in e["blobs"].items():
  p=Path(e["target"])/rel
  if not p.is_file() or h(p)!=want: raise SystemExit(41)
 units={{}}
+installed_blobs={{}}
 for name in e["units"]:
  p=Path(e["unit_dir"])/name
  rel="artifacts/registry_upload_http_entrypoint/systemd/"+name
- if not p.is_file() or h(p)!=e["blobs"].get(rel): raise SystemExit(42)
+ if not p.is_file(): raise SystemExit(42)
+ installed_blobs[name]=h(p)
+ if installed_blobs[name] not in e["installed_unit_blobs"].get(name,[e["blobs"].get(rel)]): raise SystemExit(42)
  if "@." in name:
   units[name]="template-file-hash-verified"
   continue
@@ -1178,7 +1220,7 @@ for name in e["units"]:
  if name in e["autoanswers_units"] and values.get("DropInPaths", ""): raise SystemExit(44)
  units[name]=props
 stable={{}}
-expected_states={{"wb-core-autoanswers-worker.service":"static","wb-core-autoanswers-readonly-sync.service":"static","wb-core-autoanswers-worker.timer":"enabled","wb-core-autoanswers-readonly-sync.timer":"enabled"}}
+expected_states={{"wb-core-autoanswers-worker.service":"static","wb-core-autoanswers-readonly-sync.service":"static","wb-core-autoanswers-worker.timer":{autoanswers_timer_state!r},"wb-core-autoanswers-readonly-sync.timer":{autoanswers_timer_state!r}}}
 for name in e["autoanswers_units"]:
  values={{line.split("=",1)[0]:line.split("=",1)[1] for line in units[name].splitlines() if "=" in line}}
  if values.get("DropInPaths", "") or values.get("UnitFileState") != expected_states[name]: raise SystemExit(45)
@@ -1187,33 +1229,44 @@ versions={{"system":subprocess.run(["python3","-c","from importlib.metadata impo
 expected_versions={{"system":"3.53.4.0 3.1.5 2.0.1 1.58.0 6.4.1 4.4.5","web_bot":"1.58.0 2.9.11","wb_ai":"0.129.1 0.41.0 2.9.11 2.32.5","node":"v22.21.1","npm":"10.9.4"}}
 if versions != expected_versions: raise SystemExit(43)
 nginx=subprocess.run(["nginx","-T"],check=True,text=True,capture_output=True).stdout.encode()
-print(json.dumps({{"installed_unit_contract":units,"stable_autoanswers_units":stable,"dependency_versions":versions,"nginx_sha256":hashlib.sha256(nginx).hexdigest()}},sort_keys=True))'''
+print(json.dumps({{"installed_unit_contract":units,"installed_unit_blob_hashes":installed_blobs,"stable_autoanswers_units":stable,"dependency_versions":versions,"nginx_sha256":hashlib.sha256(nginx).hexdigest()}},sort_keys=True))'''
 
 
-def _predependency_diff_proof() -> dict[str, Any]:
+def _predependency_diff_proof(release_run_id=PREDEPENDENCY_RELEASE_RUN_ID) -> dict[str, Any]:
     """The prior successful runtime already owns this unchanged dependency closure."""
-    previous, merge = PREDEPENDENCY_PROFILE["base_sha"], PREDEPENDENCY_PROFILE["merge_sha"]
+    profile = _predependency_profile(release_run_id)
+    previous, merge = profile["previous_receipt"]["deployed_sha"], profile["receipt"]["merge_sha"]
     paths = sorted(filter(None, _git(["diff", "--name-only", f"{previous}..{merge}"]).stdout.splitlines()))
     deploy_source = _git(["show", f"{merge}:apps/registry_upload_http_entrypoint_hosted_runtime.py"]).stdout
     lines = deploy_source.splitlines()
-    if (len(lines) < 1238 or lines[1205].strip() != 'run_stage("root-storage-status", root_storage_commands["status"])'
-            or lines[1206].strip() != 'run_stage("dependencies", seller_recovery_os_dependencies_command)'
-            or lines[1237].strip() != 'run_stage("root-storage-status", root_storage_commands["status"])'):
+    first, final = profile["first_storage_line"], profile["final_storage_line"]
+    if (len(lines) < final or lines[first-1].strip() != 'run_stage("root-storage-status", root_storage_commands["status"])'
+            or lines[first].strip() != 'run_stage("dependencies", seller_recovery_os_dependencies_command)'
+            or lines[final-1].strip() != 'run_stage("root-storage-status", root_storage_commands["status"])'):
         raise RecoveryError("predependency-exact-source-phase-invalid")
     protected_prefixes = ("packages/node/", "artifacts/registry_upload_http_entrypoint/systemd/",
                           "artifacts/registry_upload_http_entrypoint/nginx/", "artifacts/finance_liquidity_cash/pilot/")
     protected_direct = set(RUNTIME_GUARD_PATHS) | {"package.json", "package-lock.json", "pyproject.toml", "uv.lock", "requirements.txt", "apps/wb_buyer_chrome_runtime.py"}
     changed = [path for path in paths if path.startswith(protected_prefixes) or path in protected_direct
                or Path(path).name.startswith("requirements") or Path(path).name in {"package.json", "package-lock.json", "pyproject.toml", "uv.lock"}]
+    for path, transition in profile["unit_transitions"].items():
+        if (path not in changed or _git(["rev-parse", f"{previous}:{path}"]).stdout.strip() != transition["before"]
+                or _git(["rev-parse", f"{merge}:{path}"]).stdout.strip() != transition["after"]):
+            raise RecoveryError("predependency-unit-transition-not-exact")
+        changed.remove(path)
     if changed:
         raise RecoveryError("predependency-dependency-or-deploy-contract-changed")
     return {"previous_deployed_sha": previous, "target_merge_sha": merge,
             "paths_sha256": digest(canonical_bytes(paths)), "protected_paths_changed": [],
-            "deploy_source_sha256": digest(deploy_source.encode()), "failed_source_line": 1206}
+            "deploy_source_sha256": digest(deploy_source.encode()), "failed_source_line": first, "reviewed_unit_transitions": profile["unit_transitions"]}
 
 
-def _predependency_live_contract_script(target: Any) -> str:
-    source = _selective_live_contract_script(target, merge=PREDEPENDENCY_PROFILE["merge_sha"])
+def _predependency_live_contract_script(target: Any, *, merge=PREDEPENDENCY_PROFILE["merge_sha"], require_complete=False) -> str:
+    profile = _predependency_profile_for_merge(merge)
+    allowed = {Path(path).name: [transition["after"]] + ([] if require_complete else [transition["before"]])
+               for path, transition in profile["unit_transitions"].items()}
+    source = _selective_live_contract_script(target, merge=merge, installed_unit_blobs=allowed,
+        autoanswers_timer_state=profile["autoanswers_timer_state"])
     # Reuse the already-reviewed installed Python/Node/unit/Finance-independent
     # probe, adding the immutable npm dependency closure and required OS tools.
     extra = """
@@ -1242,6 +1295,25 @@ if (package / 'node_modules').exists():
 versions['npm_modules'] = {'installed': modules is not None, 'versions': modules}
 
 """
+    if profile["autoanswers_timer_state"] == "disabled":
+        extra += f"""
+import sys
+sys.path.insert(0,e['target'])
+from packages.application import business_data_deploy_protection as deploy
+runtime=Path(e['target']).parent/'state'
+owner=deploy.load(runtime)
+if (not owner or owner['operation_id']!={profile['receipt']['operation_id']!r}
+        or owner['expected_sha']!={merge!r}
+        or owner['phase'] not in {(['mutation_started','complete'] if require_complete else ['mutation_started'])!r}):
+    raise SystemExit(52)
+state=deploy._binding(runtime,owner)
+_systemd,quiet_reader=deploy._clients(runtime,{target.environment_file!r})
+quiet=quiet_reader()
+if quiet.get('quiet') is not True or quiet['controls']!=state['baseline']['controls']:
+    raise SystemExit(53)
+versions['held_owner']={{key:owner[key] for key in ('operation_id','expected_sha','window_id','baseline_fingerprint')}}
+versions['held_owner']['quiet']=True
+"""
     # Keep one final JSON object; SSH version probes never execute application
     # code or package installers and disclose no credentials/process secrets.
     marker = 'print(json.dumps('
@@ -1259,9 +1331,9 @@ def collect_prestate(target: Any, merge: str, *, require_incomplete: bool, case:
     if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:
         state["selective_live_contract"] = _run_remote_json(target, _selective_live_contract_script(target))
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
-        if merge != PREDEPENDENCY_PROFILE["merge_sha"] or target.target_id != "wb_core_eu_hosted_runtime_active":
+        if target.target_id != "wb_core_eu_hosted_runtime_active":
             raise RecoveryError("predependency-target-not-exact")
-        state["predependency_live_contract"] = _run_remote_json(target, _predependency_live_contract_script(target))
+        state["predependency_live_contract"] = _run_remote_json(target, _predependency_live_contract_script(target, merge=merge, require_complete=not require_incomplete))
         if not require_incomplete and state["predependency_live_contract"]["dependency_versions"]["npm_modules"] != {"installed": True, "versions": "8.17.1 3.0.1"}:
             raise RecoveryError("predependency-complete-npm-closure-missing")
     return state
@@ -1473,7 +1545,7 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion_input": completion_script,
     }
     if (case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE} or cleaner_completion_case(case, release_run_id)):
-        expected_merge = _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILES[release_run_id]["merge_sha"] if cleaner_completion_case(case, release_run_id) else PREDEPENDENCY_PROFILE["merge_sha"]
+        expected_merge = _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILES[release_run_id]["merge_sha"] if cleaner_completion_case(case, release_run_id) else _predependency_profile(release_run_id)["receipt"]["merge_sha"]
         if target.target_id != "wb_core_eu_hosted_runtime_active" or runtime_dir != "/opt/wb-core-runtime/state" or merge != expected_merge:
             raise RecoveryError("sqlite-activation-target-contract-invalid")
         commands["cleaner_precomplete_probe"] = hosted._remote_shell_command(
@@ -1575,24 +1647,27 @@ def _selective_previous_recovery_proof(client: release.GitHub) -> dict[str, Any]
             "receipt_sha256": digest(canonical_bytes(receipt)), "source_merge_sha": EXPECTED_SELECTIVE_PREVIOUS_DEPLOYED_SHA}
 
 
-def _predependency_previous_release_proof(client: release.GitHub) -> dict[str, Any]:
-    run = client.get(f"/actions/runs/{PREDEPENDENCY_PREVIOUS_RUN_ID}")
+def _predependency_previous_release_proof(client: release.GitHub, release_run_id=PREDEPENDENCY_RELEASE_RUN_ID) -> dict[str, Any]:
+    profile = _predependency_profile(release_run_id)
+    previous_run = profile["previous_run_id"]
+    previous = profile["previous_receipt"]
+    run = client.get(f"/actions/runs/{previous_run}")
     if (run.get("name"), run.get("path"), run.get("event"), run.get("run_attempt"), run.get("status"), run.get("conclusion"), run.get("head_sha")) != (
-        RELEASE_WORKFLOW, RELEASE_WORKFLOW_PATH, "workflow_run", 1, "completed", "success", PREDEPENDENCY_PREVIOUS_PROFILE["base_sha"]
+        RELEASE_WORKFLOW, RELEASE_WORKFLOW_PATH, profile["previous_event"], 1, "completed", "success", profile["previous_run_head"]
     ):
         raise RecoveryError("predependency-previous-release-run-invalid")
-    artifacts = client.get(f"/actions/runs/{PREDEPENDENCY_PREVIOUS_RUN_ID}/artifacts?per_page=100")
-    expected_name = f"release-receipt-{PREDEPENDENCY_PREVIOUS_PROFILE['gate_run_id']}"
+    artifacts = client.get(f"/actions/runs/{previous_run}/artifacts?per_page=100")
+    expected_name = f"release-receipt-{previous['gate_run_id']}"
     candidates = [item for item in artifacts.get("artifacts", []) if item.get("name") == expected_name and item.get("expired") is not True]
     if len(candidates) != 1:
         raise RecoveryError("predependency-previous-release-artifact-invalid")
     raw = client.request("GET", f"/actions/artifacts/{int(candidates[0]['id'])}/zip", raw=True)
     receipt = _json_file(_zip_files(raw, "predependency-previous-release-artifact"), "release-receipt.json", "predependency-previous-release-receipt")
-    if any(receipt.get(key) != value for key, value in PREDEPENDENCY_PREVIOUS_PROFILE.items()) or (
+    if any(receipt.get(key) != value for key, value in previous.items()) or (
         receipt.get("schema"), receipt.get("state"), receipt.get("reason"), receipt.get("release_kind")
     ) != (release.RECEIPT_SCHEMA, "done", None, "live_runtime"):
         raise RecoveryError("predependency-previous-release-receipt-invalid")
-    return {"run_id": PREDEPENDENCY_PREVIOUS_RUN_ID, "artifact_id": int(candidates[0]["id"]),
+    return {"run_id": previous_run, "artifact_id": int(candidates[0]["id"]),
             "receipt_sha256": digest(canonical_bytes(receipt)), "previous_deployed_sha": receipt["deployed_sha"]}
 
 
@@ -1626,8 +1701,8 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         "failure": evidence["failure"],
         "recovery_case": case.value,
         "activation_failure_proof": activation_failure_proof,
-        "predependency_previous_release": _predependency_previous_release_proof(client) if case is RecoveryCase.PREDEPENDENCY_STORAGE else None,
-        "predependency_diff": _predependency_diff_proof() if case is RecoveryCase.PREDEPENDENCY_STORAGE else None,
+        "predependency_previous_release": _predependency_previous_release_proof(client, release_run_id) if case is RecoveryCase.PREDEPENDENCY_STORAGE else None,
+        "predependency_diff": _predependency_diff_proof(release_run_id) if case is RecoveryCase.PREDEPENDENCY_STORAGE else None,
         "selective_b9_diff": _selective_b9_diff_proof() if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "selective_previous_recovery": _selective_previous_recovery_proof(client) if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "prestate": prestate,
@@ -1888,7 +1963,7 @@ def apply_recovery(
             if canonical_bytes(current_proof) != canonical_bytes(preview.get("activation_failure_proof")):
                 raise RecoveryError("sqlite-activation-failure-proof-drift-after-claim")
         if normal_activation_tail_case(case):
-            if case is RecoveryCase.PREDEPENDENCY_STORAGE and canonical_bytes(_predependency_diff_proof()) != canonical_bytes(preview["predependency_diff"]):
+            if case is RecoveryCase.PREDEPENDENCY_STORAGE and canonical_bytes(_predependency_diff_proof(int(preview["release_run_id"]))) != canonical_bytes(preview["predependency_diff"]):
                 raise RecoveryError("predependency-dependency-proof-drift-after-claim")
             if case is RecoveryCase.SELECTIVE_B9_ACTIVATION and canonical_bytes(
                 _selective_b9_diff_proof()
@@ -1922,7 +1997,18 @@ def apply_recovery(
                 stages.append(_bounded_status_readback(command) if phase == "managed-service-status" else _must_succeed(phase, command))
                 _publish_once(client, pr, _phase_marker(operation, "after-" + phase_id), {"schema": RECOVERY_SCHEMA, "state": "after", "operation_id": operation, "phase": phase_id, "preview_fingerprint": expected_fingerprint})
             restarted = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=True, case=case)
-            unchanged = dict(fresh); after = dict(restarted)
+            unchanged = json.loads(json.dumps(fresh)); after = json.loads(json.dumps(restarted))
+            if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+                for path, transition in _predependency_profile(release_run_id)["unit_transitions"].items():
+                    unit = Path(path).name
+                    before_blobs = unchanged["predependency_live_contract"]["installed_unit_blob_hashes"]
+                    after_blobs = after["predependency_live_contract"]["installed_unit_blob_hashes"]
+                    if (before_blobs.get(unit) not in {transition["before"], transition["after"]}
+                            or after_blobs.get(unit) != transition["after"]):
+                        raise RecoveryError("normal-tail-unit-transition-not-exact")
+                    # Only the reviewed installed unit advances during canonical
+                    # install/reload. All other readback fields still compare.
+                    before_blobs[unit] = transition["after"]
             for key in ("main_pid", "pilot_pid"):
                 unchanged.pop(key, None); after.pop(key, None)
             if canonical_bytes(unchanged) != canonical_bytes(after) or int(restarted.get("main_pid") or 0) <= 0 or int(restarted["main_pid"]) == int(fresh["main_pid"]):
