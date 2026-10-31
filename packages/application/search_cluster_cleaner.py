@@ -322,6 +322,14 @@ class KeywordCleaner:
                             'Автоматически оставлено как спорное: '+result['reason'])
                     result=dict(result,verdict='allow',reason=reason,
                                 facts=dict(classifier_result=result,controversial=True))
+        if obs.get('archived_minus') is True:
+            from packages.application.search_cluster_cleaner_archived import POLICY
+            # Retirement changes WB's obsolete full-set entry, never the
+            # owner's override or baseline for a future active query.
+            source='archive_retirement'
+            result=dict(verdict='allow',rule='WB_ARCHIVED_RETIREMENT',
+                        reason='Архив WB: убрать устаревшее исключение; это не разрешение показа',
+                        facts=dict(archived=True,archive_policy=POLICY,previous_verdict=result['verdict']))
         decision_id=self._decision(c,obs["target"],obs["query"],result,p,source,revision)
         excluded=obs.get('observed_state')=='excluded'
         state=('pending_return' if excluded else 'allow') if result['verdict']=='allow' else ('already_excluded' if excluded else 'pending_exclude')
@@ -382,7 +390,7 @@ class KeywordCleaner:
             if s['enabled'] or not s['baseline_ready']:
                 raise CleanerError('manual_not_ready','Ручная чистка сейчас недоступна',409)
             held=c.execute("SELECT reason FROM cleaner_target_holds WHERE account=? AND target=?",(self.key,target.key)).fetchone()
-            if held and held['reason']!='external_state_drift':
+            if held and held['reason'] not in {'external_state_drift','known_validation_rejected'}:
                 raise CleanerError('target_held','Чистка этой кампании приостановлена до разбора',409)
             latest_batch=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
             if latest_batch:
@@ -1087,6 +1095,8 @@ class KeywordCleaner:
                 return counts
             if len(snapshot.minus)!=len(set(snapshot.minus)) or any(q not in snapshot.queries or snapshot.queries[q]!="excluded" for q in snapshot.minus):
                 raise CleanerError("invalid_snapshot","Некорректный полный список исключений")
+            from packages.application.search_cluster_cleaner_archived import reconcile_rejected_archive_hold
+            reconcile_rejected_archive_hold(self,c,run_id,snapshot)
             # A complete current WB union is the authority for all available
             # keys, including known minus phrases.  Prior business drift alone
             # cannot freeze a target once every affected key can be classified.
@@ -1110,7 +1120,8 @@ class KeywordCleaner:
                     c.execute("UPDATE cleaner_observations SET last_seen=?,observed_state=?,sources=?,source_times=? WHERE account=? AND target=? AND query_hash=?",(snapshot.observed_at,observed,canonical(snapshot.sources.get(q,())),canonical(snapshot.source_times),self.key,t.key,qh))
                 else:
                     c.execute("INSERT INTO cleaner_observations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(self.key,t.key,t.advert_id,t.nm_id,qh,q,snapshot.observed_at,snapshot.observed_at,observed,canonical(snapshot.sources.get(q,())),canonical(snapshot.source_times),"new",None,None,run_id))
-                obs=dict(account=self.key,target=t.key,nm_id=t.nm_id,query_hash=qh,query=q,observed_state=observed)
+                obs=dict(account=self.key,target=t.key,nm_id=t.nm_id,query_hash=qh,query=q,observed_state=observed,
+                         archived_minus=q in snapshot.minus and q in snapshot.archived)
                 if observed=='archived':
                     c.execute("UPDATE cleaner_observations SET state='observed_archived',last_run_id=? WHERE account=? AND target=? AND query_hash=?",(run_id,self.key,t.key,qh))
                     continue

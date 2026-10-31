@@ -148,6 +148,7 @@ class Snapshot:
     source_times: Mapping[str, str] = field(default_factory=dict)
     coverage: str = COVERAGE_NOTICE
     initial_empty_evidence: Mapping | None = None
+    archived: tuple[str, ...] = ()
 
 
 class ReadSource(Protocol):

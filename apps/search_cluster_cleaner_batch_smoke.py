@@ -186,7 +186,7 @@ def archived_rejection_continues_batch():
         box.package['provenance']['fresh_cards_sha256']='sha256:'+hashlib.sha256(raw).hexdigest();box.write_package()
         preview=box.execute('preview');box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
         ChangeRegistryRepository(box.runtime).initialize_schema()
-        fake=FakeWB();fake.targets[12]=copy.deepcopy(fake.targets[11]);fake.write_modes[11]='400_archived'
+        fake=FakeWB();fake.targets[12]=copy.deepcopy(fake.targets[11]);fake.write_modes[11]='400_archived';fake.archived_rejection_queries=['OLD']
         before=list(fake.targets[11]['minus']);clock=Clock();clock.base=datetime.now(timezone.utc)+timedelta(seconds=1)
         with fake.server() as url:
             source=CleanerWbSource(account=ready_service(box).account,runtime=OfficialApiRuntimeConfig('synthetic',url,2),fixture=True,
@@ -234,6 +234,27 @@ def archived_rejection_continues_batch():
                         assert not _rejected_write_only(ChangedEvidence(c,state),service,rejected,target)
                     assert not _rejected_write_only(c,service,dict(rejected,can_recheck=True),target)
                 assert not parent.pending_batches() and len(fake.writes)==2
+                # A new native batch may scan a proven archived rejection;
+                # the old rejected operation is immutable and never resubmitted.
+                with service.store.read() as c:
+                    old=dict(c.execute("SELECT * FROM cleaner_write_operations WHERE target='11:101'").fetchone())
+                fake.write_modes[11]='normal';fake.targets[11]['archived']=['OLD']
+                snapshot=eligibility_rows(service,'monolith',source._adverts([11,12],source.monotonic()+120),fixture_admission=admitted)
+                assert snapshot[0]['eligible'],snapshot
+                recovery_id='synthetic-archived-retirement-0002'
+                service.start_manual_batch(dict(request_id=recovery_id,selected_categories=['active'],targets=[target]),owner,snapshot=snapshot)
+                for _ in range(60):
+                    if parent.pending_batches():parent.tick()
+                    if child.pending_jobs():child.tick()
+                    recovered=batch_status(service,recovery_id,owner)
+                    if recovered['state'] in {'complete','partial','failed'}:break
+                else:raise AssertionError('archive retirement batch did not finish')
+                assert recovered['state']=='complete',recovered
+                assert len(fake.writes)==3 and 'OLD' not in fake.targets[11]['minus'],fake.writes
+                assert set(before)-{'OLD'}<=set(fake.targets[11]['minus'])
+                with service.store.read() as c:
+                    assert dict(c.execute('SELECT * FROM cleaner_write_operations WHERE operation_id=?',(old['operation_id'],)).fetchone())==old
+                    assert c.execute('SELECT count(*) FROM cleaner_target_holds').fetchone()[0]==0
 
 
 def main():

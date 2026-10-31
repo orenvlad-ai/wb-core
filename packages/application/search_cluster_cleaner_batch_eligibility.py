@@ -66,7 +66,7 @@ def eligibility_rows(cleaner, generation: str, catalog: list[Target], *, fixture
         elif fixture_admission is None and (approved is None or approved.semantic_fingerprint != profile.semantic_fingerprint): reason = 'manual_profile_mismatch'
         # Historical drift admits a fresh read-only scan; only its complete
         # snapshot can reconcile the hold before the writer is considered.
-        elif held and held['reason'] != 'external_state_drift': reason = 'target_held'
+        elif held and held['reason'] not in {'external_state_drift','known_validation_rejected'}: reason = 'target_held'
         result.append(dict(advert_id=key[0], nm_id=key[1], campaign_name=target.name,
                            product_title=profile_title(profile or approved, key[1]), status_code=status_code, status=status,
                            payment_type='cpm',eligible=reason is None, reason=reason, admitted=sku_approved,
