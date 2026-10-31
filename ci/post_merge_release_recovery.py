@@ -463,9 +463,10 @@ def _prove_failed_stage(
             "deploy_current_checkout", f"line {profile['first_storage_line']}, in deploy_current_checkout",
             'run_stage("root-storage-status", root_storage_commands["status"])',
             "apps/root_storage_policy.py", "status --output", "--fail-on-unregistered",
-            "returned non-zero exit status 2.", f'--workflow-run-id "{gate_run_id}"',
+            "returned non-zero exit status 2.",
         )
-        if gate_run_id != profile["receipt"]["gate_run_id"] or any(item not in text for item in required):
+        if (gate_run_id != profile["receipt"]["gate_run_id"] or any(item not in text for item in required)
+                or not _storage_tail_gate_argument_matches(text, gate_run_id)):
             raise RecoveryError("failed-stage-not-exact-predependency-storage-exit2")
         failures = re.findall(r"(?:subprocess\.)?CalledProcessError:.*?returned non-zero exit status (\d+)", text, re.DOTALL)
         if failures != ["2"] or "exit status 255" in text or f"line {profile['final_storage_line']}, in deploy_current_checkout" in text:

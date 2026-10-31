@@ -1562,6 +1562,28 @@ def test_predependency_exact_source_and_dependency_proofs() -> None:
         recovery._git = original
 
 
+def test_pr1512_real_step_variable_gate_binding() -> None:
+    # Reduced immutable run 41205730174/job 124550354289 log: preserve actual
+    # timestamps, ANSI shell echo and same-step env binding; omit private paths.
+    raw = b'''2026-10-31T13:29:09.4091517Z ##[group]Run python3 apps/github_release_runner.py run --workflow-run-id "$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"
+2026-10-31T13:29:09.4092552Z \x1b[36;1mpython3 apps/github_release_runner.py run --workflow-run-id "$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"\x1b[0m
+2026-10-31T13:29:09.4114093Z shell: /usr/bin/bash -e {0}
+2026-10-31T13:29:09.4114400Z env:
+2026-10-31T13:29:09.4117477Z   GATE_RUN_ID: 41203878113
+2026-10-31T13:29:09.4123617Z ##[endgroup]
+2026-10-31T13:29:55.7799101Z   File "apps/registry_upload_http_entrypoint_hosted_runtime.py", line 1231, in deploy_current_checkout
+2026-10-31T13:29:55.7799201Z     run_stage("root-storage-status", root_storage_commands["status"])
+2026-10-31T13:29:55.7831996Z subprocess.CalledProcessError: Command ['ssh', 'python3 apps/root_storage_policy.py status --output status.json --fail-on-unregistered'] returned non-zero exit status 2.
+'''
+    prove=lambda log: recovery._prove_failed_stage(log,41203878113,'One-shot deployed release',case=recovery.RecoveryCase.PREDEPENDENCY_STORAGE,release_run_id=41205730174)
+    assert prove(raw)['stage']=='first-root-storage-status-before-dependencies'
+    for bad in (raw.replace(b'GATE_RUN_ID: 41203878113',b'GATE_RUN_ID: 1'),
+                raw+b'  GATE_RUN_ID: 41203878113\n',
+                raw.replace(b'line 1231,',b'line 1263,'),
+                raw.replace(b'env:\n',b'env:\n##[endgroup]\n')):
+        expect_reason('failed-stage-not-exact-predependency-storage-exit2',lambda bad=bad:prove(bad))
+
+
 def test_pr1512_predependency_profile_and_unit_transition() -> None:
     run = 41205730174
     profile = recovery._predependency_profile(run)
@@ -1965,6 +1987,7 @@ def legacy_tail_regressions() -> None:
     test_manual_release_full_evidence_chain()
     test_predependency_exact_source_and_dependency_proofs()
     test_pr1512_predependency_profile_and_unit_transition()
+    test_pr1512_real_step_variable_gate_binding()
     test_predependency_previous_success_receipt()
     test_predependency_previous_success_receipt(41205730174)
     test_predependency_npm_once_then_tail()
