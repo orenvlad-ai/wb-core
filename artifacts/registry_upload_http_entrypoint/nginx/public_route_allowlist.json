@@ -148,7 +148,8 @@
       "name": "sheet_vitrina_stock_monitor",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/stock-monitor",
-      "methods": ["GET"]
+      "methods": ["GET"],
+      "proxy_pass_url": "http://127.0.0.1:8780"
     },
     {
       "name": "sheet_vitrina_stock_monitor_refresh",
