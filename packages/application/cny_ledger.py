@@ -1667,6 +1667,8 @@ def parse_cny_document_text(
         extraction_diagnostics=diagnostics,
     )
     financial_normalized = dict(financial.get("normalized_parse") or {})
+    if financial.get('errors'):
+        return _parsed_payload({}, raw_parse=raw_parse, warnings=_string_list(financial.get('warnings')), errors=_string_list(financial.get('errors')))
     if (
         financial_normalized.get("document_type") == FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION
         and str(financial_normalized.get("currency") or "").upper() == "CNY"

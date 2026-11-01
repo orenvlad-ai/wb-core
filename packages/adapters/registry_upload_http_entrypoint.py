@@ -2768,7 +2768,7 @@ def _build_handler(
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                         fields=(upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {}),
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_actor(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
