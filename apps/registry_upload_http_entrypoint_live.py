@@ -35,6 +35,7 @@ from packages.adapters.registry_upload_http_entrypoint import (
 )
 from packages.adapters.search_cluster_cleaner_http import handles as cleaner_handles
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
+from packages.adapters.stock_monitor_http import start_stock_monitor_contour
 from packages.application.storage_registry import StoreRegistry
 from packages.application.search_cluster_cleaner_web import STAGE_E_CONFIG_PATH
 
@@ -292,6 +293,7 @@ def main() -> None:
     buyer_thread = None
     seller_control = None
     seller_start = None
+    stock_monitor = None
     try:
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=config.runtime_dir,
@@ -319,6 +321,7 @@ def main() -> None:
             history_snapshot_store=history_store,
             finished_snapshots_default=os.environ.get("WEB_VITRINA_FINISHED_SNAPSHOT_DEFAULT", "0") == "1",
         )
+        stock_monitor = start_stock_monitor_contour(server)
         buyer_server, buyer_thread = start_buyer_login_contour(server)
         seller_control, seller_start = start_seller_login_contours(server)
         # The legacy 8765 listener remains independent of this opt-in contour.
@@ -341,7 +344,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        for contour in (seller_start, seller_control):
+        for contour in (stock_monitor, seller_start, seller_control):
             if contour is not None:
                 contour[0].shutdown()
                 contour[0].server_close()
