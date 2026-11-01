@@ -166,6 +166,11 @@
     }
   },
   "groups": {
+    "supplier_independent_view": {
+      "patterns": ["apps/supplier_view*.py", "packages/application/supplier_view.py", "packages/adapters/supplier_view_http.py", "packages/adapters/templates/sheet_vitrina_v1_supplier.html", "artifacts/registry_upload_http_entrypoint/systemd/wb-core-supplier-view.service"],
+      "commands": [["python3", "apps/supplier_view_smoke.py"], ["python3", "apps/supplier_view_ui_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "operator_spp_jobs": {"patterns": ["packages/application/operator_spp_jobs.py", "packages/application/wb_spp_tester.py", "packages/application/operator_operations.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"], "commands": [["python3", "apps/operator_spp_job_recovery_smoke.py"]], "pip": ["apsw==3.53.4.0", "openpyxl==3.1.5", "playwright==1.58.0"]},
     "operator_business_settings": {"patterns": ["packages/application/operator_business_settings.py", "packages/application/operator_operations.py", "packages/application/registry_upload_db_backed_runtime.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html", "packages/application/sku_inventory_balance.py", "packages/application/sku_management.py", "apps/operator_business_settings_fixture.py"], "commands": [["python3", "apps/operator_business_settings_smoke.py"]], "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]},
     "operator_feedback_schedules": {"patterns": ["packages/application/operator_feedback_complaint_schedules.py", "packages/application/sheet_vitrina_v1_feedbacks_auto_complaints.py", "packages/application/operator_operations.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"], "commands": [["python3", "apps/operator_feedback_schedules_smoke.py"]], "pip": ["apsw==3.53.4.0", "openpyxl==3.1.5", "playwright==1.58.0"]},

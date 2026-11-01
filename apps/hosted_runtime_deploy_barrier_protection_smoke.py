@@ -348,8 +348,10 @@ class ProtectionTests(unittest.TestCase):
         value = preview()
         value['source']['original_operation_id'] = operation
         value['recovery_case'] = case.value
+        if case is recovery.RecoveryCase.PREDEPENDENCY_STORAGE:
+            value['release_run_id'] = recovery.PREDEPENDENCY_RELEASE_RUN_ID
         original = {**value['source'], 'operation_id': operation}
-        value['operation_id'] = recovery.recovery_operation_id(9, original)
+        value['operation_id'] = recovery.recovery_operation_id(value['release_run_id'], original)
         value['predependency_diff'] = value['selective_b9_diff'] = {'exact': True}
         value['activation_failure_proof'] = {'job_rows': 0}
         if case is recovery.RecoveryCase.PREDEPENDENCY_STORAGE:

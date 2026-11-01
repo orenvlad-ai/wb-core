@@ -7,6 +7,42 @@
   "proxy_send_timeout": "180s",
   "routes": [
     {
+      "name": "supplier_view_page",
+      "match": "exact",
+      "path": "/sheet-vitrina-v1/supplier-view",
+      "methods": [
+        "GET"
+      ],
+      "proxy_pass_url": "http://127.0.0.1:8782"
+    },
+    {
+      "name": "supplier_view_shell",
+      "match": "exact",
+      "path": "/sheet-vitrina-v1/supply-view",
+      "methods": [
+        "GET"
+      ],
+      "proxy_pass_url": "http://127.0.0.1:8782"
+    },
+    {
+      "name": "supplier_view_list",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/supply/supplier-view",
+      "methods": [
+        "GET"
+      ],
+      "proxy_pass_url": "http://127.0.0.1:8782"
+    },
+    {
+      "name": "supplier_view_detail",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/supply/supplier-view/",
+      "methods": [
+        "GET"
+      ],
+      "proxy_pass_url": "http://127.0.0.1:8782"
+    },
+    {
       "name": "operator_nomenclature_operation_detail",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/settings/nomenclature/operations/",

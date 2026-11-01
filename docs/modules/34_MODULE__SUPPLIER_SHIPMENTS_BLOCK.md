@@ -607,3 +607,46 @@ operator UI shows them only when financial authority is current. This does not
 implement subsequent advance consumption or refund; either requires its own
 explicit source-backed operation. New-document upload accepts allocation with
 the document to avoid an intermediate full-amount invoice settlement.
+
+### Independent supplier viewer (opt-in)
+
+`apps/supplier_view_http_live.py` is a separate loopback-only process on 8782.
+It exposes only internal supply-authorized GET views: `/sheet-vitrina-v1/supply-view`,
+`/sheet-vitrina-v1/supplier-view`, and `/v1/sheet-vitrina-v1/supply/supplier-view`
+(list, order detail, order documents, compact correction status, contracts).
+The original write, download and supplier-safe routes remain authoritative.
+The listener has no live-entrypoint initialization, workers, migrations, PDF
+reparsing, schema setup or writable database connection. Each request resolves
+the current operational generation and pins a bounded `mode=ro/query_only`
+snapshot, including runtime-user authorization. Canonical cost proofs are computed
+once per order per request with the existing formula and certification logic.
+Missing cost remains null. Full factual-correction reports stay outside the card;
+the full canonical cost explanation stays available to the existing UI.
+
+The documents projection omits the already loaded shipment and duplicate summary
+proof. CNY reads include only the order and explicit fee natural-key references;
+existing download links, matching and financial readiness semantics are preserved.
+Overlapping GETs are coalesced; switching an already loaded document tab does not
+refetch. Reopening an order reads fresh data. Mutations invalidate reads both
+before submission and after completion; stale responses cannot replace a new card.
+
+Activation is explicit: install/start the supplied `wb-core-supplier-view.service`,
+apply its four GET-only nginx allowlist routes, verify authentication and isolated
+reads, then set `SUPPLIER_VIEW_ENABLED=1` for the main web shell. It then opens the
+independent supply shell. Other supply modes return to the existing operator page.
+Until that flag is set the normal shell keeps its existing entry path. Rollback
+sets the main unit flag to `0` and restarts the main service first, then stops
+and disables the viewer before returning to code without its infrastructure
+classification. Removing the viewer from the managed list alone does not stop
+it. No data migration or reverse data write is required.
+The Europe hosted target explicitly enables the service and flag through the
+normal release adapter after server-side query-only validation. The application
+default remains off for other targets. The managed service is restarted and
+included in release health readback on subsequent deployments.
+The service requires the same WebCore auth environment and refuses startup without
+authentication. No production activation is implied by adding these artifacts.
+
+Validation: `python3 apps/supplier_view_smoke.py`, existing supplier HTTP/browser
+checks, and public-route smoke. Performance acceptance additionally covers a busy
+legacy process, initial registry/card/documents and repeated tab switches. Local
+fixture timings are not production latency guarantees.

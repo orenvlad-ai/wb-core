@@ -1012,6 +1012,11 @@
             // Browser-local settings group is a UI preference only.
           }
         }
+        if (requested === "directories") {
+          loadSkuGroups();
+          loadItems();
+          loadDocuments();
+        }
         if (requested === "users" && !users.length) {
           loadUsers();
         }
@@ -4290,9 +4295,6 @@
       restoreSettingsGroup();
       restoreSettingsTab();
       document.documentElement.dataset.settingsReady = "true";
-      loadSkuGroups();
-      loadItems();
-      loadDocuments();
     })();
   </script>
 </body>

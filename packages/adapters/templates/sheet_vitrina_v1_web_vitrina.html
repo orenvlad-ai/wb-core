@@ -11688,7 +11688,7 @@
       if (!frame || frame.getAttribute("src")) {
         return;
       }
-      const url = new URL(WEB_VITRINA_CONFIG.operator_path, window.location.origin);
+      const url = new URL(tabName === "factory-order" && WEB_VITRINA_CONFIG.supplier_view_path ? WEB_VITRINA_CONFIG.supplier_view_path : WEB_VITRINA_CONFIG.operator_path, window.location.origin);
       url.searchParams.set("embedded_tab", tabName);
       frame.setAttribute("src", url.toString());
     }

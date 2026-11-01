@@ -117,6 +117,7 @@ CONTINUOUS_OBSERVER_SERVICE_UNITS = tuple(
 CONTINUOUS_INFRASTRUCTURE_SERVICE_UNITS = (
     "wb-core-registry-http.service",
     "wb-core-data-mcp.service",
+    "wb-core-supplier-view.service",
 )
 CLASSIFIED_WB_CORE_TIMER_UNITS = (
     ALL_BUSINESS_TIMER_UNITS + CONTINUOUS_OBSERVER_TIMER_UNITS
