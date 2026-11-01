@@ -636,6 +636,10 @@ reads, then set `SUPPLIER_VIEW_ENABLED=1` for the main web shell. It then opens 
 independent supply shell. Other supply modes return to the existing operator page.
 Until that flag is set the normal shell keeps its existing entry path. Rollback
 removes the flag first; no data migration or reverse data write is required.
+The Europe hosted target explicitly enables the service and flag through the
+normal release adapter after server-side query-only validation. The application
+default remains off for other targets. The managed service is restarted and
+included in release health readback on subsequent deployments.
 The service requires the same WebCore auth environment and refuses startup without
 authentication. No production activation is implied by adding these artifacts.
 

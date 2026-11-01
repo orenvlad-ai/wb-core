@@ -20,6 +20,7 @@ class FakeSystemd:
         self.states = {}
         self.calls = []
         self.fail_once = None
+        self.active_services = []
         pairs = [("enabled", "active"), ("enabled", "inactive"), ("disabled", "active"), ("disabled", "inactive")]
         for i, unit in enumerate(pause.TIMERS):
             enabled, active = pairs[i % 4]
@@ -38,7 +39,7 @@ class FakeSystemd:
         return list(pause.TIMERS) + [pause.SAFETY_TIMER]
 
     def discovered_active_services(self):
-        return []
+        return list(self.active_services)
 
     def disable_now(self, unit):
         self.calls.append(("disable_now", unit))
@@ -103,6 +104,11 @@ def main():
             assert pause.load_state(runtime)["baseline_fingerprint"] == baseline
             assert systemd.calls.count(("disable_now", pause.TIMERS[2])) == 1
             assert pause.pause(runtime, **options)["quiet"] is True
+            # A query-only viewer added during deploy must not change the held
+            # business timer baseline or prevent exact resume below.
+            systemd.active_services = ["wb-core-supplier-view.service"]
+            assert pause.pause(runtime, **options)["quiet"] is True
+            assert pause.load_state(runtime)["baseline_fingerprint"] == baseline
             assert pause.resume(runtime, **options)["exact_prior_state_restored"]
             assert not barrier_status(runtime)["active"]
             for unit in pause.TIMERS:

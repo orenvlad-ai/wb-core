@@ -257,6 +257,11 @@
       "name": "wb-core-autoanswers-worker.timer",
       "enable": false,
       "restart": false
+    },
+    {
+      "name": "wb-core-supplier-view.service",
+      "enable": true,
+      "restart": true
     }
   ],
   "retired_systemd_units": [
@@ -281,7 +286,8 @@
     "CHANGE_REGISTRY_OBSERVER_ENABLED": "true",
     "CHANGE_REGISTRY_ACCOUNT_SCOPE": "seller-portal-primary",
     "SELLER_PORTAL_CANONICAL_SUPPLIER_LABEL": "ИП Сагитов В. Р.",
-    "SELLER_PORTAL_RELOGIN_SSH_DESTINATION": "wb-core-eu-root"
+    "SELLER_PORTAL_RELOGIN_SSH_DESTINATION": "wb-core-eu-root",
+    "SUPPLIER_VIEW_ENABLED": "1"
   },
   "finance_generation_filesystem": {
     "contract_version": "wb_core_finance_generation_filesystem_v1",
