@@ -19,6 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from unittest.mock import patch
+from packages.application import finance_backup_compression as compression
+
 from packages.application.finance_raw_storage import (
     CONSUMER_ID,
     ensure_operational_schema,
@@ -362,6 +365,119 @@ def _rotation(
 
 
 class FinanceStorageBackupRotationSmoke(unittest.TestCase):
+    def test_compressed_replacement_restore_crash_and_rotation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / 'runtime'
+            raw, operational, monolith = _fixture(runtime)
+            backup_root = runtime / 'backups' / 'finance-storage-split-snapshots'
+            backup_root.parent.mkdir(parents=True)
+            legacy = _rotation(runtime, backup_root)
+            first = legacy.build_plan(force_replacement=True)
+            legacy.apply(reviewed_plan=first, expected_fingerprint=first['fingerprint'], approval_reference='test')
+            old = backup_root / 'retained' / first['backup_id']
+            baseline = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in old.iterdir()}
+            rotation = _rotation(runtime, backup_root, compress_backups=True)
+            plan = rotation.build_plan(force_replacement=True)
+            self.assertTrue(plan['apply_allowed_by_machine_preflight'], plan['blockers'])
+            with self.assertRaisesRegex(RuntimeError, 'staging release'):
+                rotation.apply(reviewed_plan=plan, expected_fingerprint=plan['fingerprint'],
+                    approval_reference='test', fault_at='after_compression_staging_release')
+            self.assertEqual({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in old.iterdir()}, baseline)
+            self.assertEqual(json.loads((backup_root/'current.json').read_text())['backup_id'], first['backup_id'])
+            result = rotation.apply(reviewed_plan=plan, expected_fingerprint=plan['fingerprint'], approval_reference='test')
+            self.assertFalse(old.exists())
+            selected = backup_root / 'retained' / result['retained_backup_id']
+            self.assertEqual({p.name for p in selected.iterdir()}, {
+                'finance_raw.sqlite3.zst', 'operational.sqlite3.zst', 'compression.json',
+                'backup_manifest.json', 'storage_generation_manifest.json'})
+            self.assertEqual(rotation.readback(reviewed_plan=plan, expected_fingerprint=plan['fingerprint'])['status'], 'readback_verified')
+            self.assertEqual(backup_rotation_health(runtime)['status'], 'healthy')
+            # Replacement/deletion of an already-compressed set uses its physical inventory.
+            third = rotation.build_plan(force_replacement=True)
+            rotation.apply(reviewed_plan=third, expected_fingerprint=third['fingerprint'], approval_reference='test')
+            self.assertFalse(selected.exists())
+            self.assertEqual(rotation.readback(reviewed_plan=third, expected_fingerprint=third['fingerprint'])['status'], 'readback_verified')
+
+    def test_compression_publication_crash_matrix(self):
+        for fault in ('after_compression_disk_verified', 'after_replacement_verified',
+                      'after_current_selected'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                runtime=Path(tmp)/'runtime';_fixture(runtime)
+                root=runtime/'backups'/'finance-storage-split-snapshots';root.parent.mkdir(parents=True)
+                legacy=_rotation(runtime,root)
+                first=legacy.build_plan(force_replacement=True)
+                legacy.apply(reviewed_plan=first,expected_fingerprint=first['fingerprint'],approval_reference='test')
+                old=root/'retained'/first['backup_id']
+                rotation=_rotation(runtime,root,compress_backups=True)
+                plan=rotation.build_plan(force_replacement=True)
+                with self.assertRaisesRegex(RuntimeError,'injected fault'):
+                    rotation.apply(reviewed_plan=plan,expected_fingerprint=plan['fingerprint'],
+                        approval_reference='test',fault_at=fault)
+                self.assertTrue(old.is_dir())
+                rotation.apply(reviewed_plan=plan,expected_fingerprint=plan['fingerprint'],approval_reference='test')
+                self.assertEqual(rotation.readback(reviewed_plan=plan,expected_fingerprint=plan['fingerprint'])['status'],'readback_verified')
+                self.assertFalse(old.exists())
+
+    def test_compression_capacity_failure_keeps_selected_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime=Path(tmp)/'runtime';_fixture(runtime)
+            root=runtime/'backups'/'finance-storage-split-snapshots';root.parent.mkdir(parents=True)
+            legacy=_rotation(runtime,root)
+            first=legacy.build_plan(force_replacement=True)
+            legacy.apply(reviewed_plan=first,expected_fingerprint=first['fingerprint'],approval_reference='test')
+            rotation=_rotation(runtime,root,compress_backups=True)
+            plan=rotation.build_plan(force_replacement=True)
+            with patch.object(compression, '_space', side_effect=compression.FinanceStorageSnapshotRetentionError('reserve exhausted')):
+                with self.assertRaisesRegex(compression.FinanceStorageSnapshotRetentionError,'reserve exhausted'):
+                    rotation.apply(reviewed_plan=plan,expected_fingerprint=plan['fingerprint'],approval_reference='test')
+            self.assertEqual(json.loads((root/'current.json').read_text())['backup_id'],first['backup_id'])
+            # Exact retry safely replaces its own interrupted compressed scratch.
+            rotation.apply(reviewed_plan=plan,expected_fingerprint=plan['fingerprint'],approval_reference='test')
+            self.assertEqual(rotation.readback(reviewed_plan=plan,expected_fingerprint=plan['fingerprint'])['status'],'readback_verified')
+
+    def test_compressed_corruption_preserves_old_and_missing_codec_blocks_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / 'runtime'
+            _fixture(runtime)
+            root = runtime/'backups'/'finance-storage-split-snapshots';root.parent.mkdir(parents=True)
+            legacy = _rotation(runtime, root)
+            first = legacy.build_plan(force_replacement=True)
+            legacy.apply(reviewed_plan=first,expected_fingerprint=first['fingerprint'],approval_reference='test')
+            rotation = _rotation(runtime, root, compress_backups=True)
+            with patch.object(compression.shutil, 'which', return_value=None):
+                with self.assertRaisesRegex(compression.FinanceStorageSnapshotRetentionError, 'zstd is required'):
+                    rotation.build_plan(force_replacement=True)
+            plan = rotation.build_plan(force_replacement=True)
+            with self.assertRaisesRegex(RuntimeError, 'staging release'):
+                rotation.apply(reviewed_plan=plan, expected_fingerprint=plan['fingerprint'],
+                    approval_reference='test', fault_at='after_compression_staging_release')
+            partial = Path(plan['replacement']['destination_partial'])
+            packed = partial/'finance_raw.sqlite3.zst'
+            b=packed.read_bytes();packed.write_bytes(b[:-1]+bytes([b[-1]^1]))
+            with self.assertRaisesRegex(compression.FinanceStorageSnapshotRetentionError, 'compressed bytes drifted'):
+                rotation.apply(reviewed_plan=plan, expected_fingerprint=plan['fingerprint'], approval_reference='test')
+            self.assertEqual(json.loads((root/'current.json').read_text())['backup_id'], first['backup_id'])
+            self.assertTrue((root/'retained'/first['backup_id']).is_dir())
+
+    def test_compression_cap_applies_to_stored_bytes_and_bounds_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime=Path(tmp)/'runtime';raw,op,_=_fixture(runtime)
+            # Highly compressible real SQLite payload exceeds stored cap.
+            with closing(sqlite3.connect(raw)) as c:
+                c.execute('create table compression_fixture(payload blob)')
+                c.execute('insert into compression_fixture values(zeroblob(8388608))'); c.commit()
+            root=runtime/'backups'/'finance-storage-split-snapshots';root.parent.mkdir(parents=True)
+            rotation=_rotation(runtime,root,compress_backups=True,max_set_bytes=4*1024**2)
+            plan=rotation.build_plan(force_replacement=True)
+            self.assertGreater(plan['replacement']['source_bytes'],plan['policy']['retained_bytes_cap'])
+            self.assertTrue(plan['apply_allowed_by_machine_preflight'],plan['blockers'])
+            result=rotation.apply(reviewed_plan=plan,expected_fingerprint=plan['fingerprint'],approval_reference='test')
+            self.assertLess(result['retained_backup_bytes'],plan['policy']['retained_bytes_cap'])
+            # Decoder rejects expansion beyond the manifest length.
+            selected=root/'retained'/result['retained_backup_id']
+            with self.assertRaisesRegex(compression.FinanceStorageSnapshotRetentionError,'byte budget exceeded'):
+                compression._decode(selected/'finance_raw.sqlite3.zst',{'size_bytes':1,'sha256':'sha256:'+'0'*64})
+
     def test_zero_byte_legacy_wal_is_verified_not_corrupt(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             runtime = Path(raw_tmp) / "runtime"
@@ -702,11 +818,11 @@ class FinanceStorageBackupRotationSmoke(unittest.TestCase):
             self.assertEqual(health["canonical_source_bytes"], source_bytes)
             self.assertEqual(
                 health["next_replacement_required_bytes"],
-                source_bytes + DEFAULT_COPY_OVERHEAD_BYTES + hard_reserve,
+                source_bytes + DEFAULT_COPY_OVERHEAD_BYTES + hard_reserve + compression.OVERHEAD,
             )
             self.assertEqual(
                 health["capacity_basis"],
-                "canonical_current_split_source_size_plus_copy_overhead_plus_hard_reserve",
+                "canonical_current_split_source_size_plus_copy_overhead_plus_hard_reserve_plus_compression_workspace",
             )
             foreign = backup_root / "retained" / "foreign"
             foreign.mkdir()
