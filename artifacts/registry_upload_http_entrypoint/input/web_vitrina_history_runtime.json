@@ -2,7 +2,7 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:483d51c8f49c7b9c7391e8bc576d782178f4d315bdfe653a5ebab797a6383617",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:765fb8d2fdaf1fdae9d1cddbe378744244e24397f6f410f6f3485d7f9d70c7d5",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
     "packages/application/sheet_vitrina_v1_web_vitrina.py": "426ca35dc0074d87c064df72cdfbb2e3798a725c75e374df9f6e6b2c9c4c1f13",
@@ -41,7 +41,7 @@
     "packages/application/web_vitrina_official_fbs.py": "c42857ab9171afac6154b60aaee3a1276acd1ddc0030131ad9e345bf8eae03a5",
     "packages/application/official_fbs_stock_read.py": "db5fa2f431f7a193d2da583dc978544e0c584c3d6a90e07c2ae78483af2aaeb1",
     "packages/application/official_wb_physical_read.py": "4588fcc5c85a8ba63eb92f7bec14b0c27f46cf6c9b52686be5c2dbc179de9b2e",
-    "packages/application/wb_fbs_warehouse_registry.py": "979a7a06ca0f777b598a074fd3eb76a3e3995c1312894e56ecec83e36d5d003e"
+    "packages/application/wb_fbs_warehouse_registry.py": "42f7fcd62b16cc4d6e0a2ee5f4e3f6f4485248f4f4c34efdb9cf488eb0aacef8"
   },
   "group_migration_root": "/mnt/wb-core-extra100/web-vitrina-history-groups-candidate",
   "repair_code_hashes": {
