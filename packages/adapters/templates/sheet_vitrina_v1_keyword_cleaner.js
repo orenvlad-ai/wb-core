@@ -150,13 +150,24 @@
     let kcScheduleStatusAt=0,kcScheduleStatusLoading=false;
     async function kcScheduleStatus(force=false){if(kcScheduleStatusLoading||!kcVisible()||!force&&Date.now()-kcScheduleStatusAt<30000)return;kcScheduleStatusLoading=true;try{const data=await kcGet('/daily-schedules');const active=data.schedules.filter(row=>row.enabled).map(row=>row.time);kcText('schedule-label',active.length?'Расписание: '+active.join(', ')+' · '+data.timezone:'Расписание выключено');kcScheduleStatusAt=Date.now();}catch(_){kcText('schedule-label','Статус расписания недоступен');}finally{kcScheduleStatusLoading=false;}}
     function kcSetMode(mode){kcMode=mode==='scheduled'?'scheduled':'manual';kcNode('manual-mode').hidden=kcMode!=='manual';kcNode('scheduled-mode').hidden=kcMode!=='scheduled';kcRoot.querySelectorAll('[data-kc-mode-tab]').forEach(button=>button.setAttribute('aria-pressed',button.dataset.kcModeTab===kcMode?'true':'false'));if(kcMode==='scheduled')kcScheduledLoad();else{clearTimeout(kcScheduledTimer);kcScheduleStatus(true);}}
+    function kcScheduledDate(value,options={}){if(!value)return '—';const date=new Date(value);return Number.isNaN(date.valueOf())?'—':new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',...options}).format(date);}
+    function kcScheduledStatus(item){
+      const proven=item.summary_available===true&&item.failed_count===0&&item.held_count===0&&item.unknown_pairs===0;
+      if(item.state==='partial'&&proven&&item.deferred_count>0)return {text:'Завершено с замечанием',tone:'warning'};
+      if(item.state==='complete'&&proven&&item.deferred_count===0)return {text:'Завершено',tone:'success'};
+      if(item.state==='complete')return {text:'Завершено · требуется проверка',tone:'warning'};
+      const text=item.state==='deployment_blocked'&&item.reason?.startsWith('Ожидает повторной')?'Ожидает повторной попытки':kcBatchStatus(item.state);
+      return {text,tone:['partial','failed','attention_required'].includes(item.state)||item.unknown_pairs>0||item.failed_count>0||item.held_count>0?'warning':'neutral'};
+    }
     async function kcScheduledDetail(item,box){
       box.replaceChildren(kcMake('p','kc-note','Загружаем пары…'));
       try{
         const batch=await kcGet('/manual-batches/'+encodeURIComponent(item.batch_id));
         box.replaceChildren();
-        const number=value=>value==null?'—':String(value);
-        for(const pair of batch.items){
+        const number=value=>value==null?'—':new Intl.NumberFormat('ru-RU').format(value);
+        box.append(kcMake('p','kc-note','Обычные возвраты из исключений, подтверждённые WB: '+number(item.confirmed_returned)+'. Удаление архивных фраз показано отдельно в таблице.'));
+        const pairs=[...batch.items].sort((a,b)=>Number(!!(b.error||b.review_required||b.deferred_count))-Number(!!(a.error||a.review_required||a.deferred_count)));
+        for(const pair of pairs){
           const row=kcMake('article','kc-history-item');
           row.append(kcMake('strong','',kcBatchTarget(pair)),kcMake('p','kc-note',kcBatchStatus(pair.state)+' · ключей '+number(pair.checked_total)+' · исключено '+number(pair.confirmed_excluded)+' · возвращено '+number(pair.returned)));
           if(pair.error)row.append(kcMake('p','kc-note',kcReason(pair.error)));
@@ -164,11 +175,9 @@
             button.disabled=true;
             try{
               const detail=await kcGet('/manual-batches/'+encodeURIComponent(item.batch_id)+'/items/'+pair.index);
-              const phrases=detail.run&&detail.run.phrases;
-              const list=kcMake('ul','kc-manual-list');
-              if(Array.isArray(phrases)&&phrases.length)phrases.forEach(phrase=>list.append(kcMake('li','',phrase.query+' · '+phrase.state)));
-              else list.append(kcMake('li','','Подробности ключей пока недоступны.'));
-              button.after(list);
+              const child=detail.job||{},run=detail.run||null,list=kcMake('div','');
+              kcPhraseTable(list,'scheduled:'+item.batch_id+':'+pair.index,child.scan_decisions,run&&run.phrases,!!child.write_run_id);
+              button.after(list);button.hidden=true;
             }catch(error){button.after(kcMake('p','kc-note',error.message||'Не удалось загрузить подробности.'));}
             finally{button.disabled=false;}
           });
@@ -185,32 +194,54 @@
         const active=settings.schedules.filter(row=>row.enabled).map(row=>row.time).join(', ');
         kcText('scheduled-state',active?'Включено: '+active+' · '+settings.timezone+(settings.pause_reason?' · '+settings.pause_reason:''):'Расписание выключено. Время по умолчанию: 03:45 · '+settings.timezone);
         const list=kcNode('scheduled-history');list.replaceChildren();
-        const number=value=>value==null?'—':String(value);
+        kcText('scheduled-timezone','Даты и время запусков — по часовому поясу браузера: '+Intl.DateTimeFormat().resolvedOptions().timeZone+'.');
+        const number=value=>value==null?'—':new Intl.NumberFormat('ru-RU').format(value);
         if(!result.items.length){list.append(kcMake('p','kc-note kc-empty','Запусков по расписанию пока нет.'));}
         else{
           const wrap=kcMake('div','kc-result-table-wrap'),table=kcMake('table','kc-result-table kc-daily-table');
           const head=kcMake('thead',''),headRow=kcMake('tr','');
-          for(const title of ['Дата / статус','Кампании проверено / найдено','Ключи','Исключено','Возвращено','Подробности'])headRow.append(kcMake('th','',title));
+          for(const title of ['Запуск / статус','Кампании','Ключи','Исключено','Убран архив','Отложено','Подробнее'])headRow.append(kcMake('th','',title));
           head.append(headRow);table.append(head);
           const body=kcMake('tbody','');
           for(const item of result.items){
             const row=kcMake('tr','');
-            const status=item.state==='deployment_blocked'&&item.reason?.startsWith('Ожидает повторной')?'Ожидает повторной попытки':kcBatchStatus(item.state);
-            const title=kcMake('td','',item.local_date+' · '+status);
-            title.append(kcMake('div','kc-note',kcDate(item.due_at)));
+            const status=kcScheduledStatus(item),started=item.started_at||item.due_at;
+            const title=kcMake('td','');
+            title.append(kcMake('strong','',kcScheduledDate(started,{year:'numeric',hour:undefined,minute:undefined})));
+            const timeOptions={day:undefined,month:undefined};
+            const timing=item.started_at?kcScheduledDate(item.started_at,timeOptions):'План: '+kcScheduledDate(item.due_at,timeOptions);
+            const sameDay=item.finished_at&&new Date(started).toDateString()===new Date(item.finished_at).toDateString();
+            title.append(kcMake('div','kc-note',timing+(item.finished_at?'–'+kcScheduledDate(item.finished_at,sameDay?timeOptions:{}):'')));
+            const statusNode=kcMake('div','kc-status',status.text);statusNode.dataset.tone=status.tone;title.append(statusNode);
             if(item.reason)title.append(kcMake('div','kc-note',item.reason));
-            if(item.details?.next_retry_at)title.append(kcMake('div','kc-note','Следующая попытка: '+kcDate(item.details.next_retry_at)));
-            row.append(title,kcMake('td','',number(item.checked_campaigns)+' / '+number(item.discovered_campaigns)),
-              kcMake('td','',number(item.checked_keys)),kcMake('td','',number(item.excluded)),kcMake('td','',number(item.returned)));
-            const action=kcMake('td',''),expand=kcButton('Раскрыть',()=>{
+            const issues=[];
+            if(item.failed_count>0)issues.push('Ошибок: '+number(item.failed_count));
+            if(item.held_count>0)issues.push('Приостановлено: '+number(item.held_count));
+            if(item.unknown_pairs>0)issues.push('Неполные данные по парам: '+number(item.unknown_pairs));
+            if(item.summary_available!==true)issues.push('Подтверждённый итог пока недоступен');
+            if(issues.length)title.append(kcMake('div','kc-note',issues.join(' · ')));
+            if(item.details?.next_retry_at)title.append(kcMake('div','kc-note','Следующая попытка: '+kcScheduledDate(item.details.next_retry_at)));
+            row.append(title);
+            const metric=(value,note,warning=false)=>{
+              const cell=kcMake('td','kc-daily-metric'),amount=kcMake('span',warning?'kc-daily-value kc-daily-wait':'kc-daily-value',value);
+              cell.append(amount,kcMake('div','kc-note',note));row.append(cell);
+            };
+            metric(number(item.checked_campaigns)+' / '+number(item.discovered_campaigns),'проверено / найдено');
+            metric(number(item.checked_keys),'проверено');
+            metric(number(item.confirmed_excluded),item.confirmed_excluded==null?'нет данных':'WB подтвердил');
+            metric(number(item.archived_retired),item.archived_retired==null?'нет данных':'WB подтвердил');
+            metric(number(item.deferred_count),item.deferred_count==null?'нет данных':item.deferred_count>0?'ждут статистики':'нет отложенных',item.deferred_count>0);
+            const action=kcMake('td',''),expand=kcButton('Подробнее',()=>{
               detailRow.hidden=!detailRow.hidden;
-              expand.textContent=detailRow.hidden?'Раскрыть':'Свернуть';
+              expand.textContent=detailRow.hidden?'Подробнее':'Свернуть';
+              expand.setAttribute('aria-expanded',String(!detailRow.hidden));
               if(!detailRow.hidden&&!detailBody.dataset.loaded){detailBody.dataset.loaded='1';kcScheduledDetail(item,detailBody);}
             });
-            expand.disabled=!['queued','running','retry_wait','complete','partial','failed','attention_required'].includes(item.state);
+            expand.setAttribute('aria-expanded','false');
+            expand.disabled=!item.batch_id||!['queued','running','retry_wait','complete','partial','failed','attention_required'].includes(item.state);
             action.append(expand);row.append(action);body.append(row);
             const detailRow=kcMake('tr',''),detailCell=kcMake('td',''),detailBody=kcMake('div','');
-            detailCell.colSpan=6;detailCell.append(detailBody);detailRow.append(detailCell);detailRow.hidden=true;body.append(detailRow);
+            detailCell.colSpan=7;detailRow.className='kc-daily-details';detailCell.append(detailBody);detailRow.append(detailCell);detailRow.hidden=true;body.append(detailRow);
           }
           table.append(body);wrap.append(table);list.append(wrap);
         }

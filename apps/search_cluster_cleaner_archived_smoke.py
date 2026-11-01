@@ -39,6 +39,15 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual(op['state'],'confirmed');self.assertEqual(op['dispatch_count'],1)
                 self.assertEqual(json.loads(op['versions'])['archive_retirement']['queries'],[q])
                 self.assertEqual(f.count('change_registry_facts'),3)
+                from packages.application.search_cluster_cleaner_daily import result_summary
+                batch=dict(items=[dict(advert_id=11,nm_id=101,write_run_id=op['run_id'],
+                    state='complete',stage='finished',confirmed_excluded=0,returned=0,
+                    deferred_count=0,delivery_state='confirmed')],state='complete',failed_count=0,held_count=0)
+                # Intentionally stale counters cannot produce a negative return
+                # or erase confirmed exclusions: all counts use one ledger read.
+                report=result_summary(f.app,batch)
+                self.assertEqual((report['confirmed_excluded'],report['archived_retired'],report['confirmed_returned']),(2,1,0))
+
                 f.clock.advance(30);f.start()
                 with f.worker() as (worker,_,__):worker.tick()
                 self.assertEqual(len(f.fake.writes),1)
@@ -48,6 +57,21 @@ class ArchiveTests(unittest.TestCase):
                 with f.worker() as (worker,_,__):worker.tick()
                 self.assertEqual(len(f.fake.writes),2);self.assertIn(q,f.fake.targets[11]['minus'])
                 self.assertEqual(f.rows('cleaner_manual_overrides')+f.rows('cleaner_baselines'),saved)
+
+    def test_daily_summary_keeps_confirmed_archive_in_unresolved_operation(self):
+        from packages.application.search_cluster_cleaner_daily import result_summary
+        with fixture() as f:
+            f.fake.targets[11]['archived']=['OLD'];f.fake.mode='extra'
+            f.start()
+            with f.worker() as (worker,_,__):worker.tick()
+            op=f.rows('cleaner_write_operations')[0]
+            self.assertNotEqual(op['state'],'confirmed')
+            batch=dict(items=[dict(advert_id=11,nm_id=101,write_run_id=op['run_id'],state='partial',
+                stage='finished',confirmed_excluded=2,returned=1,deferred_count=0,delivery_state='wb_pending')],
+                state='partial',failed_count=0,held_count=1)
+            report=result_summary(f.app,batch)
+            self.assertEqual((report['confirmed_excluded'],report['archived_retired'],report['confirmed_returned']),(2,1,0))
+            self.assertEqual(report['unknown_pairs'],1)
 
     def test_archive_and_override_drift_cancel_before_post(self):
         for mutation in ('reactivated','override','missing_minus','incomplete','legacy_snapshot'):
