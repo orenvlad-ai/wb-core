@@ -1,4 +1,4 @@
-"""Atomic quantity-only invoice revisions before supplier dispatch/receipt.
+"""Atomic bounded invoice revisions, including evidenced pre-dispatch history.
 
 Run on the explicitly selected runtime through production_apply_launcher.
 Source documents and payment identities are never recreated.
@@ -7,12 +7,13 @@ Source documents and payment identities are never recreated.
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import socket
 import shutil
@@ -54,7 +55,33 @@ def rows(conn, table, where, values):
     return sorted([dict(r) for r in conn.execute(f"SELECT * FROM {table} WHERE {where}", values)], key=encoded)
 
 
-def snapshot(conn, shipment_id):
+def historical_guards(conn, shipment_id):
+    """Read only this shipment's material boundaries, never same-SKU activity.
+
+    Lazy optional tables are represented as absent, rather than a zero count.
+    An absent table cannot contain a persisted boundary; no schema is created.
+    """
+    base_key = "supplier_shipment_acceptance:" + shipment_id
+    recovery_prefix = "supplier_shipment_acceptance_recovery:" + shipment_id + ":"
+    queries = (
+        ("ff_stock_operations", "source_object_id=? OR source_key=? OR substr(source_key,1,?)=?", (shipment_id, base_key, len(recovery_prefix), recovery_prefix)),
+        ("supplier_ff_cost_layers", "supplier_shipment_id=?", (shipment_id,)),
+        ("supplier_ff_cost_layer_lines", "supplier_shipment_id=?", (shipment_id,)),
+        ("ff_guided_acceptance_replays", "shipment_id=?", (shipment_id,)),
+        ("ff_pool_documents", "source_id=? AND document_kind='china_acceptance'", (shipment_id,)),
+        ("warehouse_business_operations", "source_id=? AND source_type IN ('supplier_shipment','supplier_shipment_acceptance')", (shipment_id,)),
+        ("own_capital_events", "shipment_id=? AND event_type NOT IN ('supplier_payment','cost_payment')", (shipment_id,)),
+        ("own_capital_expense_certifications", "shipment_id=? AND expenses_complete<>0", (shipment_id,)),
+    )
+    result = {}
+    for table, where, values in queries:
+        name = PREFIX + table
+        present = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+        result[table] = conn.execute(f"SELECT count(*) FROM {name} WHERE {where}", values).fetchone()[0] if present else None
+    return result
+
+
+def snapshot(conn, shipment_id, *, historical=False):
     headers = rows(conn, PREFIX + "supplier_shipments", "shipment_id=?", (shipment_id,))
     require(len(headers) == 1, "shipment-not-found")
     header = headers[0]
@@ -77,7 +104,44 @@ def snapshot(conn, shipment_id):
     protected["contract_links"] = rows(conn, PREFIX + "invoice_contract_links", "invoice_document_id=?", (document_id,))
     for link in protected["contract_links"]:
         protected["contract:" + link["contract_document_id"]] = rows(conn, PREFIX + "trade_documents", "document_id=?", (link["contract_document_id"],))
-    return {"header": header, "lines": rows(conn, PREFIX + "supplier_shipment_lines", "shipment_id=?", (shipment_id,)), "document": docs[0], "protected": protected}
+    result = {"header": header, "lines": rows(conn, PREFIX + "supplier_shipment_lines", "shipment_id=?", (shipment_id,)), "document": docs[0], "protected": protected}
+    if historical:
+        result["historical_guards"] = historical_guards(conn, shipment_id)
+    return result
+
+
+def trusted_actor():
+    # The bounded CLI has no authenticated web actor. Record its effective OS
+    # principal; a request must never supply or override this attribution.
+    return f"{pwd.getpwuid(os.geteuid()).pw_name}@{socket.gethostname()}:{os.geteuid()}"
+
+
+def business_today():
+    from packages.application.supplier_shipment_status import supplier_business_today
+    return date.fromisoformat(supplier_business_today(now=datetime.now(timezone.utc)))
+
+
+def historical_context(before, meta, supplied):
+    require(isinstance(supplied, dict) and set(supplied) == {"source_date", "effective_date", "dispatch_date", "reason", "evidence"}, "invalid-historical-revision-context")
+    context = {}
+    for key in ("source_date", "effective_date", "dispatch_date"):
+        value = supplied[key]
+        require(isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value), "invalid-historical-revision-date:" + key)
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            require(False, "invalid-historical-revision-date:" + key)
+        context[key] = value
+    for key in ("reason", "evidence"):
+        require(isinstance(supplied[key], str) and 0 < len(supplied[key].strip()) <= 4000, "missing-historical-revision-evidence:" + key)
+        context[key] = supplied[key].strip()
+    require(str(meta.get("invoice_date") or "") <= context["effective_date"] <= context["source_date"] <= context["dispatch_date"] <= business_today().isoformat(), "historical-revision-date-order-mismatch")
+    header = before["header"]
+    require(not header.get("actual_shipment_date") or header["actual_shipment_date"] == context["dispatch_date"], "historical-dispatch-date-mismatch")
+    require(not header.get("historical_status_exception") and header.get("order_status") not in {"accepted_ff", "archived"}, "historical-revision-requires-unreceived-order")
+    guards = before.get("historical_guards")
+    require(isinstance(guards, dict) and bool(guards) and all(value is None or value == 0 for value in guards.values()), "historical-revision-material-boundary-exists")
+    return {**context, "actor": trusted_actor(), "recorded_actual_shipment_date": header.get("actual_shipment_date"), "factual_date_correction_required": not bool(header.get("actual_shipment_date"))}
 
 
 def line_key(line):
@@ -87,9 +151,11 @@ def line_key(line):
     return "extra:" + re.sub(r"\s+", "", unicodedata.normalize("NFKC", line["model_raw"])).casefold()
 
 
-def candidate(before, parsed, source, source_sha):
+def candidate(before, parsed, source, source_sha, *, removed_barcodes=(), historical_pre_dispatch=None):
     header = before["header"]
-    require(not header.get("archived_at") and not header.get("actual_ff_acceptance_date") and not header.get("actual_shipment_date"), "revision-requires-unshipped-active-order")
+    require(not header.get("archived_at") and not header.get("actual_ff_acceptance_date"), "revision-requires-unshipped-active-order")
+    if historical_pre_dispatch is None:
+        require(not header.get("actual_shipment_date"), "revision-requires-unshipped-active-order")
     require(not header.get("expenses_complete"), "certified-order-requires-separate-correction")
     meta = parsed["metadata"]
     require(not parsed["errors"] and not parsed["summary"]["checksum_error"], "invalid-invoice-totals")
@@ -97,11 +163,20 @@ def candidate(before, parsed, source, source_sha):
     for key in ("contract_no", "contract_date", "currency"):
         require(meta.get(key) == header.get(key), "invoice-identity-mismatch:" + key)
     require(bool(meta.get("invoice_date")), "invoice-date-missing")
+    historical = historical_context(before, meta, historical_pre_dispatch) if historical_pre_dispatch is not None else None
     old = {line_key(x): x for x in before["lines"]}
     new = {line_key(x): x for x in parsed["lines"]}
-    require(len(old) == len(before["lines"]) and len(new) == len(parsed["lines"]) and old.keys() == new.keys(), "assortment-mismatch-or-duplicate")
+    require(len(old) == len(before["lines"]) and len(new) == len(parsed["lines"]), "assortment-mismatch-or-duplicate")
+    require(isinstance(removed_barcodes, (list, tuple)) and all(isinstance(x, str) and x for x in removed_barcodes), "invalid-removed-barcodes")
+    require(len(set(removed_barcodes)) == len(removed_barcodes), "duplicate-removed-barcode")
+    removed_keys = {"product:" + x for x in removed_barcodes}
+    require(set(old) - set(new) == removed_keys and not set(new) - set(old), "assortment-mismatch-or-duplicate")
+    require(any(x["line_type"] == "product" for x in new.values()), "revision-requires-retained-products")
+    removed_ids = [old[key]["line_id"] for key in sorted(removed_keys)]
     changes = []
     for key, item in old.items():
+        if key in removed_keys:
+            continue
         replacement = new[key]
         require(item["unit_price"] == replacement["unit_price"], "unit-price-change-not-supported")
         if replacement["line_type"] == "product":
@@ -118,7 +193,10 @@ def candidate(before, parsed, source, source_sha):
     header_updates = {k: summary[k] for k in ("product_qty_total", "product_amount_total", "extras_amount_total", "invoice_amount_total", "declared_invoice_total")}
     header_updates.update(invoice_date=meta["invoice_date"], source_filename=source.name, source_file_path=relative, source_file_sha256=source_sha, parser_version=parsed["parser_version"])
     document_updates = dict(document_date=meta["invoice_date"], amount_total=summary["invoice_amount_total"], file_original_name=source.name, file_path=relative, file_sha256=source_sha, parser_version=parsed["parser_version"], parsed_metadata_json=encoded({**meta, "supplier_name": header["supplier_name"], "invoice_amount_total": summary["invoice_amount_total"]}).decode())
-    return {"header": header_updates, "lines": changes, "document": document_updates, "file_sha256": source_sha, "file_path": relative}
+    result = {"header": header_updates, "lines": changes, "removed_line_ids": removed_ids, "document": document_updates, "file_sha256": source_sha, "file_path": relative}
+    if historical is not None:
+        result["historical_pre_dispatch"] = historical
+    return result
 
 
 def update(conn, table, id_column, identity, fields):
@@ -145,9 +223,12 @@ class SupplierInvoiceRevisionAdapter:
         require(len(content) <= 20 * 1024 * 1024, "invoice-too-large")
         sha = hashlib.sha256(content).hexdigest()
         require(sha == request["source_sha256"], "source-sha-mismatch")
+        historical = "historical_pre_dispatch" in request
+        if historical:
+            require(isinstance(request["historical_pre_dispatch"], dict), "invalid-historical-revision-context")
         with closing(connect(db)) as conn:
             conn.execute("BEGIN")
-            before = snapshot(conn, request["shipment_id"])
+            before = snapshot(conn, request["shipment_id"], historical=historical)
             require(len(rows(conn, PREFIX + "supplier_shipments", "invoice_document_id=? AND archived_at IS NULL", (before["document"]["document_id"],))) == 1, "shared-invoice-document")
         require(before["document"]["status"] == "active" and before["document"]["document_type"] == "invoice", "inactive-invoice-document")
         require(before["header"]["invoice_no"] == request["invoice_no"], "target-invoice-mismatch")
@@ -155,11 +236,14 @@ class SupplierInvoiceRevisionAdapter:
             path = (root / row[path_key]).resolve()
             require(path.is_relative_to(root) and hashlib.sha256(path.read_bytes()).hexdigest() == row[sha_key], "previous-source-file-mismatch")
         parsed = parse_supplier_invoice_xlsx(content, filename=source.name)
-        return root, db, before, candidate(before, parsed, source, sha), content
+        return root, db, before, candidate(before, parsed, source, sha, removed_barcodes=request.get("removed_barcodes", ()), historical_pre_dispatch=request.get("historical_pre_dispatch")), content
 
     def preview(self, request, operation_id):
         root, db, before, after, _ = self.plan(request)
-        return {"operation_id": operation_id, "target": request["hostname"] + ":" + str(db), "scope": {"shipment_id": request["shipment_id"], "invoice_no": request["invoice_no"], "before_quantity": before["header"]["product_qty_total"], "after_quantity": after["header"]["product_qty_total"], "before_amount": before["header"]["invoice_amount_total"], "after_amount": after["header"]["invoice_amount_total"]}, "prestate_sha256": digest(before), "candidate_sha256": digest(after), "recovery": {"before_image": str(root / "supplier_invoice_revisions" / operation_id / "before.json"), "original_invoice": before["header"]["source_file_path"], "method": "restore-exact-header-lines-document-from-before-image-then-targeted-replay"}}
+        scope = {"shipment_id": request["shipment_id"], "invoice_no": request["invoice_no"], "before_quantity": before["header"]["product_qty_total"], "after_quantity": after["header"]["product_qty_total"], "before_amount": before["header"]["invoice_amount_total"], "after_amount": after["header"]["invoice_amount_total"]}
+        if "historical_pre_dispatch" in after:
+            scope["historical_pre_dispatch"] = after["historical_pre_dispatch"]
+        return {"operation_id": operation_id, "target": request["hostname"] + ":" + str(db), "scope": scope, "prestate_sha256": digest(before), "candidate_sha256": digest(after), "recovery": {"before_image": str(root / "supplier_invoice_revisions" / operation_id / "before.json"), "original_invoice": before["header"]["source_file_path"], "method": "restore-exact-header-lines-document-from-before-image-then-targeted-replay"}}
 
     def apply(self, request, operation_id, preview):
         from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
@@ -194,11 +278,14 @@ class SupplierInvoiceRevisionAdapter:
                 with conn:
                     conn.execute("BEGIN IMMEDIATE")
                     require(self.context(request)[1] == db, "storage-generation-drift")
-                    require(digest(snapshot(conn, request["shipment_id"])) == digest(before), "transaction-prestate-drift")
+                    require(digest(snapshot(conn, request["shipment_id"], historical="historical_pre_dispatch" in after)) == digest(before), "transaction-prestate-drift")
                     supplier_before = begin_source_change(conn, [request["shipment_id"]])
                     conn.execute(f"CREATE TABLE IF NOT EXISTS {AUDIT}(operation_id TEXT PRIMARY KEY,shipment_id TEXT NOT NULL,created_at TEXT NOT NULL,prestate_json TEXT NOT NULL,candidate_json TEXT NOT NULL,queue_json TEXT NOT NULL)")
                     require(conn.execute(f"SELECT 1 FROM {AUDIT} WHERE operation_id=?", (operation_id,)).fetchone() is None, "operation-already-submitted")
                     update(conn, PREFIX + "supplier_shipments", "shipment_id", request["shipment_id"], {**after["header"], "updated_at": now})
+                    for line_id in after.get("removed_line_ids", []):
+                        count = conn.execute(f"DELETE FROM {PREFIX}supplier_shipment_lines WHERE shipment_id=? AND line_id=?", (request["shipment_id"], line_id)).rowcount
+                        require(count == 1, "removed-line-count-mismatch")
                     for line in after["lines"]:
                         update(conn, PREFIX + "supplier_shipment_lines", "line_id", line["line_id"], line["updates"])
                     update(conn, PREFIX + "trade_documents", "document_id", before["document"]["document_id"], {**after["document"], "updated_at": now})
@@ -245,13 +332,17 @@ class SupplierInvoiceRevisionAdapter:
             before = json.loads(audit["prestate_json"])
             after = json.loads(audit["candidate_json"])
             require(audit["shipment_id"] == request["shipment_id"], "readback-shipment-mismatch")
-            current = snapshot(conn, request["shipment_id"])
+            current = snapshot(conn, request["shipment_id"], historical="historical_pre_dispatch" in after)
         checks = [current["protected"] == before["protected"], hashlib.sha256((root / after["file_path"]).read_bytes()).hexdigest() == after["file_sha256"]]
+        if "historical_pre_dispatch" in after:
+            # Native continuation may create an empty lazy schema. It must not
+            # create a material boundary for this bounded source correction.
+            checks.append(all(value is None or value == 0 for value in current["historical_guards"].values()))
         for section in ("header", "document"):
             checks.append(all(current[section][k] == v for k, v in after[section].items()))
             checks.append(all(current[section][k] == v for k, v in before[section].items() if k not in after[section] and k != "updated_at"))
         by_id = {x["line_id"]: x for x in current["lines"]}
-        checks.append(set(by_id) == {x["line_id"] for x in before["lines"]})
+        checks.append(set(by_id) == {x["line_id"] for x in before["lines"]} - set(after.get("removed_line_ids", [])))
         for line in after["lines"]:
             checks.append(all(by_id.get(line["line_id"], {}).get(k) == v for k, v in line["updates"].items()))
             previous = next(x for x in before["lines"] if x["line_id"] == line["line_id"])

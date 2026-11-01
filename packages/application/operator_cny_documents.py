@@ -143,7 +143,7 @@ def read_status(block):
     """Consistent RO native records, with exact financial watermark separately."""
     from packages.application.cny_ledger import (
         CNY_LEDGER_CONTRACT_NAME, _ledger_summary, _ledger_diagnostics, _conversion_row,
-        CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE, _cny_operation_revision_payload,
+        CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE, _cny_operation_revision_payload, _supplier_advances,
     )
     from packages.application.registry_upload_db_backed_runtime import _cny_document_to_dict, _cny_ledger_operation_to_dict
     documents, operations, state, request, proof = [], [], {}, {}, None
@@ -166,7 +166,8 @@ def read_status(block):
     return {'contract_name': CNY_LEDGER_CONTRACT_NAME, 'status': 'ok',
         'summary': _ledger_summary(documents, operations, state), 'documents': documents,
         'conversions': [_conversion_row(d) for d in documents if d['document_type'] == CNY_DOCUMENT_TYPE_CONVERSION_PURCHASE and d['status'] != 'excluded'],
-        'ledger_operations': operations, 'replay': state, 'diagnostics': _ledger_diagnostics(operations, state),
+        'ledger_operations': operations, 'supplier_advances': _supplier_advances(documents, operations),
+        'replay': state, 'diagnostics': _ledger_diagnostics(operations, state),
         'account_preparation': continuation,
         'financial_authority': {'current': bool(proof), 'account_revision': request.get('revision'),
             'source_fingerprint': request.get('source_fingerprint'), 'replayed_at': proof['replayed_at'] if proof else None},
