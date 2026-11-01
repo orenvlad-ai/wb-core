@@ -2811,6 +2811,12 @@ class SupplierFinancialDocumentsBlock:
         )
 
     def _saved_document_needs_parse_refresh(self, document: Mapping[str, Any]) -> bool:
+        # These rows contain an explicitly conserved share of an immutable
+        # original. Re-reading that original as one owner's full cost would
+        # duplicate the expense. Malformed allocation evidence fails closed.
+        from packages.application.supplier_shared_document_allocation import is_allocated_document
+        if is_allocated_document(document):
+            return False
         if str(document.get("parse_status") or "") == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED:
             return False
         document_type = str(document.get("document_type") or "")

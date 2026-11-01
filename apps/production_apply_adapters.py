@@ -18,6 +18,9 @@ class Adapter(Protocol):
 
 
 _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
+    "supplier_shared_customs_allocation_v1": (
+        "apps.supplier_shared_customs_allocation", "SupplierSharedCustomsAllocationAdapter",
+    ),
     "finance_absence_publication_v1": (
         "apps.finance_absence_publication", "FinanceAbsencePublicationAdapter",
     ),
