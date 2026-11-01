@@ -1981,7 +1981,105 @@ subprocess.CalledProcessError: Command ['ssh', '{profile['operation_id']}', 'app
         expect_reason('cleaner-completion-started-owner-required', lambda: recovery.apply_recovery(CommentsClient(), value, FINGERPRINT, object()))
 
 
+def backup_capacity_fixture():
+    gib = 1024**3
+    available = 60 * gib
+    role = {'identity_ok': True, 'identity_error_fields': [], 'reserve_breached': False,
+            'required_reserve_bytes': gib, 'available_bytes': available}
+    roles = {name: deepcopy(role) for name in ('root', 'backup', 'generation', 'warehouse_backup')}
+    roles['backup'].update(reserve_breached=True, required_reserve_bytes=-1,
+                           reserve_mode='finance_next_replacement_plus_emergency')
+    alert = {'code': 'storage_reserve_breach', 'severity': 'critical', 'role': 'backup',
+             'available_bytes': available, 'required_reserve_bytes': -1,
+             'reserve_error': "Finance backup reserve evidence is not healthy: status=degraded, blockers=['last scheduled backup attempt failed']"}
+    payload = {
+        'health': {'last_failure': deepcopy(recovery.BACKUP_CAPACITY_FAILURE), 'status': 'degraded',
+                   'blockers': ['last scheduled backup attempt failed'], 'next_replacement_capacity': True,
+                   'retained_backup_id': 'finance-backup-8d7d8182cf84e0178e34', 'retained_count': 1,
+                   'age_seconds': 593000, 'rpo_seconds': 604800, 'canonical_source_bytes': 36*gib,
+                   'next_replacement_required_bytes': 44*gib + 65*1024**2, 'available_bytes': available,
+                   'canonical_source_manifest_sha256': 'sha256:'+'a'*64},
+        'storage': {'status': 'normal', 'safe_for_discretionary_root_writes': True,
+                    'unregistered_large_root_files': [], 'policy_sha256': 'sha256:'+'b'*64,
+                    'alerts': [alert], 'storage_registry': {'roles': roles, 'alerts': [deepcopy(alert)],
+                    'ok': False, 'current_root_producer_violations': [], 'unregistered_destination_violations': []}},
+        'pending_transactions': [], 'emergency_reserve_bytes': 4*gib,
+    }
+    identities = {}
+    for name in ('policy', 'selector', 'intent'):
+        unsigned = {'fixture': name}
+        fingerprint = 'sha256:' + recovery.digest(recovery.canonical_bytes(unsigned))
+        payload[name] = dict(unsigned, fingerprint=fingerprint)
+        identities[name] = fingerprint
+    return payload, identities
+
+
+def test_exact_backup_capacity_guards():
+    payload, identities = backup_capacity_fixture()
+    with patch.object(recovery, 'BACKUP_CAPACITY_IDENTITIES', identities):
+        proof = recovery.validate_backup_capacity_proof(payload)
+        assert proof['health_status'] == 'degraded' and proof['margin_bytes'] > 0
+        mutations = [
+            ('failure-not-exact', lambda p: p['health']['last_failure'].update(error='different failure')),
+            ('health-blockers', lambda p: p['health']['blockers'].append('bad restore')),
+            ('identity-drift', lambda p: p['policy'].update(fixture='tampered')),
+            ('insufficient-reserve', lambda p: p['health'].update(available_bytes=proof['required_reserve_bytes']-1)),
+            ('rpo-expired', lambda p: p['health'].update(age_seconds=604800)),
+            ('pending-transaction', lambda p: p.update(pending_transactions=['copying.json'])),
+            ('other-alerts', lambda p: p['storage']['alerts'].append({'code': 'foreign'})),
+            ('filesystem-identity', lambda p: p['storage']['storage_registry']['roles']['backup'].update(identity_ok=False)),
+            ('other-reserve', lambda p: p['storage']['storage_registry']['roles']['generation'].update(reserve_breached=True)),
+            ('capacity-basis', lambda p: p['health'].update(next_replacement_required_bytes=1)),
+        ]
+        for reason, mutate in mutations:
+            bad = deepcopy(payload); mutate(bad)
+            expect_reason('backup-capacity-'+reason, lambda: recovery.validate_backup_capacity_proof(bad))
+    source = dict(pull_request=1527, merge_sha=recovery.BACKUP_CAPACITY_MERGE_SHA,
+                  original_operation_id=recovery.BACKUP_CAPACITY_OWNER)
+    target = SimpleNamespace(target_id='wb_core_eu_hosted_runtime_active', target_dir='/opt/wb-core-runtime/app')
+    with patch.object(recovery, '_run_remote_json', side_effect=AssertionError('must not connect')):
+        expect_reason('backup-capacity-release-not-exact', lambda: recovery.collect_backup_capacity_proof(target, source, 1))
+        bad = dict(source, merge_sha=M)
+        expect_reason('backup-capacity-release-not-exact', lambda: recovery.collect_backup_capacity_proof(target, bad, recovery.BACKUP_CAPACITY_RELEASE_RUN_ID))
+    value = preview(); value['backup_capacity_proof'] = proof
+    with patch.object(recovery, 'collect_backup_capacity_proof', return_value=dict(proof, source_manifest_sha256='drift')):
+        expect_reason('backup-capacity-proof-drift', lambda: recovery.recheck_backup_capacity_proof(target, value))
+    assert not recovery.backup_capacity_case(recovery.RecoveryCase.STORAGE_TAIL, 1)
+    assert not recovery.backup_capacity_case(recovery.RecoveryCase.PREDEPENDENCY_STORAGE, recovery.BACKUP_CAPACITY_RELEASE_RUN_ID)
+
+
+def test_backup_capacity_tail_rechecks(*, fail_at=0):
+    value = preview(); value['release_run_id'] = recovery.BACKUP_CAPACITY_RELEASE_RUN_ID
+    value['existing_started_owner'] = {'owner': 'exact'}
+    calls, originals = patch_apply()
+    checks = []
+    def recheck(*args):
+        checks.append(len(checks)+1)
+        if fail_at == checks[-1]:
+            raise recovery.RecoveryError('backup-capacity-insufficient-reserve')
+        return {'stage': 'exact-historical-backup-capacity-readback'}
+    try:
+        with patch.object(recovery, 'collect_existing_started_owner', return_value=value['existing_started_owner']), \
+                patch.object(recovery, '_resume_started_deploy_protection', return_value=[]), \
+                patch.object(recovery, 'recheck_backup_capacity_proof', side_effect=recheck):
+            result = recovery.apply_recovery(CommentsClient(), value, FINGERPRINT, object())
+    finally:
+        restore_apply(originals)
+    assert 'root-readback' not in calls and 'restart' not in calls
+    if fail_at:
+        assert result['state'] == 'ambiguous' and 'completion' not in calls
+        if fail_at == 2:
+            assert 'activation' not in calls
+    else:
+        assert result['state'] == 'complete' and len(checks) == 3
+        assert calls == ['status', 'auth', 'activation', 'cleaner-probe', 'completion']
+
+
 def legacy_tail_regressions() -> None:
+    test_exact_backup_capacity_guards()
+    test_backup_capacity_tail_rechecks()
+    test_backup_capacity_tail_rechecks(fail_at=2)
+    test_backup_capacity_tail_rechecks(fail_at=3)
     for run_id in recovery.CLEANER_PROFILES:
         test_cleaner_completion_exact_evidence_and_no_replay(run_id)
     test_manual_release_full_evidence_chain()
