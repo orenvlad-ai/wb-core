@@ -185,8 +185,8 @@ def check_confirmation_diagnostics():
             assert 'secret-fixture-token' not in json.dumps(dict(row))
             if reason is None:
                 assert result['source_generation']['complete'] and row['complete'] == 1
-                # Captured from the same stable fixture on the pre-diagnostics collector.
-                assert result['source_generation']['generation_digest'] == 'sha256:4a06511b86d53c19224a1e1566c81803d17a6d8bd49c73fb145fd34c57d15009'
+                # Stable fixture under the explicit nmID/chrtID identity policy.
+                assert result['source_generation']['generation_digest'] == 'sha256:a45c85a65a9753b849c865f82d5d4cec866322a1588ef869064d46a4e3322b0c', result['source_generation']['generation_digest']
                 assert all(not p['reason_codes'] for p in saved['stock_confirmations'])
             else:
                 assert row['complete'] == 0 and result['source_generation']['complete'] is False
@@ -324,7 +324,112 @@ class CatalogSource:
         )
 
 
+
+def check_catalog_identity():
+    import json
+    from dataclasses import replace
+    from packages.application.wb_fbs_warehouse_registry import (
+        REGISTRY_RUNS_TABLE, fbs_generation_failure, _catalog_comparison, _safe_catalog_comparison)
+    baseline_digest = None
+    for mode in ('stable', 'description', 'reordered', 'local_timestamp', 'chrt_added',
+                 'chrt_removed', 'rebound', 'card_removed', 'card_added', 'local_scope', 'local_visibility', 'incomplete', 'duplicate'):
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / 'operational.sqlite3'
+            _seed(db)
+            class ChangingCatalog(CatalogSource):
+                def fetch_catalog_snapshot(self):
+                    snapshot = super().fetch_catalog_snapshot()
+                    if self.calls != 2:
+                        return snapshot
+                    cards = list(snapshot.cards)
+                    if mode == 'description':
+                        cards = [replace(c, title='changed', vendor_code='new article',
+                                         subject_name='new category', updated_at='2099-01-01',
+                                         barcodes=['new barcode']) for c in cards]
+                    elif mode == 'reordered':
+                        cards = [replace(c, chrt_ids=list(reversed(c.chrt_ids))) for c in reversed(cards)]
+                    elif mode == 'chrt_added':
+                        cards[0] = replace(cards[0], chrt_ids=[9001, 9002, 9999])
+                    elif mode == 'chrt_removed':
+                        cards[0] = replace(cards[0], chrt_ids=[9001])
+                    elif mode == 'rebound':
+                        cards[0] = replace(cards[0], chrt_ids=[9001, 9003])
+                        cards[1] = replace(cards[1], chrt_ids=[9002])
+                    elif mode == 'card_removed':
+                        cards = cards[1:]
+                    elif mode == 'card_added':
+                        cards.append(replace(cards[-1], nm_id=505, chrt_ids=[9505]))
+                    elif mode == 'duplicate':
+                        cards.append(cards[0])
+                    elif mode in ('local_timestamp', 'local_scope', 'local_visibility'):
+                        with sqlite3.connect(db) as c:
+                            if mode == 'local_timestamp':
+                                c.execute("UPDATE sheet_vitrina_v1_nomenclature_items SET updated_at='2099-01-01'")
+                            elif mode == 'local_visibility':
+                                c.execute("UPDATE sheet_vitrina_v1_nomenclature_items SET is_hidden=1 WHERE nm_id=101")
+                            else:
+                                c.execute("UPDATE sheet_vitrina_v1_nomenclature_items SET is_active=1 WHERE nm_id=404")
+                    return WbContentCatalogSnapshot.from_cards(cards, pages_fetched=1,
+                        terminal_short_page=mode != 'incomplete', cursor_chain_digest='changed-cursor')
+            result = WbFbsWarehouseRegistry(db_path=db, runtime_dir=db.parent, timestamp_factory=Clock(),
+                source=OfficialSource(), catalog_source=ChangingCatalog()).collect()
+            with sqlite3.connect(db) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(f'SELECT * FROM {REGISTRY_RUNS_TABLE} ORDER BY run_sequence DESC LIMIT 1').fetchone()
+                scope = json.loads(row['catalog_scope_json'])
+            proof = scope['generation_diagnostics']['catalog_comparison']
+            accepted = mode in ('stable', 'description', 'reordered', 'local_timestamp')
+            assert bool(row['complete']) == accepted, (mode, dict(row))
+            if accepted:
+                digest = result['source_generation']['generation_digest']
+                if baseline_digest is None:
+                    baseline_digest = digest
+                assert digest == baseline_digest, mode
+                assert proof['identity_change_count'] == 0
+            else:
+                safe = fbs_generation_failure(row)['catalog_comparison']
+                assert safe == proof, (mode, safe, proof)
+                if mode == 'local_scope':
+                    assert safe['requested_added_nm_ids'] == [404]
+                elif mode == 'local_visibility':
+                    assert safe['requested_state_changes'] == [{'nm_id': 101, 'fields': ['is_hidden']}]
+                elif mode not in ('incomplete', 'duplicate'):
+                    assert safe['identity_change_count'] > 0 and safe['changes']
+                if mode == 'incomplete':
+                    assert safe['before_complete'] and not safe['after_complete']
+                if mode == 'rebound':
+                    assert safe['changes'][0]['before_chrt_ids'] == [9001, 9002]
+                    assert safe['changes'][0]['after_chrt_ids'] == [9001, 9003]
+            if mode == 'description':
+                assert proof['description_change_count'] == 4
+                assert proof['before_source_digest'] != proof['after_source_digest']
+                assert proof['before_identity_digest'] == proof['after_identity_digest']
+                assert proof['changes'][0]['fields'] == ['title', 'vendor_code', 'subject_name', 'updated_at', 'barcodes']
+                assert 'new article' not in json.dumps(proof)
+    # Bounding evidence never bounds the actual comparison. Late identity changes
+    # must be visible even when earlier cards have description-only changes.
+    original = CatalogSource().fetch_catalog_snapshot().cards[0]
+    cards = [replace(original, nm_id=n, chrt_ids=[n]) for n in range(1, 40)]
+    changed = [replace(c, title='changed') for c in cards]
+    changed[-1] = replace(changed[-1], chrt_ids=list(range(100, 140)))
+    def snapshot(rows):
+        return WbContentCatalogSnapshot.from_cards(rows, pages_fetched=1,
+            terminal_short_page=True, cursor_chain_digest='fixture')
+    proof = _catalog_comparison(snapshot(cards), snapshot(changed), {}, {})
+    assert proof['change_count'] == 39 and proof['identity_change_count'] == 1
+    assert len(proof['changes']) == 10 and proof['changes_truncated']
+    assert proof['changes'][0]['nm_id'] == 39 and proof['changes'][0]['chrt_ids_truncated']
+    assert proof['changes'][0]['after_chrt_count'] == 40
+    assert len(proof['changes'][0]['after_chrt_ids']) == 20
+    proof['secret'] = 'Authorization=secret-fixture'
+    proof['changes'][0]['fields'].append('secret-fixture')
+    proof['before_source_digest'] = 'secret-fixture'
+    assert 'secret-fixture' not in json.dumps(_safe_catalog_comparison(proof))
+    assert _safe_catalog_comparison(None) is None
+
+
 def main() -> int:
+    check_catalog_identity()
     check_confirmation_diagnostics()
     with tempfile.TemporaryDirectory(prefix="wb-fbs-complete-snapshot-") as raw:
         db_path = Path(raw) / "operational.sqlite3"

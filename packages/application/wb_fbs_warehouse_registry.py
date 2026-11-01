@@ -58,6 +58,131 @@ FBS_FAILURE_REASONS = frozenset({
 MAX_CONFIRMATION_PROOFS = 8
 
 
+
+CATALOG_IDENTITY_POLICY = 'nm_id_chrt_id_v1'
+CATALOG_DESCRIPTION_FIELDS = ('title', 'vendor_code', 'subject_name', 'updated_at', 'barcodes')
+MAX_CATALOG_CHANGES = 10
+MAX_CATALOG_CHRT_IDS = 20
+
+
+def _catalog_identity(snapshot):
+    # Full catalog membership is still protected; presentation is evidence only.
+    return sorted(({'nm_id': card.nm_id, 'chrt_ids': sorted(card.chrt_ids)}
+                   for card in snapshot.cards), key=lambda row: (row['nm_id'] or 0, row['chrt_ids']))
+
+
+def _catalog_comparison(first, second, first_scope, second_scope):
+    before = {card.nm_id: card for card in first.cards}
+    after = {card.nm_id: card for card in second.cards}
+    changes = []
+    identity_count = description_count = 0
+    # Bounded persisted evidence, but comparison/counting covers every card.
+    for nm_id in sorted(before.keys() | after.keys(), key=lambda value: value or 0):
+        a, b = before.get(nm_id), after.get(nm_id)
+        fields = ['membership'] if a is None or b is None else []
+        old_ids, new_ids = sorted(a.chrt_ids) if a else [], sorted(b.chrt_ids) if b else []
+        if old_ids != new_ids:
+            fields.append('chrt_ids')
+        if a is not None and b is not None:
+            fields.extend(key for key in CATALOG_DESCRIPTION_FIELDS
+                          if (sorted(getattr(a, key)) if key == 'barcodes' else getattr(a, key))
+                          != (sorted(getattr(b, key)) if key == 'barcodes' else getattr(b, key)))
+        if not fields:
+            continue
+        identity = 'membership' in fields or 'chrt_ids' in fields
+        identity_count += int(identity)
+        description_count += int(any(key in CATALOG_DESCRIPTION_FIELDS for key in fields))
+        changes.append({'nm_id': nm_id, 'fields': fields, 'identity_changed': identity,
+                        'before_present': a is not None, 'after_present': b is not None,
+                        'before_chrt_ids': old_ids[:MAX_CATALOG_CHRT_IDS],
+                        'after_chrt_ids': new_ids[:MAX_CATALOG_CHRT_IDS],
+                        'before_chrt_count': len(old_ids), 'after_chrt_count': len(new_ids),
+                        'chrt_ids_truncated': max(len(old_ids), len(new_ids)) > MAX_CATALOG_CHRT_IDS})
+    # Identity changes cannot be crowded out by cosmetic changes in a large catalog.
+    changes.sort(key=lambda row: (not row['identity_changed'], row['nm_id'] or 0))
+    old_scope = set(first_scope.get('requested_nm_ids', []))
+    new_scope = set(second_scope.get('requested_nm_ids', []))
+    added, removed = sorted(new_scope - old_scope), sorted(old_scope - new_scope)
+    old_items = {r['nm_id']: r for r in first_scope.get('requested_items', [])}
+    new_items = {r['nm_id']: r for r in second_scope.get('requested_items', [])}
+    scope_changes = [{'nm_id': nm, 'fields': [key for key in ('is_active', 'is_hidden')
+                     if old_items[nm][key] != new_items[nm][key]]}
+                     for nm in sorted(old_items.keys() & new_items.keys()) if old_items[nm] != new_items[nm]]
+    return {'policy': CATALOG_IDENTITY_POLICY,
+            'before_complete': bool(first_scope.get('complete')),
+            'after_complete': bool(second_scope.get('complete')),
+            'requested_state_change_count': len(scope_changes),
+            'requested_state_changes': scope_changes[:MAX_CATALOG_CHANGES],
+            'requested_state_changes_truncated': len(scope_changes) > MAX_CATALOG_CHANGES,
+            'before_identity_digest': _fingerprint(_catalog_identity(first)),
+            'after_identity_digest': _fingerprint(_catalog_identity(second)),
+            'before_source_digest': first.source_digest, 'after_source_digest': second.source_digest,
+            'before_scope_digest': first_scope.get('scope_digest'),
+            'after_scope_digest': second_scope.get('scope_digest'),
+            'identity_change_count': identity_count, 'description_change_count': description_count,
+            'change_count': len(changes), 'changes_truncated': len(changes) > MAX_CATALOG_CHANGES,
+            'changes': changes[:MAX_CATALOG_CHANGES],
+            'requested_added_count': len(added), 'requested_removed_count': len(removed),
+            'requested_added_nm_ids': added[:MAX_CATALOG_CHANGES],
+            'requested_removed_nm_ids': removed[:MAX_CATALOG_CHANGES],
+            'requested_changes_truncated': max(len(added), len(removed)) > MAX_CATALOG_CHANGES}
+
+
+def _safe_catalog_comparison(value):
+    """Cycle receipts expose bounded IDs/field names, never arbitrary provider text."""
+    import re
+    if not isinstance(value, dict) or value.get('policy') != CATALOG_IDENTITY_POLICY:
+        return None
+    result = {'policy': CATALOG_IDENTITY_POLICY}
+    for key in ('before_identity_digest', 'after_identity_digest', 'before_source_digest',
+                'after_source_digest', 'before_scope_digest', 'after_scope_digest'):
+        v = value.get(key)
+        if isinstance(v, str) and re.fullmatch(r'sha256:[0-9a-f]{64}', v):
+            result[key] = v
+    for key in ('identity_change_count', 'description_change_count', 'change_count',
+                'requested_added_count', 'requested_removed_count', 'requested_state_change_count'):
+        v = value.get(key)
+        if type(v) is int and 0 <= v <= 2**63 - 1:
+            result[key] = v
+    for key in ('changes_truncated', 'requested_changes_truncated', 'requested_state_changes_truncated',
+                'before_complete', 'after_complete'):
+        if type(value.get(key)) is bool:
+            result[key] = value[key]
+    def ids(raw, limit):
+        return [v for v in raw[:limit] if type(v) is int and 0 < v <= 2**63 - 1] if isinstance(raw, list) else []
+    for key in ('requested_added_nm_ids', 'requested_removed_nm_ids'):
+        result[key] = ids(value.get(key), MAX_CATALOG_CHANGES)
+    result['requested_state_changes'] = []
+    raw_states = value.get('requested_state_changes')
+    for row in raw_states[:MAX_CATALOG_CHANGES] if isinstance(raw_states, list) else []:
+        if not isinstance(row, dict) or not ids([row.get('nm_id')], 1):
+            continue
+        fields = row.get('fields')
+        result['requested_state_changes'].append({'nm_id': row['nm_id'], 'fields':
+            [v for v in fields[:4] if isinstance(v, str) and v in ('is_active', 'is_hidden')]
+            if isinstance(fields, list) else []})
+    result['changes'] = []
+    raw = value.get('changes')
+    for row in raw[:MAX_CATALOG_CHANGES] if isinstance(raw, list) else []:
+        if not isinstance(row, dict):
+            continue
+        item = {}
+        for key in ('nm_id', 'before_chrt_count', 'after_chrt_count'):
+            v = row.get(key)
+            if type(v) is int and 0 <= v <= 2**63 - 1:
+                item[key] = v
+        for key in ('identity_changed', 'before_present', 'after_present', 'chrt_ids_truncated'):
+            if type(row.get(key)) is bool:
+                item[key] = row[key]
+        for key in ('before_chrt_ids', 'after_chrt_ids'):
+            item[key] = ids(row.get(key), MAX_CATALOG_CHRT_IDS)
+        fields = row.get('fields')
+        item['fields'] = [v for v in fields[:16] if isinstance(v, str)
+                          and v in (*CATALOG_DESCRIPTION_FIELDS, 'membership', 'chrt_ids')] if isinstance(fields, list) else []
+        result['changes'].append(item)
+    return result
+
+
 def _stock_confirmation_proofs(first_runs, confirmation_runs):
     """Bounded metadata only; leave source acceptance and its digests untouched."""
     proofs = []
@@ -153,7 +278,8 @@ def fbs_generation_failure(latest, reason_code='generation_incomplete'):
         'registry_run_id': run_id if isinstance(run_id, str) and re.fullmatch(r'fbsreg_[0-9a-f]{28}', run_id) else None,
         'registry_run_sequence': integer(latest.get('run_sequence')),
         'stability': stability, 'stock_confirmations': proofs,
-        'stock_confirmation_count': integer(details.get('stock_confirmation_count'))}
+        'stock_confirmation_count': integer(details.get('stock_confirmation_count')),
+        'catalog_comparison': _safe_catalog_comparison(details.get('catalog_comparison'))}
 
 
 class WbFbsWarehouseRegistryError(ValueError):
@@ -429,13 +555,12 @@ class WbFbsWarehouseRegistry:
             warehouse_scope_after = self._active_exact_warehouse_scope(
                 _normalize_official_registry(warehouses_after, offices_after)[0]
             )
+            catalog_comparison = _catalog_comparison(catalog_before, catalog_after, catalog_scope, catalog_scope_after)
             stability = {
                 "registry_stable": registry_digest == registry_after_digest,
                 "catalog_stable": (
                     str(catalog_scope.get("scope_digest") or "")
                     == str(catalog_scope_after.get("scope_digest") or "")
-                    and str(catalog_before.source_digest)
-                    == str(catalog_after.source_digest)
                 ),
                 "warehouse_scope_stable": (
                     str(warehouse_scope.get("scope_digest") or "")
@@ -510,7 +635,8 @@ class WbFbsWarehouseRegistry:
                         "generation_diagnostics": {
                             "reason_codes": sorted({code for proof in confirmation_proofs for code in proof['reason_codes']}),
                             "stock_confirmations": confirmation_proofs,
-                            "stock_confirmation_count": stock_confirmation_count}},
+                            "stock_confirmation_count": stock_confirmation_count,
+                            "catalog_comparison": catalog_comparison}},
                     "warehouse_scope": warehouse_scope,
                     "catalog_digest": str(catalog_scope.get("scope_digest") or ""),
                     "mapping_digest": str(warehouse_scope.get("scope_digest") or ""),
@@ -573,7 +699,8 @@ class WbFbsWarehouseRegistry:
             from packages.application.stock_catalog_scope import read_stock_catalog_scope
 
             query_scope = read_stock_catalog_scope(conn)
-            active_rows = query_scope["identities"]
+            active_rows = sorted(({key: row[key] for key in ("nm_id", "is_active", "is_hidden")}
+                                  for row in query_scope["identities"]), key=lambda row: row["nm_id"] or 0)
         positive_nm_ids = set(query_scope["nm_ids"])
         cards_by_nm: dict[int, list[Any]] = {}
         for card in snapshot.cards:
@@ -615,8 +742,9 @@ class WbFbsWarehouseRegistry:
         scope_material = {
             "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
             "query_scope_policy": query_scope["policy"],
+            "identity_policy": CATALOG_IDENTITY_POLICY,
             "active_scope": active_rows,
-            "catalog_snapshot_digest": snapshot.source_digest,
+            "catalog_identity_digest": _fingerprint(_catalog_identity(snapshot)),
             "mapping": [
                 {"chrt_id": chrt_id, "nm_id": exact[chrt_id]}
                 for chrt_id in sorted(exact)
@@ -633,6 +761,9 @@ class WbFbsWarehouseRegistry:
             "terminal_short_page": snapshot.terminal_short_page,
             "cursor_chain_digest": snapshot.cursor_chain_digest,
             "catalog_snapshot_digest": snapshot.source_digest,
+            "identity_policy": CATALOG_IDENTITY_POLICY,
+            "requested_nm_ids": sorted(positive_nm_ids),
+            "requested_items": active_rows,
             "active_scope_digest": _fingerprint(active_rows),
             "mapping_digest": _fingerprint(scope_material["mapping"]),
             "scope_digest": _fingerprint(scope_material),
