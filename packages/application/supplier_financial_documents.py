@@ -200,6 +200,7 @@ def build_supplier_payment_readiness(
     posted_documents: list[dict[str, Any]] = []
     seen: set[str] = set()
     derived_paid = Decimal("0")
+    allocation_invalid = False
     for raw in cny_documents:
         document = dict(raw)
         if str(document.get("document_type") or "") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT:
@@ -224,14 +225,22 @@ def build_supplier_payment_readiness(
             continue
         seen.add(identity)
         posted_documents.append(document)
+        from packages.application.cny_ledger import supplier_payment_allocation
+        try:
+            allocation = supplier_payment_allocation(document)
+        except ValueError:
+            allocation_invalid = True
+            continue
         derived_paid += abs(
-            _parse_decimal(document.get("cny_amount") or document.get("amount"))
+            _parse_decimal(allocation["settlement_cny"] if allocation else (document.get("cny_amount") or document.get("amount")))
             or Decimal("0")
         )
 
     header_paid = _parse_decimal(shipment.get("cny_paid_amount"))
     confirmed_paid = max(Decimal("0"), header_paid or Decimal("0"), derived_paid)
     blockers: list[dict[str, str]] = []
+    if allocation_invalid:
+        blockers.append({"code": "supplier_payment_allocation_invalid", "reason_ru": "Не подтверждено распределение оплаты и переплаты поставщику."})
     if invoice_total is None or invoice_total <= Decimal("0"):
         blockers.append(
             {"code": "invoice_total_missing", "reason_ru": "Не подтверждена сумма invoice."}
@@ -3797,7 +3806,13 @@ def parse_financial_document_text(
     elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT:
         normalized, expense_lines, parser_warnings = _parse_bank_control_statement(text)
     elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION:
-        normalized, expense_lines, parser_warnings = _parse_bank_transfer_application(normalized_text)
+        if _looks_like_vtb_0401060(normalized_text):
+            try:
+                normalized, expense_lines, parser_warnings = _parse_vtb_0401060_transfer(normalized_text)
+            except ValueError as exc:
+                return _parsed_payload(normalized={}, expense_lines=[], raw_parse=raw_parse, warnings=[], errors=[str(exc)])
+        else:
+            normalized, expense_lines, parser_warnings = _parse_bank_transfer_application(normalized_text)
     elif document_type == FINANCIAL_DOCUMENT_TYPE_BANK_FEE_STATEMENT:
         normalized, expense_lines, parser_warnings = _parse_vtb_bank_fee_statement(normalized_text)
     else:
@@ -3862,6 +3877,8 @@ def classify_financial_document(text: str, *, filename: str = "") -> dict[str, A
         return {"status": "classified", "document_type": FINANCIAL_DOCUMENT_TYPE_CUSTOMS_DECLARATION, "reasons": ["customs declaration structure"], "warnings": []}
     if "ведомость банковского контроля по контракту" in haystack:
         return {"status": "classified", "document_type": FINANCIAL_DOCUMENT_TYPE_BANK_CONTROL_STATEMENT, "reasons": ["bank control statement title"], "warnings": []}
+    if _looks_like_vtb_0401060(text):
+        return {"status": "classified", "document_type": FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION, "reasons": ["original VTB 0401060 payment order"], "warnings": []}
     if "заявление" in haystack and "на перевод" in haystack:
         return {"status": "classified", "document_type": FINANCIAL_DOCUMENT_TYPE_BANK_TRANSFER_APPLICATION, "reasons": ["transfer application structure"], "warnings": []}
     return {
@@ -5880,6 +5897,71 @@ def _parse_bank_control_statement(text: str) -> tuple[dict[str, Any], list[dict[
         },
     )
     return normalized, [], warnings
+
+
+def _looks_like_vtb_0401060(text: str) -> bool:
+    return bool(re.search(r"\b0401060\b", text) and re.search(r"ПЛАТ[ЕЁ]ЖНОЕ\s+ПОРУЧЕНИЕ", text, re.I) and re.search(r"VTB|ВТБ", text, re.I))
+
+
+def _parse_vtb_0401060_transfer(text: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+    """Read the original VTB currency payment order, with no synthetic SWIFT text.
+
+    Fail closed for incomplete/ambiguous evidence. This supported form uses a
+    Russian amount-in-words currency plus currency-coded Russian bank accounts.
+    """
+    def one(pattern, label, flags=re.I | re.M):
+        found = re.findall(pattern, text, flags)
+        unique = set(found)
+        if len(found) != 1 or len(unique) != 1:
+            raise ValueError('VTB 0401060 missing or ambiguous ' + label)
+        return found[0]
+    if len(re.findall(r"\b0401060\b", text)) != 1 or len(re.findall(r"ПЛАТ[ЕЁ]ЖНОЕ\s+ПОРУЧЕНИЕ", text, re.I)) != 1:
+        raise ValueError('VTB 0401060 requires exactly one original payment order')
+    if not re.search(r"(?m)^\s*ИСПОЛНЕНО\s*$", text) or re.search(r"НЕ\s+ИСПОЛНЕНО|ОТМЕН[ЕЁ]Н|ОТКАЗ|ОЖИДА", text, re.I):
+        raise ValueError('VTB 0401060 is not proven executed')
+    if not re.search(r"китайских\s+юан", text, re.I) or re.search(r"\bRUB\b|рубл|российских\s+руб|Сумма\s+прописью[^\n]*руб", text, re.I):
+        raise ValueError('VTB 0401060 requires unambiguous CNY amount in words')
+    # The PDF text layer can put the date immediately before the order number.
+    header = re.search(r"ПЛАТ[ЕЁ]ЖНОЕ\s+ПОРУЧЕНИЕ\s*№(.*?)(?=Сумма)", text, re.I | re.S)
+    if not header:
+        raise ValueError('VTB 0401060 missing payment order header')
+    block = header[1]
+    dates = re.findall(r"\d{2}\.\d{2}\.\d{4}", block)
+    numbers = re.findall(r"\d+", re.sub(r"\d{2}\.\d{2}\.\d{4}", ' ', block))
+    if len(dates) != 1 or len(numbers) != 1:
+        raise ValueError('VTB 0401060 missing or ambiguous order number/date')
+    date = _parse_date(dates[0])
+    execution_date = _parse_date(one(r"(?m)^\s*(\d{1,2}\s+[А-Яа-я]+\s+\d{4})\s*$", 'execution date'))
+    if not date or execution_date != date:
+        raise ValueError('VTB 0401060 execution date differs from payment order date')
+    amount = _parse_decimal(one(r"\bСумма[ \t]+([\d][\d \u00a0\u202f]*[.,]\d{2})(?!\d)", 'transfer amount'))
+    if amount is None or amount <= 0:
+        raise ValueError('VTB 0401060 transfer amount must be positive')
+    if not re.search(r'VTB\s+BANK\s*\(PJSC\)\s+SHANGHAI\s+BRANCH', text, re.I):
+        raise ValueError('VTB 0401060 missing beneficiary bank identity')
+    accounts = list(dict.fromkeys(re.findall(r"\b(\d{20})\b", text)))
+    debit = [a for a in accounts if a.startswith('40802') and a[5:8] == '156']
+    beneficiary_accounts = [a for a in accounts if a.startswith('40807') and a[5:8] == '156']
+    if len(debit) != 1 or len(beneficiary_accounts) != 1 or len(accounts) != 2:
+        raise ValueError('VTB 0401060 requires unique CNY debit and beneficiary accounts')
+    beneficiary = one(r"^[ \t]*([A-Z][A-Z0-9 &.,()\'/+-]*CO\.,?[ \t]*LTD)[ \t]*$", 'beneficiary', flags=re.M)
+    payer = one(r"^\s*(IE\s+[^\n]+?)(?=\s{2,}Сумма|$)", 'ordering customer')
+    contract_number, contract_date_raw = one(r"CONTRACT\s+([A-Z0-9/-]+)\s+DD\s+(\d{2}\.\d{2}\.\d{4})", 'contract')
+    contract_date = _parse_date(contract_date_raw)
+    if not contract_date:
+        raise ValueError('VTB 0401060 invalid contract date')
+    details = one(r"^\s*(CONTRACT[^\n]+)\s*$", 'payment details')
+    normalized = {'document_number': numbers[0], 'transfer_application_number': numbers[0], 'document_date': date,
+        'execution_status': 'ИСПОЛНЕНО', 'execution_time': execution_date, 'execution_date': execution_date,
+        'currency': 'CNY', 'transfer_amount': _decimal_to_float(amount), 'total_amount': _decimal_to_float(amount),
+        'debit_account': debit[0], 'ordering_customer': payer.strip(), 'beneficiary_customer': beneficiary.strip(),
+        'beneficiary_account': beneficiary_accounts[0], 'beneficiary_bank': 'VTB BANK (PJSC) SHANGHAI BRANCH',
+        'beneficiary_bank_swift_bic': one(r"\b(VTBRCNSH[A-Z0-9]{3})\b", 'beneficiary bank BIC'),
+        'vendor': beneficiary.strip(), 'contract_ref': 'CONTRACT '+contract_number+' DD '+contract_date_raw,
+        'contract_number': contract_number, 'contract_date': contract_date, 'payment_details': details.strip(),
+        'source_document_format': 'original_vtb_0401060_executed_currency_payment_order',
+        'execution_datetime_precision': 'date_only', 'bank': 'ВТБ'}
+    return normalized, [], []
 
 
 def _parse_bank_transfer_application(text: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
