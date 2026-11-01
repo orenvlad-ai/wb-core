@@ -635,7 +635,10 @@ apply its four GET-only nginx allowlist routes, verify authentication and isolat
 reads, then set `SUPPLIER_VIEW_ENABLED=1` for the main web shell. It then opens the
 independent supply shell. Other supply modes return to the existing operator page.
 Until that flag is set the normal shell keeps its existing entry path. Rollback
-removes the flag first; no data migration or reverse data write is required.
+sets the main unit flag to `0` and restarts the main service first, then stops
+and disables the viewer before returning to code without its infrastructure
+classification. Removing the viewer from the managed list alone does not stop
+it. No data migration or reverse data write is required.
 The Europe hosted target explicitly enables the service and flag through the
 normal release adapter after server-side query-only validation. The application
 default remains off for other targets. The managed service is restarted and
