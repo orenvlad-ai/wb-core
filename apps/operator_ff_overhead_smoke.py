@@ -97,6 +97,204 @@ class AcceptanceTests(unittest.TestCase):
         with sqlite3.connect(self.runtime.db_path) as conn:
             conn.execute(f"UPDATE {TARGETED_RECALC_QUEUE_TABLE} SET status='complete',economics_status='complete',finance_status='complete'")
 
+    def hold_for_cancellation(self):
+        from apps.business_data_maintenance_pause_smoke import fixture
+        from packages.application import business_data_maintenance_pause as pause
+        systemd, activity = fixture(self.root)
+        proc = self.root / 'empty-proc'
+        proc.mkdir(exist_ok=True)
+        self.enterContext(patch.object(pause, '_cron_entries', return_value=[]))
+        options = dict(window_id='expense-cancel-fixture', actor='fixture', reason='scope correction',
+            systemd=systemd, activity_reader=activity, proc_root=proc)
+        pause.pause(self.root, **options)
+        self.cancel_options = dict(maintenance_window_id=options['window_id'], systemd=systemd,
+            activity_reader=activity, proc_root=proc)
+        self.pause_options = options
+
+    def cancel(self, *identities, **overrides):
+        with operations.readonly(self.runtime.db_path) as conn:
+            candidates = [dict(request_id=identity, source_digest=conn.execute(
+                f'SELECT source_digest FROM {operations.TABLE} WHERE request_id=?', (identity,)).fetchone()[0]) for identity in identities]
+        return operations.cancel_sources(self.runtime.db_path, self.root, candidates,
+            **{**self.cancel_options, 'cancellation_id':'cancel-cohort-fixture', 'actor':'fixture',
+               'reason':'deferred or corrected scope', 'now':self.stamp(), **overrides})
+
+    def resume_after_cancellation(self):
+        from packages.application import business_data_maintenance_pause as pause
+        pause.resume(self.root, **self.pause_options)
+
+    def test_cancellation_is_exact_atomic_durable_and_native_terminal(self):
+        from packages.application.operator_operations import journal
+        a = self.preview(request_id='cancel-a', scope='FBO')['request_id']
+        b = self.preview(request_id='keep-b-fixture', scope='FBS', amount_rub='91')['request_id']
+        for identity in (a,b): self.surface.confirm_document(identity)
+        with operations.readonly(self.runtime.db_path) as conn:
+            original = dict(conn.execute(f'SELECT * FROM {operations.TABLE} WHERE request_id=?', (a,)).fetchone())
+        self.hold_for_cancellation()
+        first = self.cancel(a)[0]
+        self.assertEqual(first['state'], 'cancelled')
+        self.assertIsNone(first['document'])
+        self.assertEqual(self.cancel(a, now='2026-09-09T14:00:00Z')[0], first)
+        with operations.readonly(self.runtime.db_path) as conn:
+            self.assertEqual(dict(conn.execute(f'SELECT * FROM {operations.TABLE} WHERE request_id=?', (a,)).fetchone()), original)
+            with self.assertRaisesRegex(ValueError, 'confirmed_overhead_day_pending'):
+                operations.assert_day_can_close(conn, '2026-09-08')
+        self.assertEqual(next(i for i in journal(self.runtime.db_path)['items'] if i['operation_id']==a)['state'], 'cancelled')
+        self.assertEqual(self.surface.request_status(a)['state'], 'cancelled')
+        self.assertFalse(self.surface.request_status(a)['confirm_allowed'])
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, 'immutable'):
+                conn.execute(f"UPDATE {operations.CANCELLATIONS} SET reason='rewrite' WHERE request_id=?", (a,))
+            with self.assertRaisesRegex(sqlite3.IntegrityError, 'immutable'):
+                conn.execute(f"UPDATE {REQUESTS_TABLE} SET request_payload_json='{{}}' WHERE request_id=?", (a,))
+        with self.assertRaisesRegex(ValueError, 'другими параметрами'):
+            self.cancel(a, reason='different command')
+        self.resume_after_cancellation()
+        posted = self.service.post(a)
+        self.assertEqual(posted['error']['code'], 'overhead_confirmation_cancelled')
+        self.assertEqual(self.drain()['processed_count'], 1)
+        self.assertEqual(self.counts(), (2,1))
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,a)['state'],'cancelled')
+        with operations.readonly(self.runtime.db_path) as conn:
+            operations.assert_day_can_close(conn, '2026-09-08')
+
+    def test_cancellation_requires_held_quiet_exact_window_and_free_posting_owner(self):
+        import fcntl
+        from packages.application.warehouse_functional_lock import WarehouseFunctionalBusyError
+        a = self.preview()['request_id']; self.surface.confirm_document(a)
+        self.hold_for_cancellation()
+        with self.assertRaisesRegex(RuntimeError, 'exact held'):
+            self.cancel(a, maintenance_window_id='other-window')
+        with (self.root/'.ff-pool-document-posting.lock').open('a+b') as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            with self.assertRaises(WarehouseFunctionalBusyError): self.cancel(a)
+        systemd = self.cancel_options['systemd']
+        timer = next(iter(systemd.states))
+        systemd.states[timer]['is_active'] = 'active'
+        with self.assertRaisesRegex(RuntimeError, 'not drained'): self.cancel(a)
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,a)['state'], 'accepted')
+
+    def test_cancellation_refuses_entire_cohort_if_one_posted_or_fingerprint_drifted(self):
+        a = self.preview(request_id='posted-a')['request_id']; self.surface.confirm_document(a)
+        self.drain()
+        b = self.preview(request_id='unposted-b',amount_rub='91')['request_id']; self.surface.confirm_document(b)
+        self.hold_for_cancellation()
+        with self.assertRaisesRegex(ValueError, 'Проведение уже начато'): self.cancel(a,b)
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,b)['state'],'accepted')
+        with self.assertRaisesRegex(ValueError, 'Источник отмены'):
+            operations.cancel_sources(self.runtime.db_path,self.root,[dict(request_id=b,source_digest='sha256:wrong')],
+                **self.cancel_options,cancellation_id='wrong-digest',actor='fixture',reason='fixture',now=self.stamp())
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f'SELECT count(*) FROM {operations.CANCELLATIONS}').fetchone()[0],0)
+
+    def test_cancelled_pdf_scope_replacement_preserves_payment_and_posts_once(self):
+        from packages.application.ff_pool_documents import OVERHEAD_PAYMENT_EVIDENCE_TABLE, _active_overhead_payment_request
+        source = _render_pdf(_fixture('wb_bank_0401060.txt'),title='scope-correction',x_offset=0)
+        a = self.surface.accept_pool_overhead_preview({**self.payload,'amount_rub':''}, actor='fixture',
+            source_bytes=source,filename='original.pdf',content_type='application/pdf')['request_id']
+        self.surface.confirm_document(a)
+        with operations.readonly(self.runtime.db_path) as conn:
+            original = dict(conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(a,)).fetchone())
+            digest = conn.execute(f'SELECT source_digest FROM {operations.TABLE} WHERE request_id=?',(a,)).fetchone()[0]
+            payment = dict(conn.execute(f'SELECT * FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE}').fetchone())
+        args=dict(source_digest=digest,cancellation_id='cancel-cohort-fixture',replacement_id='replacement-fixture',
+            actor='fixture',reason='receipt wholly FBS',timestamp_factory=self.stamp)
+        with self.assertRaisesRegex(ValueError, 'точный отменённый'):
+            operations.replace_cancelled_scope_with_fbs(self.runtime.db_path,self.root,a,**args)
+        self.hold_for_cancellation(); self.cancel(a)
+        from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+        with self.assertRaises(MaintenanceAdmissionBlocked):
+            operations.replace_cancelled_scope_with_fbs(self.runtime.db_path,self.root,a,**args)
+        self.resume_after_cancellation()
+        b=operations.replace_cancelled_scope_with_fbs(self.runtime.db_path,self.root,a,**args)['request_id']
+        self.assertNotEqual(a,b)
+        self.assertEqual(operations.replace_cancelled_scope_with_fbs(self.runtime.db_path,self.root,a,**args)['request_id'],b)
+        self.assertTrue(self.surface.request_status(b)['confirm_allowed'])
+        with self.assertRaisesRegex(ValueError,'другими параметрами'):
+            operations.replace_cancelled_scope_with_fbs(self.runtime.db_path,self.root,a,**{**args,'reason':'different'})
+        with operations.readonly(self.runtime.db_path) as conn:
+            replaced=dict(conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(b,)).fetchone())
+            self.assertEqual(replaced['source_file_blob'],original['source_file_blob'])
+            self.assertEqual(replaced['source_sha256'],original['source_sha256'])
+            old_manifest=json.loads(original['request_payload_json']); new_manifest=json.loads(replaced['request_payload_json'])
+            self.assertEqual(new_manifest,{**old_manifest,'scope':'FBS'})
+            self.assertEqual(dict(conn.execute(f'SELECT * FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE}').fetchone()),payment)
+            self.assertEqual(_active_overhead_payment_request(conn,payment['request_id']),b)
+        repeated=self.surface.accept_pool_overhead_preview({**self.payload,'request_id':'duplicate-upload','scope':'FBS','amount_rub':''},actor='fixture',
+            source_bytes=source,filename='renamed.pdf',content_type='application/pdf')
+        self.assertEqual(repeated['request_id'],b)
+        self.surface.confirm_document(b)
+        self.drain(); self.drain()
+        self.assertEqual(self.counts(),(2,1))
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,a)['state'],'cancelled')
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,b)['replacement']['predecessor_request_id'],a)
+        with operations.readonly(self.runtime.db_path) as conn:
+            domains=[json.loads(r[0])['domain'] for r in conn.execute(f'SELECT posted_manifest_json FROM {DOCUMENTS_TABLE}')]
+            self.assertEqual([d['scope'] for d in domains],['FBS'])
+
+    def test_cancelled_scope_replacement_can_renew_unconfirmed_on_next_day(self):
+        # Upgrade an existing database that still owns the old renewal trigger.
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            sql=conn.execute("SELECT sql FROM sqlite_master WHERE name='ff_pool_overhead_payment_renewal_source_guard'").fetchone()[0]
+            start=sql.index('OR EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_overhead_replacements')
+            end=sql.index('AND predecessor.business_date=NEW.previous_business_date',start)
+            legacy=sql[:start]+')\n              '+sql[end:]
+            conn.execute('DROP TRIGGER ff_pool_overhead_payment_renewal_source_guard')
+            conn.execute(legacy)
+        FfPoolDocumentService(db_path=self.runtime.db_path,runtime_dir=self.root,resume=False,timestamp_factory=self.stamp)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            self.assertIn('ff_pool_overhead_replacements',conn.execute("SELECT sql FROM sqlite_master WHERE name='ff_pool_overhead_payment_renewal_source_guard'").fetchone()[0])
+        source = _render_pdf(_fixture('wb_bank_0401060.txt'),title='next-day-scope',x_offset=0)
+        a = self.surface.accept_pool_overhead_preview({**self.payload,'amount_rub':''},actor='fixture',
+            source_bytes=source,filename='source.pdf',content_type='application/pdf')['request_id']
+        self.surface.confirm_document(a)
+        with operations.readonly(self.runtime.db_path) as conn:
+            digest=conn.execute(f'SELECT source_digest FROM {operations.TABLE} WHERE request_id=?',(a,)).fetchone()[0]
+        self.hold_for_cancellation(); self.cancel(a); self.resume_after_cancellation()
+        b=operations.replace_cancelled_scope_with_fbs(self.runtime.db_path,self.root,a,source_digest=digest,
+            cancellation_id='cancel-cohort-fixture',replacement_id='nextday-replacement',actor='fixture',
+            reason='FBS correction',timestamp_factory=self.stamp)['request_id']
+        self.now += timedelta(days=1)
+        c=self.surface.accept_pool_overhead_preview({**self.payload,'request_id':'nextday-upload','amount_rub':'','scope':'FBS'},actor='fixture',
+            source_bytes=source,filename='source.pdf',content_type='application/pdf')['request_id']
+        self.assertNotEqual(b,c)
+        self.assertTrue(self.surface.request_status(c)['confirm_allowed'])
+        self.assertEqual(self.surface.request_status(c)['business_date'],'2026-09-09')
+        self.surface.confirm_document(c); self.drain()
+        self.assertEqual(self.counts(),(2,1))
+
+    def test_cancellation_winning_after_drain_selection_prevents_stale_post(self):
+        a=self.preview()['request_id']; self.surface.confirm_document(a)
+        self.hold_for_cancellation()
+        original_readonly=operations.readonly
+        fired=False
+        fixture=self
+        class Selection:
+            def __init__(self, conn): self.conn=conn
+            def __getattr__(self,name): return getattr(self.conn,name)
+            def close(self):
+                nonlocal fired
+                self.conn.close()
+                if not fired:
+                    fired=True
+                    fixture.cancel(a)
+        def selected(db_path): return original_readonly(db_path) if fired else Selection(original_readonly(db_path))
+        with patch.object(operations,'readonly',side_effect=selected):
+            self.assertEqual(self.drain()['processed_count'],0)
+        self.assertTrue(fired)
+        self.assertEqual(self.counts(),(1,0))
+        with operations.readonly(self.runtime.db_path) as conn:
+            operations.assert_day_can_close(conn,'2026-09-08')
+
+    def test_legacy_confirmation_database_without_cancellation_schema_still_blocks_closure(self):
+        a=self.preview()['request_id']; self.surface.confirm_document(a)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.execute(f'DROP TABLE {operations.CANCELLATIONS}')
+        with operations.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(ValueError,'confirmed_overhead_day_pending'):
+                operations.assert_day_can_close(conn,'2026-09-08')
+        self.assertEqual(operations.read_acceptance(self.runtime.db_path,a)['state'],'accepted')
+
     def test_preview_is_not_journal_acceptance_and_failed_allocation_does_not_block_source(self):
         from packages.application.fbs_overhead_presentation import OverheadAccountingView
         preview = self.preview()
@@ -580,11 +778,18 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(self.counts(),(1,1))
 
     def test_journal_bounds_missing_schema_and_inherited_section_permissions(self):
-        from packages.adapters.registry_upload_http_entrypoint import _user_can_access_path, _required_section_for_path
+        from packages.adapters.registry_upload_http_entrypoint import _user_can_access_path, _required_section_for_path, _operator_domains_for_user
+        from packages.application import operator_operations as common
         route='/v1/sheet-vitrina-v1/operations'
         self.assertEqual(_required_section_for_path(route),'supply')
-        self.assertFalse(_user_can_access_path({'role':'operator','allowed_sections':['vitrina']},route))
+        limited={'role':'operator','allowed_sections':['vitrina']}
+        # The shared journal is accessible across domains; rows/exact reads retain native grants.
+        self.assertTrue(_user_can_access_path(limited,route))
+        self.assertNotIn('ff_pool_document',_operator_domains_for_user(limited))
         self.assertTrue(_user_can_access_path({'role':'operator','allowed_sections':['supply']},route))
+        preview=self.preview(); self.surface.confirm_document(preview['request_id'])
+        self.assertEqual(common.journal(self.runtime.db_path,allowed_domains=_operator_domains_for_user(limited))['total'],0)
+        self.assertIsNone(common.read_acceptance(self.runtime.db_path,preview['request_id'],allowed_domains=_operator_domains_for_user(limited)))
         for page,limit in ((0,25),(1,101),(True,25)):
             with self.assertRaises(ValueError): operations.journal(self.runtime.db_path,page=page,limit=limit)
         bare=self.root/'bare.sqlite3'
@@ -771,9 +976,12 @@ class NativeCompletionTests(unittest.TestCase):
             p=accounting.current_publication_receipt(self.runtime,now=self.now)
             return dict(status='published',version=p['accounting_version'])
         actual_publication=accounting.current_publication_receipt
+        # This fixture owns source/posting/dated publication and T1 finalization;
+        # bounded background rotation has its own real-schema smoke coverage.
         with heavy_admitted(self.root,operation='cycle'),warehouse_functional_job_lock(self.root) as owner, \
              patch.object(accounting,'current_publication_receipt',side_effect=lambda runtime,now=None:actual_publication(runtime,now=now or self.now)), \
              patch.object(accounting,'refresh',side_effect=refresh), \
+             patch('packages.application.warehouse_recovery_sync_retention.run_bounded_recovery_retention',return_value={'status':'ready'}), \
              patch('packages.application.operator_warehouse_documents.drain',return_value={'request_ids':[]}), \
              patch('packages.application.operator_warehouse_documents.reconcile',return_value={'processed_count':0}), \
              patch('packages.application.operator_fulfillment_services.reconcile',return_value={'processed_count':0}):

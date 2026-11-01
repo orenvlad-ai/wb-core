@@ -5,7 +5,7 @@ posting and dated accounting publication remain separately evidenced effects.
 """
 from __future__ import annotations
 
-from contextlib import closing, nullcontext
+from contextlib import closing, nullcontext, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -13,10 +13,12 @@ from pathlib import Path
 import sqlite3
 
 TABLE = "sheet_vitrina_v1_ff_pool_overhead_confirmations"
+CANCELLATIONS = "sheet_vitrina_v1_ff_pool_overhead_cancellations"
+REPLACEMENTS = "sheet_vitrina_v1_ff_pool_overhead_replacements"
 PREFIX = "/v1/sheet-vitrina-v1/operations"
 NATIVE = "/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/requests/"
 COMPLETION_REQUEST_COLUMNS = 'request_id,document_kind,request_payload_json,idempotency_epoch,business_date,source_revision,source_sha256,request_identity,posted_document_id,posted_manifest_sha256,actor,recovery_operation_id'
-STATES = ("accepted", "processing", "completed", "delayed", "needs_attention")
+STATES = ("accepted", "processing", "completed", "delayed", "needs_attention", "cancelled")
 
 
 def ensure_schema(conn):
@@ -33,6 +35,71 @@ def ensure_schema(conn):
             receipt_json TEXT NOT NULL DEFAULT '{{}}' CHECK(json_valid(receipt_json))
         );
         CREATE INDEX IF NOT EXISTS ff_overhead_confirmations_by_time ON {TABLE}(accepted_at,request_id);
+        CREATE TABLE IF NOT EXISTS {CANCELLATIONS}(
+            request_id TEXT PRIMARY KEY REFERENCES {TABLE}(request_id),
+            cancellation_id TEXT NOT NULL,
+            command_digest TEXT NOT NULL,
+            source_digest TEXT NOT NULL,
+            cancelled_at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            maintenance_window_id TEXT NOT NULL,
+            native_state_before TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS ff_overhead_cancellations_by_operation ON {CANCELLATIONS}(cancellation_id);
+        CREATE TRIGGER IF NOT EXISTS ff_overhead_cancellation_no_update
+        BEFORE UPDATE ON {CANCELLATIONS}
+        BEGIN SELECT RAISE(ABORT,'FF overhead cancellation is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_overhead_cancellation_no_delete
+        BEFORE DELETE ON {CANCELLATIONS}
+        BEGIN SELECT RAISE(ABORT,'FF overhead cancellation is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_overhead_cancellation_unposted_guard
+        BEFORE INSERT ON {CANCELLATIONS}
+        WHEN NOT EXISTS(SELECT 1 FROM {TABLE} c
+            JOIN sheet_vitrina_v1_ff_pool_document_requests r USING(request_id)
+            WHERE c.request_id=NEW.request_id AND c.source_digest=NEW.source_digest
+              AND r.document_kind='pool_overhead' AND r.state IN ('accepted','ready','blocked','error')
+              AND r.posted_document_id='' AND r.posted_at='' AND r.posted_manifest_sha256='' AND r.recovery_operation_id=''
+              AND NOT EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_documents d WHERE d.request_id=r.request_id))
+        BEGIN SELECT RAISE(ABORT,'FF overhead cancellation requires an exact unposted source'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_overhead_cancelled_cannot_post
+        BEFORE INSERT ON sheet_vitrina_v1_ff_pool_documents
+        WHEN EXISTS(SELECT 1 FROM {CANCELLATIONS} WHERE request_id=NEW.request_id)
+        BEGIN SELECT RAISE(ABORT,'cancelled FF overhead cannot post'); END;
+        CREATE TABLE IF NOT EXISTS {REPLACEMENTS}(
+            predecessor_request_id TEXT PRIMARY KEY REFERENCES {CANCELLATIONS}(request_id),
+            successor_request_id TEXT NOT NULL UNIQUE REFERENCES sheet_vitrina_v1_ff_pool_document_requests(request_id),
+            anchor_request_id TEXT NOT NULL,
+            replacement_id TEXT NOT NULL UNIQUE,
+            command_digest TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            CHECK(predecessor_request_id<>successor_request_id)
+        );
+        CREATE TRIGGER IF NOT EXISTS ff_overhead_replacement_no_update
+        BEFORE UPDATE ON {REPLACEMENTS}
+        BEGIN SELECT RAISE(ABORT,'FF overhead replacement is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_overhead_replacement_no_delete
+        BEFORE DELETE ON {REPLACEMENTS}
+        BEGIN SELECT RAISE(ABORT,'FF overhead replacement is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_overhead_replacement_source_guard
+        BEFORE INSERT ON {REPLACEMENTS}
+        WHEN NOT EXISTS(SELECT 1 FROM {CANCELLATIONS} c
+            JOIN sheet_vitrina_v1_ff_pool_document_requests p ON p.request_id=c.request_id
+            JOIN sheet_vitrina_v1_ff_pool_document_requests s ON s.request_id=NEW.successor_request_id
+            JOIN sheet_vitrina_v1_ff_pool_overhead_payment_evidence e ON e.request_id=NEW.anchor_request_id
+            WHERE c.request_id=NEW.predecessor_request_id
+              AND e.payment_fingerprint=json_extract(p.request_payload_json,'$.payment_evidence.payment_fingerprint')
+              AND json_extract(p.request_payload_json,'$.scope')='both' AND json_extract(s.request_payload_json,'$.scope')='FBS'
+              AND json_extract(p.request_payload_json,'$.source_mode')='payment_order_pdf'
+              AND json_remove(p.request_payload_json,'$.scope')=json_remove(s.request_payload_json,'$.scope')
+              AND p.source_file_blob=s.source_file_blob AND p.source_sha256=s.source_sha256
+              AND p.idempotency_epoch=s.idempotency_epoch AND p.business_date<=s.business_date
+              AND s.document_kind='pool_overhead' AND s.posted_document_id='' AND s.recovery_operation_id=''
+              AND p.posted_document_id='' AND p.recovery_operation_id=''
+              AND NOT EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_overhead_payment_renewals r WHERE r.predecessor_request_id=p.request_id))
+        BEGIN SELECT RAISE(ABORT,'FF overhead replacement requires the exact cancelled PDF and FBS scope'); END;
         CREATE TRIGGER IF NOT EXISTS ff_overhead_superseded_preview_cannot_confirm
         BEFORE INSERT ON {TABLE}
         WHEN EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_overhead_payment_renewals WHERE predecessor_request_id=NEW.request_id)
@@ -75,6 +142,33 @@ def _exists(conn):
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone() is not None
 
 
+def _cancellation(conn, identity):
+    # Read-only callers can inspect databases from before the additive migration.
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (CANCELLATIONS,)).fetchone():
+        return None
+    return conn.execute(f"SELECT * FROM {CANCELLATIONS} WHERE request_id=?", (identity,)).fetchone()
+
+
+def _uncancelled_sql(conn, alias="c"):
+    exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (CANCELLATIONS,)).fetchone()
+    return f"NOT EXISTS(SELECT 1 FROM {CANCELLATIONS} cancelled WHERE cancelled.request_id={alias}.request_id)" if exists else "1"
+
+
+def _operational_target(db_path, runtime_dir):
+    from packages.application.storage_registry import StoreRegistry
+    registry = StoreRegistry(Path(runtime_dir))
+    authority = registry.load()
+    if registry.resolve("operational", manifest=authority) != Path(db_path).resolve():
+        raise ValueError("overhead_command_storage_target_changed")
+    return registry, authority
+
+
+def assert_not_cancelled(conn, identity):
+    from packages.application.ff_pool_documents import FfPoolDocumentError
+    if _cancellation(conn, identity):
+        raise FfPoolDocumentError("overhead_confirmation_cancelled", "Подтверждение расхода отменено. Проведение запрещено.")
+
+
 def _resolve(conn, identity):
     row = conn.execute("SELECT request_id FROM sheet_vitrina_v1_ff_pool_document_request_aliases WHERE client_request_id=?", (identity,)).fetchone()
     return str(row[0]) if row else identity
@@ -91,9 +185,12 @@ def _public(conn, row):
     publication = _pool_overhead_publication_state(conn, document_id=doc_id) if doc_id else None
     if publication:
         publication = {k:v for k,v in publication.items() if k not in {"error", "affected_nm_ids"}}
-    state = row["state"]
+    cancelled = _cancellation(conn, row["request_id"])
+    replacements_exist = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (REPLACEMENTS,)).fetchone()
+    replacement = conn.execute(f"SELECT predecessor_request_id,successor_request_id,replacement_id,created_at,actor,reason FROM {REPLACEMENTS} WHERE predecessor_request_id=? OR successor_request_id=?", (row["request_id"], row["request_id"])).fetchone() if replacements_exist else None
+    state = "cancelled" if cancelled else row["state"]
     labels = {"accepted": "Принято", "processing": "Обрабатывается", "completed": "Обработано",
-              "delayed": "Обработка отложена", "needs_attention": "Требует внимания"}
+              "delayed": "Обработка отложена", "needs_attention": "Требует внимания", "cancelled": "Отменено"}
     reasons = {
         "": "Документ принят. Повторный ввод не требуется.",
         "warehouse_busy": "Складской расчёт занят. Документ сохранён для следующего цикла.",
@@ -108,12 +205,15 @@ def _public(conn, row):
     summary.update(facility_name=source["facility_name"], category_label_ru=OVERHEAD_EXPENSE_CATEGORY_LABELS_RU.get(manifest["category"], ""))
     return {"durable_saved": True, "operation_id": row["request_id"], "request_id": row["request_id"],
         "accepted_at": row["accepted_at"], "state": state, "label_ru": labels[state],
-        "reason_ru": reasons.get(row["reason_code"], reasons["posting_blocked"]), "reason_code": row["reason_code"],
+        "reason_ru": "Подтверждение отменено до проведения. Расход не учтён." if cancelled else reasons.get(row["reason_code"], reasons["posting_blocked"]),
+        "reason_code": "overhead_confirmation_cancelled" if cancelled else row["reason_code"],
         "business_date": source["business_date"], "summary": summary,
         "source_document": {"request_id": row["request_id"], "source_sha256": source["source_sha256"],
             "source_revision": source["source_revision"], "filename": source["filename"], "source_mode": manifest["source_mode"]},
         "document": {"document_id": doc_id, "posted": True} if doc_id else None,
         "publication": publication, "processing_receipt": json.loads(row["receipt_json"]),
+        "cancellation": dict(cancelled) if cancelled else None,
+        "replacement": dict(replacement) if replacement else None,
         "journal_path": "/sheet-vitrina-v1/operations?operation_id=" + row["request_id"],
         "detail_path": PREFIX + "/" + row["request_id"], "native_detail_path": NATIVE + row["request_id"]}
 
@@ -194,6 +294,99 @@ def confirm_source(db_path, identity, *, now, current_day, actor=None, runtime_d
     return canonical
 
 
+@contextmanager
+def _held_cancellation_window(runtime_dir, *, window_id, systemd, activity_reader, proc_root):
+    from apps.business_data_maintenance import _ExclusiveRestoreLock
+    from packages.application import business_data_maintenance_pause as pause
+    from packages.application.business_data_write_barrier import barrier_status
+    runtime_dir = Path(runtime_dir).resolve()
+    with _ExclusiveRestoreLock(runtime_dir):
+        state = pause.load_state(runtime_dir)
+        barrier = barrier_status(runtime_dir)
+        if (not state or state["phase"] != "held" or state["window_id"] != window_id
+                or not barrier.get("active") or not barrier.get("hold_confirmed")
+                or barrier.get("window_kind") != "maintenance_pause" or barrier.get("window_id") != window_id
+                or barrier.get("plan_fingerprint") != state["plan_fingerprint"]):
+            raise RuntimeError("exact held maintenance window is required for overhead cancellation")
+        current = pause.readback(runtime_dir, systemd=systemd, activity_reader=activity_reader, proc_root=proc_root)
+        pause._unchanged(state, current)
+        if not current["quiet"]:
+            raise RuntimeError("maintenance writers have not drained for overhead cancellation")
+        yield
+
+
+def cancel_sources(db_path, runtime_dir, candidates, *, cancellation_id, actor, reason, now,
+        maintenance_window_id, systemd, activity_reader, proc_root=Path("/proc")):
+    """Cancel an exact unposted cohort atomically; retry the same command ID.
+
+    Candidates contain canonical request_id and the confirmation source_digest.
+    Native posting ownership precedes the warehouse writer, exactly as in drain.
+    Original confirmations, source bytes, payment evidence and aliases survive.
+    """
+    from packages.application.ff_pool_documents import REQUESTS_TABLE, DOCUMENTS_TABLE, _connect, _fingerprint, FfPoolDocumentError
+    from packages.application.warehouse_domain_write_guard import assert_warehouse_domain_write_allowed
+    from packages.application.warehouse_functional_lock import warehouse_functional_write_lock, WarehouseFunctionalBusyError
+    if (not isinstance(cancellation_id, str) or not 1 <= len(cancellation_id.strip()) <= 120
+            or not isinstance(actor, str) or not 1 <= len(actor.strip()) <= 160
+            or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 1000
+            or not candidates or len(candidates) > 100):
+        raise ValueError("invalid_overhead_cancellation_command")
+    exact = sorted((dict(request_id=c["request_id"], source_digest=c["source_digest"]) for c in candidates), key=lambda c: c["request_id"])
+    if len({c["request_id"] for c in exact}) != len(exact):
+        raise ValueError("duplicate_overhead_cancellation_candidate")
+    digest = _fingerprint(dict(candidates=exact, actor=actor, reason=reason, maintenance_window_id=maintenance_window_id))
+    _operational_target(db_path, runtime_dir)
+    with _held_cancellation_window(runtime_dir, window_id=maintenance_window_id, systemd=systemd,
+            activity_reader=activity_reader, proc_root=proc_root), (Path(runtime_dir) / ".ff-pool-document-posting.lock").open("a+b") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise WarehouseFunctionalBusyError("native FF posting owner is active") from exc
+        try:
+            with warehouse_functional_write_lock(runtime_dir, timeout_seconds=5), closing(_connect(db_path)) as conn:
+                registry, authority = _operational_target(db_path, runtime_dir)
+                conn.execute("BEGIN IMMEDIATE")
+                assert_warehouse_domain_write_allowed(conn, writer="ff_overhead_cancellation")
+                previous = conn.execute(f"SELECT request_id,command_digest FROM {CANCELLATIONS} WHERE cancellation_id=? ORDER BY request_id", (cancellation_id,)).fetchall()
+                if previous:
+                    if [r["request_id"] for r in previous] != [c["request_id"] for c in exact] or any(r["command_digest"] != digest for r in previous):
+                        raise FfPoolDocumentError("overhead_cancellation_identity_conflict", "Операция отмены уже сохранена с другими параметрами")
+                else:
+                    rows = []
+                    for candidate in exact:
+                        identity = candidate["request_id"]
+                        source = conn.execute(f"SELECT * FROM {TABLE} WHERE request_id=?", (identity,)).fetchone()
+                        request = conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?", (identity,)).fetchone()
+                        if source is None or request is None or request["document_kind"] != "pool_overhead":
+                            raise FfPoolDocumentError("overhead_request_not_found", "Подтверждённый расход не найден")
+                        frozen = json.loads(source["source_json"])
+                        if (source["source_digest"] != candidate["source_digest"] or _fingerprint(frozen) != source["source_digest"]
+                                or json.loads(request["request_payload_json"]) != frozen["manifest"]
+                                or request["idempotency_epoch"] != frozen["feature_epoch"]
+                                or any(request[key] != frozen[key] for key in ("business_date", "source_revision", "source_sha256", "request_identity"))):
+                            raise FfPoolDocumentError("overhead_cancellation_source_changed", "Источник отмены не совпадает")
+                        if _cancellation(conn, identity):
+                            raise FfPoolDocumentError("overhead_already_cancelled", "Расход уже отменён другой операцией")
+                        recovery_exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_recovery_operations'").fetchone()
+                        recovery = conn.execute("SELECT 1 FROM sheet_vitrina_v1_recovery_operations WHERE json_extract(target_scope_json,'$.request_id')=? LIMIT 1", (identity,)).fetchone() if recovery_exists else None
+                        if (request["state"] not in {"accepted", "ready", "blocked", "error"}
+                                or any(request[key] for key in ("posted_document_id", "posted_at", "posted_manifest_sha256", "recovery_operation_id"))
+                                or conn.execute(f"SELECT 1 FROM {DOCUMENTS_TABLE} WHERE request_id=?", (identity,)).fetchone() or recovery):
+                            raise FfPoolDocumentError("overhead_cancellation_not_unposted", "Проведение уже начато. Отмена подтверждения запрещена")
+                        rows.append((identity, source["source_digest"], request["state"]))
+                    for identity, source_digest, native_state in rows:
+                        conn.execute(f"INSERT INTO {CANCELLATIONS} VALUES(?,?,?,?,?,?,?,?,?)",
+                            (identity, cancellation_id, digest, source_digest, now, actor, reason, maintenance_window_id, native_state))
+                        conn.execute(f"UPDATE {REQUESTS_TABLE} SET state='blocked',updated_at=?,error_code='overhead_confirmation_cancelled',error_details_json=? WHERE request_id=?",
+                            (now, json.dumps(dict(cancellation_id=cancellation_id), ensure_ascii=False), identity))
+                if registry.load() != authority:
+                    raise ValueError("overhead_command_storage_target_changed")
+                conn.commit()
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return [read_acceptance(db_path, c["request_id"]) for c in exact]
+
+
 def source_confirmable(db_path, identity):
     """Read intrinsic guards only; failed derived allocation is not rejection."""
     from packages.application.ff_pool_documents import REQUESTS_TABLE, _writer_epoch, _facility, _scope, _money_cents, _overhead_metadata
@@ -214,11 +407,96 @@ def source_confirmable(db_path, identity):
         return False
 
 
+def replace_cancelled_scope_with_fbs(db_path, runtime_dir, identity, *, source_digest,
+        cancellation_id, replacement_id, actor, reason, timestamp_factory=None):
+    """Save a new FBS source from one cancelled 'both' PDF, without confirming.
+
+    No upload, payment-evidence reassignment or original-source mutation occurs.
+    This explicit correction is the only path that can change a frozen scope.
+    """
+    from packages.application.ff_pool_documents import (REQUESTS_TABLE, OVERHEAD_PAYMENT_EVIDENCE_TABLE,
+        _connect, _fingerprint, _json, _document_request_identity, _payment_fingerprint_from_manifest,
+        _active_overhead_payment_request, _writer_epoch, _facility, _overhead_metadata, _money_cents,
+        FfPoolDocumentError, FfPoolDocumentService)
+    from packages.contracts.ff_pool_documents import DocumentIdentity
+    from packages.application.ff_pool_surfaces import _business_date_in_timezone
+    from packages.application.warehouse_domain_write_guard import assert_warehouse_domain_write_allowed
+    from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+    from packages.application.business_data_procedure_admission import admitted_write
+    if (not isinstance(replacement_id, str) or not 1 <= len(replacement_id.strip()) <= 120
+            or not isinstance(actor, str) or not 1 <= len(actor.strip()) <= 160
+            or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 1000):
+        raise ValueError("invalid_overhead_replacement_command")
+    command = _fingerprint(dict(request_id=identity, source_digest=source_digest,
+        cancellation_id=cancellation_id, replacement_id=replacement_id, actor=actor, reason=reason, scope="FBS"))
+    _operational_target(db_path, runtime_dir)
+    with admitted_write(runtime_dir), warehouse_functional_write_lock(runtime_dir, timeout_seconds=5), closing(_connect(db_path)) as conn:
+        registry, authority = _operational_target(db_path, runtime_dir)
+        conn.execute("BEGIN IMMEDIATE")
+        assert_warehouse_domain_write_allowed(conn, writer="ff_overhead_scope_replacement")
+        previous = conn.execute(f"SELECT * FROM {REPLACEMENTS} WHERE predecessor_request_id=? OR replacement_id=?", (identity, replacement_id)).fetchone()
+        if previous:
+            if previous["command_digest"] != command:
+                raise FfPoolDocumentError("overhead_replacement_identity_conflict", "Исправление уже сохранено с другими параметрами")
+            successor = previous["successor_request_id"]
+        else:
+            cancellation = _cancellation(conn, identity)
+            source = conn.execute(f"SELECT * FROM {TABLE} WHERE request_id=?", (identity,)).fetchone()
+            request = conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?", (identity,)).fetchone()
+            if (not cancellation or not source or not request or cancellation["cancellation_id"] != cancellation_id
+                    or source["source_digest"] != source_digest):
+                raise FfPoolDocumentError("overhead_replacement_cancelled_source_required", "Требуется точный отменённый источник")
+            manifest = json.loads(request["request_payload_json"])
+            if manifest.get("source_mode") != "payment_order_pdf" or manifest.get("scope") != "both":
+                raise FfPoolDocumentError("overhead_replacement_scope_not_supported", "Исправление поддерживает только область FBS для отменённого PDF с областью FBS + FBO")
+            payment = _payment_fingerprint_from_manifest(manifest)
+            evidence = conn.execute(f"SELECT request_id FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE} WHERE payment_fingerprint=?", (payment,)).fetchone()
+            if not evidence or _active_overhead_payment_request(conn, evidence[0]) != identity:
+                raise FfPoolDocumentError("overhead_replacement_payment_owner_changed", "У платежа уже другой действующий источник")
+            _overhead_metadata(conn, request=request, manifest=manifest,
+                amount_cents=_money_cents(manifest["amount_rub"], field="overhead amount", positive=True))
+            epoch = _writer_epoch(conn)
+            if epoch != request["idempotency_epoch"]:
+                raise FfPoolDocumentError("feature_epoch_changed", "Складской режим изменился")
+            facility = _facility(conn, manifest["facility_id"], require_active=True)
+            timezone_name = conn.execute("SELECT display_timezone FROM sheet_vitrina_v1_ff_facilities WHERE facility_id=?", (facility,)).fetchone()[0]
+            now = timestamp_factory() if timestamp_factory else datetime.now(timezone.utc).isoformat()
+            day = _business_date_in_timezone(now, timezone_name)
+            if _closed_day(runtime_dir, day):
+                raise FfPoolDocumentError("closed_accounting_day", "Дата документа уже закрыта в учёте")
+            manifest = {**manifest, "scope": "FBS"}
+            revision = _fingerprint(dict(cancelled_predecessor=identity, replacement_id=replacement_id,
+                business_date=day, manifest=manifest))
+            native_identity = DocumentIdentity(request_id=replacement_id, source_system=request["source_system"],
+                source_type=request["source_type"], source_id=request["source_id"], source_revision=revision,
+                idempotency_epoch=epoch, actor=actor, business_date=day)
+            request_identity = _document_request_identity(native_identity, "pool_overhead", manifest,
+                request["source_sha256"], request["template_fingerprint"])
+            successor = "ffpdr_" + request_identity.removeprefix("sha256:")[:28]
+            conn.execute(f"""INSERT INTO {REQUESTS_TABLE}(request_id,request_identity,client_request_id,document_kind,state,
+                source_system,source_type,source_id,source_revision,idempotency_epoch,actor,business_date,
+                source_filename,source_content_type,source_sha256,source_file_blob,template_fingerprint,request_payload_json,accepted_at,updated_at)
+                VALUES(?,?,?,'pool_overhead','accepted',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (successor, request_identity, replacement_id, request["source_system"], request["source_type"], request["source_id"],
+                 revision, epoch, actor, day, request["source_filename"], request["source_content_type"], request["source_sha256"],
+                 request["source_file_blob"], request["template_fingerprint"], _json(manifest), now, now))
+            conn.execute("INSERT INTO sheet_vitrina_v1_ff_pool_document_request_aliases VALUES(?,?,?,?)", (replacement_id, successor, request_identity, now))
+            conn.execute(f"INSERT INTO {REPLACEMENTS} VALUES(?,?,?,?,?,?,?,?)",
+                (identity, successor, evidence[0], replacement_id, command, now, actor, reason))
+        if registry.load() != authority:
+            raise ValueError("overhead_command_storage_target_changed")
+        conn.commit()
+        service = FfPoolDocumentService(db_path=Path(db_path), runtime_dir=Path(runtime_dir), resume=False, bootstrap=False,
+            timestamp_factory=timestamp_factory)
+        return service.process_request(successor, overhead_source_only=True)
+
+
 def assert_day_can_close(conn, day):
     """This same pinned source transaction must see every accepted day's intent."""
     if _exists(conn) and conn.execute(f"""SELECT 1 FROM {TABLE} c
             JOIN sheet_vitrina_v1_ff_pool_document_requests r USING(request_id)
             WHERE json_extract(c.source_json,'$.business_date')<=?
+              AND {_uncancelled_sql(conn)}
               AND r.posted_document_id='' LIMIT 1""", (day,)).fetchone():
         raise ValueError("confirmed_overhead_day_pending")
 
@@ -267,6 +545,7 @@ def drain(db_path, runtime_dir, *, limit=100, timestamp_factory=None):
             return {"processed_count": 0}
         rows = conn.execute(f"""SELECT c.* FROM {TABLE} c JOIN sheet_vitrina_v1_ff_pool_document_requests r USING(request_id)
             WHERE c.state NOT IN ('completed','needs_attention')
+              AND {_uncancelled_sql(conn)}
             ORDER BY (r.posted_document_id!=''),c.accepted_at,c.request_id LIMIT ?""", (limit,)).fetchall()
     # Match native posting lock order: posting owner, then warehouse writer.
     with (runtime_dir / ".ff-pool-document-posting.lock").open("a+b") as handle:
@@ -283,6 +562,9 @@ def drain(db_path, runtime_dir, *, limit=100, timestamp_factory=None):
                     with warehouse_functional_write_lock(runtime_dir, timeout_seconds=5):
                         source = json.loads(row["source_json"])
                         with closing(_connect(Path(db_path), query_only=True)) as conn:
+                            # Rows were selected before posting ownership; cancellation may have won.
+                            if _cancellation(conn, identity):
+                                continue
                             request = conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?", (identity,)).fetchone()
                             if (_fingerprint(source) != row["source_digest"] or request is None
                                     or json.loads(request["request_payload_json"]) != source["manifest"]
@@ -334,7 +616,7 @@ def reconcile(runtime, *, now=None):
     with closing(readonly(runtime.db_path)) as conn:
         if not _exists(conn):
             return {"processed_count": 0}
-        rows = conn.execute(f"SELECT * FROM {TABLE} WHERE state IN ('accepted','processing','delayed') ORDER BY accepted_at,request_id LIMIT 100").fetchall()
+        rows = conn.execute(f"SELECT c.* FROM {TABLE} c WHERE state IN ('accepted','processing','delayed') AND {_uncancelled_sql(conn)} ORDER BY accepted_at,request_id LIMIT 100").fetchall()
         receipts = [_public(conn, row) for row in rows]
     count = 0
     for acceptance in receipts:
@@ -426,6 +708,7 @@ def assert_book_closure(conn, book):
 def assert_native_confirmation(conn, request):
     """Private cycle exception requires the exact immutable accepted command."""
     from packages.application.ff_pool_documents import _fingerprint, FfPoolDocumentError
+    assert_not_cancelled(conn, request["request_id"])
     row = conn.execute(f"SELECT * FROM {TABLE} WHERE request_id=?", (request["request_id"],)).fetchone()
     source = json.loads(row["source_json"]) if row else {}
     if (row is None or request["document_kind"] != "pool_overhead"
@@ -514,7 +797,7 @@ def capture_pending_completion(runtime, *, finance_block=None):
     if registry.resolve('operational',manifest=authority) != Path(runtime.db_path).resolve():
         raise ValueError('overhead_completion_storage_changed')
     with closing(readonly(runtime.db_path)) as conn:
-        rows = conn.execute(f"SELECT request_id FROM {TABLE} WHERE state IN ('accepted','processing','delayed') ORDER BY accepted_at,request_id LIMIT 100").fetchall() if _exists(conn) else []
+        rows = conn.execute(f"SELECT request_id FROM {TABLE} c WHERE state IN ('accepted','processing','delayed') AND {_uncancelled_sql(conn)} ORDER BY accepted_at,request_id LIMIT 100").fetchall() if _exists(conn) else []
         sources = []
         for row in rows:
             # Unposted or still queued sources belong to another bounded pass.

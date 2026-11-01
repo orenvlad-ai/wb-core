@@ -7,7 +7,8 @@
     processing: "Обрабатывается",
     completed: "Обработано",
     delayed: "Обработка задерживается",
-    needs_attention: "Требует внимания"
+    needs_attention: "Требует внимания",
+    cancelled: "Отменено"
   });
   const unaccepted = new Set(["draft", "preview", "staged", "parsed", "validation"]);
   const popups = new WeakMap();
@@ -290,9 +291,9 @@
     section.dataset.ffOperationReceipt = receipt.operation_id;
     section.setAttribute("role", "status");
     section.setAttribute("tabindex", "-1");
-    const check = make("span", "ff-operation-check", "✓");
+    const check = make("span", receipt.state === "cancelled" ? "ff-operation-cancelled" : "ff-operation-check", receipt.state === "cancelled" ? "—" : "✓");
     check.setAttribute("aria-hidden", "true");
-    section.append(check, make("h3", "", receipt.primary_effect==='reply_draft_saved'?'Черновик сохранён':'Принято'), make("p", "", receipt.primary_effect === "external_command" ? "Команда сохранена." : receipt.primary_effect==='native_job'?'Задание сохранено.':receipt.primary_effect==='reply_draft_saved'?'Ответ ещё не опубликован в WB.':receipt.primary_effect === "source_saved" ? "Изменение сохранено." : "Документ сохранён."));
+    section.append(check, make("h3", "", receipt.state === "cancelled" ? "Отменено" : receipt.primary_effect==='reply_draft_saved'?'Черновик сохранён':'Принято'), make("p", "", receipt.state === "cancelled" ? "Подтверждение отменено до проведения. Расход не учтён." : receipt.primary_effect === "external_command" ? "Команда сохранена." : receipt.primary_effect==='native_job'?'Задание сохранено.':receipt.primary_effect==='reply_draft_saved'?'Ответ ещё не опубликован в WB.':receipt.primary_effect === "source_saved" ? "Изменение сохранено." : "Документ сохранён."));
     if (text(receipt.title_ru)) section.appendChild(make("p", "ff-operation-title", receipt.title_ru));
     const fields = Array.isArray(receipt.fields) ? receipt.fields : [];
     if (fields.length) {

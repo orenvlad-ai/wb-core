@@ -81,6 +81,8 @@ WAREHOUSE_DOMAIN_TABLES = (
     "sheet_vitrina_v1_ff_pool_balances",
     "sheet_vitrina_v1_ff_pool_documents",
     "sheet_vitrina_v1_ff_pool_overhead_confirmations",
+    "sheet_vitrina_v1_ff_pool_overhead_cancellations",
+    "sheet_vitrina_v1_ff_pool_overhead_replacements",
     "sheet_vitrina_v1_ff_pool_operator_confirmations",
     "sheet_vitrina_v1_ff_pool_overhead_payment_renewals",
     "sheet_vitrina_v1_ff_pool_document_lines",

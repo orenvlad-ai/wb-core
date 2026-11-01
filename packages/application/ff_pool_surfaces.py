@@ -1071,6 +1071,8 @@ class FfPoolSurface:
                 if acceptance is None and not row["posted_document_id"] else "Ожидает публикации в расчёте себестоимости"),
                 denominator_quantity=None, denominator_sku_count=None, affected_sku_count=None,
                 allocation_total_rub=None, pool_allocations_rub={})
+            if acceptance and acceptance["state"] == "cancelled":
+                preview_summary.update(allocation_status="cancelled", allocation_label="Подтверждение отменено. Расход не учтён.")
         payload = {
             "contract_name": CONTRACT_NAME,
             "workflow_contract": "ff_document_workflow_v1",
@@ -1118,6 +1120,8 @@ class FfPoolSurface:
         if str(row["document_kind"]) == "pool_overhead":
             from packages.application.operator_ff_overhead import read_acceptance, source_confirmable
             payload["acceptance"] = acceptance
+            if acceptance and acceptance["state"] == "cancelled":
+                payload.update(state="cancelled", state_label_ru="Отменено", steps=[])
             from packages.application.ff_pool_documents import OVERHEAD_PAYMENT_RENEWALS_TABLE, _active_overhead_payment_request
             with self._read() as conn:
                 renewal = conn.execute(f"SELECT successor_request_id,business_date,anchor_request_id FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} WHERE predecessor_request_id=?", (canonical,)).fetchone()
