@@ -71,6 +71,8 @@ from packages.application.storage_registry import (
 )
 
 
+from packages.application import finance_backup_compression as compression
+
 BACKUP_SET_CONTRACT = "wb_core_finance_storage_backup_set_v1"
 CURRENT_CONTRACT = "wb_core_finance_storage_backup_current_v1"
 POLICY_CONTRACT = "wb_core_finance_storage_backup_policy_v1"
@@ -608,6 +610,7 @@ class FinanceStorageBackupRotation:
         max_set_bytes: int = DEFAULT_MAX_SET_BYTES,
         max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
         minimum_replacement_interval_seconds: int = DEFAULT_MIN_REPLACEMENT_INTERVAL_SECONDS,
+        compress_backups: bool = False,
         now_factory: Any = _utc_now,
     ) -> None:
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
@@ -630,6 +633,7 @@ class FinanceStorageBackupRotation:
         self.minimum_replacement_interval_seconds = int(
             minimum_replacement_interval_seconds
         )
+        self.compress_backups = bool(compress_backups)
         self.now_factory = now_factory
         if _SHA_RE.fullmatch(self.deployed_sha) is None:
             raise FinanceStorageBackupRotationError("exact deployed SHA is required")
@@ -1147,7 +1151,10 @@ class FinanceStorageBackupRotation:
     def _retained_candidate(self, path: Path) -> dict[str, Any]:
         if _BACKUP_ID_RE.fullmatch(path.name) is None:
             raise FinanceStorageBackupRotationError("retained backup id is invalid")
-        files = self._files(path, allowed=_BACKUP_FILES)
+        manifest = _load_json(path / BACKUP_MANIFEST_FILENAME, label="retained backup manifest")
+        stored = compression.physical_files(path, manifest)
+        expected_names = set(stored) | {BACKUP_MANIFEST_FILENAME}
+        files = self._files(path, allowed=expected_names)
         directory_identity = _directory_identity(path)
         if (
             int(directory_identity["mode"]) != 0o700
@@ -1162,7 +1169,7 @@ class FinanceStorageBackupRotation:
                 "retained backup permissions/ownership are unsafe"
             )
         names = {item["name"] for item in files}
-        if names != _BACKUP_FILES:
+        if names != expected_names:
             raise FinanceStorageBackupRotationError("retained backup is incomplete")
         manifest = _load_json(
             path / BACKUP_MANIFEST_FILENAME, label="retained backup manifest"
@@ -1174,27 +1181,12 @@ class FinanceStorageBackupRotation:
             if isinstance(item, Mapping)
         }
         actual = {item["name"]: item for item in files}
-        if set(declared) != {
-            RAW_BACKUP_FILENAME,
-            OPERATIONAL_BACKUP_FILENAME,
-            SOURCE_MANIFEST_FILENAME,
-        }:
-            raise FinanceStorageBackupRotationError(
-                "retained backup byte manifest is incomplete"
-            )
-        for name in (
-            RAW_BACKUP_FILENAME,
-            OPERATIONAL_BACKUP_FILENAME,
-            SOURCE_MANIFEST_FILENAME,
-        ):
-            expected = declared.get(name)
+        if set(declared) != {RAW_BACKUP_FILENAME, OPERATIONAL_BACKUP_FILENAME, SOURCE_MANIFEST_FILENAME}:
+            raise FinanceStorageBackupRotationError("retained logical manifest is incomplete")
+        for name, expected in stored.items():
             item = actual.get(name)
-            if (
-                expected is None
-                or item is None
-                or int(expected.get("size_bytes") or -1) != int(item["size_bytes"])
-                or str(expected.get("sha256") or "") != str(item["sha256"])
-            ):
+            if (item is None or expected['size_bytes'] != item['size_bytes']
+                    or expected['sha256'] != item['sha256']):
                 raise FinanceStorageBackupRotationError("retained backup bytes drifted")
         restore_drill = dict(manifest.get("restore_drill") or {})
         watermarks = dict(
@@ -1249,7 +1241,7 @@ class FinanceStorageBackupRotation:
             raise FinanceStorageBackupRotationError(
                 "retained backup manifest is invalid"
             )
-        restore_selected = StoreRegistry(path).load(require_files=True)
+        restore_selected = StoreRegistry(path).load(require_files=compression.RECEIPT not in names)
         if (
             restore_selected.manifest_sha256
             != str(manifest.get("restore_manifest_sha256") or "")
@@ -1627,10 +1619,12 @@ class FinanceStorageBackupRotation:
             guard["operational"]["allocated_bytes"]
         )
         copy_required_bytes = source_bytes + DEFAULT_COPY_OVERHEAD_BYTES
-        if replacement_due and source_bytes > self.max_set_bytes:
+        if replacement_due and not self.compress_backups and source_bytes > self.max_set_bytes:
             raise FinanceStorageBackupRotationError(
                 "canonical split exceeds the hard per-set byte cap"
             )
+        if replacement_due and self.compress_backups:
+            compression.require_codec()
         root_capacity = _filesystem(self.runtime_dir)
         backup_capacity = _filesystem(self.backup_mount)
         backup_fallbacks = sorted(
@@ -1655,6 +1649,14 @@ class FinanceStorageBackupRotation:
                     continue
                 pre_delete.append(candidate)
                 projected += int(candidate["allocated_bytes"])
+        archive_budget = 0
+        if replacement_due and self.compress_backups:
+            # A hard output ceiling, not a guessed compression ratio. Keep the
+            # selected old set, one raw staging set, and the disk reserve.
+            available = int(backup_capacity['available_bytes']) + sum(int(i['allocated_bytes']) for i in pre_delete)
+            archive_budget = max(0, min(self.max_set_bytes - compression.OVERHEAD,
+                available - copy_required_bytes - self.hard_reserve_bytes - compression.OVERHEAD))
+            copy_required_bytes += archive_budget + compression.OVERHEAD
         pre_delete_ids = {item["artifact_id"] for item in pre_delete}
         post_delete: list[dict[str, Any]] = []
         if cleanup_legacy:
@@ -1691,17 +1693,19 @@ class FinanceStorageBackupRotation:
         final_backup_available = (
             int(backup_capacity["available_bytes"])
             + backup_released
-            - (source_bytes if replacement_due else 0)
+            - ((archive_budget + compression.OVERHEAD if self.compress_backups else source_bytes) if replacement_due else 0)
         )
         final_root_available = int(root_capacity["available_bytes"]) + root_released
         final_set_bytes = (
-            source_bytes
+            (archive_budget + compression.OVERHEAD if self.compress_backups else source_bytes)
             if replacement_due
             else int((current_candidate or {}).get("total_bytes") or 0)
         )
         blockers: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         blockers.extend(transaction_blockers)
+        if replacement_due and self.compress_backups and archive_budget < compression.OVERHEAD:
+            blockers.append({'code': 'compression_staging_capacity_shortfall'})
         if retained and current_candidate is None:
             blockers.append(
                 {
@@ -1764,8 +1768,10 @@ class FinanceStorageBackupRotation:
                     "target_bytes": self.backup_target_bytes,
                 }
             )
+        next_source_bytes = source_bytes if self.compress_backups else final_set_bytes
         if final_backup_available < (
-            final_set_bytes + DEFAULT_COPY_OVERHEAD_BYTES + self.hard_reserve_bytes
+            next_source_bytes + DEFAULT_COPY_OVERHEAD_BYTES + self.hard_reserve_bytes
+            + (compression.OVERHEAD if self.compress_backups else 0)
         ):
             blockers.append(
                 {
@@ -1815,6 +1821,8 @@ class FinanceStorageBackupRotation:
                     "minimum_interval_seconds": self.minimum_replacement_interval_seconds,
                     "forced": bool(force_replacement),
                 },
+                "storage_format": compression.FORMAT if self.compress_backups else "sqlite",
+                "archive_budget_bytes": archive_budget,
                 "copy_order": ["operational", "finance_raw"],
                 "source_bytes": source_bytes,
                 "source_allocated_bytes": source_allocated,
@@ -1848,7 +1856,8 @@ class FinanceStorageBackupRotation:
                 "final_root_available_bytes": final_root_available,
                 "final_backup_available_bytes": final_backup_available,
                 "next_replacement_required_bytes": (
-                    final_set_bytes
+                    next_source_bytes
+                    + (compression.OVERHEAD if self.compress_backups else 0)
                     + DEFAULT_COPY_OVERHEAD_BYTES
                     + self.hard_reserve_bytes
                 ),
@@ -2363,6 +2372,12 @@ class FinanceStorageBackupRotation:
         os.chmod(self.retained_root, 0o700)
         partial.mkdir(parents=False, exist_ok=True, mode=0o700)
         os.chmod(partial, 0o700)
+        if (partial / compression.RECEIPT).exists():
+            manifest = _load_json(partial / BACKUP_MANIFEST_FILENAME, label="compressed partial manifest")
+            if manifest.get('plan_fingerprint') != plan['fingerprint']:
+                raise FinanceStorageBackupRotationError('compressed partial belongs to another plan')
+            self._compress_replacement(partial, manifest, plan, fault_at=fault_at)
+            return self._publish_replacement(partial, final, manifest, transaction, fault_at)
         guard = self._assert_plan_cas(plan)
         proofs = dict(transaction.get("copy_proofs") or {})
         for logical, filename in (
@@ -2595,9 +2610,21 @@ class FinanceStorageBackupRotation:
         )
         if fault_at == "after_backup_manifest":
             raise RuntimeError("injected fault after backup manifest")
+        self._compress_replacement(partial, backup_manifest, plan, fault_at=fault_at)
+        return self._publish_replacement(partial, final, backup_manifest, transaction, fault_at)
+
+    def _compress_replacement(self, partial, manifest, plan, *, fault_at):
+        replacement = plan.get('replacement') or {}
+        if replacement.get('storage_format') == compression.FORMAT:
+            compression.compress_verified_set(partial, manifest,
+                max_stored_bytes=int(plan['policy']['retained_bytes_cap']),
+                reserve_bytes=int(plan['policy']['hard_reserve_bytes']),
+                archive_budget=int(replacement['archive_budget_bytes']), fault_at=fault_at)
+
+    def _publish_replacement(self, partial, final, manifest, transaction, fault_at):
         _fsync_directory(partial)
         transaction["phase"] = "replacement_verified"
-        transaction["backup_manifest_fingerprint"] = backup_manifest["fingerprint"]
+        transaction["backup_manifest_fingerprint"] = manifest["fingerprint"]
         transaction["updated_at"] = _utc_now()
         _atomic_write_json(Path(transaction["transaction_path"]), transaction)
         if fault_at == "after_replacement_verified":
@@ -3097,6 +3124,7 @@ class FinanceStorageBackupRotation:
             _atomic_write_json(transaction_path, transaction)
             if fault_at == "after_post_publish_gc":
                 raise RuntimeError("injected fault after post-publish GC")
+            guard = self._assert_plan_cas(reviewed_plan)
             root_capacity = _filesystem(self.runtime_dir)
             backup_capacity = _filesystem(self.backup_mount)
             final_non_targets = self._protected_non_target_identity()
@@ -3139,7 +3167,8 @@ class FinanceStorageBackupRotation:
                 ),
                 "next_replacement_capacity": (
                     backup_capacity["available_bytes"]
-                    >= int(replacement["allocated_bytes"])
+                    >= sum(int(guard[name]['size_bytes']) for name in ('raw', 'operational'))
+                    + compression.OVERHEAD
                     + DEFAULT_COPY_OVERHEAD_BYTES
                     + self.hard_reserve_bytes
                 ),
@@ -3261,34 +3290,42 @@ class FinanceStorageBackupRotation:
                 raise FinanceStorageBackupRotationError(
                     "reviewed superseded artifact still exists"
                 )
-        raw_readback = _sqlite_readback(
-            Path(candidate["path"]) / RAW_BACKUP_FILENAME, include_logical=True
-        )
-        operational_readback = _sqlite_readback(
-            Path(candidate["path"]) / OPERATIONAL_BACKUP_FILENAME,
-            include_logical=True,
-        )
-        manifest = _load_json(
-            Path(candidate["path"]) / BACKUP_MANIFEST_FILENAME,
-            label="current backup manifest",
-        )
-        restore_registry = StoreRegistry(Path(candidate["path"]))
-        restore_selected = restore_registry.load(require_files=True)
-        for logical_store in ("finance_raw", "operational"):
-            with restore_registry.session(
-                logical_store,
-                mode="ro",
-                operation="finance_backup_terminal_restore_readback",
-                manifest=restore_selected,
-            ) as restore_connection:
-                restore_connection.execute("SELECT 1").fetchone()
-        if (
-            raw_readback["logical_tables"]
-            != manifest["sqlite_readback"]["raw"]["logical_tables"]
-            or operational_readback["logical_tables"]
-            != manifest["sqlite_readback"]["operational"]["logical_tables"]
-        ):
-            raise FinanceStorageBackupRotationError("current restore readback drifted")
+        restore_root = Path(candidate['path'])
+        manifest = _load_json(restore_root / BACKUP_MANIFEST_FILENAME, label="current backup manifest")
+        if (restore_root / compression.RECEIPT).exists():
+            compression.verify_restored_bytes(restore_root, manifest)
+            restore_selected = StoreRegistry(restore_root).load(require_files=False)
+            if restore_selected.manifest_sha256 != manifest['restore_manifest_sha256']:
+                raise FinanceStorageBackupRotationError('compressed restore manifest differs')
+        else:
+            raw_readback = _sqlite_readback(
+                restore_root / RAW_BACKUP_FILENAME, include_logical=True
+            )
+            operational_readback = _sqlite_readback(
+                restore_root / OPERATIONAL_BACKUP_FILENAME,
+                include_logical=True,
+            )
+            manifest = _load_json(
+                restore_root / BACKUP_MANIFEST_FILENAME,
+                label="current backup manifest",
+            )
+            restore_registry = StoreRegistry(restore_root)
+            restore_selected = restore_registry.load(require_files=True)
+            for logical_store in ("finance_raw", "operational"):
+                with restore_registry.session(
+                    logical_store,
+                    mode="ro",
+                    operation="finance_backup_terminal_restore_readback",
+                    manifest=restore_selected,
+                ) as restore_connection:
+                    restore_connection.execute("SELECT 1").fetchone()
+            if (
+                raw_readback["logical_tables"]
+                != manifest["sqlite_readback"]["raw"]["logical_tables"]
+                or operational_readback["logical_tables"]
+                != manifest["sqlite_readback"]["operational"]["logical_tables"]
+            ):
+                raise FinanceStorageBackupRotationError("current restore readback drifted")
         root_capacity = _filesystem(self.runtime_dir)
         backup_capacity = _filesystem(self.backup_mount)
         retained, _protected = [], []
@@ -3379,7 +3416,8 @@ class FinanceStorageBackupRotation:
             ),
             "next_replacement_capacity": (
                 backup_capacity["available_bytes"]
-                >= int(candidate["allocated_bytes"])
+                >= int(health['canonical_source_bytes'])
+                + (compression.OVERHEAD if self.compress_backups else 0)
                 + DEFAULT_COPY_OVERHEAD_BYTES
                 + self.hard_reserve_bytes
             ),
@@ -3520,7 +3558,8 @@ def backup_rotation_health(runtime_dir: Path) -> dict[str, Any]:
                 stat = item.stat()
                 identity.update({"uid": int(stat.st_uid), "gid": int(stat.st_gid)})
                 actual_files[item.name] = identity
-        if set(actual_files) != _BACKUP_FILES:
+        stored_files = compression.physical_files(selected_root, manifest, hashes=False)
+        if set(actual_files) != set(stored_files) | {BACKUP_MANIFEST_FILENAME}:
             raise FinanceStorageBackupRotationError(
                 "Finance current backup file inventory drifted"
             )
@@ -3541,19 +3580,10 @@ def backup_rotation_health(runtime_dir: Path) -> dict[str, Any]:
             for item in manifest.get("files") or []
             if isinstance(item, Mapping)
         }
-        for name in (
-            RAW_BACKUP_FILENAME,
-            OPERATIONAL_BACKUP_FILENAME,
-            SOURCE_MANIFEST_FILENAME,
-        ):
-            expected = declared_files.get(name)
+        for name, expected in stored_files.items():
             actual = actual_files[name]
-            if expected is None or int(expected.get("size_bytes") or -1) != int(
-                actual["size_bytes"]
-            ):
-                raise FinanceStorageBackupRotationError(
-                    "Finance current backup file size drifted"
-                )
+            if int(expected['size_bytes']) != int(actual['size_bytes']):
+                raise FinanceStorageBackupRotationError("Finance current backup file size drifted")
         retained_bytes = sum(
             int(item["allocated_bytes"]) for item in actual_files.values()
         )
@@ -3663,12 +3693,14 @@ def backup_rotation_health(runtime_dir: Path) -> dict[str, Any]:
             int(item["size_bytes"]) for item in source_identities
         )
         next_replacement_required = (
-            canonical_source_bytes + DEFAULT_COPY_OVERHEAD_BYTES + hard_reserve
+            canonical_source_bytes + DEFAULT_COPY_OVERHEAD_BYTES + hard_reserve + compression.OVERHEAD
         )
         if capacity["available_bytes"] < next_replacement_required:
             blockers.append("insufficient capacity for atomic next replacement")
         if capacity["available_bytes"] < degraded_available:
             blockers.append("backup filesystem crossed degraded watermark")
+        if policy.get('last_failure'):
+            blockers.append("last scheduled backup attempt failed")
         result.update(
             {
                 "status": "healthy" if not blockers else "degraded",
@@ -3692,7 +3724,7 @@ def backup_rotation_health(runtime_dir: Path) -> dict[str, Any]:
                     source_manifest.manifest_sha256
                 ),
                 "capacity_basis": (
-                    "canonical_current_split_source_size_plus_copy_overhead_plus_hard_reserve"
+                    "canonical_current_split_source_size_plus_copy_overhead_plus_hard_reserve_plus_compression_workspace"
                 ),
                 "degraded_available_bytes": degraded_available,
                 "next_replacement_capacity": (
@@ -3836,6 +3868,7 @@ def _scheduled_rotation_owned(
         degraded_available_bytes=configured_int(
             "degraded_available_bytes", DEFAULT_DEGRADED_AVAILABLE_BYTES
         ),
+        compress_backups=True,
         max_set_bytes=configured_int("retained_bytes_cap", DEFAULT_MAX_SET_BYTES),
         max_age_seconds=configured_int("age_cap_seconds", DEFAULT_MAX_AGE_SECONDS),
         minimum_replacement_interval_seconds=configured_int(
