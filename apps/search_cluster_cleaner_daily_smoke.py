@@ -15,7 +15,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from apps.search_cluster_cleaner_stage_e_recovery_smoke import Sandbox
 from packages.application.change_registry import ChangeRegistryRepository
 from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator
-from packages.application.search_cluster_cleaner_daily import ZONE,DailyCleanerScheduler,history,policy_ready,save_schedules,schedules
+from packages.application.search_cluster_cleaner_daily import ZONE,DailyCleanerScheduler,history,policy_ready,result_summary,save_schedules,schedules
 from apps.search_cluster_cleaner_self_service_worker import armed_cycle,heartbeat_while_busy,ready_cycle,report_health
 from packages.contracts.search_cluster_cleaner import CleanerError,Principal,Target
 from packages.domain.search_cluster_sources import union_snapshot
@@ -534,6 +534,31 @@ def finite_retry_regressions() -> None:
         assert history(cleaner,owner)['items'][0]['state']=='deployment_blocked'
 
 
+def summary_regressions() -> None:
+    with Sandbox() as box:
+        cleaner=provision(box)
+        good=dict(advert_id=11,nm_id=101,state='complete',stage='finished',write_run_id=None,
+                  confirmed_excluded=7,returned=0,deferred_count=0,delivery_state='confirmed')
+        deferred=dict(advert_id=12,nm_id=102,state='partial',stage='finished',write_run_id=None,
+                      error_code='statistics_missing',checked_total=44,deferred_count=1,
+                      confirmed_excluded=None,returned=None,delivery_state='unknown')
+        batch=dict(items=[good,deferred],state='partial',failed_count=0,held_count=0,
+                   created_at='2026-10-31T22:45:08+00:00',updated_at='2026-11-01T00:01:27+00:00')
+        result=result_summary(cleaner,batch)
+        assert (result['confirmed_excluded'],result['archived_retired'],result['confirmed_returned'],
+                result['deferred_count'],result['unknown_pairs'])==(7,0,0,1,0),result
+        gap=result_summary(cleaner,batch,dict(discovered_pairs=3,eligible_pairs=2))
+        assert gap['unknown_pairs']==1,gap
+        uncertain=dict(deferred,error_code='transport_ambiguous',checked_total=None,deferred_count=None)
+        result=result_summary(cleaner,dict(batch,items=[good,uncertain]))
+        assert result['confirmed_excluded']==7 and result['unknown_pairs']==1,result
+        result=result_summary(cleaner,dict(batch,items=[uncertain]))
+        assert result['confirmed_excluded'] is None and result['archived_retired'] is None,result
+        assert result['deferred_count'] is None and result['unknown_pairs']==1,result
+        result=result_summary(cleaner,dict(batch,items=[dict(good,confirmed_excluded=0)],state='complete'))
+        assert result['confirmed_excluded']==0 and result['unknown_pairs']==0,result
+
+
 def integrated_flow() -> None:
     """One real guarded batch against loopback FakeWB, including readback."""
     from apps.search_cluster_cleaner_reconcile_integration_fixture import running_integration_fixture
@@ -571,6 +596,25 @@ def integrated_flow() -> None:
         result=history(cleaner,owner)['items'][0]
         assert (result['discovered_campaigns'],result['checked_campaigns'],result['checked_keys'],
                 result['excluded'],result['returned'])==(1,1,5,2,1),result
+        assert (result['confirmed_excluded'],result['archived_retired'],result['confirmed_returned'],
+                result['unknown_pairs'],result['deferred_count'])==(2,0,1,0,0),result
+        # Old saved history must acquire the same read-only projection without
+        # changing its durable receipt, even for an ordinary read-only user.
+        with cleaner.store.transaction() as c:
+            row=c.execute('SELECT details FROM cleaner_daily_occurrences WHERE account=? AND batch_id=?',
+                          (cleaner.key,result['batch_id'])).fetchone()
+            legacy=json.loads(row['details'])
+            for key in ('report_version','summary_available','confirmed_excluded','archived_retired',
+                        'confirmed_returned','deferred_count','held_count','unknown_pairs','started_at','finished_at'):
+                legacy.pop(key,None)
+            frozen=json.dumps(legacy,ensure_ascii=False)
+            c.execute('UPDATE cleaner_daily_occurrences SET details=? WHERE account=? AND batch_id=?',
+                      (frozen,cleaner.key,result['batch_id']))
+        old=history(cleaner,Principal('reader',True,True,True))['items'][0]
+        assert old['confirmed_excluded']==2 and old['confirmed_returned']==1 and old['summary_available'],old
+        with cleaner.store.read() as c:
+            assert c.execute('SELECT details FROM cleaner_daily_occurrences WHERE account=? AND batch_id=?',
+                             (cleaner.key,result['batch_id'])).fetchone()[0]==frozen
         assert not errors,errors
         status,public_history,_=fixture.request('/daily-schedules/history',opener=reader)
         assert status==200 and public_history['items'][0]['checked_keys']==5
@@ -579,5 +623,5 @@ def integrated_flow() -> None:
 
 if __name__=='__main__':
     from apps.search_cluster_cleaner_idle_smoke import main as idle_smoke
-    check();deployment_blocked_flow();finite_retry_regressions();integrated_flow();idle_smoke()
+    check();summary_regressions();deployment_blocked_flow();finite_retry_regressions();integrated_flow();idle_smoke()
     print('search cluster cleaner daily smoke: ok')

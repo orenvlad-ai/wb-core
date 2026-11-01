@@ -558,6 +558,7 @@ class DailyCleanerScheduler:
                       batch_state=batch['state'],selected_count=len(items),partial_count=batch['partial_count'],
                       failed_count=batch['failed_count'],skipped_count=batch['skipped_count'],
                       error=batch.get('error'),error_code=batch.get('error_code'))
+        detail.update(result_summary(cleaner,batch,detail))
         incomplete=detail.get('discovered_pairs',0)>detail.get('eligible_pairs',0)
         final='partial' if incomplete and batch['state']=='complete' else batch['state']
         reason='; '.join(part for part in (batch.get('error') or '',
@@ -568,24 +569,188 @@ class DailyCleanerScheduler:
         return dict(batch_id=pending['batch_id'],state=final)
 
 
+def result_summary(cleaner, batch: dict, occurrence: dict | None=None) -> dict:
+    """Read-only confirmed subtotals; an incomplete pair never erases others."""
+    items=batch['items']
+    run_ids=[item['write_run_id'] for item in items if item.get('write_run_id')]
+    confirmations={}
+    with cleaner.store.read() as c:
+        rows=c.execute("""SELECT o.run_id,o.target,o.versions,i.query
+            FROM cleaner_write_operations o JOIN cleaner_write_items i ON i.operation_id=o.operation_id
+            WHERE o.account=? AND o.run_id IN (SELECT value FROM json_each(?))
+              AND i.state='confirmed' AND i.confirmed_at IS NOT NULL""",
+            (cleaner.key,json.dumps(run_ids))).fetchall() if run_ids else []
+    for row in rows:
+        versions=json.loads(row['versions'])
+        retirement=versions.get('archive_retirement',{})
+        counts=confirmations.setdefault((row['run_id'],row['target']),dict(excluded=set(),returned=set(),archived=set()))
+        if row['query'] in versions.get('removals',[]):
+            key='archived' if (retirement.get('policy')=='wb_archived_retirement_v1'
+                              and row['query'] in retirement.get('queries',[])) else 'returned'
+        else:key='excluded'
+        counts[key].add(row['query'])
+    excluded=[];returned=[];archived=[];deferred=[];unknown=0
+    for item in items:
+        # A finished scan with no write run and only missing statistics is
+        # positive evidence of no write, not a missing receipt counted as zero.
+        scan_only=(item.get('state')=='partial' and item.get('stage')=='finished'
+                   and item.get('error_code')=='statistics_missing' and not item.get('write_run_id')
+                   and item.get('checked_total') is not None and item.get('deferred_count',0)>0
+                   and not item.get('can_recheck') and not item.get('review_required'))
+        ex=0 if scan_only else item.get('confirmed_excluded')
+        ret=0 if scan_only else item.get('returned')
+        if item.get('write_run_id'):
+            # All three subtotals come from the same confirmed-item snapshot,
+            # including partially confirmed operations. Never subtract a newer
+            # archive count from an older batch projection's return count.
+            counts=confirmations.get((item['write_run_id'],f"{item['advert_id']}:{item['nm_id']}"),{})
+            excluded.append(len(counts.get('excluded',())))
+            returned.append(len(counts.get('returned',())))
+            archived.append(len(counts.get('archived',())))
+        else:
+            if type(ex) is int:excluded.append(ex)
+            if type(ret) is int:returned.append(ret);archived.append(0)
+        if type(item.get('deferred_count')) is int:deferred.append(item['deferred_count'])
+        unknown+=bool(ex is None or ret is None or item.get('can_recheck') or item.get('review_required')
+                      or item.get('write_run_id') and item.get('delivery_state') not in {'confirmed','not_sent'})
+    occurrence=occurrence or {}
+    unknown+=max(0,occurrence.get('discovered_pairs',0)-occurrence.get('eligible_pairs',0))
+    return dict(report_version=1,summary_available=True,
+                confirmed_excluded=sum(excluded) if excluded else None,
+                archived_retired=sum(archived) if returned else None,
+                confirmed_returned=sum(returned) if returned else None,
+                deferred_count=sum(deferred) if deferred else None,
+                failed_count=batch['failed_count'],held_count=batch['held_count'],unknown_pairs=unknown,
+                started_at=batch.get('created_at'),
+                finished_at=batch.get('updated_at') if batch['state'] in {'complete','partial','failed'} else None)
+
+
+def historical_summary(cleaner, batch_id: str, occurrence: dict) -> dict:
+    """Read a compact legacy receipt, without projecting every key/decision.
+
+    Requests and latest child events retain the same account, owner and frozen
+    target checks as the full public batch view. Unknown children remain unknown.
+    """
+    from packages.application.search_cluster_cleaner import batch_child_id
+    with cleaner.store.read() as c:
+        c.execute('BEGIN')
+        try:
+            request=c.execute("SELECT actor FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-batches'",
+                              (cleaner.key,batch_id)).fetchone()
+            if not request:return {}
+            actor=Principal(request['actor'],True,True,True)
+            saved=cleaner.manual_batch_snapshot(batch_id,actor,_conn=c)
+            ids=[batch_child_id(batch_id,index) for index in range(len(saved['items']))]
+            requests={r['request_id']:json.loads(r['outcome']) for r in c.execute(
+                """SELECT request_id,outcome FROM cleaner_requests WHERE account=? AND actor=?
+                   AND route='manual-clean' AND request_id IN (SELECT value FROM json_each(?))""",
+                (cleaner.key,request['actor'],json.dumps(ids)))}
+            events={}
+            for row in c.execute("""SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%'
+                    AND json_extract(facts,'$.job_id') IN (SELECT value FROM json_each(?)) ORDER BY sequence""",
+                    (cleaner.key,json.dumps(ids))):
+                facts=json.loads(row['facts']);events[facts['job_id']]=facts
+            jobs={}
+            def matches(value,index,frozen):
+                return (value.get('batch_id')==batch_id and value.get('batch_index')==index
+                        and value.get('advert_id')==frozen['advert_id'] and value.get('nm_id')==frozen['nm_id'])
+            for index,frozen in enumerate(saved['items']):
+                job_id=ids[index];initial=requests.get(job_id)
+                if initial is None:continue
+                latest=events.get(job_id,{})
+                job=dict(initial,**latest)
+                job.update(state=latest.get('state','queued'),stage=latest.get('stage','fetching'))
+                if not matches(initial,index,frozen) or not matches(job,index,frozen):
+                    jobs[index]=None  # A collision is an explicit failure, never a receipt.
+                else:jobs[index]=job
+            run_ids=sorted({run_id for job in jobs.values() if job for run_id in
+                            (job.get('scan_run_id'),job.get('write_run_id')) if run_id})
+            runs={r['run_id']:dict(r) for r in c.execute(
+                "SELECT run_id,state,kind,reason,summary,targets FROM cleaner_runs WHERE account=? AND run_id IN (SELECT value FROM json_each(?))",
+                (cleaner.key,json.dumps(run_ids)))}
+            operations={}
+            for row in c.execute("""SELECT o.run_id,o.target,o.state,
+                    json_group_array(json_object('query_hash',i.query_hash,'decision_id',i.decision_id)) AS refs,
+                    sum(CASE WHEN i.state NOT IN ('confirmed','rejected') OR
+                              (i.state='confirmed' AND i.confirmed_at IS NULL) THEN 1 ELSE 0 END) AS unresolved
+                    FROM cleaner_write_operations o LEFT JOIN cleaner_write_items i ON i.operation_id=o.operation_id
+                    WHERE o.account=? AND o.run_id IN (SELECT value FROM json_each(?))
+                    GROUP BY o.operation_id""",(cleaner.key,json.dumps(run_ids))):
+                operations.setdefault((row['run_id'],row['target']),[]).append(dict(row))
+            items=[]
+            for index,frozen in enumerate(saved['items']):
+                update=saved['item_updates'].get(str(index),{});job=jobs.get(index)
+                collision=index in jobs and job is None
+                state='failed' if collision else update.get('state') or (job['state'] if job else 'queued')
+                item=dict(advert_id=frozen['advert_id'],nm_id=frozen['nm_id'],state=state,
+                    stage='finished' if collision else update.get('stage') or (job['stage'] if job else 'queued'),
+                    error_code='batch_child_collision' if collision else update.get('error_code') or (job.get('error_code') if job else None),
+                    review_required=bool(update.get('review_required')),
+                    can_recheck=bool(job and job.get('can_recheck')),
+                    write_run_id=job.get('write_run_id') if job else None,
+                    checked_total=None,deferred_count=None,confirmed_excluded=None,returned=None,delivery_state='unknown')
+                if job:
+                    scan=runs.get(job.get('scan_run_id'))
+                    if scan and scan['state']=='complete':
+                        counts=json.loads(scan['summary'])
+                        item.update(checked_total=counts.get('checked_total'),deferred_count=counts.get('excluded_not_executed'))
+                    write_id=job.get('write_run_id')
+                    if write_id:
+                        run=runs.get(write_id)
+                        # A missing/foreign run cannot supply confirmed zeroes.
+                        if not run:raise CleanerError('not_found','Запуск не найден',404)
+                        item.update(confirmed_excluded=0,returned=0)
+                        ops=operations.get((write_id,f"{frozen['advert_id']}:{frozen['nm_id']}"),[])
+                        active=[op for op in ops if op['state']!='cancelled_before_send']
+                        expected={(r.get('target'),r.get('query_hash'),r.get('decision_id')) for r in json.loads(run['targets'])}
+                        actual={(op['target'],r['query_hash'],r['decision_id']) for op in active for r in json.loads(op['refs'])}
+                        if (expected and expected==actual and active
+                                and all(op['state']=='confirmed' and not op['unresolved'] for op in active)):
+                            item['delivery_state']='confirmed'
+                        elif not active and (any(op['state']=='cancelled_before_send' for op in ops)
+                                             or run['state']=='stopped' and run['reason']=='batch_write_wait'):
+                            item['delivery_state']='not_sent'
+                    elif job['state'] in {'complete','no_change'}:
+                        item.update(confirmed_excluded=0,returned=0)
+                items.append(item)
+            not_started=lambda item:item['stage']=='not_started' or item['error_code']=='not_started_after_failure'
+            batch=dict(items=items,state=saved['state'],created_at=saved['created_at'],updated_at=saved['updated_at'],
+                       failed_count=sum(i['state']=='failed' and not i['review_required'] and not not_started(i) for i in items),
+                       held_count=sum(i['review_required'] for i in items))
+        finally:c.rollback()
+    return result_summary(cleaner,batch,occurrence)
+
+
 def history(cleaner,principal:Principal,*,limit:int=30) -> dict:
     principal.require_read()
     if not schema_ready(cleaner):return dict(items=[],timezone='Asia/Yekaterinburg',available=False)
     with cleaner.store.read() as c:
-        rows=c.execute('''SELECT o.*, (SELECT json_extract(e.facts,'$.state') FROM cleaner_events e
-            WHERE e.account=o.account AND e.kind LIKE 'self_service_batch_%'
-              AND json_extract(e.facts,'$.batch_id')=o.batch_id ORDER BY e.sequence DESC LIMIT 1) AS batch_state
-            FROM cleaner_daily_occurrences o WHERE o.account=? ORDER BY o.due_at DESC LIMIT ?''',
+        rows=c.execute('SELECT * FROM cleaner_daily_occurrences WHERE account=? ORDER BY due_at DESC LIMIT ?',
                        (cleaner.key,min(max(limit,1),100))).fetchall()
+        queued=[row['batch_id'] for row in rows if row['state']=='batch_queued']
+        batch_states={}
+        if queued:
+            for event in c.execute("""SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%'
+                    AND json_extract(facts,'$.batch_id') IN (SELECT value FROM json_each(?)) ORDER BY sequence""",
+                    (cleaner.key,json.dumps(queued))):
+                facts=json.loads(event['facts']);batch_states[facts['batch_id']]=facts.get('state','queued')
     result=[]
     for row in rows:
         item=dict(schedule_id=row['schedule_id'],local_date=row['local_date'],due_at=row['due_at'],
-                  state=(row['batch_state'] or 'queued') if row['state']=='batch_queued' else row['state'],
+                  state=batch_states.get(row['batch_id'],'queued') if row['state']=='batch_queued' else row['state'],
                   batch_id=row['batch_id'],discovered_campaigns=row['discovered_count'],
                   details=json.loads(row['details']),reason=row['reason'],checked_campaigns=row['checked_campaign_count'],
                   checked_keys=None,excluded=None,returned=None)
         item['checked_keys']=item['details'].get('checked_keys')
         item['excluded']=item['details'].get('excluded')
         item['returned']=item['details'].get('returned')
+        summary=item['details'] if item['details'].get('report_version')==1 else {}
+        if (not summary or summary.get('unknown_pairs',0)>0) and row['state'] in {'complete','partial','failed'} and row['batch_id']:
+            try:summary=historical_summary(cleaner,row['batch_id'],item['details'])
+            except CleanerError:summary={}
+        for name in ('confirmed_excluded','archived_retired','confirmed_returned','deferred_count',
+                     'failed_count','held_count','unknown_pairs','started_at','finished_at'):
+            item[name]=summary.get(name)
+        item['summary_available']=summary.get('summary_available',False)
         result.append(item)
     return dict(items=result,timezone='Asia/Yekaterinburg')
