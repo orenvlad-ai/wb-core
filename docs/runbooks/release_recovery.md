@@ -170,3 +170,33 @@ read-only endpoints/operational sessions (`mode=ro`, `query_only=ON`). Для
 завершения всех jobs — idle. Ожидающий SKU worker сам по себе не означает
 non-idle. Отсутствие активного job не доказывает lifetime lease в production;
 новый job или pause для диагностики запускают только в разрешённой области задачи.
+
+
+## Exact historical backup-cap failure: Release Runner 41294599188
+
+PR #1527 (`bfe4706ece716b93c26327f3bab268671ca9e3e7`) reached the final
+storage readback after restart. The new backup health truthfully reports the
+31 October pre-copy per-set-cap failure; its selected verified backup and
+replacement capacity remain valid. The held release owner prevents running a
+replacement backup before release completion.
+
+For this run only, the storage-tail recovery accepts a separate live capacity
+proof while retaining `degraded` health. It binds the original owner, PR and SHA,
+the immutable policy, selector and waiting intent, the exact historical failure,
+no pending transaction, native backup inventory/RPO checks, all filesystem
+identities and every other storage reserve. The only permitted alert is the
+backup reserve's historical-health refusal. Actual available bytes must cover
+canonical source size + 8 GiB hard reserve + 64 MiB copy overhead + 1 MiB
+compression workspace + 4 GiB emergency reserve. The source manifest and root
+policy must not drift from the preview. The check repeats before activation and
+immediately before the metadata completion CAS; an expired RPO or reduced free
+space refuses completion.
+
+The normal source/owner/quiet guards, service/auth checks, activation,
+`before_complete` cleaner probe, metadata CAS and final readback remain required.
+No artifact, backup policy, last failure or admission intent is changed by this
+exception; there is no code sync, restart, backup execution or automatic resume.
+After successful recovery, explicitly resume the existing window and perform
+the separately reviewed canonical backup. Recovery completion alone is not
+proof that the backup or subsequent scheduled cycle succeeded. An uncertain
+recovery remains readback-only under the existing claim rules.

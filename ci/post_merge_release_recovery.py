@@ -1545,8 +1545,8 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion": completion,
         "completion_input": completion_script,
     }
-    if (case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE} or cleaner_completion_case(case, release_run_id)):
-        expected_merge = _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILES[release_run_id]["merge_sha"] if cleaner_completion_case(case, release_run_id) else _predependency_profile(release_run_id)["receipt"]["merge_sha"]
+    if (case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE} or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id)):
+        expected_merge = BACKUP_CAPACITY_MERGE_SHA if backup_capacity_case(case, release_run_id) else _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILES[release_run_id]["merge_sha"] if cleaner_completion_case(case, release_run_id) else _predependency_profile(release_run_id)["receipt"]["merge_sha"]
         if target.target_id != "wb_core_eu_hosted_runtime_active" or runtime_dir != "/opt/wb-core-runtime/state" or merge != expected_merge:
             raise RecoveryError("sqlite-activation-target-contract-invalid")
         commands["cleaner_precomplete_probe"] = hosted._remote_shell_command(
@@ -1672,6 +1672,120 @@ def _predependency_previous_release_proof(client: release.GitHub, release_run_id
             "receipt_sha256": digest(canonical_bytes(receipt)), "previous_deployed_sha": receipt["deployed_sha"]}
 
 
+# This exception accepts honest degraded diagnostics, never fabricates healthy
+# status or edits the runtime artifact. It expires with the existing backup RPO.
+BACKUP_CAPACITY_RELEASE_RUN_ID = 41294599188
+BACKUP_CAPACITY_MERGE_SHA = "bfe4706ece716b93c26327f3bab268671ca9e3e7"
+BACKUP_CAPACITY_OWNER = "release-v3-4283bce676c40e4a73a9adc7833e3d56"
+BACKUP_CAPACITY_FAILURE = {
+    "at": "2026-10-31T16:02:06.231173Z",
+    "error": "FinanceStorageBackupRotationError: canonical split exceeds the hard per-set byte cap",
+    "plan_fingerprint": "",
+}
+BACKUP_CAPACITY_IDENTITIES = {
+    "policy": "sha256:7b7b5fbb54251995bd63e4f075ba50339c29b579f46ed72f5cf4fff2e75efddc",
+    "selector": "sha256:801f469f944f8a53344f4e6f232196f782b500c3d908041b3f9b72b8bb70bc74",
+    "intent": "sha256:3c67cbb089bf44c978341e039ef110768c14bddbfff90ecd8a2d6ca1c5a197d3",
+}
+
+
+def backup_capacity_case(case: RecoveryCase, release_run_id: int) -> bool:
+    return case is RecoveryCase.STORAGE_TAIL and release_run_id == BACKUP_CAPACITY_RELEASE_RUN_ID
+
+
+def validate_backup_capacity_proof(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Accept only the immutable pre-copy cap failure with live physical room."""
+    def require(ok: bool, reason: str) -> None:
+        if not ok:
+            raise RecoveryError("backup-capacity-" + reason)
+
+    for name, expected in BACKUP_CAPACITY_IDENTITIES.items():
+        item = payload.get(name) or {}
+        require(item.get("fingerprint") == expected, "identity-drift")
+        unsigned = {key: value for key, value in item.items() if key != "fingerprint"}
+        require("sha256:" + digest(canonical_bytes(unsigned)) == expected, "identity-drift")
+    health = dict(payload.get("health") or {})
+    storage = dict(payload.get("storage") or {})
+    registry = dict(storage.get("storage_registry") or {})
+    roles = dict(registry.get("roles") or {})
+    require(health.get("last_failure") == BACKUP_CAPACITY_FAILURE, "failure-not-exact")
+    require(health.get("status") == "degraded" and health.get("blockers") == ["last scheduled backup attempt failed"], "health-blockers")
+    require(health.get("next_replacement_capacity") is True, "insufficient-reserve")
+    require(health.get("retained_backup_id") == "finance-backup-8d7d8182cf84e0178e34" and health.get("retained_count") == 1, "retained-drift")
+    require(isinstance(health.get("age_seconds"), (int, float)) and 0 <= health["age_seconds"] < 604800 and health.get("rpo_seconds") == 604800, "rpo-expired")
+    require(storage.get("status") == "normal" and storage.get("safe_for_discretionary_root_writes") is True, "root-health")
+    require(not storage.get("unregistered_large_root_files") and not registry.get("current_root_producer_violations") and not registry.get("unregistered_destination_violations"), "storage-violations")
+    require(set(roles) == {"root", "backup", "generation", "warehouse_backup"}, "role-inventory")
+    for name, role in roles.items():
+        require(role.get("identity_ok") is True and role.get("identity_error_fields") == [], "filesystem-identity")
+        if name != "backup":
+            require(role.get("reserve_breached") is False and int(role.get("required_reserve_bytes", -1)) >= 0 and int(role.get("available_bytes", -1)) >= int(role["required_reserve_bytes"]), "other-reserve")
+    backup = roles["backup"]
+    require(backup.get("reserve_mode") == "finance_next_replacement_plus_emergency" and backup.get("required_reserve_bytes") == -1 and backup.get("reserve_breached") is True, "backup-diagnostic")
+    alert = {"code": "storage_reserve_breach", "severity": "critical", "role": "backup", "available_bytes": backup["available_bytes"], "required_reserve_bytes": -1,
+             "reserve_error": "Finance backup reserve evidence is not healthy: status=degraded, blockers=['last scheduled backup attempt failed']"}
+    require(storage.get("alerts") == [alert] and registry.get("alerts") == [alert] and registry.get("ok") is False, "other-alerts")
+    require(payload.get("emergency_reserve_bytes") == 4 * 1024**3, "emergency-reserve")
+    require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(health.get("canonical_source_manifest_sha256") or "")) is not None, "source-manifest")
+    source = int(health.get("canonical_source_bytes") or 0)
+    required = int(health.get("next_replacement_required_bytes") or 0)
+    require(source > 0 and required == source + 8 * 1024**3 + 64 * 1024**2 + 1024**2, "capacity-basis")
+    available = min(int(health.get("available_bytes", -1)), int(backup["available_bytes"]))
+    reserve = required + 4 * 1024**3
+    require(available >= reserve, "insufficient-reserve")
+    require(payload.get("pending_transactions") == [], "pending-transaction")
+    return {"acceptance": "exact-historical-cap-failure-with-live-capacity", "health_status": "degraded",
+            "required_reserve_bytes": reserve, "available_bytes": available, "margin_bytes": available - reserve,
+            "identities": dict(BACKUP_CAPACITY_IDENTITIES),
+            "source_manifest_sha256": health.get("canonical_source_manifest_sha256"),
+            "root_policy_sha256": storage.get("policy_sha256")}
+
+
+def collect_backup_capacity_proof(target: Any, source: Mapping[str, Any], release_run_id: int) -> dict[str, Any]:
+    if (release_run_id != BACKUP_CAPACITY_RELEASE_RUN_ID or source.get("pull_request") != 1527
+            or source.get("merge_sha") != BACKUP_CAPACITY_MERGE_SHA
+            or source.get("original_operation_id") != BACKUP_CAPACITY_OWNER
+            or target.target_id != "wb_core_eu_hosted_runtime_active"
+            or target.target_dir != "/opt/wb-core-runtime/app"):
+        raise RecoveryError("backup-capacity-release-not-exact")
+    policy_path = ROOT / target.root_storage_policy_file
+    expected_policy_sha256 = digest(policy_path.read_bytes())
+    # Two bounded native health reads bracket the full storage scan. Neither
+    # writes artifacts, takes writer leases, repairs state, nor hashes DB bytes.
+    script = f'''
+import hashlib, json, sys
+from pathlib import Path
+sys.path.insert(0, {target.target_dir!r})
+from packages.application.root_storage_policy import load_policy, collect_root_storage_status
+from packages.application.finance_storage_backup_rotation import backup_rotation_health
+from packages.application.finance_backup_admission import _read_intent
+runtime = Path('/opt/wb-core-runtime/state')
+backup = runtime / 'backups/finance-storage-split-snapshots'
+remote_policy = Path({str(Path(target.target_dir) / target.root_storage_policy_file)!r})
+assert hashlib.sha256(remote_policy.read_bytes()).hexdigest() == {expected_policy_sha256!r}, 'root policy drift'
+policy = load_policy(remote_policy)
+assert Path('/opt/wb-core-runtime/app/.wb-core-runtime-sha').read_text().strip() == {BACKUP_CAPACITY_MERGE_SHA!r}
+health_before = backup_rotation_health(runtime)
+storage = collect_root_storage_status(policy=policy)
+health = backup_rotation_health(runtime)
+assert health_before.get('canonical_source_manifest_sha256') == health.get('canonical_source_manifest_sha256'), 'source drift'
+transactions = backup / 'transactions'
+pending = [p.name for p in transactions.iterdir() if p.is_symlink() or not p.is_file() or json.loads(p.read_text()).get('phase') != 'completed'] if transactions.exists() else []
+result = dict(health=health, storage=storage, policy=json.loads((backup/'retention_policy.json').read_text()), selector=json.loads((backup/'current.json').read_text()), intent=_read_intent(runtime), pending_transactions=pending, emergency_reserve_bytes=policy['storage_registry']['filesystems']['backup']['emergency_reserve_bytes'])
+print(json.dumps(result, sort_keys=True))
+'''
+    return validate_backup_capacity_proof(_run_remote_json(target, script))
+
+
+def recheck_backup_capacity_proof(target: Any, preview: Mapping[str, Any]) -> dict[str, Any]:
+    proof = collect_backup_capacity_proof(target, preview['source'], int(preview['release_run_id']))
+    previous = preview.get('backup_capacity_proof') or {}
+    for key in ('identities', 'source_manifest_sha256', 'root_policy_sha256'):
+        if proof.get(key) != previous.get(key):
+            raise RecoveryError('backup-capacity-proof-drift')
+    return {"stage": "exact-historical-backup-capacity-readback", "proof": proof}
+
+
 def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> dict[str, Any]:
     evidence = collect_evidence(client, release_run_id)
     original = evidence["original_receipt"]
@@ -1731,6 +1845,12 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         i = result["stages"].index("change-registry-activation-exact-target")
         result["stages"][i:i + 1] = ["existing-activation-readback", "cleaner-before-complete-probe"]
         result["forbidden_stages"].append("change-registry-activation")
+    if backup_capacity_case(case, release_run_id):
+        if result['existing_started_owner'] is None:
+            raise RecoveryError('backup-capacity-started-owner-required')
+        result['backup_capacity_proof'] = collect_backup_capacity_proof(target, result['source'], release_run_id)
+        result['stages'][0] = 'exact-historical-backup-capacity-readback'
+        result['stages'].insert(result['stages'].index('deployment-metadata-cas-complete'), 'cleaner-before-complete-probe')
     result["preview_fingerprint"] = preview_fingerprint(result)
     return result
 
@@ -1921,8 +2041,13 @@ def apply_recovery(
         stages = _claim_deploy_protection(target, preview['source'])
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
         stages.append(_must_succeed("root-storage-status-refresh", protected(commands["root_storage_status"])))
+    if backup_capacity_case(case, release_run_id):
+        if started_owner is None:
+            raise RecoveryError('backup-capacity-started-owner-required')
+        stages.append(recheck_backup_capacity_proof(target, preview))
+    else:
+        stages.append(_must_succeed("root-storage-readback", commands["root_storage_readback"]))
     stages.extend([
-        _must_succeed("root-storage-readback", commands["root_storage_readback"]),
         _must_succeed("status", commands["status"]),
         _must_succeed("auth", commands["auth"]),
     ])
@@ -1956,6 +2081,8 @@ def apply_recovery(
             collect_existing_started_owner(target, preview['source'])
         ) != canonical_bytes(started_owner):
             raise RecoveryError('existing-started-owner-drift-after-claim')
+        if backup_capacity_case(case, release_run_id):
+            stages.append(recheck_backup_capacity_proof(target, preview))
         if preview.get('pr1483_preparation_continuation') is not None:
             from ci.pr1483_preparation_continuation import clear_stopped_sync_health
             stages.append(clear_stopped_sync_health(client, target, preview))
@@ -2030,7 +2157,7 @@ def apply_recovery(
                 stages.append({"stage": "activation-readback", "stdout_sha256": digest(readback.stdout.encode())})
             else:
                 stages.append({"stage": "activation", "stdout_sha256": digest(activation.stdout.encode())})
-        if (case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE} or cleaner_completion_case(case, release_run_id)):
+        if (case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE} or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id)):
             stages.append(_must_succeed("cleaner-before-complete-probe", protected(commands["cleaner_precomplete_probe"])))
         before_completion = collect_prestate(
             target, preview["source"]["merge_sha"], require_incomplete=True, case=case
@@ -2040,6 +2167,8 @@ def apply_recovery(
         completion_runner = prove_repo_only_descendant(client, preview["source"])
         if canonical_bytes(completion_runner) != canonical_bytes(fresh_runner):
             raise RecoveryError("trusted-main-drift-before-completion")
+        if backup_capacity_case(case, release_run_id):
+            stages.append(recheck_backup_capacity_proof(target, preview))
         completion = _run_stage(protected(commands["completion"]), input_text=commands["completion_input"])
         if completion.returncode != 0:
             # Never repeat the CAS write.  Accept only an exact complete target
