@@ -450,6 +450,7 @@
       "patterns": [
         "packages/application/storage_registry.py",
         "packages/application/finance_storage_backup_rotation.py",
+        "packages/application/finance_backup_compression.py",
         "apps/finance_storage_backup_rotation.py"
       ],
       "commands": [
@@ -1522,6 +1523,7 @@
         "packages/application/finance_backup_handoff.py",
         "packages/application/finance_backup_admission.py",
         "packages/application/finance_storage_backup_rotation.py",
+        "packages/application/finance_backup_compression.py",
         "packages/application/registry_upload_http_entrypoint.py",
         "apps/finance_backup_handoff_smoke.py"
       ],

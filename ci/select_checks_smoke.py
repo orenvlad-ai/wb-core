@@ -88,11 +88,13 @@ BOUNDARIES = {
     'finance_storage_split_smoke': (
         'packages/application/storage_registry.py',
         'packages/application/finance_storage_backup_rotation.py',
+        'packages/application/finance_backup_compression.py',
         'apps/finance_storage_backup_rotation.py',
     ),
     'finance_storage_backup_rotation_smoke': (
         'packages/application/storage_registry.py',
         'packages/application/finance_storage_backup_rotation.py',
+        'packages/application/finance_backup_compression.py',
         'apps/finance_storage_backup_rotation.py',
     ),
     'root_storage_policy_smoke': (
