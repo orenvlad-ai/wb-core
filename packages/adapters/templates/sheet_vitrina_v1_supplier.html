@@ -1803,7 +1803,40 @@
             return rows.filter((row) => allowed.has(orderStatusLabels[row.order_status] ? row.order_status : "production"));
           }
 
-          async function fetchJson(url, options = {}) {
+      const viewRequests = new Map();
+      let openingShipment = 0;
+      let loadedDocumentsFor = "";
+      let documentsEpoch = 0;
+      window.addEventListener("focus", () => {loadedDocumentsFor = "";});
+      async function fetchJson(url, options = {}) {
+        const method = String(options.method || "GET").toUpperCase();
+        if (method !== "GET") {
+          loadedDocumentsFor = "";
+          documentsEpoch += 1;
+          viewRequests.clear();
+          try {return await fetchJsonNetwork(url, options);}
+          finally {loadedDocumentsFor = ""; documentsEpoch += 1; viewRequests.clear();}
+        }
+        let readUrl = url;
+        if (config.supplier_read_path) {
+          if (url === tradeDocumentsPath) readUrl = config.supplier_read_path + "/contracts";
+          else if (url === shipmentsPath || url.startsWith(shipmentsPath + "/")) {
+            const suffix = url.slice(shipmentsPath.length);
+            if (!suffix || /^\/sup_[A-Za-z0-9_-]+(\/documents)?$/.test(suffix)) readUrl = config.supplier_read_path + suffix;
+            else if (/^\/sup_[A-Za-z0-9_-]+\/factual-date-correction$/.test(suffix)) readUrl = config.supplier_read_path + suffix.replace(/factual-date-correction$/, "correction");
+          }
+        }
+        if (!viewRequests.has(readUrl)) {
+          const request = fetchJsonNetwork(readUrl, options).finally(() => {
+            if (viewRequests.get(readUrl) === request) viewRequests.delete(readUrl);
+          });
+          viewRequests.set(readUrl, request);
+        }
+        // The card is editable: callers must never share mutable response objects.
+        return JSON.parse(JSON.stringify(await viewRequests.get(readUrl)));
+      }
+
+          async function fetchJsonNetwork(url, options = {}) {
         const action = supplierAcceptance && !options.supplierFactualDates
           ? supplierAcceptance.classify(url, String(options.method || "GET").toUpperCase()) : null;
         if (action) return supplierAcceptance.submit(url, options, action);
@@ -2122,10 +2155,18 @@
       }
 
       async function openShipment(shipmentId, options) {
+        const opening = ++openingShipment;
+        loadedDocumentsFor = "";
+        documentsEpoch += 1;
+        setMessage(registryMessage, "Открываем поставку…", "");
         try {
-          currentShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
+          const nextShipment = await fetchJson(shipmentsPath + "/" + encodeURIComponent(shipmentId), {
             headers: { Accept: "application/json" }
           });
+          if (opening !== openingShipment) return;
+          currentShipment = nextShipment;
+          resetFinancialState();
+          setMessage(registryMessage, "", "");
           currentUploadId = "";
           isNewShipment = false;
           cardDirty = false;
@@ -2151,6 +2192,7 @@
             loadFinancialDocuments();
           }
         } catch (error) {
+          if (opening !== openingShipment) return;
           setMessage(registryMessage, error.message, "error");
         }
       }
@@ -2300,7 +2342,7 @@
         activeCardTab = tab === "financial" ? "financial" : "supply";
         renderCardTabs(currentShipment || blankShipment());
         if (activeCardTab === "financial" && canManageFinancialDocuments) {
-          loadFinancialDocuments();
+          loadFinancialDocuments({reuse: true});
         }
       }
 
@@ -2465,11 +2507,16 @@
           resetFinancialState();
           return;
         }
+        const requestedShipmentId = currentShipment.shipment_id;
+        if (options && options.reuse && loadedDocumentsFor === requestedShipmentId) return;
+        const epoch = documentsEpoch;
         setMessage(financialDocumentsMessage, "Загружаем документы...", "");
         try {
-          const payload = await fetchJson(orderDocumentsPath(currentShipment.shipment_id), {
+          const payload = await fetchJson(orderDocumentsPath(requestedShipmentId), {
             headers: { Accept: "application/json" }
           });
+          if (!currentShipment || currentShipment.shipment_id !== requestedShipmentId || epoch !== documentsEpoch) return;
+          loadedDocumentsFor = requestedShipmentId;
           orderRequiredDocuments = Array.isArray(payload.required_documents) ? payload.required_documents : [];
           orderDocumentPackageDownloads = payload.package_downloads || {};
           financialDocuments = Array.isArray(payload.documents) ? payload.documents : [];
@@ -2485,6 +2532,7 @@
           renderFinancialDocuments();
           setMessage(financialDocumentsMessage, "", "");
         } catch (error) {
+          if (!currentShipment || currentShipment.shipment_id !== requestedShipmentId || epoch !== documentsEpoch) return;
           resetFinancialState();
           setMessage(financialDocumentsMessage, error.message, "error");
         }
@@ -4307,6 +4355,9 @@
         if ((cardDirty || (isNewShipment && currentUploadId)) && !confirm(uiText("关闭且不保存修改？ / Close without saving changes? / Закрыть карточку без сохранения изменений?", "Закрыть карточку без сохранения изменений?"))) {
           return;
         }
+        openingShipment += 1;
+        documentsEpoch += 1;
+        loadedDocumentsFor = "";
         shipmentCard.hidden = true;
         currentShipment = null;
         currentUploadId = "";
@@ -4336,6 +4387,9 @@
       }
 
       function closeCardWithoutConfirm() {
+        openingShipment += 1;
+        documentsEpoch += 1;
+        loadedDocumentsFor = "";
         shipmentCard.hidden = true;
         currentShipment = null;
         currentUploadId = "";

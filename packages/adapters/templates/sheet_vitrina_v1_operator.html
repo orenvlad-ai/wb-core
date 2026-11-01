@@ -7039,6 +7039,13 @@
 
       function activateSupplyMode(modeName, options) {
         const activeModeName = normalizePersistedSectionName(modeName, VALID_SUPPLY_MODES, DEFAULT_SUPPLY_MODE);
+        if (config.independent_supplier_read && activeModeName !== "supplier") {
+          const legacy = new URL("/sheet-vitrina-v1/operator", location.origin);
+          legacy.searchParams.set("embedded_tab", "factory-order");
+          legacy.searchParams.set("supply_mode", activeModeName);
+          location.replace(legacy.pathname + legacy.search);
+          return activeModeName;
+        }
         closeOperatorFloatingControls();
         supplyModeButtons.forEach((button) => {
           const selected = button.dataset.supplyModeButton === activeModeName;
@@ -7120,10 +7127,10 @@
         supplySectionPanels.forEach((panel) => {
           panel.hidden = panel.dataset.supplySectionPanel !== activeSectionName;
         });
-        if (activeSectionName === "registry" && !supplyCalculationRegistryLoaded) {
+        if (!config.independent_supplier_read && activeSectionName === "registry" && !supplyCalculationRegistryLoaded) {
           loadSupplyCalculationRegistry();
         }
-        if (activeSectionName === "fbs-fulfillment") {
+        if (!config.independent_supplier_read && activeSectionName === "fbs-fulfillment") {
           loadFbsFulfillmentStatus();
         }
         if (!options || options.persist !== false) {
@@ -7147,10 +7154,10 @@
         if (!options || options.persist !== false) {
           writePersistedOperatorUiState({ report_section: activeSectionName });
         }
-        if (activeSectionName === "wb-finance" && !wbFinanceReportLoaded) {
+        if (!config.independent_supplier_read && activeSectionName === "wb-finance" && !wbFinanceReportLoaded) {
           loadWbFinanceReport();
         }
-        if (activeSectionName === "partner" && !partnerReportLoaded) {
+        if (!config.independent_supplier_read && activeSectionName === "partner" && !partnerReportLoaded) {
           loadPartnerReportOptions();
         }
         scheduleEmbeddedHeightPost();
@@ -16591,7 +16598,7 @@
         { persist: !isEmbeddedMode }
       );
       activateSupplyMode(
-        persistedOperatorUiState.supply_mode || DEFAULT_SUPPLY_MODE,
+        config.independent_supplier_read ? "supplier" : (operatorQuery.get("supply_mode") || persistedOperatorUiState.supply_mode || DEFAULT_SUPPLY_MODE),
         { persist: !isEmbeddedMode }
       );
       activateSupplySection(
@@ -16605,6 +16612,7 @@
       renderStockReportSkuSelector();
       renderStockReportColumnSelector();
       renderStockReportIdle();
+      if (!config.independent_supplier_read) {
       loadStatus();
       loadDailyReport();
       loadPlanReportBaselineStatus();
@@ -16621,6 +16629,7 @@
           );
         })
         .finally(() => loadWbWarehouseExclusionOptions());
+      }
     })();
   </script>
 </body>

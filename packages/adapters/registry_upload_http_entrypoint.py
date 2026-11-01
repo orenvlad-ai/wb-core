@@ -11095,6 +11095,8 @@ def _operator_domains_for_user(user: Mapping[str, Any]) -> frozenset[str]:
 def _user_can_access_path(user: Mapping[str, Any], path: str, *, query: str = "") -> bool:
     normalized = str(path or "").split("?", 1)[0]
     role = str(user.get("role") or "").strip()
+    if normalized in {"/sheet-vitrina-v1/supplier-view", "/sheet-vitrina-v1/supply-view"} or normalized == "/v1/sheet-vitrina-v1/supply/supplier-view" or normalized.startswith("/v1/sheet-vitrina-v1/supply/supplier-view/"):
+        return role != WEB_AUTH_ROLE_SUPPLIER and _user_has_section_access(user, WEB_AUTH_SECTION_SUPPLY)
     if normalized == '/sheet-vitrina-v1/operations' or normalized == '/v1/sheet-vitrina-v1/operations' or normalized.startswith('/v1/sheet-vitrina-v1/operations/'):
         return bool(_operator_domains_for_user(user))
     if normalized == DEFAULT_AUTO_UPDATES_MONITORING_PATH:
@@ -11492,6 +11494,7 @@ def _render_sheet_vitrina_operator_ui(
     user_config_key: str = "local_operator",
     operator_context: Mapping[str, Any] | None = None,
     embedded_tab: str = "",
+    independent_supplier_read: bool = False,
 ) -> str:
     web_vitrina_url = DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     operator_ui_context = operator_context or {}
@@ -11501,6 +11504,7 @@ def _render_sheet_vitrina_operator_ui(
         "page_title": "Операторский сайт" if normalized_embedded_tab else "sheet_vitrina_v1",
         "embedded": bool(normalized_embedded_tab),
         "initial_tab": normalized_embedded_tab,
+        "independent_supplier_read": independent_supplier_read,
         "daily_report_path": daily_report_path,
         "stock_report_path": stock_report_path,
         "plan_report_path": plan_report_path,
@@ -11585,7 +11589,7 @@ def _render_sheet_vitrina_operator_ui(
         "cny_account_opening_balance_path": DEFAULT_CNY_ACCOUNT_OPENING_BALANCE_PATH,
         "cny_account_replay_path": DEFAULT_CNY_ACCOUNT_REPLAY_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
-        "supplier_ui_path": DEFAULT_SHEET_SUPPLIER_UI_PATH,
+        "supplier_ui_path": "/sheet-vitrina-v1/supplier-view" if independent_supplier_read or os.environ.get("SUPPLIER_VIEW_ENABLED") == "1" else DEFAULT_SHEET_SUPPLIER_UI_PATH,
         "current_business_date": str(operator_ui_context.get("current_business_date") or ""),
         "stock_report_active_skus": list(operator_ui_context.get("stock_report_active_skus") or []),
         "stock_report_active_sku_count": int(operator_ui_context.get("stock_report_active_sku_count") or 0),
@@ -11618,12 +11622,14 @@ def _render_sheet_vitrina_supplier_ui(
     can_manage_documents: bool = False,
     can_manage_financial_documents: bool = False,
     embedded: str = "",
+    independent_read: bool = False,
 ) -> str:
     config_payload = {
         "user_config_key": user_config_key,
         "page_title": "Реестр заказов",
         "surface": "internal",
         "embedded": str(embedded or ""),
+        "supplier_read_path": "/v1/sheet-vitrina-v1/supply/supplier-view" if independent_read else "",
         "supplier_shipments_path": DEFAULT_SUPPLIER_SHIPMENTS_PATH,
         "supplier_shipments_parse_path": DEFAULT_SUPPLIER_SHIPMENTS_PARSE_PATH,
         "trade_documents_path": DEFAULT_TRADE_DOCUMENTS_PATH,
@@ -12027,6 +12033,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "read_path": read_path,
         "performance_path": DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH,
         "operator_path": operator_path,
+        "supplier_view_path": "/sheet-vitrina-v1/supply-view" if os.environ.get("SUPPLIER_VIEW_ENABLED") == "1" else "",
         "auto_updates_path": DEFAULT_AUTO_UPDATES_MONITORING_PATH,
         "warehouses_path": DEFAULT_WAREHOUSES_PATH,
         "wb_incident_policy_options_path": DEFAULT_WB_WAREHOUSE_EXCLUSION_OPTIONS_PATH,

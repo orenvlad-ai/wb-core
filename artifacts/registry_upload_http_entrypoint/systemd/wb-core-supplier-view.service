@@ -1,0 +1,22 @@
+[Unit]
+Description=WB Core Supplier Query-Only Views
+After=network.target
+RequiresMountsFor=/opt/wb-core-runtime/state/generations
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wb-core-runtime/app
+EnvironmentFile=/opt/wb-ai/.env
+Environment=REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state
+Environment=SUPPLIER_VIEW_HTTP_PORT=8782
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/wb-core-runtime/app/apps/supplier_view_http_live.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
