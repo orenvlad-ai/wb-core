@@ -34,6 +34,40 @@ def dismiss_acceptance(page):
     expect(popup).to_be_hidden()
 
 
+def daily_register_browser(output):
+    base=dict(batch_id='daily-test',state='partial',local_date='2026-11-01',due_at='2026-10-31T22:45:00Z',started_at='2026-10-31T22:45:00Z',finished_at='2026-11-01T00:01:00Z',checked_campaigns=61,discovered_campaigns=61,checked_keys=9158,confirmed_excluded=7,archived_retired=44,confirmed_returned=2,deferred_count=1,failed_count=0,held_count=0,unknown_pairs=0,summary_available=True)
+    rows=[base,dict(base,state='complete',confirmed_excluded=0,archived_retired=0,deferred_count=0),dict(base,state='complete',unknown_pairs=1),dict(base,state='partial',held_count=1),dict(base,state='failed',failed_count=1),dict(base,state='partial',summary_available=False,confirmed_excluded=None,archived_retired=None,deferred_count=None,failed_count=None,held_count=None,unknown_pairs=None)]
+    with sync_playwright() as p, running_fixture() as f:
+     browser=p.chromium.launch()
+     page=browser.new_page(viewport={'width':1440,'height':1080},timezone_id='Asia/Tbilisi');errors=[]
+     page.on('pageerror',lambda e:errors.append(str(e)))
+     page.route('**'+PREFIX+'/daily-schedules/history',lambda r:r.fulfill(json={'items':rows}))
+     page.route('**'+PREFIX+'/manual-batches/daily-test',lambda r:r.fulfill(json={'items':[dict(index=0,advert_id=12,nm_id=101,state='partial',checked_total=4,confirmed_excluded=1,returned=1,error='statistics_missing')]}))
+     page.route('**'+PREFIX+'/manual-batches/daily-test/items/0',lambda r:r.fulfill(json={'job':{'scan_decisions':[dict(query='стекло с автоустановкой',technical_reason='statistics_missing',state='pending_exclude',verdict='exclude')]},'run':None}))
+     browser_login(page,f);page.locator('[data-kc-mode-tab="scheduled"]').click()
+     table=page.locator('.kc-daily-table');expect(table).to_be_visible()
+     expect(table.locator('th')).to_have_text(['Запуск / статус','Кампании','Ключи','Исключено','Убран архив','Отложено','Подробнее'])
+     first=table.locator('tbody>tr').nth(0)
+     expect(first).to_contain_text('02:45–04:01');expect(first).to_contain_text('Завершено с замечанием')
+     expect(first.locator('td').nth(3)).to_contain_text('7');expect(first.locator('td').nth(4)).to_contain_text('44')
+     expect(page.locator('[data-kc-scheduled-timezone]')).to_contain_text('Asia/Tbilisi')
+     expect(table.locator('tbody>tr').nth(2).locator('td').nth(3).locator('.kc-daily-value')).to_have_text('0')
+     expect(table.locator('tbody>tr').nth(4).locator('.kc-status')).to_have_attribute('data-tone','warning')
+     expect(table.locator('tbody>tr').nth(6)).to_contain_text('Приостановлено: 1')
+     expect(table.locator('tbody>tr').nth(8)).to_contain_text('Ошибок: 1')
+     expect(table.locator('tbody>tr').nth(10).locator('td').nth(3).locator('.kc-daily-value')).to_have_text('—')
+     first.get_by_role('button',name='Подробнее',exact=True).click()
+     expect(first.get_by_role('button',name='Свернуть')).to_have_attribute('aria-expanded','true')
+     detail=table.locator('tbody>tr').nth(1);expect(detail).to_contain_text('Обычные возвраты из исключений, подтверждённые WB: 2')
+     detail.get_by_role('button',name='Ключи пары').click();expect(detail).to_contain_text('стекло с автоустановкой')
+     page.screenshot(path=str(output/'daily-register-desktop.png'),full_page=True)
+     page.set_viewport_size({'width':390,'height':844})
+     assert page.locator('[data-keyword-cleaner]').evaluate('(n)=>n.scrollWidth<=n.clientWidth+1')
+     page.screenshot(path=str(output/'daily-register-mobile.png'),full_page=True)
+     assert not errors,errors
+     browser.close()
+
+
 def run(output:Path):
     output.mkdir(parents=True,exist_ok=True);checks=[];screens=[]
     def check(name,condition=True):
@@ -581,6 +615,8 @@ def run(output:Path):
             page.unroute_all(behavior='ignoreErrors');page.close()
         browser.close()
     from apps.search_cluster_cleaner_batch_recovery_browser_smoke import run as run_batch_recovery
+    daily_register_browser(output)
+    checks.append('daily_register_confirmed_subtotals_unknowns_and_details')
     recovery = run_batch_recovery(output/'batch-recovery')
     checks.extend('batch_recovery_'+name for name in recovery['checks'])
     from apps.search_cluster_cleaner_drift_batch_browser_smoke import main as drift_batch_browser_main
