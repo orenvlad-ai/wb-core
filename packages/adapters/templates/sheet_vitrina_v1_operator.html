@@ -5266,6 +5266,16 @@
                 </tbody>
               </table>
             </div>
+            <section id="cnySupplierAdvances" hidden>
+              <h3 class="block-title" style="margin-top: 18px;">Переплаты поставщикам</h3>
+              <p>Учтены отдельно от стоимости товаров. Не входят в остаток банковского счёта.</p>
+              <div class="cny-account-table-wrap">
+                <table class="cny-account-table" aria-label="Переплаты поставщикам">
+                  <thead><tr><th>Дата</th><th>Поставщик</th><th>Контракт</th><th>Сумма CNY</th><th>Стоимость RUB</th><th>Основание</th></tr></thead>
+                  <tbody id="cnySupplierAdvancesBody"></tbody>
+                </table>
+              </div>
+            </section>
             <h3 class="block-title" style="margin-top: 18px;">Ledger operations</h3>
             <div class="cny-account-table-wrap">
               <table class="cny-account-table" aria-label="CNY ledger operations">
@@ -11696,6 +11706,16 @@
         const operations = Array.isArray(payload && payload.ledger_operations) ? payload.ledger_operations : [];
         renderCnyConversions(Array.isArray(payload && payload.conversions) ? payload.conversions : [], operations);
         renderCnyLedgerOperations(operations);
+        const advancesSection = document.getElementById("cnySupplierAdvances");
+        const advancesBody = document.getElementById("cnySupplierAdvancesBody");
+        const advances = moneyCurrent && Array.isArray(payload && payload.supplier_advances) ? payload.supplier_advances : [];
+        if (advancesSection && advancesBody) {
+          advancesSection.hidden = !advances.length;
+          advancesBody.innerHTML = advances.map(item => "<tr>" + [
+            formatCnyDateTime(item.operation_date), valueOrDash(item.supplier_name), valueOrDash(item.contract_no),
+            formatCnyAmount(item.amount_cny), formatCnyRub(item.rub_carrying_value), valueOrDash(item.reason)
+          ].map(value => "<td>" + escapeHtml(value) + "</td>").join("") + "</tr>").join("");
+        }
       }
 
       function renderCnyConversions(documents, operations) {
@@ -11884,6 +11904,7 @@
           opening_balance: "opening balance",
           conversion_in: "конвертация",
           supplier_payment_out: "оплата поставщику",
+          supplier_advance_out: "переплата поставщику (вне себестоимости)",
           conversion_fee: "комиссия конвертации",
           transfer_fee: "комиссия перевода",
           adjustment: "adjustment"

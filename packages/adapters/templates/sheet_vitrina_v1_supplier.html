@@ -3316,6 +3316,7 @@
             setMessage(financialDocumentsMessage, "Загружаем " + String(index + 1) + "/" + String(files.length) + ": " + file.name, "");
             const formData = new FormData();
             formData.append("file", file, file.name);
+            formData.append("propose_payment_allocation", "true");
             try {
               let payload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id), {
                 method: "POST",
@@ -3333,6 +3334,7 @@
                 const confirmedFormData = new FormData();
                 confirmedFormData.append("file", file, file.name);
                 confirmedFormData.append("payment_date", String(paymentDate).trim());
+                confirmedFormData.append("propose_payment_allocation", "true");
                 payload = await fetchJson(financialDocumentsPath(currentShipment.shipment_id), {
                   method: "POST",
                   body: confirmedFormData,
@@ -3379,6 +3381,12 @@
               const document = item.document || {};
               const duplicateText = (item.warnings || []).join("; ");
               const detectedResults = Array.isArray(item.detected_results) ? item.detected_results : [];
+              const allocation = item.payment_allocation;
+              const allocationFields = allocation
+                ? '<div class="finance-summary-stack"><label>В оплату этого инвойса, CNY<input readonly aria-label="В оплату этого инвойса, CNY" value="' + escapeHtml(allocation.settlement_cny) + '"></label>'
+                  + '<label>Отдельный аванс поставщику, CNY<input readonly aria-label="Отдельный аванс поставщику, CNY" value="' + escapeHtml(allocation.advance_cny) + '"></label>'
+                  + '<small>Полная сумма банковского платежа сохранится. Аванс не входит в себестоимость этой поставки. Подтверждение добавления также подтверждает это распределение.</small></div>'
+                : "";
               const duplicateLocations = (item.duplicates || []).map((duplicate) => {
                 const shipment = duplicate.shipment || {};
                 return [
@@ -3415,6 +3423,7 @@
                   formatAmount(document.amount, document.currency)
                 ].filter(Boolean).join(" · "))
                 + '<br><small>Найдено позиций: ' + String(detectedResults.length) + '</small>'
+                + allocationFields
                 + (resultRows ? '<div class="finance-summary-stack">' + resultRows + '</div>' : '<p class="message warning">Импортируемых позиций не найдено.</p>')
                 + (duplicateText ? '<details><summary><span class="badge warning">Есть предупреждения</span></summary><small>' + escapeHtml(duplicateText) + '</small></details>' : "")
                 + (duplicateLocations ? '<br><span>Найдено: ' + escapeHtml(duplicateLocations) + '</span>' : "")

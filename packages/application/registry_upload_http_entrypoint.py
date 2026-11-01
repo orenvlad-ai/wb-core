@@ -5686,6 +5686,7 @@ class RegistryUploadHttpEntrypoint:
                     preview=preview,
                     payment_date=str(upload_fields.get("payment_date") or ""),
                     actor=actor,
+                    propose_payment_allocation=str(upload_fields.get("propose_payment_allocation") or "").lower() == "true",
                 )
         return self.supplier_financial_documents_block.preview_document_upload(
             shipment_id,
@@ -5747,7 +5748,7 @@ class RegistryUploadHttpEntrypoint:
             return owners
         def write(child):
             if action=='confirm_upload':
-                result=self._confirm_supplier_upload_token(shipment_id=shipment_id,confirmation_token=child['confirmation_token'],payload=body,skip_target_revision_check=True)
+                result=self._confirm_supplier_upload_token(shipment_id=shipment_id,confirmation_token=child['confirmation_token'],payload=body,skip_target_revision_check=True,actor=actor)
             elif action=='confirm_import':
                 result=self._native_handle_supplier_financial_document_confirm_import_request(shipment_id,document_id,
                     selected_operation_ids=body.get('selected_operation_ids'),expected_source_sha256=body.get('source_sha256'),expected_target_revision=body.get('target_revision'))
@@ -5798,12 +5799,14 @@ class RegistryUploadHttpEntrypoint:
             return self._handle_supplier_financial_documents_confirm_upload_request(
                 shipment_id,
                 payload,
+                actor=actor,
             )
 
     def _handle_supplier_financial_documents_confirm_upload_request(
         self,
         shipment_id: str,
         payload: Mapping[str, Any],
+        *, actor: str = "",
     ) -> dict[str, Any]:
         batch_tokens = [
             str(item or "").strip()
@@ -5872,6 +5875,7 @@ class RegistryUploadHttpEntrypoint:
                     confirmation_token=token,
                     payload=payload,
                     skip_target_revision_check=True,
+                    actor=actor,
                 )
                 for token in batch_tokens
             ]
@@ -5893,6 +5897,7 @@ class RegistryUploadHttpEntrypoint:
             shipment_id=shipment_id,
             confirmation_token=token,
             payload=payload,
+            actor=actor,
         )
 
     def _confirm_supplier_upload_token(
@@ -5902,6 +5907,7 @@ class RegistryUploadHttpEntrypoint:
         confirmation_token: str,
         payload: Mapping[str, Any],
         skip_target_revision_check: bool = False,
+        actor: str = "",
     ) -> dict[str, Any]:
         stored_preview = self.runtime.load_supplier_confirmation_preview(
             confirmation_token
@@ -5920,6 +5926,7 @@ class RegistryUploadHttpEntrypoint:
                 ),
                 duplicate_reason=str(payload.get("duplicate_reason") or ""),
                 skip_target_revision_check=skip_target_revision_check,
+                actor=actor,
             )
         return self.supplier_financial_documents_block.confirm_document_upload(
             shipment_id,
@@ -5949,6 +5956,7 @@ class RegistryUploadHttpEntrypoint:
         preview: Mapping[str, Any],
         payment_date: str,
         actor: str,
+        propose_payment_allocation: bool = False,
     ) -> dict[str, Any]:
         normalized = dict(preview.get("normalized_parse") or {})
         if not str(
@@ -5968,6 +5976,11 @@ class RegistryUploadHttpEntrypoint:
                 "warnings": list(preview.get("warnings") or []),
             }
         token = "sfc_" + uuid4().hex
+        source_sha256 = hashlib.sha256(file_bytes).hexdigest()
+        now = self.activated_at_factory()
+        payment_allocation, allocation_target_revision = self._supplier_cny_payment_allocation_proposal(
+            shipment_id, normalized, source_sha256=source_sha256, actor=actor, confirmed_at=now,
+        ) if propose_payment_allocation else (None, None)
         filename = Path(uploaded_filename or "cny-document.pdf").name
         staging_dir = self.runtime.runtime_dir / "supplier_financial_staging" / token
         staging_dir.mkdir(parents=True, exist_ok=False)
@@ -5995,6 +6008,8 @@ class RegistryUploadHttpEntrypoint:
                 "payment_date": payment_date,
                 "actor": actor,
                 "normalized_parse": normalized,
+                "payment_allocation": payment_allocation,
+                "allocation_target_revision": allocation_target_revision,
             },
             created_at=now,
             expires_at=expires_at,
@@ -6162,6 +6177,7 @@ class RegistryUploadHttpEntrypoint:
                 "file_sha256": source_sha256,
             },
             "detected_results": [detected_result],
+            "payment_allocation": payment_allocation,
             "warnings": [
                 *list(preview.get("warnings") or []),
                 *(
@@ -6180,6 +6196,74 @@ class RegistryUploadHttpEntrypoint:
             "duplicates": duplicate_rows,
         }
 
+    def _supplier_cny_payment_allocation_context(self, shipment_id: str) -> tuple[dict[str, Any], str, Decimal]:
+        """Read exact invoice and confirmed settlement facts; never estimate a balance."""
+        from packages.application.cny_ledger import supplier_payment_allocation
+        from packages.application.operator_supplier_shipments import readonly
+        from contextlib import closing
+        with closing(readonly(self.runtime.db_path)) as conn:
+            row = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?", (shipment_id,)).fetchone()
+            header = dict(row) if row is not None else {}
+            lines = [dict(row) for row in conn.execute("SELECT line_id,barcode,qty,unit_price,amount FROM sheet_vitrina_v1_supplier_shipment_lines WHERE shipment_id=? ORDER BY line_id", (shipment_id,))]
+            documents = [dict(row) for row in conn.execute("SELECT * FROM sheet_vitrina_v1_cny_documents WHERE source_order_id=? AND document_type=? AND status<>? ORDER BY document_id", (shipment_id, CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT, CNY_DOCUMENT_STATUS_EXCLUDED))]
+            operations = [dict(row) for row in conn.execute("SELECT * FROM sheet_vitrina_v1_cny_ledger_operations WHERE source_order_id=? AND operation_type='supplier_payment_out' ORDER BY sequence_key,operation_id", (shipment_id,))]
+        by_document: dict[str, list[Mapping[str, Any]]] = {}
+        for operation in operations:
+            by_document.setdefault(str(operation.get("source_document_id") or ""), []).append(operation)
+        paid = Decimal("0")
+        for document in documents:
+            allocation = supplier_payment_allocation(document)
+            expected = Decimal(str(allocation["settlement_cny"] if allocation else document.get("cny_amount")))
+            matches = by_document.pop(str(document["document_id"]), [])
+            if document.get("status") != "posted" or len(matches) != 1:
+                raise ValueError("Остаток к оплате не подтверждён: требуется завершить расчёт предыдущих платежей.")
+            operation = matches[0]
+            counted = operation.get("status") == "posted" or (operation.get("status") == "needs_review" and operation.get("error_reason") == "date_only_deterministic_sequence")
+            if not counted or not expected.is_finite() or expected <= 0 or abs(Decimal(str(operation.get("cny_delta")))) != expected:
+                raise ValueError("Остаток к оплате не подтверждён данными CNY.")
+            paid += expected
+        if by_document or (header.get("cny_paid_amount") not in (None, "") and Decimal(str(header["cny_paid_amount"])) != paid):
+            raise ValueError("Остаток к оплате изменился; дождитесь пересчёта и повторите загрузку.")
+        material = {
+            "header": {key: header.get(key) for key in ("shipment_id", "invoice_no", "invoice_document_id", "invoice_amount_total", "source_file_sha256", "supplier_name", "contract_no", "contract_date", "currency", "archived_at")},
+            "lines": lines,
+            "payments": [{key: item.get(key) for key in ("document_id", "file_sha256", "cny_amount", "parsed_payload_json", "status")} for item in documents],
+            "operations": [{key: item.get(key) for key in ("operation_id", "source_document_id", "operation_date", "cny_delta", "rub_value_delta", "status", "error_reason")} for item in operations],
+        }
+        revision = "sha256:" + hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return header, revision, paid
+
+    def _supplier_cny_payment_allocation_proposal(self, shipment_id, normalized, *, source_sha256, actor, confirmed_at):
+        if normalized.get("document_type") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT:
+            return None, None
+        if any(item.get("file_sha256") == source_sha256 for item in self.runtime.list_cny_documents()):
+            return None, None
+        from packages.application.cny_ledger import supplier_payment_allocation
+        header, revision, paid = self._supplier_cny_payment_allocation_context(shipment_id)
+        if header.get("archived_at") or str(header.get("currency") or "").upper() not in {"CNY", "RMB"}:
+            raise ValueError("Распределение возможно только для активного инвойса в CNY.")
+        try:
+            total = Decimal(str(normalized.get("cny_amount") or normalized.get("transfer_amount")))
+            invoice = Decimal(str(header.get("invoice_amount_total")))
+            if not total.is_finite() or not invoice.is_finite() or total <= 0 or invoice <= 0:
+                raise ValueError()
+        except (ValueError, InvalidOperation):
+            raise ValueError("Сумма платежа и итог инвойса должны быть подтверждены до распределения.") from None
+        remaining = invoice - paid
+        if total <= remaining:
+            return None, revision
+        if remaining <= 0:
+            raise ValueError("Инвойс уже оплачен. Для полностью авансового платежа нужен отдельный учёт.")
+        allocation = {"version": 1, "authority": "operator_confirmed", "source_order_id": shipment_id,
+            "supplier_name": str(header.get("supplier_name") or ""), "contract_no": str(header.get("contract_no") or ""),
+            "contract_date": str(header.get("contract_date") or ""), "actor": actor, "confirmed_at": confirmed_at,
+            "reason": "Подтверждено в карточке поставки: остаток по инвойсу и отдельный аванс поставщику.",
+            "settlement_cny": str(remaining), "advance_cny": str(total - remaining)}
+        allocation = supplier_payment_allocation({"document_type": CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT, "source_order_id": shipment_id,
+            "currency": normalized.get("currency"), "cny_amount": str(total),
+            "parsed_payload": {**normalized, "supplier_payment_allocation": allocation}})
+        return allocation, revision
+
     def _confirm_supplier_cny_document_upload(
         self,
         *,
@@ -6189,6 +6273,7 @@ class RegistryUploadHttpEntrypoint:
         allow_semantic_duplicate: bool = False,
         duplicate_reason: str = "",
         skip_target_revision_check: bool = False,
+        actor: str = "",
     ) -> dict[str, Any]:
         preview = self.runtime.load_supplier_confirmation_preview(
             confirmation_token
@@ -6200,6 +6285,13 @@ class RegistryUploadHttpEntrypoint:
             != "supplier_cny_document_upload"
         ):
             raise ValueError("confirmation token does not match CNY upload")
+        data = dict(preview.get("payload") or {})
+        if data.get("allocation_target_revision"):
+            from packages.application.operator_supplier_financial import active
+            if active() is None:
+                raise ValueError("Подтверждение распределения требует request_id для защищённого сохранения.")
+        if data.get("allocation_target_revision") and str(data.get("actor") or "") != str(actor or ""):
+            raise ValueError("payment allocation confirmation belongs to another operator")
         if preview.get("consumed_at"):
             stored_result = dict(preview.get("result") or {})
             if str(stored_result.get("status") or "") == "pending":
@@ -6222,6 +6314,8 @@ class RegistryUploadHttpEntrypoint:
                     resumed.pop("http_status", None)
                 return resumed
             return {**stored_result, "idempotent": True}
+        if data.get("allocation_target_revision") and data["allocation_target_revision"] != self._supplier_cny_payment_allocation_context(shipment_id)[1]:
+            raise ValueError("Остаток по инвойсу изменился. Повторите предварительный просмотр оплаты.")
         if _timestamp_as_utc(str(preview.get("expires_at") or "")) <= _timestamp_as_utc(
             self.activated_at_factory()
         ):
@@ -6232,7 +6326,6 @@ class RegistryUploadHttpEntrypoint:
             != self._supplier_cny_target_revision(shipment_id)
         ):
             raise ValueError("confirmation token is stale; CNY dependencies changed")
-        data = dict(preview.get("payload") or {})
         staging_path = self.runtime.runtime_dir / str(data.get("staging_path") or "")
         file_bytes = staging_path.read_bytes()
         if hashlib.sha256(file_bytes).hexdigest() != str(
@@ -6360,6 +6453,7 @@ class RegistryUploadHttpEntrypoint:
                 reject_unsupported=True,
                 manual_payment_date=str(data.get("payment_date") or "") or None,
                 manual_payment_date_actor=str(data.get("actor") or ""),
+                payment_allocation=data.get("payment_allocation"),
             )
             result = {
                 **result,
@@ -6393,6 +6487,10 @@ class RegistryUploadHttpEntrypoint:
     def _supplier_cny_target_revision(self, shipment_id: str) -> str:
         shipment = self.runtime.load_supplier_shipment(shipment_id) or {}
         material = {
+            "invoice_identity": {key: (shipment.get("header") or {}).get(key) for key in (
+                "invoice_no", "invoice_amount_total", "invoice_document_id", "source_file_sha256",
+                "supplier_name", "contract_no", "contract_date", "currency", "archived_at",
+            )},
             "shipment_updated_at": str(
                 (shipment.get("header") or {}).get("updated_at") or ""
             ),
