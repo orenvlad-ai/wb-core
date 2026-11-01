@@ -1,4 +1,4 @@
-"""Atomic quantity-only invoice revisions before supplier dispatch/receipt.
+"""Atomic bounded invoice revisions before supplier dispatch/receipt.
 
 Run on the explicitly selected runtime through production_apply_launcher.
 Source documents and payment identities are never recreated.
@@ -87,7 +87,7 @@ def line_key(line):
     return "extra:" + re.sub(r"\s+", "", unicodedata.normalize("NFKC", line["model_raw"])).casefold()
 
 
-def candidate(before, parsed, source, source_sha):
+def candidate(before, parsed, source, source_sha, *, removed_barcodes=()):
     header = before["header"]
     require(not header.get("archived_at") and not header.get("actual_ff_acceptance_date") and not header.get("actual_shipment_date"), "revision-requires-unshipped-active-order")
     require(not header.get("expenses_complete"), "certified-order-requires-separate-correction")
@@ -99,9 +99,17 @@ def candidate(before, parsed, source, source_sha):
     require(bool(meta.get("invoice_date")), "invoice-date-missing")
     old = {line_key(x): x for x in before["lines"]}
     new = {line_key(x): x for x in parsed["lines"]}
-    require(len(old) == len(before["lines"]) and len(new) == len(parsed["lines"]) and old.keys() == new.keys(), "assortment-mismatch-or-duplicate")
+    require(len(old) == len(before["lines"]) and len(new) == len(parsed["lines"]), "assortment-mismatch-or-duplicate")
+    require(isinstance(removed_barcodes, (list, tuple)) and all(isinstance(x, str) and x for x in removed_barcodes), "invalid-removed-barcodes")
+    require(len(set(removed_barcodes)) == len(removed_barcodes), "duplicate-removed-barcode")
+    removed_keys = {"product:" + x for x in removed_barcodes}
+    require(set(old) - set(new) == removed_keys and not set(new) - set(old), "assortment-mismatch-or-duplicate")
+    require(any(x["line_type"] == "product" for x in new.values()), "revision-requires-retained-products")
+    removed_ids = [old[key]["line_id"] for key in sorted(removed_keys)]
     changes = []
     for key, item in old.items():
+        if key in removed_keys:
+            continue
         replacement = new[key]
         require(item["unit_price"] == replacement["unit_price"], "unit-price-change-not-supported")
         if replacement["line_type"] == "product":
@@ -118,7 +126,7 @@ def candidate(before, parsed, source, source_sha):
     header_updates = {k: summary[k] for k in ("product_qty_total", "product_amount_total", "extras_amount_total", "invoice_amount_total", "declared_invoice_total")}
     header_updates.update(invoice_date=meta["invoice_date"], source_filename=source.name, source_file_path=relative, source_file_sha256=source_sha, parser_version=parsed["parser_version"])
     document_updates = dict(document_date=meta["invoice_date"], amount_total=summary["invoice_amount_total"], file_original_name=source.name, file_path=relative, file_sha256=source_sha, parser_version=parsed["parser_version"], parsed_metadata_json=encoded({**meta, "supplier_name": header["supplier_name"], "invoice_amount_total": summary["invoice_amount_total"]}).decode())
-    return {"header": header_updates, "lines": changes, "document": document_updates, "file_sha256": source_sha, "file_path": relative}
+    return {"header": header_updates, "lines": changes, "removed_line_ids": removed_ids, "document": document_updates, "file_sha256": source_sha, "file_path": relative}
 
 
 def update(conn, table, id_column, identity, fields):
@@ -155,7 +163,7 @@ class SupplierInvoiceRevisionAdapter:
             path = (root / row[path_key]).resolve()
             require(path.is_relative_to(root) and hashlib.sha256(path.read_bytes()).hexdigest() == row[sha_key], "previous-source-file-mismatch")
         parsed = parse_supplier_invoice_xlsx(content, filename=source.name)
-        return root, db, before, candidate(before, parsed, source, sha), content
+        return root, db, before, candidate(before, parsed, source, sha, removed_barcodes=request.get("removed_barcodes", ())), content
 
     def preview(self, request, operation_id):
         root, db, before, after, _ = self.plan(request)
@@ -199,6 +207,9 @@ class SupplierInvoiceRevisionAdapter:
                     conn.execute(f"CREATE TABLE IF NOT EXISTS {AUDIT}(operation_id TEXT PRIMARY KEY,shipment_id TEXT NOT NULL,created_at TEXT NOT NULL,prestate_json TEXT NOT NULL,candidate_json TEXT NOT NULL,queue_json TEXT NOT NULL)")
                     require(conn.execute(f"SELECT 1 FROM {AUDIT} WHERE operation_id=?", (operation_id,)).fetchone() is None, "operation-already-submitted")
                     update(conn, PREFIX + "supplier_shipments", "shipment_id", request["shipment_id"], {**after["header"], "updated_at": now})
+                    for line_id in after.get("removed_line_ids", []):
+                        count = conn.execute(f"DELETE FROM {PREFIX}supplier_shipment_lines WHERE shipment_id=? AND line_id=?", (request["shipment_id"], line_id)).rowcount
+                        require(count == 1, "removed-line-count-mismatch")
                     for line in after["lines"]:
                         update(conn, PREFIX + "supplier_shipment_lines", "line_id", line["line_id"], line["updates"])
                     update(conn, PREFIX + "trade_documents", "document_id", before["document"]["document_id"], {**after["document"], "updated_at": now})
@@ -251,7 +262,7 @@ class SupplierInvoiceRevisionAdapter:
             checks.append(all(current[section][k] == v for k, v in after[section].items()))
             checks.append(all(current[section][k] == v for k, v in before[section].items() if k not in after[section] and k != "updated_at"))
         by_id = {x["line_id"]: x for x in current["lines"]}
-        checks.append(set(by_id) == {x["line_id"] for x in before["lines"]})
+        checks.append(set(by_id) == {x["line_id"] for x in before["lines"]} - set(after.get("removed_line_ids", [])))
         for line in after["lines"]:
             checks.append(all(by_id.get(line["line_id"], {}).get(k) == v for k, v in line["updates"].items()))
             previous = next(x for x in before["lines"] if x["line_id"] == line["line_id"])

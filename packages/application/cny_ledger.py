@@ -48,6 +48,7 @@ from packages.contracts.cny_ledger import (
     CNY_LEDGER_OPERATION_STATUS_POSTED,
     CNY_LEDGER_OPERATION_STATUS_SKIPPED,
     CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT,
+    CNY_LEDGER_OPERATION_SUPPLIER_ADVANCE_OUT,
     CNY_LEDGER_OPERATION_TRANSFER_FEE,
     CNY_LEDGER_PARSER_VERSION,
 )
@@ -68,6 +69,7 @@ DATE_ONLY_OPERATION_PRIORITY = {
     CNY_LEDGER_OPERATION_TRANSFER_FEE: 3,
     "bank_fee": 3,
     CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT: 4,
+    CNY_LEDGER_OPERATION_SUPPLIER_ADVANCE_OUT: 4,
     CNY_LEDGER_OPERATION_ADJUSTMENT: 5,
 }
 DATE_ONLY_OPERATION_START_OF_DAY_TYPES = {
@@ -112,6 +114,7 @@ class CnyLedgerBlock:
                 and str(item.get("status") or "") != CNY_DOCUMENT_STATUS_EXCLUDED
             ],
             "ledger_operations": operations,
+            "supplier_advances": _supplier_advances(documents, operations),
             "replay": replay_state,
             "diagnostics": _ledger_diagnostics(operations, replay_state),
             "account_preparation": continuation,
@@ -147,6 +150,86 @@ class CnyLedgerBlock:
         filename = _safe_filename(uploaded_filename or "cny-document.pdf")
         return parse_cny_document_pdf(file_bytes, filename=filename, text_extractor=self.pdf_text_extractor)
 
+    def allocate_supplier_payment(
+        self, document_id: str, *, settlement_cny: Any, advance_cny: Any,
+        supplier_name: str, contract_no: str, contract_date: str,
+        actor: str, reason: str, expected_file_sha256: str,
+        expected_total_cny: Any, confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Explicitly separate settlement from a supplier advance, never bank money.
+
+        The source amount/PDF is retained. Source metadata and the existing CNY
+        preparation intent commit together; retries retain the same document.
+        Existing allocations are immutable through this bounded entry point.
+        """
+        if confirmed is not True:
+            raise ValueError("supplier payment allocation requires explicit confirmation")
+        document_id = str(document_id or "").strip()
+        from packages.application.registry_upload_db_backed_runtime import (
+            _connect, _cny_document_to_dict, _save_cny_document_in_connection,
+        )
+        from packages.application import operator_supplier_financial as operator_financial
+
+        with _connect(self.runtime.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_cny_documents WHERE document_id=?",
+                (str(document_id or "").strip(),),
+            ).fetchone()
+            if row is None:
+                raise ValueError("supplier payment document not found")
+            document = _cny_document_to_dict(row)
+            if (not expected_file_sha256 or document.get("file_sha256") != expected_file_sha256
+                    or _allocation_money(expected_total_cny) != _allocation_money(document.get("cny_amount"))):
+                raise ValueError("supplier payment allocation source evidence drift")
+            order_id = str(document.get("source_order_id") or "")
+            shipment = conn.execute(
+                "SELECT supplier_name,contract_no,contract_date,archived_at FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
+                (order_id,),
+            ).fetchone()
+            evidence = {"supplier_name": supplier_name, "contract_no": contract_no, "contract_date": contract_date}
+            if shipment is None or shipment["archived_at"] or any(
+                str(shipment[key] or "").strip() != str(value or "").strip()
+                for key, value in evidence.items()
+            ):
+                raise ValueError("supplier payment allocation supplier/contract evidence mismatch")
+            allocation = {
+                "version": 1, "authority": "operator_confirmed", "actor": str(actor or "").strip(),
+                "reason": str(reason or "").strip(), "source_order_id": order_id,
+                "settlement_cny": _decimal_to_storage(_allocation_money(settlement_cny)),
+                "advance_cny": _decimal_to_storage(_allocation_money(advance_cny)),
+                **{key: str(value or "").strip() for key, value in evidence.items()},
+            }
+            parsed = dict(document.get("parsed_payload") or {})
+            previous = parsed.get("supplier_payment_allocation")
+            if previous is not None:
+                comparable = {key: value for key, value in previous.items() if key != "confirmed_at"}
+                if comparable != allocation:
+                    raise ValueError("supplier payment allocation already exists with different evidence")
+                supplier_payment_allocation(document)
+                saved = document
+                idempotent = True
+            else:
+                allocation["confirmed_at"] = self.timestamp_factory()
+                candidate = {**document, "parsed_payload": {**parsed, "supplier_payment_allocation": allocation},
+                             "updated_at": self.timestamp_factory()}
+                supplier_payment_allocation(candidate)
+                guard = operator_financial.before_write(conn, kind="cny", subject_id=document_id, owners=[order_id])
+                _save_cny_document_in_connection(conn, candidate)
+                operator_financial.record_saved(conn, kind="cny", subject_id=document_id, guard=guard)
+                saved = _cny_document_to_dict(conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_cny_documents WHERE document_id=?", (document_id,),
+                ).fetchone())
+                idempotent = False
+            conn.commit()
+        replay = self.replay_ledger(reason="supplier_payment_allocation")
+        queue = self._enqueue_functional_recalculation(saved)
+        return self._with_truthful_write_outcome(
+            {**self._with_download_path(saved), "idempotent": idempotent, "replay": replay.get("replay") or replay},
+            replay=replay, queue=queue,
+            success_message="Оплата распределена; аванс поставщику учтён отдельно.",
+        )
+
     def upload_document(
         self,
         *,
@@ -161,6 +244,7 @@ class CnyLedgerBlock:
         reject_unsupported: bool = True,
         manual_payment_date: str | None = None,
         manual_payment_date_actor: str | None = None,
+        payment_allocation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not file_bytes:
             raise ValueError("CNY document upload file is empty")
@@ -212,10 +296,28 @@ class CnyLedgerBlock:
                 normalized["payment_date_provenance"] = {"source": "parsed_document"}
         now = self.timestamp_factory()
         file_sha256 = hashlib.sha256(file_bytes).hexdigest()
+        if payment_allocation is not None:
+            normalized = {**normalized, "supplier_payment_allocation": dict(payment_allocation)}
+            allocation_document = {
+                "document_type": document_type, "currency": normalized.get("currency"),
+                "source_order_id": str(source_order_id or "").strip(),
+                "cny_amount": normalized.get("cny_amount") or normalized.get("transfer_amount"),
+                "parsed_payload": normalized,
+            }
+            allocation = supplier_payment_allocation(allocation_document)
+            shipment = self.runtime.load_supplier_shipment(str(source_order_id or ""))
+            header = (shipment or {}).get("header") or {}
+            if not header or header.get("archived_at") or any(
+                str(header.get(key) or "").strip() != allocation[key]
+                for key in ("supplier_name", "contract_no", "contract_date")
+            ):
+                raise ValueError("supplier payment allocation supplier/contract evidence mismatch")
         document_id = "cnydoc_" + uuid4().hex
         natural_key = _document_natural_key(document_type=document_type, file_sha256=file_sha256, normalized=normalized)
         existing = self.runtime.load_cny_document_by_natural_key(natural_key)
         if existing is not None:
+            if payment_allocation is not None and supplier_payment_allocation(existing) != allocation:
+                raise ValueError("existing payment requires an explicit allocation revision")
             existing_id = str(existing.get("document_id") or "")
             if source_order_id and not str(existing.get("source_order_id") or "").strip():
                 existing = self.runtime.update_cny_document_context(
@@ -580,6 +682,7 @@ class CnyLedgerBlock:
         ]
         planned_operations = _build_planned_operations(documents, created_at=now)
         planned_operations.sort(key=_operation_sort_key)
+        documents_by_id = {str(item.get("document_id") or ""): item for item in documents}
 
         balance_cny = Decimal("0")
         balance_rub = Decimal("0")
@@ -590,6 +693,8 @@ class CnyLedgerBlock:
 
         for index, operation in enumerate(planned_operations, start=1):
             op = dict(operation)
+            advance_operation = None
+            allocation = None
             op["sequence_key"] = f"{index:08d}:{_operation_sort_key(op)}"
             op["effective_rate_before"] = _decimal_to_storage(_safe_div(balance_rub, balance_cny))
             op["balance_cny_after"] = _decimal_to_storage(balance_cny)
@@ -597,9 +702,16 @@ class CnyLedgerBlock:
             op["average_rate_after"] = _decimal_to_storage(_safe_div(balance_rub, balance_cny))
             op.setdefault("status", CNY_LEDGER_OPERATION_STATUS_POSTED)
             op.setdefault("error_reason", "")
+            if op["operation_type"] == CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT:
+                try:
+                    allocation = supplier_payment_allocation(documents_by_id[str(op["source_document_id"])])
+                except ValueError:
+                    _block_operation(op, CNY_CALC_STATUS_PARSE_ERROR)
             if not op.get("operation_date"):
                 _block_operation(op, CNY_CALC_STATUS_DOCUMENT_DATE_MISSING)
             elif op.get("status") == CNY_LEDGER_OPERATION_STATUS_SKIPPED:
+                pass
+            elif op.get("status") == CNY_LEDGER_OPERATION_STATUS_BLOCKED:
                 pass
             elif op["operation_type"] == CNY_LEDGER_OPERATION_OPENING_BALANCE:
                 cny_delta = _parse_decimal(op.get("cny_delta")) or Decimal("0")
@@ -639,6 +751,24 @@ class CnyLedgerBlock:
                 else:
                     rate_before = _safe_div(balance_rub, balance_cny)
                     payment_cost = _quantize_money(paid_cny * (rate_before or Decimal("0")))
+                    full_paid_cny, full_payment_cost = paid_cny, payment_cost
+                    if allocation is not None:
+                        # Check and value the WHOLE bank payment above. Both
+                        # components are admitted together, at the same WAC.
+                        paid_cny = Decimal(allocation["settlement_cny"])
+                        payment_cost = _quantize_money(full_payment_cost * paid_cny / full_paid_cny)
+                        advance_cny = full_paid_cny - paid_cny
+                        advance_cost = full_payment_cost - payment_cost
+                        op["cny_delta"] = _decimal_to_storage(-paid_cny)
+                        advance_operation = {
+                            **op,
+                            "operation_id": _stable_cny_operation_id(str(op["source_document_id"]), "supplier_advance"),
+                            "operation_type": CNY_LEDGER_OPERATION_SUPPLIER_ADVANCE_OUT,
+                            "sequence_key": str(op["sequence_key"]) + "|supplier_advance",
+                            "cny_delta": _decimal_to_storage(-advance_cny),
+                            "rub_value_delta": _decimal_to_storage(-advance_cost),
+                            "effective_rate_before": _decimal_to_storage(rate_before),
+                        }
                     balance_cny -= paid_cny
                     balance_rub -= payment_cost
                     op["rub_value_delta"] = _decimal_to_storage(-payment_cost)
@@ -724,6 +854,21 @@ class CnyLedgerBlock:
                 op["created_at"] = str(existing.get("created_at") or op.get("created_at") or "")
                 op["updated_at"] = str(existing.get("updated_at") or op.get("updated_at") or "")
             posted_operations.append(op)
+            if advance_operation is not None:
+                # Persist the settlement intermediate balance followed by the
+                # advance balance; their sum equals the original bank debit.
+                balance_cny += _parse_decimal(advance_operation["cny_delta"]) or Decimal("0")
+                balance_rub += _parse_decimal(advance_operation["rub_value_delta"]) or Decimal("0")
+                advance_operation.update(
+                    balance_cny_after=_decimal_to_storage(balance_cny),
+                    balance_rub_value_after=_decimal_to_storage(balance_rub),
+                    average_rate_after=_decimal_to_storage(_safe_div(balance_rub, balance_cny)),
+                )
+                existing_advance = existing_operations.get(str(advance_operation["operation_id"]))
+                if existing_advance is not None and _cny_operation_revision_payload(existing_advance) == _cny_operation_revision_payload(advance_operation):
+                    advance_operation["created_at"] = existing_advance["created_at"]
+                    advance_operation["updated_at"] = existing_advance["updated_at"]
+                posted_operations.append(advance_operation)
 
         if not core_only:
             self._reconcile_changed_capital_operations(existing_operations, posted_operations)
@@ -1242,6 +1387,9 @@ class CnyLedgerBlock:
             raise ValueError(f"CNY document not found: {document_id}")
         if str(document.get("status") or "") != CNY_DOCUMENT_STATUS_EXCLUDED:
             raise ValueError("CNY document is not archived")
+        allocation = supplier_payment_allocation(document)
+        if allocation is not None and str(target_shipment_id or "").strip() != allocation["source_order_id"]:
+            raise ValueError("allocated supplier payment cannot be moved to another order")
         old_shipment_id = str(document.get("source_order_id") or "").strip()
         now = self.timestamp_factory()
         restored_status = _document_status_for_parse(
@@ -1293,6 +1441,9 @@ class CnyLedgerBlock:
         document = self.runtime.load_cny_document(str(document_id or "").strip())
         if document is None:
             raise ValueError(f"CNY document not found: {document_id}")
+        allocation = supplier_payment_allocation(document)
+        if allocation is not None and str(target_shipment_id or "").strip() != allocation["source_order_id"]:
+            raise ValueError("allocated supplier payment cannot be moved to another order")
         if str(document.get("status") or "") == CNY_DOCUMENT_STATUS_EXCLUDED:
             return self.restore_document(
                 document_id,
@@ -1763,6 +1914,106 @@ def _operation_sort_key(operation: Mapping[str, Any]) -> str:
     else:
         primary = f"{operation_date}T23:59:{min(priority, 59):02d}Z"
     return "|".join([primary, operation_date, "1", f"{priority:02d}", created_at, source_document_id, operation_type])
+
+
+def _allocation_money(value: Any) -> Decimal:
+    try:
+        amount = Decimal(str(value))
+        if not amount.is_finite() or amount <= 0 or amount != _quantize_money(amount):
+            raise ValueError("supplier payment allocation requires positive CNY amounts with at most two decimals")
+    except (InvalidOperation, ValueError):
+        raise ValueError("supplier payment allocation amount is invalid") from None
+    return amount
+
+
+def supplier_payment_allocation(document: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Validate explicit allocation evidence; absent metadata keeps legacy semantics.
+
+    Consumers may use settlement_cny for invoice readiness while retaining the
+    full source amount for fee matching and bank document presentation.
+    """
+    if "parsed_payload" in document:
+        parsed = document.get("parsed_payload") or {}
+    elif "parsed_payload_json" in document:
+        try:
+            parsed = json.loads(document.get("parsed_payload_json") or "{}")
+        except (TypeError, ValueError):
+            raise ValueError("supplier payment source parse JSON is invalid") from None
+    else:
+        parsed = {}
+    if not isinstance(parsed, Mapping):
+        raise ValueError("supplier payment source parse must be an object")
+    raw = parsed.get("supplier_payment_allocation")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("supplier payment allocation must be an object")
+    allocation = dict(raw)
+    if (document.get("document_type") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT
+            or str(document.get("currency") or "").upper() != "CNY"
+            or allocation.get("version") != 1
+            or allocation.get("authority") != "operator_confirmed"):
+        raise ValueError("supplier payment allocation identity/authority is invalid")
+    for key in ("actor", "reason", "source_order_id", "supplier_name", "contract_no", "contract_date", "confirmed_at"):
+        if not isinstance(allocation.get(key), str) or not str(allocation[key]).strip():
+            raise ValueError("supplier payment allocation evidence missing: " + key)
+    try:
+        datetime.strptime(allocation["contract_date"], "%Y-%m-%d")
+        datetime.fromisoformat(allocation["confirmed_at"].replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("supplier payment allocation date evidence is invalid") from None
+    if allocation["source_order_id"] != str(document.get("source_order_id") or ""):
+        raise ValueError("supplier payment allocation order/date evidence mismatch")
+    for bank_key, allocation_key in (("contract_number", "contract_no"), ("contract_date", "contract_date")):
+        if parsed.get(bank_key) and str(parsed[bank_key]).strip() != allocation[allocation_key]:
+            raise ValueError("supplier payment allocation bank contract mismatch")
+    settlement = _allocation_money(allocation.get("settlement_cny"))
+    advance = _allocation_money(allocation.get("advance_cny"))
+    total = _allocation_money(document.get("cny_amount"))
+    parsed_total = _parse_decimal(parsed.get("cny_amount") or parsed.get("transfer_amount"))
+    if settlement + advance != total or parsed_total != total:
+        raise ValueError("supplier payment allocation does not conserve the source bank amount")
+    allocation["settlement_cny"] = _decimal_to_storage(settlement)
+    allocation["advance_cny"] = _decimal_to_storage(advance)
+    return allocation
+
+
+def _supplier_advances(
+    documents: Iterable[Mapping[str, Any]], operations: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    by_id = {str(item.get("document_id") or ""): item for item in documents}
+    advances = []
+    for operation in operations:
+        counted = operation.get("status") == CNY_LEDGER_OPERATION_STATUS_POSTED or (
+            operation.get("status") == CNY_LEDGER_OPERATION_STATUS_NEEDS_REVIEW
+            and operation.get("error_reason") == "date_only_deterministic_sequence"
+        )
+        if (operation.get("operation_type") != CNY_LEDGER_OPERATION_SUPPLIER_ADVANCE_OUT
+                or not counted):
+            continue
+        document = by_id.get(str(operation.get("source_document_id") or ""), {})
+        document_status = str(operation.get("document_status") or document.get("status") or "").strip().lower()
+        if document_status not in {"", CNY_DOCUMENT_STATUS_POSTED} or (
+            operation.get("status") == CNY_LEDGER_OPERATION_STATUS_NEEDS_REVIEW
+            and document_status != CNY_DOCUMENT_STATUS_POSTED
+        ):
+            continue
+        try:
+            allocation = supplier_payment_allocation(document)
+        except ValueError:
+            allocation = None
+        advances.append({
+            "source_document_id": operation["source_document_id"], "operation_id": operation["operation_id"],
+            "source_order_id": operation.get("source_order_id") or "", "operation_date": operation.get("operation_date") or "",
+            "supplier_name": (allocation or {}).get("supplier_name"), "contract_no": (allocation or {}).get("contract_no"),
+            "contract_date": (allocation or {}).get("contract_date"),
+            "reason": allocation["reason"] if allocation else "supplier advance source allocation is missing or invalid",
+            "amount_cny": _decimal_to_storage(abs(_parse_decimal(operation.get("cny_delta")) or Decimal("0"))),
+            "rub_carrying_value": _decimal_to_storage(abs(_parse_decimal(operation.get("rub_value_delta")) or Decimal("0"))),
+            "status": "unapplied" if allocation else "needs_review", "included_in_cogs": False,
+            "calculation_warning": str(operation.get("error_reason") or ""),
+        })
+    return advances
 
 
 def _ledger_summary(

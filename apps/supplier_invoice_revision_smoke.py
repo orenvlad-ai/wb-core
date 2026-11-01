@@ -121,6 +121,43 @@ def main():
             raise AssertionError("injected failure did not abort")
         with connect(runtime.db_path) as conn:
             assert digest(snapshot(conn, "sup_test")) == digest(before)
+    with TemporaryDirectory() as raw:
+        root = Path(raw)
+        request, runtime, old, _ = fixture(root)
+        workbook = load_workbook(root / "old.xlsx")
+        sheet = workbook.active
+        removed = old["lines"][1]
+        sheet.cell(sheet.max_row, 7).value -= removed["amount"]
+        sheet.delete_rows(removed["raw"]["worksheet_row"])
+        source = root / "removed.xlsx"
+        workbook.save(source)
+        request.update(source_path=str(source), source_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+        try:
+            adapter.preview(request, "test-no-removal-authority")
+        except Exception as exc:
+            assert "assortment" in str(exc)
+        else:
+            raise AssertionError("unrequested deletion admitted")
+        request["removed_barcodes"] = [removed["barcode"]]
+        preview = adapter.preview(request, "test-removal")
+        with connect(runtime.db_path) as conn:
+            before = snapshot(conn, "sup_test")
+        with patch.object(adapter, "enqueue", return_value={"queue_id": "test-queue", "status": "queued"}):
+            result = execute(action="apply", adapter_name="test", operation_id="test-removal", request=request, expected_prestate=preview["prestate_sha256"], expected_candidate=preview["candidate_sha256"], adapters=adapters)
+        assert result["state"] == "applied", result
+        with connect(runtime.db_path) as conn:
+            after = snapshot(conn, "sup_test")
+        assert len(after["lines"]) == len(before["lines"]) - 1
+        assert removed["barcode"] not in {x["barcode"] for x in after["lines"]}
+        assert before["protected"] == after["protected"]
+        assert after["header"]["product_qty_total"] == before["header"]["product_qty_total"] - removed["qty"]
+        assert json.loads((root / "supplier_invoice_revisions/test-removal/before.json").read_text()) == before
+        # Readback must notice a removed line reappearing, not just updated totals.
+        with sqlite3.connect(runtime.db_path) as conn:
+            line = next(x for x in before["lines"] if x["barcode"] == removed["barcode"])
+            columns = list(line)
+            conn.execute("INSERT INTO sheet_vitrina_v1_supplier_shipment_lines (" + ",".join(columns) + ") VALUES (" + ",".join("?" for _ in columns) + ")", [line[k] for k in columns])
+        assert adapter.readback(request, "test-removal")["state"] == "failed"
     print("supplier_invoice_revision_smoke: OK")
 
 

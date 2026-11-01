@@ -465,7 +465,7 @@ The first posted CNY supplier payment activates the full physical invoice compos
 
 # 19. Confirmation, archive and supplier-document correction contract
 
-- `supplier_invoice_revision_v1` is a runtime-local Production Apply adapter for revised XLSX quantities on an active, unshipped, unreceived, uncertified order. It requires an explicit hostname, runtime marker/SHA, shipment ID, invoice number, staged runtime source path and SHA. Preview reads the operational generation without schema writes. It rejects changed invoice/contract/currency identity, assortment, unit prices, duplicate/missing barcodes and inconsistent totals. File metadata, header and existing line records change in one SQLite transaction while shipment, line, invoice-document, contract, payment and expense identities remain fixed. Original files remain intact; fsynced before-images and an audit record support scoped recovery. The shared warehouse lock and a second transactional prestate check prevent concurrent drift. One durable targeted recalculation covers the earlier original/revised invoice and payment boundary. Readback verifies exact source bytes, values, unchanged fields and financial links; warehouse publication completion must be verified separately. This adapter runs through `apps/production_apply_launcher.py` on the selected host; it is not an SSH transport or a browser upload endpoint.
+- `supplier_invoice_revision_v1` is a runtime-local Production Apply adapter for revised XLSX quantities on an active, unshipped, unreceived, uncertified order. It requires an explicit hostname, runtime marker/SHA, shipment ID, invoice number, staged runtime source path and SHA. Preview reads the operational generation without schema writes. It rejects changed invoice/contract/currency identity, added assortment, unit prices, duplicate/missing barcodes and inconsistent totals. Product removal requires an explicit `removed_barcodes` list exactly matching old-minus-new keys; other assortment changes remain rejected. Removed rows are preserved in the immutable before-image and excluded from the expected readback line set. File metadata, header and existing line records change in one SQLite transaction while shipment, line, invoice-document, contract, payment and expense identities remain fixed. Original files remain intact; fsynced before-images and an audit record support scoped recovery. The shared warehouse lock and a second transactional prestate check prevent concurrent drift. One durable targeted recalculation covers the earlier original/revised invoice and payment boundary. Readback verifies exact source bytes, values, unchanged fields and financial links; warehouse publication completion must be verified separately. This adapter runs through `apps/production_apply_launcher.py` on the selected host; it is not an SSH transport or a browser upload endpoint.
 
 - Header-only shipment changes omit `lines`. Compatibility payloads that repeat every persisted line unchanged are also treated as header-only; legacy lines without a source-owned barcode remain field-for-field unchanged. A real legacy composition edit remains blocked by the barcode-identity guard.
 - `actual_shipment_date` changes still require `factual-dates/preview` followed by `factual-dates/confirm`. `actual_ff_acceptance_date` is no longer a routine editable field: it is the read-only result of the Stage 7A `Принять на FF` document. Legacy preview and new-order HTTP save reject an FF-acceptance change. The guided XLSX preview pins one facility, exact SKU identity, actual quantity, FBS/FBO allocation, discrepancies and expenses; final confirmation remains fail-closed until both writer epoch and exact opening are active.
@@ -588,3 +588,21 @@ attempts. После собственного after-book crash original stages �
 при exact own accounting revision, совпадении current per-date tuple и ghost IDs
 с сохранённым predecessor и независимой проверке original expected-book stage
 hashes. Чужой tuple или неизвестная lineage оставляют recovery незавершённой.
+
+
+### Explicit supplier overpayment allocation
+
+A supplier bank payment retains its original PDF, full CNY amount and identity.
+An operator-confirmed `supplier_payment_allocation` in its parsed payload records
+settlement and unapplied supplier advance, supplier/contract identity, actor,
+reason and confirmation time. Both positive amounts must sum exactly to the bank
+amount. Missing allocation preserves legacy behavior; invalid allocation fails
+closed. The account replay checks and values the full bank debit first, then
+emits `supplier_payment_out` and `supplier_advance_out` components with exact
+CNY/RUB conservation. Only the settlement component enters invoice paid totals,
+product capital and COGS. Fees continue matching against the full source payment.
+The account response exposes unapplied `supplier_advances` separately, and the
+operator UI shows them only when financial authority is current. This does not
+implement subsequent advance consumption or refund; either requires its own
+explicit source-backed operation. New-document upload accepts allocation with
+the document to avoid an intermediate full-amount invoice settlement.

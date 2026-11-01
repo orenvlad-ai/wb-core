@@ -200,6 +200,7 @@ def build_supplier_payment_readiness(
     posted_documents: list[dict[str, Any]] = []
     seen: set[str] = set()
     derived_paid = Decimal("0")
+    allocation_invalid = False
     for raw in cny_documents:
         document = dict(raw)
         if str(document.get("document_type") or "") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT:
@@ -224,14 +225,22 @@ def build_supplier_payment_readiness(
             continue
         seen.add(identity)
         posted_documents.append(document)
+        from packages.application.cny_ledger import supplier_payment_allocation
+        try:
+            allocation = supplier_payment_allocation(document)
+        except ValueError:
+            allocation_invalid = True
+            continue
         derived_paid += abs(
-            _parse_decimal(document.get("cny_amount") or document.get("amount"))
+            _parse_decimal(allocation["settlement_cny"] if allocation else (document.get("cny_amount") or document.get("amount")))
             or Decimal("0")
         )
 
     header_paid = _parse_decimal(shipment.get("cny_paid_amount"))
     confirmed_paid = max(Decimal("0"), header_paid or Decimal("0"), derived_paid)
     blockers: list[dict[str, str]] = []
+    if allocation_invalid:
+        blockers.append({"code": "supplier_payment_allocation_invalid", "reason_ru": "Не подтверждено распределение оплаты и переплаты поставщику."})
     if invoice_total is None or invoice_total <= Decimal("0"):
         blockers.append(
             {"code": "invoice_total_missing", "reason_ru": "Не подтверждена сумма invoice."}

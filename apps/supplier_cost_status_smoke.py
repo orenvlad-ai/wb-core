@@ -270,6 +270,22 @@ def _assert_supplier_financial_readiness_contract() -> None:
         ],
     )
     _assert(complete["complete"] is True and complete["status"] == "full", "100% payment is green-ready")
+    allocated_payment = {
+        "document_id": "payment-allocated", "document_type": "supplier_cny_payment", "status": "posted",
+        "currency": "CNY", "source_order_id": "order", "cny_amount": "70.00",
+        "parsed_payload": {"cny_amount": "70.00", "supplier_payment_allocation": {
+            "version": 1, "authority": "operator_confirmed", "actor": "operator", "reason": "revised invoice",
+            "source_order_id": "order", "supplier_name": "Factory", "contract_no": "contract",
+            "contract_date": "2026-01-01", "confirmed_at": "2026-11-01T12:00:00Z",
+            "settlement_cny": "60.00", "advance_cny": "10.00",
+        }},
+    }
+    allocated = build_supplier_payment_readiness(shipment, [first, allocated_payment])
+    _assert(allocated["complete"] is True and allocated["confirmed_paid"] == 100, "separate supplier advance is excluded from invoice payment")
+    allocated_payment["parsed_payload"]["supplier_payment_allocation"]["advance_cny"] = "11.00"
+    invalid = build_supplier_payment_readiness({**shipment, "cny_paid_amount": 100}, [first, allocated_payment])
+    _assert(not invalid["complete"] and any(x["code"] == "supplier_payment_allocation_invalid" for x in invalid["blockers"]), "invalid split cannot fall back to header success")
+
     _assert(
         all(item.get("is_uploaded") for item in _build_supplier_payment_checklist(
             payment_readiness=complete,
