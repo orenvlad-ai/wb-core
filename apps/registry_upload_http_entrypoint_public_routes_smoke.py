@@ -189,8 +189,9 @@ def main() -> None:
         if rendered.count(f"location = {path} {{") != 1:
             raise AssertionError(f"monitor public location missing or duplicated: {path}")
         location = _exact_location_block(rendered, path)
-        if "proxy_pass http://127.0.0.1:8765;" not in location:
-            raise AssertionError(f"monitor route must use the authenticated application listener: {path}")
+        expected_port = 8780 if method == "GET" else 8765
+        if f"proxy_pass http://127.0.0.1:{expected_port};" not in location:
+            raise AssertionError(f"monitor route must use its designated authenticated listener: {path}")
         if "proxy_set_header X-Forwarded-Proto $scheme;" not in location:
             raise AssertionError(f"monitor route must retain public origin for application CSRF checks: {path}")
     if any(route["match"] == "prefix" and route["path"].startswith("/v1/sheet-vitrina-v1/stock-monitor") for route in routes):
