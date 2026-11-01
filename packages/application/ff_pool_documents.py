@@ -382,7 +382,8 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
         ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}(anchor_request_id,business_date DESC);
         CREATE UNIQUE INDEX IF NOT EXISTS ff_pool_overhead_payment_renewals_by_payment_day
         ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}(payment_fingerprint,business_date);
-        CREATE TRIGGER IF NOT EXISTS ff_pool_overhead_payment_renewal_source_guard
+        DROP TRIGGER IF EXISTS ff_pool_overhead_payment_renewal_source_guard;
+        CREATE TRIGGER ff_pool_overhead_payment_renewal_source_guard
         BEFORE INSERT ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}
         WHEN NOT EXISTS(
             SELECT 1 FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE} evidence
@@ -391,7 +392,9 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
             WHERE evidence.request_id=NEW.anchor_request_id AND evidence.payment_fingerprint=NEW.payment_fingerprint
               AND (predecessor.request_id=evidence.request_id OR EXISTS(
                   SELECT 1 FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} previous
-                  WHERE previous.successor_request_id=predecessor.request_id AND previous.anchor_request_id=evidence.request_id))
+                  WHERE previous.successor_request_id=predecessor.request_id AND previous.anchor_request_id=evidence.request_id)
+                  OR EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_overhead_replacements replacement
+                    WHERE replacement.successor_request_id=predecessor.request_id AND replacement.anchor_request_id=evidence.request_id))
               AND predecessor.business_date=NEW.previous_business_date AND successor.business_date=NEW.business_date
               AND predecessor.business_date<successor.business_date
               AND predecessor.idempotency_epoch=successor.idempotency_epoch
@@ -1504,17 +1507,17 @@ class FfPoolDocumentService:
                             raise FfPoolDocumentError("request_id_identity_conflict", "Client request_id was already used for another semantic document")
                     from packages.application.operator_ff_overhead import TABLE as confirmations_table
                     frozen_request = conn.execute(f"""SELECT request_id FROM {REQUESTS_TABLE} request
-                        WHERE request_id IN (SELECT ? UNION ALL SELECT successor_request_id FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} WHERE anchor_request_id=?)
+                        WHERE request_id=?
                         AND (posted_document_id<>'' OR posted_at<>'' OR recovery_operation_id<>'' OR state IN ('posted','replaying','complete')
                             OR EXISTS(SELECT 1 FROM {confirmations_table} WHERE request_id=request.request_id)
                             OR EXISTS(SELECT 1 FROM {DOCUMENTS_TABLE} WHERE request_id=request.request_id)) LIMIT 1""",
-                        (anchor_request_id, anchor_request_id)).fetchone()
+                        (active_id,)).fetchone()
                     frozen = frozen_request is not None
                     if frozen:
                         active_id = str(frozen_request["request_id"])
                         active = conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?", (active_id,)).fetchone()
                     anchor = conn.execute(f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?", (anchor_request_id,)).fetchone()
-                    original_manifest = _json_object(_loads(anchor["request_payload_json"], {}))
+                    original_manifest = _json_object(_loads(active["request_payload_json"], {}))
                     fields = ("facility_id", "scope", "category", "comment", "amount_rub")
                     if any(manifest.get(key) != original_manifest.get(key) for key in fields):
                         raise FfPoolDocumentError("overhead_payment_fields_mismatch",
@@ -1702,6 +1705,9 @@ class FfPoolDocumentService:
             ).fetchone()
             if request is None:
                 raise FfPoolDocumentError("request_not_found", "Document request was not found")
+            if request["document_kind"] == "pool_overhead":
+                from packages.application.operator_ff_overhead import assert_not_cancelled
+                assert_not_cancelled(conn, request_id)
             if defer_confirmed_overhead_projection:
                 from packages.application.operator_ff_overhead import assert_native_confirmation
                 assert_native_confirmation(conn, request)
@@ -1826,6 +1832,9 @@ class FfPoolDocumentService:
                 ).fetchone()
                 if current_request is None:
                     raise FfPoolDocumentError("request_not_found", "Document request disappeared")
+                if current_request["document_kind"] == "pool_overhead":
+                    from packages.application.operator_ff_overhead import assert_not_cancelled
+                    assert_not_cancelled(conn, request_id)
                 if str(current_request["state"]) in {"posted", "replay", "complete"}:
                     conn.rollback()
                     return None
@@ -4897,11 +4906,22 @@ def _plan_pool_overhead(
 
 
 def _active_overhead_payment_request(conn: sqlite3.Connection, anchor_request_id: str) -> str:
-    """Resolve the sole leaf of immutable, transaction-serialized renewal links."""
-    row = conn.execute(f"""SELECT successor_request_id
-        FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} WHERE anchor_request_id=?
-        ORDER BY business_date DESC LIMIT 1""", (anchor_request_id,)).fetchone()
-    return str(row[0]) if row else anchor_request_id
+    """Resolve the sole leaf of immutable renewals and explicit corrections."""
+    from packages.application.operator_ff_overhead import REPLACEMENTS
+    has_replacements = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (REPLACEMENTS,)).fetchone()
+    identity = anchor_request_id
+    seen = set()
+    while identity not in seen and len(seen) < 100:
+        seen.add(identity)
+        successors = list(conn.execute(f"SELECT successor_request_id FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} WHERE predecessor_request_id=?", (identity,)))
+        if has_replacements:
+            successors += list(conn.execute(f"SELECT successor_request_id FROM {REPLACEMENTS} WHERE predecessor_request_id=?", (identity,)))
+        if not successors:
+            return identity
+        if len(successors) != 1:
+            raise FfPoolDocumentError("overhead_payment_owner_ambiguous", "У платежа несколько действующих источников")
+        identity = str(successors[0][0])
+    raise FfPoolDocumentError("overhead_payment_owner_ambiguous", "Цепочка источников платежа некорректна")
 
 
 def _document_request_identity(identity, document_kind, manifest, source_sha256, template_fingerprint):

@@ -62,6 +62,13 @@ def checks(page) -> None:
         page.evaluate("processing => render('first', {...receipt,state:'completed',primary_effect:'source_saved',processing})", processing)
         assert first.locator(".ff-operation-status").inner_text() == label
 
+    page.evaluate("render('first', {...receipt,state:'cancelled',reason_ru:'Расход не учтён.'})")
+    assert page.evaluate("OperatorAcceptance.acceptedOperation({...receipt,state:'cancelled'})") is True
+    assert first.locator('h3').inner_text() == 'Отменено'
+    assert first.locator('.ff-operation-status').inner_text() == 'Отменено'
+    assert first.locator('.ff-operation-check').count() == 0
+    assert first.get_by_text('Подтверждение отменено до проведения. Расход не учтён.', exact=True).count() == 1
+
     for effect in ("external_command", "external_job"):
         page.evaluate("""effect => render('first', {...receipt,primary_effect:effect,state:'processing',children:[
           {nm_id:101,parameter_field:'price',external_confirmed:true,outcome:'ambiguous'},

@@ -29811,7 +29811,7 @@
           const copy = make("div"), data = operation.summary || {};
           copy.append(make("strong", "", (operation.title_ru || "Накладные расходы ФФ") + (data.amount_rub != null ? " · " + operationMoney(data.amount_rub) : "")),
             make("p", "ff-pool-note", (data.facility_name || "ФФ") + " · " + operationDate(operation.business_date)),
-            make("span", "ff-operation-accepted", "✓ Принято"), operationStatus(operation));
+            make("span", operation.state === "cancelled" ? "ff-operation-cancelled" : "ff-operation-accepted", operation.state === "cancelled" ? "Отменено" : "✓ Принято"), operationStatus(operation));
           const detail = make("button", "button ghost", "Подробнее"); detail.type = "button";
           detail.addEventListener("click", function () { showOperationDetail(operation.operation_id); }); row.append(copy, detail); nodes.journal.appendChild(row);
         });
@@ -29832,8 +29832,8 @@
         if (!acceptedOperation(operation) || operation.operation_id !== id) throw new Error("acceptance_not_confirmed");
         clear(nodes.journalDetail);
         const section = make("section", "ff-operation-detail"); section.setAttribute("tabindex", "-1"); section.dataset.operationId = id;
-        section.append(make("h3", "", operation.title_ru || "Накладные расходы ФФ"), make("p", "ff-operation-accepted", "✓ Принято · Документ сохранён."), operationSummary(operation), operationStatus(operation));
-        const explanation = operation.state === "completed" ? "Связанные расчёты завершены." :
+        section.append(make("h3", "", operation.title_ru || "Накладные расходы ФФ"), make("p", operation.state === "cancelled" ? "ff-operation-cancelled" : "ff-operation-accepted", operation.state === "cancelled" ? "Подтверждение отменено до проведения." : "✓ Принято · Документ сохранён."), operationSummary(operation), operationStatus(operation));
+        const explanation = operation.state === "cancelled" ? "Расход не учтён. Плановый цикл не будет проводить этот источник." : operation.state === "completed" ? "Связанные расчёты завершены." :
           operation.state === "delayed" || operation.state === "needs_attention" ? "Документ сохранён. Задержка обработки не требует повторной отправки." :
           "Связанные расчёты выполнятся в ближайшем плановом цикле. Обычно — в течение трёх часов; при задержке обработка может занять больше времени.";
         section.appendChild(make("p", "ff-pool-note", explanation));
