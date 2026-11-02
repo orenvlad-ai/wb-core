@@ -1,6 +1,7 @@
 {
   "schema": "wb-core.check-map/v1",
   "command_dependencies": {
+    "fbs_native_attachment_imports": {"scripts": ["apps/fbs_historical_fbo_native_smoke.py", "apps/fbs_temporary_allocation_action_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "operator_supplier_bounded_imports": {"scripts": ["apps/historical_dated_inputs_smoke.py", "apps/operator_supplier_release_scope_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]},
     "operator_complaint_http_imports": {"scripts": ["apps/operator_complaint_runs_http_smoke.py", "apps/operator_complaint_runs_browser_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "operator_supplier_history_imports": {"scripts": ["apps/operator_supplier_history_cycle_smoke.py", "apps/operator_supplier_history_sources_smoke.py", "apps/operator_supplier_history_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]},
