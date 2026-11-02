@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Active cutover, same-day receipts, daily closure, persistence and consumers."""
 from contextlib import ExitStack
+from collections import Counter
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -395,6 +396,75 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(after.sheets[0].rows[1][2:], [888, 100000.0])
         self.assertEqual(after.metadata["server_cell_presentation"]["SKU:1|own_capital_FF_capital_rub"][self.day]["candidate_only"], False)
         self.assertEqual(runtime.materialize(after, runtime_dir=self.root, now=self.now), after)
+
+    def test_materialize_matches_public_snapshot_cells_with_one_payload_per_date(self):
+        self.opening()
+        self.image, self.wb = capture("2026-09-08", quantity="900"), wb("2026-09-08")
+        book, _ = runtime.prepare(self.root, now=datetime(2026, 9, 8, 14, tzinfo=timezone.utc))
+        # Several SKU scopes and dated columns must not multiply full payload reads.
+        for payload in book["presentations"].values():
+            for nm in range(2, 9):
+                payload["rows"][str(nm)] = deepcopy(payload["rows"]["1"])
+        days = ["2026-09-06", "2026-09-07", "2026-09-08", "2026-09-09"]
+        prior = {"source": runtime.SOURCE, "management_value": "123", "candidate_only": False}
+        plan = SheetVitrinaV1Envelope("v1", "snapshot", days[-1], days, [], {}, [
+            SheetVitrinaWriteTarget("DATA_VITRINA", "A1", "A1:F2", "A:F", "replace", False,
+                ["label", "key", *days], [["cost", "SKU:1|our_wb_unit_cost_rub", 123, 999, 999, 999]], 1, 6),
+            SheetVitrinaWriteTarget("OTHER", "A1", "A1:B2", "A:B", "replace", False,
+                ["label", "key"], [["unchanged", "foreign"]], 1, 2)],
+            metadata={"foreign": {"keep": True}, "server_cell_presentation": {
+                "SKU:1|our_wb_unit_cost_rub": {days[0]: prior}}})
+        original_book, original_plan = deepcopy(book), deepcopy(plan)
+        payload_method = runtime.ActiveInventorySnapshot.payload
+        policy = SimpleNamespace(book_max_age_seconds=3600)
+        with patch("packages.application.fbs_current_snapshot_policy.resolve_current_snapshot_policy", return_value=policy):
+            for now, current_day, unavailable in (
+                (datetime(2026, 9, 8, 14, tzinfo=timezone.utc), days[2], False),
+                (datetime(2026, 9, 8, 16, tzinfo=timezone.utc), days[2], True),
+                (datetime(2026, 9, 9, 14, tzinfo=timezone.utc), days[3], True),
+            ):
+                with self.subTest(now=now):
+                    current = runtime.inventory_from_book(book, now=now, runtime_dir=self.root)
+                    self.assertEqual(current.payload()["quality"] == "unavailable", unavailable)
+                    expected = deepcopy(plan.metadata["server_cell_presentation"])
+                    # Public snapshot APIs define the previous cell contract, including
+                    # active publication flags and unavailable facility quantities.
+                    for day in dict.fromkeys([*book["presentations"], current_day]):
+                        snapshot = current
+                        if day != current_day:
+                            snapshot = runtime.ActiveInventorySnapshot.__new__(runtime.ActiveInventorySnapshot)
+                            object.__setattr__(snapshot, "_json", json.dumps(book["presentations"][day]))
+                        for nm in [None, *snapshot.payload()["rows"]]:
+                            scope = "TOTAL" if nm is None else "SKU:" + nm
+                            for key, value in snapshot.metrics(nm).items():
+                                expected.setdefault(scope + "|" + key, {})[day] = snapshot.presentation(value)
+                    reads = Counter()
+
+                    def counted(snapshot):
+                        data = payload_method(snapshot)
+                        reads[data["date"]] += 1
+                        return data
+
+                    with patch.object(runtime.ActiveInventorySnapshot, "payload", counted):
+                        after = runtime.materialize(plan, runtime_dir=self.root, now=now,
+                            book=book, book_version="pinned-book", ready_target="ready-1")
+                    self.assertEqual(reads, Counter({day: 1 for day in [*book["presentations"], current_day]}))
+                    self.assertEqual(after.metadata["server_cell_presentation"], expected)
+                    self.assertEqual(after.metadata["foreign"], plan.metadata["foreign"])
+                    self.assertEqual(after.sheets[1], plan.sheets[1])
+                    actual_rows = {row[1]: row for row in after.sheets[0].rows}
+                    for identity, dates in expected.items():
+                        for day, cell in dates.items():
+                            value = cell["management_value"]
+                            self.assertEqual(actual_rows[identity][days.index(day) + 2],
+                                             float(value) if value else "")
+                    self.assertEqual(after.metadata["fbs_accounting_bindings"], {
+                        day: {"book_version": "pinned-book", "presentation_version": payload["version_id"],
+                              "effective_date": book["effective_date"], "date": day,
+                              "quality": payload["quality"], "source": runtime.SOURCE, "ready_target": "ready-1"}
+                        for day, payload in book["presentations"].items()})
+        self.assertEqual(book, original_book)
+        self.assertEqual(plan, original_plan)
 
 
 class ActiveReportsTests(SharedCostReportTests):
