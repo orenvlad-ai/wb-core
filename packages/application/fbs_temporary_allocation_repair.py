@@ -51,13 +51,30 @@ def _saved(reader, day, *, version_id):
         expected={int(r['nm_id']):(Decimal(r['quantity']),None if wf._public_line_payload(r)['capital_rub'] is None else Decimal(r['capital_rub'])) for r in balances if r['warehouse_key']==model['warehouse_key']}
         actual={int(r['nm_id']):(Decimal(r['quantity']),None if r['capital_rub'] is None else Decimal(r['capital_rub'])) for r in payload.get('balances',[])}
         require(payload.get('status')=='ready' and actual==expected and len(actual)==len(payload.get('balances',[])),'saved_stage_payload_changed')
+        with localcontext() as context:
+            # Match the native compact model's Decimal policy; individual
+            # immutable money operands retain all their original digits.
+            context.prec=28
+            raw=[r for r in balances if r['warehouse_key']==model['warehouse_key']]
+            values=[Decimal(r[k]) for r in raw for k in ('quantity','capital_rub')]
+            require(all(v.is_finite() and v>=0 for v in values),'saved_stage_operand_invalid')
+            totals=payload.get('warehouse',{})
+            quantity=sum((Decimal(r['quantity']) for r in raw),Decimal(0))
+            capital=sum((Decimal(r['capital_rub']) for r in raw),Decimal(0))
+            complete=all(value[1] is not None for value in expected.values())
+            require(totals.get('total_quantity') is not None and totals.get('known_capital_rub') is not None
+                and Decimal(str(totals['total_quantity']))==quantity
+                and Decimal(str(totals['known_capital_rub']))==capital
+                and ((totals.get('total_capital_rub') is not None and Decimal(str(totals['total_capital_rub']))==capital)
+                     if complete else totals.get('total_capital_rub') is None),
+                'saved_stage_totals_changed')
     companions={}
     for table,order in [('functional_ff_reservations','supply_id,nm_id'),('supplier_cost_states','shipment_id'),('unmatched_doprinato','unmatched_id')]:
         companions[table]=reader.rows(f'SELECT * FROM {P}{table} WHERE version_id=? ORDER BY {order}',(version_id,))
     return dict(version=version,snapshot=snapshot,balances=balances,read_models=models,companions=companions)
 
 
-def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,native_plan,evidence,now,source_versions,retained_inputs):
+def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,native_plan,evidence,now,source_versions,retained_inputs,targeted_version_ids=()):
     require(conn.in_transaction and conn.row_factory is sqlite3.Row and conn.execute('PRAGMA query_only').fetchone()[0]==1,'query_only_required')
     require(fingerprint(book)==book_version==native_plan['source_book_version'],'book_binding_changed')
     actual=handoff.read_historical_handoff_plan(conn,plan_digest=native_plan['plan_digest'])
@@ -126,6 +143,15 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
     predecessor=(date.fromisoformat(first)-timedelta(days=1)).isoformat()
     require(predecessor in source_versions,'pre_native_predecessor_binding_missing')
     previous=_saved(reader,predecessor,version_id=source_versions[predecessor])
+    # The saved dated WB source predates some already-posted native documents.
+    # Reconstruct these sources explicitly instead of taking a later current
+    # snapshot (or discarding the late receipts and supplier corrections).
+    from packages.application.fbs_temporary_allocation_foreign_sources import capture_foreign_suffix_sources
+    all_physical={d['document_id']:d for d in documents}
+    all_physical.update({d['document_id']:d for d in physical})
+    physical=list(all_physical.values())
+    foreign=capture_foreign_suffix_sources(conn,saved_by_day=saved,documents=physical,
+        targeted_version_ids=list(targeted_version_ids),date_from=first,date_to=targets[-1])
     accounting['native_requests_by_id']={}
     accounting['archived_dated_inputs']={d:{'quantity_snapshot':q} for d,q in quantities.items()}
     source_queries=original_source_queries(accounting)
@@ -133,10 +159,10 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
     # The entire reconstruction consumes only immutable raw/native operands.
     result=dict(contract=CONTRACT,book_version=book_version,book=deepcopy(book),native_plan=deepcopy(native_plan),
         accounting_capture=accounting,quantity_snapshots=quantities,dates=saved,retained=retained,previous=previous,
-        physical_documents=physical,return_document_id=returned['document_id'],selected_nm_ids=nms,prepared_at=timestamp,
+        physical_documents=physical,foreign_sources=foreign,return_document_id=returned['document_id'],selected_nm_ids=nms,prepared_at=timestamp,
         cost_interval_proof=dict(complete=True,unexpected_operations=[],native_plan_digest=native_plan['plan_digest'],
             date_from=first,date_to=targets[-1],movements_digest=fingerprint(all_movements)),
-        query_fence=json.loads(canonical(ready.pin_queries(conn,reader.queries))))
+        query_fence=json.loads(canonical(ready.pin_queries(conn,reader.queries)))+foreign['query_fence'])
     result['source_digest']=fingerprint(result)
     return result
 
@@ -155,6 +181,50 @@ def _revise_retained(original,*,wb,selected,version_id,saved_version):
                 wac_rub=format(c/q,'f') if q else None,
                 revision_proof=dict(contract=CONTRACT,saved_version=saved_version,revised_version=version_id))
         # Other stage values and any preexisting diagnostic remain exact.
+    retained['source_digest']=fingerprint({k:v for k,v in retained.items() if k!='source_digest'})
+    return retained
+
+
+def _rebuild_retained(original,*,wb,balances,version_id,saved_version,source_proof):
+    """Derive operands from the authenticated full six-stage reconstruction.
+
+    A superseded presentation binding may be replaced by that proof. Unknown
+    missing values on an otherwise bound row remain a blocking incident.
+    """
+    from packages.application.fbs_inventory_presentation import RETAINED_STAGES
+    retained=deepcopy(original);retained['wb_version_id']=version_id
+    by_key={(r['warehouse_key'],int(r['nm_id'])):r for r in balances}
+    wb_rows={int(r['nm_id']):r for r in wb['rows']}
+    replaced={'stage_projection_missing','projection_functional_version_mismatch',
+              'projection_date_binding_mismatch','projection_exact_version_missing'}
+    for nm,row in retained['rows'].items():
+        reason=row.get('reason','')
+        require(not reason or reason in replaced,'shared_cost_incomplete:unknown_retained_incident')
+        for stage in RETAINED_STAGES:
+            old=row['stages'][stage]
+            if stage!='WB' and not reason:
+                require(old['quantity'] is not None and old['capital_rub'] is not None,
+                        'shared_cost_incomplete:unproved_retained_operand')
+            value=by_key.get((stages.STAGES[stage],int(nm)))
+            if stage=='WB':
+                exact=wb_rows[int(nm)]
+                require(exact['status']=='available','shared_cost_incomplete:wb_operand')
+                q=Decimal(str(exact['quantity']));c=Decimal(exact['capital_rub'])
+            elif value:
+                require(wf._public_line_payload(value)['capital_rub'] is not None,'shared_cost_incomplete:stage_cost')
+                q=Decimal(value['quantity']);c=Decimal(value['capital_rub'])
+            else:
+                # _saved authenticates the complete six stage payloads; the
+                # pure source rebuild preserves their closed-world coverage.
+                q=c=Decimal(0)
+            with localcontext() as context:
+                context.prec=160
+                old_zero=old.pop('zero_evidence',None)
+                old.update(quantity=format(q,'f'),capital_rub=format(c,'f'),wac_rub=format(c/q,'f') if q else None,
+                    revision_proof=dict(contract=CONTRACT,saved_version=saved_version,revised_version=version_id,
+                        source_set_digest=source_proof,previous_presentation_reason=reason,
+                        previous_presentation_zero_evidence=old_zero))
+        row['reason']=''
     retained['source_digest']=fingerprint({k:v for k,v in retained.items() if k!='source_digest'})
     return retained
 
@@ -181,7 +251,10 @@ def build_temporary_allocation_repair(book,*,capture,native_plan):
         basis=initial.build_basis(native_plan=native_plan,snapshot=snapshot,previous_snapshot=previous,
             previous_version=saved['version']['version_id'],prepared_at=capture['prepared_at'],cost_interval_proof=capture['cost_interval_proof'])
         items={int(r['nm_id']):r for r in json.loads(snapshot['items_json'])}
-        balances=deepcopy(saved['balances'])
+        from packages.application.fbs_temporary_allocation_foreign_sources import rebuild_foreign_suffix_day
+        rebuilt=rebuild_foreign_suffix_day(saved,day=day,documents=capture['physical_documents'],
+            foreign_capture=capture['foreign_sources'])
+        balances=deepcopy(rebuilt['balances'])
         for row in balances:
             nm=int(row['nm_id'])
             if row['warehouse_key']!='wb' or nm not in capture['selected_nm_ids']:continue
@@ -206,10 +279,6 @@ def build_temporary_allocation_repair(book,*,capture,native_plan):
                 daily.append(wf._daily_wb_cost_row(day=day,nm_id=nm,quantity=q,wac=wac,quality=initial.QUALITY,
                     provenance=dict(source='documented_historical_fbs_handoff_initial_cost',snapshot_id=watermark['snapshot_id'],
                         initial_valuation_anchor=deepcopy(anchors[nm]),snapshot_carried_forward=False)))
-        with localcontext() as context:
-            context.prec=160
-            ff,physical=stages._physical_ff_revision(saved,day=day,documents=capture['physical_documents'])
-        balances=[r for r in balances if r['warehouse_key']!='ff' or int(r['nm_id']) not in capture['selected_nm_ids']]+[r for r in ff if int(r['nm_id']) in capture['selected_nm_ids']]
         balances.sort(key=lambda row:(row['warehouse_key'],int(row['nm_id'])))
         version_id='temporary-fbs:'+fingerprint([CONTRACT,capture['source_digest'],day,balances])[7:]
         for row in balances:row['version_id']=version_id
@@ -218,14 +287,14 @@ def build_temporary_allocation_repair(book,*,capture,native_plan):
         cloned['snapshot_id']=wf._stable_id('wbsnapv',dict(source_snapshot_id=watermark['snapshot_id'],version_id=version_id))
         ids=sorted({int(r['nm_id']) for r in dated['quantity_snapshot']['rows']})
         wb=stages._cloned_wb_capture(version,cloned,balances,day=day,nm_ids=ids)
-        retained=_revise_retained(capture['retained'][day],wb=wb,selected=capture['selected_nm_ids'],
-            version_id=version_id,saved_version=saved['version']['version_id'])
+        retained=_rebuild_retained(capture['retained'][day],wb=wb,balances=balances,
+            version_id=version_id,saved_version=saved['version']['version_id'],source_proof=capture['foreign_sources']['source_digest'])
         candidate['wb_days'][day]=wb;candidate['retained_days'][day]=retained
         candidate['shared_days'][day]=build_shared_cost_day(state,wb,day)
         candidate['presentations'][day]=FbsInventorySnapshot(fbs_state=state,wb_capture=wb,retained=retained,day=day).payload()
         require(candidate['shared_days'][day]['quality']=='complete' and candidate['presentations'][day]['totals']['total']['capital_rub'] is not None,'shared_cost_incomplete')
         editions[day]=dict(version_id=version_id,version=version,snapshot=cloned,saved=saved,balances=balances,
-            companions=deepcopy(saved['companions']),full_physical_ff_proof=physical)
+            companions=deepcopy(rebuilt['companions']),full_physical_ff_proof=rebuilt['proof'])
         previous=snapshot
     require(anchors,'initial_wb_anchor_scope_missing')
     quality=dict(initial_wb_quality=initial.QUALITY,source_cost='immutable_documentary_fbs_handoff',
@@ -237,6 +306,7 @@ def build_temporary_allocation_repair(book,*,capture,native_plan):
         native_stage_editions={d:e['version_id'] for d,e in editions.items()},quality_proof=quality)
     result=dict(contract=CONTRACT,candidate_book=candidate,after_book=fingerprint(candidate),editions=editions,
         query_fence=capture['query_fence'],dated_source_digest=capture['source_digest'],quality_proof=quality,
+        foreign_source_fence=capture['foreign_sources']['query_fence'],
         native_handoff_plan_digest=native_plan['plan_digest'],daily_wb_costs=daily,initial_anchors=deepcopy(quality['initial_anchors']),
         source_document_manifest={d['document_id']:d['fingerprint'] for d in capture['accounting_capture']['documents']})
     result['manifest_digest']=fingerprint(result)

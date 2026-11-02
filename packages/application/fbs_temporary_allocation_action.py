@@ -65,7 +65,7 @@ def _repair():
 
 
 def _code():
-    names=('fbs_temporary_allocation_action.py','fbs_temporary_allocation_repair.py','wb_historical_fbs_cost.py',
+    names=('fbs_temporary_allocation_action.py','fbs_temporary_allocation_repair.py','fbs_temporary_allocation_foreign_sources.py','wb_historical_fbs_cost.py',
            'ff_pool_fbs_historical_handoff.py','ff_pool_fbs_lifecycle.py','ff_pool_documents.py','fbs_current_snapshot_policy.py')
     return {**shared._preflight_code(),**{name:'sha256:'+hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in names}}
 
@@ -156,10 +156,21 @@ def _snapshot(runtime,inputs,*,now):
         while day.isoformat()<=current_day:
             sql=f'''SELECT version_id FROM {P}warehouse_functional_versions
                 WHERE status='good' AND cutover_id=? AND business_effective_date=?
+                AND version_kind!='targeted_supplier_replay'
                 ORDER BY effective_at DESC,created_at DESC,rowid DESC LIMIT 1'''
             args=(FUNCTIONAL_CUTOVER_ID,day.isoformat());initial_queries.append((sql,args))
             selected=conn.execute(sql,args).fetchone()
             require(selected is not None,'exact_pre_native_wb_day_missing')
+            # A supplier correction's effective date marks its historical
+            # impact; its copied current WB stock is not that day's source.
+            # Authenticate the selected dated edition rather than silently
+            # falling back from a corrupt ordinary snapshot.
+            from packages.application.fbs_historical_fbo_stage_sources import _snapshot_quantity_authority
+            dated_version=dict(conn.execute(f'SELECT * FROM {P}warehouse_functional_versions WHERE version_id=?',(selected[0],)).fetchone())
+            _snapshot_quantity_authority(dated_version,
+                dict(conn.execute(f'SELECT * FROM {P}warehouse_wb_snapshots WHERE version_id=?',(selected[0],)).fetchone()))
+            if day.isoformat()=='2026-10-26':
+                correction_since=json.loads(dated_version['source_watermarks_json'])['captured_at']
             source_versions[day.isoformat()]=selected[0]
             if day.isoformat()>='2026-10-27':
                 stock=archived_quantity_snapshot(conn,day=day.isoformat(),observed_at=now.isoformat())
@@ -167,11 +178,19 @@ def _snapshot(runtime,inputs,*,now):
                 retained_inputs[day.isoformat()]=capture_retained_stages(runtime.db_path,day=day.isoformat(),wb_version_id=selected[0],nm_ids=ids,connection=conn)
                 initial_queries.append((f'SELECT * FROM {P}warehouse_business_projection_current_rows WHERE as_of_date=? ORDER BY nm_id',(day.isoformat(),)))
             day+=timedelta(days=1)
+        sql=f'''SELECT version_id FROM {P}warehouse_functional_versions
+            WHERE status='good' AND cutover_id=? AND version_kind='targeted_supplier_replay'
+            AND julianday(created_at)>=julianday(?) AND business_effective_date<=?
+            ORDER BY business_effective_date,effective_at,created_at,rowid'''
+        args=(FUNCTIONAL_CUTOVER_ID,correction_since,current_day);initial_queries.append((sql,args))
+        targeted_version_ids=[row[0] for row in conn.execute(sql,args)]
+        require(len(targeted_version_ids)<=32,'targeted_correction_scope_limit')
         selector_fence=json.loads(canonical(ready.pin_queries(conn,initial_queries)))
     return dict(book_version=version,original=original,native_guard=guard,ready_expected=asdict(expected),freshness_policy=freshness_policy,
                 documentary_digest=fingerprint(source),evidence_digest=evidence['evidence_digest'],facility_id=facility,
                 nm_ids=nms,source_lines={str(k):v for k,v in lines.items()},source_versions=source_versions,
-                retained_inputs=retained_inputs,selector_fence=selector_fence)
+                retained_inputs=retained_inputs,targeted_version_ids=targeted_version_ids,
+                source_capture_frontier=correction_since,selector_fence=selector_fence)
 
 
 def _check_source_copy_budget(*,table,count,size,elapsed):
@@ -185,6 +204,7 @@ def _subset(conn,destination,*,book,now,snapshot):
     through=now.date().isoformat();dates=sorted(book['state']['periods'])
     versions={v['version_id'] for v in book.get('wb_days',{}).values()}
     versions.update(snapshot['source_versions'].values())
+    versions.update(snapshot.get('targeted_version_ids',[]))
     versions.update(r[0] for r in conn.execute(f"SELECT version_id FROM {P}warehouse_functional_versions WHERE version_kind='functional_cutover'"))
     versions.update(r[0] for r in conn.execute(f'SELECT version_id FROM {P}warehouse_functional_active'))
     require(0<len(versions)<=1000,'source_version_budget')
@@ -193,8 +213,13 @@ def _subset(conn,destination,*,book,now,snapshot):
     # FF parity and the accepted original book's complete document manifest.
     nms=snapshot['nm_ids'];marks=','.join('?' for _ in nms)
     selected_orders=f'SELECT order_id FROM {P}wb_supplies_fbs_order_observations WHERE nm_id IN ({marks})'
-    nativeops=f'SELECT operation_id FROM {LINES_TABLE} WHERE nm_id IN ({marks}) UNION SELECT operation_id FROM {docs.DOCUMENTS_TABLE}'
-    filters={LINES_TABLE:(f'operation_id IN ({nativeops})',nms),OPERATIONS_TABLE:(f'operation_id IN ({nativeops})',nms)}
+    # Inclusive Julian prefilter is conservative at sub-millisecond precision;
+    # the foreign-source reader performs the exact aware timestamp comparison.
+    late_sql=f'SELECT operation_id FROM {OPERATIONS_TABLE} WHERE (julianday(posted_at)>=julianday(?) OR julianday(posted_at) IS NULL) AND business_date<=? ORDER BY operation_id'
+    late_args=(snapshot['source_capture_frontier'],max(snapshot['source_versions']))
+    nativeops=f'SELECT operation_id FROM {LINES_TABLE} WHERE nm_id IN ({marks}) UNION SELECT operation_id FROM {docs.DOCUMENTS_TABLE} UNION SELECT operation_id FROM {OPERATIONS_TABLE} WHERE (julianday(posted_at)>=julianday(?) OR julianday(posted_at) IS NULL) AND business_date<=?'
+    native_args=[*nms,*late_args]
+    filters={LINES_TABLE:(f'operation_id IN ({nativeops})',native_args),OPERATIONS_TABLE:(f'operation_id IN ({nativeops})',native_args)}
     for table in ('wb_supplies_fbs_order_observations','wb_supplies_fbs_status_observations','wb_supplies_fbs_status_current','wb_supplies_fbs_status_transitions','wb_supplies_fbs_identity_evidence'):
         filters[P+table]=(f'order_id IN ({selected_orders})',nms)
     for table in ('ff_pool_fbs_lifecycle_current','ff_pool_fbs_lifecycle_events','ff_pool_fbs_applicability_events'):
@@ -203,6 +228,18 @@ def _subset(conn,destination,*,book,now,snapshot):
     for suffix in ('functional_versions','functional_balances','functional_read_models','wb_snapshots',
                    'functional_ff_reservations','supplier_cost_states','unmatched_doprinato'):
         filters[P+'warehouse_'+suffix]=(f'version_id IN ({vm})',va)
+    targeted=snapshot.get('targeted_version_ids',[])
+    if targeted:
+        tm=','.join('?' for _ in targeted)
+        publications=P+'warehouse_targeted_publications'
+        undo=P+'warehouse_targeted_undo_manifests'
+        filters[publications]=(f'version_id IN ({tm})',targeted)
+        filters[undo]=(f'published_version_id IN ({tm})',targeted)
+        shipments=f'SELECT shipment_id FROM {undo} WHERE published_version_id IN ({tm})'
+        for suffix,key in (('supplier_shipments','shipment_id'),('supplier_shipment_lines','shipment_id'),
+                           ('supplier_financial_documents','supplier_order_id'),
+                           ('supplier_financial_expense_lines','supplier_order_id'),('cny_ledger_operations','source_order_id')):
+            filters[P+suffix]=(f'{key} IN ({shipments})',targeted)
     # Only original selected WB generations by day; no current generation is
     # substituted for an older official observation during the rehearsal.
     gids={p['snapshot']['id'] for p in book['state']['periods'].values() if p.get('snapshot',{}).get('id')}
@@ -227,6 +264,7 @@ def _subset(conn,destination,*,book,now,snapshot):
     from packages.application.fbs_accounting_rehearsal_sources import select_rehearsal_sources
     selected_sources=select_rehearsal_sources(conn,dates=sorted(snapshot['retained_inputs']),now=now,
         extra_ready_keys=[(snapshot['ready_expected']['bundle_version'],snapshot['ready_expected']['as_of_date'])])
+    selected_sources['selection_queries'].append((late_sql,late_args))
     filters.update(selected_sources['filters'])
     allowed=set(staging.SOURCE_TABLES)|set(filters)|{P+x for x in extras}
     schema=list(conn.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid"))
@@ -365,10 +403,11 @@ def _verify_unit(conn,unit):
     return True
 
 
-def _build_candidate(runtime,*,book,version,native_plan,evidence,now,source_versions,retained_inputs):
+def _build_candidate(runtime,*,book,version,native_plan,evidence,now,source_versions,retained_inputs,targeted_version_ids=()):
     with ready.readonly(runtime.db_path) as conn:
         captured=_repair().capture_temporary_allocation_repair(conn,runtime_dir=runtime.runtime_dir,book=book,book_version=version,
-            native_plan=native_plan,evidence=evidence,now=now,source_versions=source_versions,retained_inputs=retained_inputs)
+            native_plan=native_plan,evidence=evidence,now=now,source_versions=source_versions,retained_inputs=retained_inputs,
+            targeted_version_ids=targeted_version_ids)
         candidate=_repair().build_temporary_allocation_repair(book,capture=captured,native_plan=native_plan)
     require(candidate['after_book']==fingerprint(candidate['candidate_book']) and candidate['candidate_book'].get('active') is True
         and not candidate['candidate_book'].get('publication_error'),'healthy_full_candidate_required')
@@ -449,6 +488,8 @@ def _record_recipe(runtime,recipe,*,owner_token):
                 if not recipe.get('simulation_only') and not _verify_unit(conn,recipe['unit']):
                     require(bool(recipe.get('source_selection_fence')),'ready_selection_fence_required')
                     stages.check_query_fence(conn,recipe['source_selection_fence'])
+                    require('foreign_source_fence' in candidate,'foreign_source_fence_required')
+                    stages.check_query_fence(conn,candidate['foreign_source_fence'])
                 if existing:
                     require(_read_recipe(conn,binding)==recipe,'saved_recipe_changed')
                     if not _verify_unit(conn,recipe['unit']):stages.check_query_fence(conn,recipe['snapshot'].get('selector_fence',[]))
@@ -484,6 +525,9 @@ def _apply_native_unit(runtime,recipe,*,binding,owner_token,fault=None):
                 if not recipe.get('simulation_only'):
                     require(bool(recipe.get('source_selection_fence')),'ready_selection_fence_required')
                     stages.check_query_fence(conn,recipe['source_selection_fence'])
+                    candidate=recipe['numeric']['candidate']
+                    require('foreign_source_fence' in candidate,'foreign_source_fence_required')
+                    stages.check_query_fence(conn,candidate['foreign_source_fence'])
                 require(accounting.load(runtime.runtime_dir)[1]==recipe['expected_book'],'native_book_changed')
                 stages.check_query_fence(conn,recipe['snapshot'].get('selector_fence',[]))
                 ready.check_expected(conn,ready.ExpectedReady(**recipe['expected']))
@@ -524,7 +568,8 @@ def prepare_publication(runtime,*,recipe,binding,now):
     with ready.readonly(db) as conn:
         require(_read_recipe(conn,binding)==recipe and _verify_unit(conn,recipe['unit']),'publication_native_unit_unproven')
     captured,candidate=_build_candidate(runtime,book=book,version=version,native_plan=recipe['unit']['native_plan'],evidence=recipe['evidence'],now=now,
-        source_versions=recipe['snapshot']['source_versions'],retained_inputs=recipe['snapshot']['retained_inputs'])
+        source_versions=recipe['snapshot']['source_versions'],retained_inputs=recipe['snapshot']['retained_inputs'],
+        targeted_version_ids=recipe['snapshot'].get('targeted_version_ids',[]))
     dates=sorted(candidate['editions']);require(dates and dates[0]=='2026-10-27','full_27_suffix_required')
     plan=dict(contract=CONTRACT,status='ready',before_book_digest=version,candidate_book=candidate['candidate_book'],
         scope=dict(dates=dates,date_from=dates[0],date_to=dates[-1]),observation=dict(captured_at=recipe['created_at']),
@@ -560,7 +605,8 @@ def independent_rebuild(manifest,*,runtime_dir,recovering=False):
     else:
         runtime=shared._runtime(Path(runtime_dir))
         captured,candidate=_build_candidate(runtime,book=book,version=version,native_plan=recipe['unit']['native_plan'],evidence=recipe['evidence'],now=now,
-            source_versions=recipe['snapshot']['source_versions'],retained_inputs=recipe['snapshot']['retained_inputs'])
+            source_versions=recipe['snapshot']['source_versions'],retained_inputs=recipe['snapshot']['retained_inputs'],
+            targeted_version_ids=recipe['snapshot'].get('targeted_version_ids',[]))
     require(captured==manifest['original_capture'] and candidate==manifest['candidate'],'publication_independent_candidate_changed')
     with ready.readonly(Path(manifest['authority']['path'])) as conn:
         publication.verify_ready_targets(conn,manifest=manifest,candidate=candidate,runtime_dir=runtime_dir,now=now)

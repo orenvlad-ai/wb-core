@@ -123,6 +123,15 @@ class TemporaryRepairTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'pre_native_retained_binding_changed'):
                 repair.capture_temporary_allocation_repair(conn,runtime_dir=self.runtime.runtime_dir,book=self.book,book_version=self.version,native_plan=self.plan,evidence=self.evidence,now=datetime.fromisoformat(STAMP.replace('Z','+00:00')),source_versions={d:'saved:'+d for d in DAYS},retained_inputs=changed)
 
+    def test_missing_balance_is_not_zero_when_stage_totals_disagree(self):
+        with closing(_connect(self.runtime.db_path)) as conn:
+            row=conn.execute(f"SELECT payload_json FROM {P}functional_read_models WHERE version_id=? AND warehouse_key='production'",('saved:2026-10-31',)).fetchone()
+            body=json.loads(row[0]);body['warehouse']['total_quantity']='7'
+            conn.execute(f"UPDATE {P}functional_read_models SET payload_json=? WHERE version_id=? AND warehouse_key='production'",(canonical(body),'saved:2026-10-31'))
+            conn.commit();conn.execute('PRAGMA query_only=ON');conn.execute('BEGIN')
+            with self.assertRaisesRegex(ValueError,'saved_stage_totals_changed'):
+                repair._saved(repair._Reader(conn),'2026-10-31',version_id='saved:2026-10-31')
+
     def test_foreign_unknown_retained_payload_is_never_repaired(self):
         retained=deepcopy(self.capture['retained']['2026-10-28'])
         foreign=deepcopy(retained['rows']['101']);foreign['reason']='foreign_stage_incomplete'
@@ -137,10 +146,29 @@ class TemporaryRepairTests(unittest.TestCase):
         changed['source_digest']=fingerprint({k:v for k,v in changed.items() if k!='source_digest'})
         with self.assertRaisesRegex(ValueError,'shared_cost_incomplete'):repair.build_temporary_allocation_repair(self.book,capture=changed,native_plan=self.plan)
 
+    def test_reconstructed_positive_stage_does_not_keep_old_zero_proof(self):
+        day='2026-10-29';retained=deepcopy(self.capture['retained'][day])
+        old_zero=dict(basis='absent_from_complete_published_document_stage',version_id='saved:'+day)
+        retained['rows']['101']['stages']['PRODUCTION']['zero_evidence']=old_zero
+        balances=deepcopy(self.candidate['editions'][day]['balances'])
+        prototype=deepcopy(next(r for r in balances if r['warehouse_key']=='ff' and r['nm_id']==101))
+        prototype.update(warehouse_key='production',quantity='10',capital_rub='100',cost_covered_quantity='10',wac_rub='10')
+        balances.append(prototype)
+        revised=repair._rebuild_retained(retained,wb=self.candidate['candidate_book']['wb_days'][day],balances=balances,
+            version_id='new-edition',saved_version='saved:'+day,source_proof='source-proof')
+        stage=revised['rows']['101']['stages']['PRODUCTION']
+        self.assertEqual(stage['quantity'],'10');self.assertEqual(stage['capital_rub'],'100')
+        self.assertNotIn('zero_evidence',stage)
+        self.assertEqual(stage['revision_proof']['previous_presentation_zero_evidence'],old_zero)
+
     def test_later_wb_quantity_above_all_documented_departures_fails(self):
         changed=deepcopy(self.capture);saved=changed['dates']['2026-10-29']
         items=json.loads(saved['snapshot']['items_json']);items[0].update(wb_contour_quantity='9',in_way_from_client='9');saved['snapshot']['items_json']=canonical(items)
         next(r for r in saved['balances'] if r['warehouse_key']=='wb' and r['nm_id']==101)['quantity']='9'
+        # Give the numerical guard a self-consistent source binding; the
+        # separate source-tamper tests cover rejection of stale digests.
+        foreign=changed['foreign_sources'];foreign['saved_digests']['2026-10-29']=fingerprint(saved)
+        foreign['source_digest']=fingerprint({k:v for k,v in foreign.items() if k!='source_digest'})
         changed['source_digest']=fingerprint({k:v for k,v in changed.items() if k!='source_digest'})
         with self.assertRaisesRegex(ValueError,'wb_quantity_exceeds_documented_handoffs'):repair.build_temporary_allocation_repair(self.book,capture=changed,native_plan=self.plan)
 
