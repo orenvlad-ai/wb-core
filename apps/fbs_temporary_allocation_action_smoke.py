@@ -226,6 +226,32 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
     def test_full_private_preflight_real_T1_material_WB_book_and_Ready(self):
         self._published_history_fixture()
 
+    def test_supplier_effective_date_does_not_replace_the_dated_wb_source(self):
+        with closing(_connect(self.runtime.db_path)) as conn:
+            row=dict(conn.execute("SELECT * FROM sheet_vitrina_v1_warehouse_functional_versions WHERE version_id='saved:2026-11-02'").fetchone())
+            row.update(version_id='late-supplier-change',version_kind='targeted_supplier_replay',
+                business_effective_date='2026-10-31',effective_at=STAMP,created_at=STAMP,
+                source_watermarks_json=action.canonical(dict(base_version_id='saved:2026-11-02')),
+                plan_fingerprint=action.fingerprint('late-supplier-change'))
+            conn.execute(f'INSERT INTO sheet_vitrina_v1_warehouse_functional_versions({",".join(row)}) VALUES({",".join("?" for _ in row)})',tuple(row.values()))
+            conn.commit()
+        snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
+        self.assertEqual(snapshot['source_versions']['2026-10-31'],'saved:2026-10-31')
+        self.assertEqual(snapshot['targeted_version_ids'],['late-supplier-change'])
+        with closing(_connect(self.runtime.db_path)) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_versions SET status='rolled_back' WHERE version_id='late-supplier-change'")
+            conn.commit()
+        with ready.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(Exception,'ready_repair_source_changed'):
+                action.stages.check_query_fence(conn,snapshot['selector_fence'])
+
+    def test_corrupt_ordinary_dated_source_is_not_silently_skipped(self):
+        with closing(_connect(self.runtime.db_path)) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET raw_rows_digest='corrupt' WHERE version_id='saved:2026-10-31'")
+            conn.commit()
+        with self.assertRaisesRegex(ValueError,'snapshot_quantity_authority_invalid'):
+            action._snapshot(self.runtime,self.inputs,now=self.now)
+
     def test_actual_finalizer_accepts_only_the_six_closed_history_days(self):
         sim,receipt,proof=self._published_history_fixture()
         manifest=receipt.manifest
@@ -317,6 +343,32 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
                 row.update(version_id='foreign-newer-source',effective_at='2026-11-02T15:01:00Z',created_at='2026-11-02T15:01:00Z')
                 row['plan_fingerprint']=action.fingerprint('foreign-newer-source')
                 conn.execute(f'INSERT INTO sheet_vitrina_v1_warehouse_functional_versions({",".join(row)}) VALUES({",".join("?" for _ in row)})',tuple(row.values()));conn.commit()
+            with self.assertRaisesRegex(Exception,'ready_repair_source_changed'):
+                action._apply_native_unit(self.runtime,recipe,binding=binding,owner_token=owner['owner_token'])
+        with ready.readonly(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f"SELECT SUM(quantity) FROM {BALANCES_TABLE} WHERE pool='FBO'").fetchone()[0],5400)
+            self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {OPERATIONS_TABLE} WHERE operation_type='fbs_physical_handoff'").fetchone()[0],0)
+
+    def test_continuation_rechecks_foreign_operands_before_any_money(self):
+        snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
+        directory=action._directory(self.root,'foreign-fence-local-temporary')
+        with patch.object(action,'_retain',return_value={}):
+            result=action._preflight(self.runtime,request={},operation_id='foreign-fence-local-temporary',directory=directory,
+                snapshot=snapshot,inputs=self.inputs,now=self.now)
+        # Exercise the recovery boundary with an immutable source proof whose
+        # selector and selected native prestate remain unchanged.
+        with ready.readonly(self.runtime.db_path) as conn:
+            result['numeric']['candidate']['foreign_source_fence']=action.json.loads(action.canonical(ready.pin_queries(conn,[
+                ('SELECT nomenclature_name FROM sheet_vitrina_v1_nomenclature_items WHERE nm_id=?',(101,))])))
+        recipe=action._make_recipe(self.runtime,snapshot=snapshot,unit=result['unit'],evidence=self.inputs[1],
+            operation_id='foreign-fence-local-temporary',created_at=STAMP,numeric=result['numeric'],
+            source_selection_fence=result['subset']['selection_fence'])
+        with warehouse_functional_job_lock(self.root) as owner:
+            binding=action._record_recipe(self.runtime,recipe,owner_token=owner['owner_token'])
+            with closing(_connect(self.runtime.db_path)) as conn,conn:
+                conn.execute("UPDATE sheet_vitrina_v1_nomenclature_items SET nomenclature_name='changed-source' WHERE nm_id=101")
+            with self.assertRaisesRegex(Exception,'ready_repair_source_changed'):
+                action._record_recipe(self.runtime,recipe,owner_token=owner['owner_token'])
             with self.assertRaisesRegex(Exception,'ready_repair_source_changed'):
                 action._apply_native_unit(self.runtime,recipe,binding=binding,owner_token=owner['owner_token'])
         with ready.readonly(self.runtime.db_path) as conn:
