@@ -746,6 +746,26 @@ def command_dependency_checks():
     print("command dependencies: direct/sibling/group/mixed browser routes and backend isolation OK")
 
 
+def fbs_repair_dependency_checks():
+    script = "apps/fbs_temporary_allocation_repair_smoke.py"
+    sibling_source = script.removesuffix("_smoke.py") + ".py"
+    # Dependency closure must follow both direct and automatic sibling checks.
+    for path in (script, sibling_source):
+        plan = build_plan_from_paths(pull_request=1547, base=BASE, head=HEAD,
+            paths=[path], file_exists=lambda _, p: p in {script, sibling_source})
+        verify_plan(plan)
+        assert plan["pip"] == ["openpyxl==3.1.5"], plan
+        assert plan["commands"] == [
+            ["python3", "-m", "py_compile", path], ["python3", script]], plan
+    actual = build_plan_from_paths(pull_request=1547, base=BASE, head=HEAD,
+        paths=["packages/application/fbs_temporary_allocation_repair.py", script],
+        file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
+    verify_plan(actual)
+    assert actual["pip"] == ["openpyxl==3.1.5"], actual
+    assert actual["commands"].count(["python3", script]) == 1, actual
+    print("FBS repair dependencies: direct/sibling/actual diff keep exact openpyxl prerequisite OK")
+
+
 def ads_dependency_checks():
     scripts = ["apps/ads_partial_adapter_smoke.py", "apps/ads_partial_publication_smoke.py"]
     for paths, expected in (
@@ -1091,6 +1111,7 @@ def main() -> None:
     command_dependency_checks()
     stock_monitor_dependency_checks()
     payment_pdf_dependency_checks()
+    fbs_repair_dependency_checks()
     ads_dependency_checks()
     buyout_percent_dependency_checks()
     finance_liquidity_checks()
