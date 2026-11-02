@@ -595,6 +595,8 @@ def materialize(plan, *, runtime_dir, now=None, book=_UNSET, book_version=None, 
     if not book or not book["active"]:
         return plan
     current = inventory_from_book(book, now=now, runtime_dir=runtime_dir)
+    current_data = current.payload()
+    current_day = current_data["date"]
     metadata = deepcopy(dict(plan.metadata or {}))
     cells = metadata.setdefault("server_cell_presentation", {})
     # Only dates from this policy. Closed inventory presentations are immutable
@@ -602,18 +604,19 @@ def materialize(plan, *, runtime_dir, now=None, book=_UNSET, book_version=None, 
     for day, payload in book["presentations"].items():
         if day not in plan.date_columns:
             continue
-        snapshot = current if day == current.date else ActiveInventorySnapshot.__new__(ActiveInventorySnapshot)
-        if day != current.date:
+        snapshot = current if day == current_day else ActiveInventorySnapshot.__new__(ActiveInventorySnapshot)
+        if day != current_day:
             object.__setattr__(snapshot, "_json", json.dumps(payload))
+        data = current_data if day == current_day else snapshot.payload()
         for nm in [None, *payload["rows"]]:
             scope = "TOTAL" if nm is None else "SKU:" + nm
-            for key, value in snapshot.metrics(nm).items():
-                cells.setdefault(scope + "|" + key, {})[day] = snapshot.presentation(value)
-    if current.date in plan.date_columns and current.date not in book["presentations"]:
-        for nm in [None, *current.payload()["rows"]]:
+            for key, value in snapshot._metrics(data, nm).items():
+                cells.setdefault(scope + "|" + key, {})[day] = snapshot.presentation(value, data=data)
+    if current_day in plan.date_columns and current_day not in book["presentations"]:
+        for nm in [None, *current_data["rows"]]:
             scope = "TOTAL" if nm is None else "SKU:" + nm
-            for key, value in current.metrics(nm).items():
-                cells.setdefault(scope + "|" + key, {})[current.date] = current.presentation(value)
+            for key, value in current._metrics(current_data, nm).items():
+                cells.setdefault(scope + "|" + key, {})[current_day] = current.presentation(value, data=current_data)
     sheets = []
     for sheet in plan.sheets:
         if sheet.sheet_name != "DATA_VITRINA":

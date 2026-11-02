@@ -75,7 +75,15 @@ def _saved(reader, day, *, version_id):
     return dict(version=version,snapshot=snapshot,balances=balances,read_models=models,companions=companions)
 
 
-def _closed_prefix_receipts(conn,reader,*,book,accounting,native_plan,source_versions,retained_inputs):
+def _saved_once(reader,cache,day,*,version_id):
+    """Reuse a validated edition only inside this capture's pinned RO read."""
+    key=(day,version_id)
+    if key not in cache:
+        cache[key]=_saved(reader,day,version_id=version_id)
+    return cache[key]
+
+
+def _closed_prefix_receipts(conn,reader,*,book,accounting,native_plan,source_versions,retained_inputs,saved_cache=None):
     """Admit only two already-posted, confirmed receipts behind closed26.
 
     This is a source proof, never a posting or an ordinary-history bypass.
@@ -115,7 +123,7 @@ def _closed_prefix_receipts(conn,reader,*,book,accounting,native_plan,source_ver
     require(source_versions.get(day)==wb['version_id'] and retained_inputs.get(day)==retained
         and retained['source_digest']==fingerprint({k:v for k,v in retained.items() if k!='source_digest'}),
         'closed_prefix_frozen_stage_changed')
-    saved=_saved(reader,day,version_id=wb['version_id'])
+    saved=_saved_once(reader,saved_cache if saved_cache is not None else {},day,version_id=wb['version_id'])
     from packages.application.shared_sku_cost_sources import capture_wb_component
     actual_wb=capture_wb_component(None,day=day,nm_ids=wb['requested_nm_ids'],version_id=wb['version_id'],connection=conn)
     require(actual_wb==wb and wb['complete'] and wb['authority_complete'],'closed_prefix_frozen_wb_changed')
@@ -175,13 +183,14 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
     first=native_plan['allocation_date'];dates=[r['dispatch']['business_date'] for r in native_plan['orders'] if 'dispatch' in r]
     handoff._boundary(book,allocation_date=first,handoff_dates=dates)
     reader=_Reader(conn)
+    saved_cache={}
     db=Path(conn.execute('PRAGMA database_list').fetchone()[2])
     timestamp=now.isoformat().replace('+00:00','Z') if isinstance(now,datetime) else now
     observed=datetime.fromisoformat(timestamp.replace('Z','+00:00'))
     accounting=capture_current(db,now=observed,include_baseline=False,connection=conn)
     require(accounting['documents_complete'] and accounting['quantity_snapshot']['complete'],'complete_current_sources_required')
     closed_prefix=_closed_prefix_receipts(conn,reader,book=book,accounting=accounting,native_plan=native_plan,
-        source_versions=source_versions,retained_inputs=retained_inputs)
+        source_versions=source_versions,retained_inputs=retained_inputs,saved_cache=saved_cache)
     repair_first=closed_prefix['date'] if closed_prefix else first
     targets=_days(repair_first,accounting['business_date'])
     documents=accounting['documents'];by_id={d['document_id']:d for d in documents}
@@ -227,7 +236,7 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
         quantities[day]=(deepcopy(book['state']['periods'][day]['snapshot']) if closed_prefix and day==repair_first
             else archived_quantity_snapshot(conn,day=day,observed_at=timestamp))
         require(day in source_versions,'pre_native_version_binding_missing')
-        saved[day]=_saved(reader,day,version_id=source_versions[day])
+        saved[day]=_saved_once(reader,saved_cache,day,version_id=source_versions[day])
         ids=sorted({int(r['nm_id']) for r in quantities[day]['rows']})
         require(day in retained_inputs,'pre_native_retained_binding_missing')
         retained[day]=deepcopy(retained_inputs[day])
@@ -239,7 +248,7 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
     require(all(int(r['quantity'])==0 for r in return_stock['rows'] if int(r['nm_id']) in nms),'actual_return_day_zero_required')
     predecessor=(date.fromisoformat(first)-timedelta(days=1)).isoformat()
     require(predecessor in source_versions,'pre_native_predecessor_binding_missing')
-    previous=_saved(reader,predecessor,version_id=source_versions[predecessor])
+    previous=_saved_once(reader,saved_cache,predecessor,version_id=source_versions[predecessor])
     # The saved dated WB source predates some already-posted native documents.
     # Reconstruct these sources explicitly instead of taking a later current
     # snapshot (or discarding the late receipts and supplier corrections).
@@ -252,7 +261,12 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
     accounting['native_requests_by_id']={}
     accounting['archived_dated_inputs']={d:{'quantity_snapshot':q} for d,q in quantities.items()}
     source_queries=original_source_queries(accounting)
-    for sql,args in source_queries:reader.rows(sql,args)
+    already_read={(sql,tuple(args)) for sql,args in reader.queries}
+    for sql,args in source_queries:
+        key=(sql,tuple(args))
+        if key not in already_read:
+            reader.rows(sql,args)
+            already_read.add(key)
     # The entire reconstruction consumes only immutable raw/native operands.
     result=dict(contract=CONTRACT,book_version=book_version,book=deepcopy(book),native_plan=deepcopy(native_plan),
         accounting_capture=accounting,quantity_snapshots=quantities,dates=saved,retained=retained,previous=previous,

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real local 27/32/29 native documents, true-shaped WB14 and daily book replay."""
 from contextlib import closing
+from collections import Counter
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal, localcontext
@@ -8,6 +9,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from apps import ff_pool_fbs_historical_handoff_smoke as fixture
 from packages.application import fbs_temporary_allocation_repair as repair
@@ -350,6 +352,37 @@ class ClosedPrefixReceiptRepairTests(unittest.TestCase):
         with closing(_connect(self.runtime.db_path)) as conn:
             self.assertEqual(counts,tuple(conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] for table in (
                 'sheet_vitrina_v1_warehouse_business_operations','sheet_vitrina_v1_ff_pool_documents')))
+
+    def test_frozen26_is_read_once_and_all_exact_source_fences_survive(self):
+        from packages.application.fbs_historical_fbo_stage_sources import MAX_BYTES
+        self.assertEqual(MAX_BYTES,64*1024**2)
+        calls=Counter();original_rows=repair._Reader.rows
+        def observed(reader,sql,args=()):
+            calls[(sql,tuple(args))]+=1
+            return original_rows(reader,sql,args)
+        with patch.object(repair,'_saved',wraps=repair._saved) as getter,patch.object(repair._Reader,'rows',observed):
+            captured=self.capture()
+        self.assertEqual(sum(call.args[1]=='2026-10-26' for call in getter.call_args_list),1)
+        expected=[(f'SELECT * FROM {P}{table} WHERE version_id=?'+order,('saved:2026-10-26',))
+            for table,order in [('functional_versions',''),('wb_snapshots',''),
+                ('functional_balances',' ORDER BY warehouse_key,nm_id'),('functional_read_models',' ORDER BY warehouse_key'),
+                ('functional_ff_reservations',' ORDER BY supply_id,nm_id'),('supplier_cost_states',' ORDER BY shipment_id'),
+                ('unmatched_doprinato',' ORDER BY unmatched_id')]]
+        for key in expected:self.assertEqual(calls[key],1,key)
+        frozen_id=self.book['state']['periods']['2026-10-26']['snapshot']['id']
+        stock_key=(f'SELECT * FROM {REGISTRY_RUNS_TABLE} WHERE run_id=?',(frozen_id,))
+        self.assertEqual(calls[stock_key],1)
+        fences={(sql,tuple(args)) for sql,args,digest in captured['query_fence']}
+        self.assertTrue(set(expected)|{stock_key}<=fences)
+        self.assertTrue(all(entry in captured['query_fence'] for entry in captured['closed_prefix_repair']['query_fence']))
+        with closing(_connect(self.runtime.db_path)) as conn:
+            conn.execute('PRAGMA query_only=ON');conn.execute('BEGIN')
+            repair.stages.check_query_fence(conn,captured['query_fence'])
+        self.assertEqual(captured['previous'],captured['dates']['2026-10-26'])
+        # The cache is local to one capture; a new read validates the source again.
+        with patch.object(repair,'_saved',wraps=repair._saved) as next_capture:
+            self.capture()
+        self.assertEqual(sum(call.args[1]=='2026-10-26' for call in next_capture.call_args_list),1)
 
     def test_unknown_late_document_is_not_silently_added_to_the_cohort(self):
         captured=self.capture();changed=deepcopy(captured['accounting_capture'])
