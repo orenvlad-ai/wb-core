@@ -80,6 +80,36 @@ class ActionTests(unittest.TestCase):
             expected_prestate=preview['prestate_sha256'] if preview else '',expected_candidate=preview['candidate_sha256'] if preview else '',
             adapters={'fbs_snapshot_accounting_v1':self.adapter})
 
+    def test_selected_four_hour_sources_and_previous_container_keep_full_preview(self):
+        from apps.fbs_current_snapshot_policy_smoke import canonical as bind,select
+        from packages.application import business_data_schedule_profile as schedule
+        with closing(_connect(self.runtime.db_path)) as conn:
+            bind(self.root.resolve(),self.runtime.db_path,conn,monolith=True)
+            conn.execute(f"UPDATE {action.ready.TABLE} SET as_of_date='2026-11-01' WHERE as_of_date='2026-11-02'")
+            conn.commit()
+        select(self.root)
+        action.datetime.now.return_value=datetime.fromisoformat('2026-11-02T18:50:00+00:00')
+        before=self.snapshot();p=self.launch()
+        self.assertEqual(p['state'],'preview');self.assertEqual(before,self.snapshot())
+        cached=action._read_json(action._directory(self.root,'restore-fixture')/'preflight.json')
+        self.assertTrue(cached['snapshot']['freshness_policy']['selected'])
+        self.assertEqual(cached['snapshot']['ready_target']['as_of_date'],'2026-11-01')
+        self.assertIn('fbs_current_snapshot_policy.py',cached['code_authority'])
+        (self.root/schedule.SELECTOR_FILENAME).unlink()
+        with self.assertRaisesRegex(ValueError,'preflight_sources_changed|fbs_current_snapshot_policy_unavailable'):
+            self.launch('apply',preview=p)
+        self.assertEqual(before,self.snapshot())
+
+    def test_private_copy_cap_does_not_expand_other_limits(self):
+        self.assertEqual(action.MAX_BYTES,512*1024**2)
+        action._check_source_copy_budget(table='fixture',count=1,size=640*1024**2,elapsed=1)
+        for reason,kwargs in (
+            ('bytes',dict(count=1,size=action.MAX_SOURCE_COPY_BYTES+1,elapsed=1)),
+            ('rows',dict(count=action.MAX_ROWS+1,size=1,elapsed=1)),
+            ('time',dict(count=1,size=1,elapsed=120))):
+            with self.assertRaisesRegex(ValueError,'subset_'+reason+'_budget'):
+                action._check_source_copy_budget(table='fixture',**kwargs)
+
     def test_unknown_action_rejected_before_target_and_money(self):
         with patch.object(adapter_module,'target',side_effect=AssertionError('target not allowed')):
             for method in ('preview','readback'):

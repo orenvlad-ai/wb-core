@@ -12,7 +12,6 @@ import threading
 from urllib import error as urllib_error, request as urllib_request
 
 from openpyxl import Workbook, load_workbook
-from pypdf import PdfReader
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -375,6 +374,7 @@ def _read_headers(workbook_bytes: bytes) -> list[str]:
 
 
 def _pdf_text(pdf_bytes: bytes) -> str:
+    from pypdf import PdfReader
     reader = PdfReader(BytesIO(pdf_bytes))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 

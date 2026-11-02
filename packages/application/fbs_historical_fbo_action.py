@@ -7,6 +7,7 @@ immutable recipe. Readback never writes or submits anything.
 from contextlib import closing, contextmanager
 from copy import deepcopy
 from datetime import date, datetime, timezone
+from dataclasses import asdict
 import hashlib
 import json
 import os
@@ -30,6 +31,8 @@ from packages.application.warehouse_functional_lock import warehouse_functional_
 RESTORE = 'restore_historical_fbo'
 RECOVER = 'recover_historical_fbo'
 MAX_BYTES = 512 * 1024**2
+# Only disposable source copies; publication/JSON limits remain unchanged.
+MAX_SOURCE_COPY_BYTES = 1024 * 1024**2
 MAX_ROWS = 100000
 RESERVE = 10 * 1024**3
 P = 'sheet_vitrina_v1_'
@@ -201,7 +204,7 @@ def capture_native_sources(conn, *, book, scope, opening_date, physical, restore
 def _preflight_code():
     result={**typed.publication._code(),**typed._adapter_code()}
     for name in ('fbs_historical_fbo_action.py','fbs_accounting_rehearsal_sources.py',
-                 'web_vitrina_window_v3.py','sheet_vitrina_v1_inventory_history.py'):
+                 'web_vitrina_window_v3.py','sheet_vitrina_v1_inventory_history.py','fbs_current_snapshot_policy.py'):
         result[name]='sha256:'+hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
     return result
 
@@ -245,6 +248,8 @@ def _snapshot(runtime, inputs):
     value,physical,restored,fees,_=inputs
     book,version=accounting.load(runtime.runtime_dir);typed._healthy(book)
     with ready.readonly(runtime.db_path) as conn:
+        from packages.application.fbs_current_snapshot_policy import resolve_current_snapshot_policy
+        freshness_policy=asdict(resolve_current_snapshot_policy(connection=conn))
         capture=capture_native_sources(conn,book=book,scope=value['scope'],opening_date=value['opening_date'],physical=physical,restored=restored)
         plan=prepare_historical_fbo_dispatch_plan(capture,value['scope'])
         require(plan['status']=='prepared_unconnected','native_candidate_blocked:'+str(plan.get('reason')))
@@ -253,7 +258,13 @@ def _snapshot(runtime, inputs):
         material=ready.capture_material(conn,tables=staging.SOURCE_TABLES)
         active=conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()
         require(active is not None,'active_bundle_required')
-        target=dict(bundle_version=active[0],as_of_date=max(book['state']['periods']))
+        day=max(book['state']['periods'])
+        selected=conn.execute(f'''SELECT as_of_date FROM {ready.TABLE} WHERE bundle_version=?
+            AND EXISTS(SELECT 1 FROM json_each(plan_json,'$.date_columns') WHERE value=?)
+            ORDER BY (as_of_date=?) DESC,activated_at DESC,refreshed_at DESC,as_of_date DESC LIMIT 1''',
+            (active[0],day,day)).fetchone()
+        require(selected is not None,'real_ready_current_column_required')
+        target=dict(bundle_version=active[0],as_of_date=selected[0])
         expected=ready.capture_expected(conn,**target)
         require(expected.exists,'real_current_ready_required')
         invoice_refs=[]
@@ -270,7 +281,7 @@ def _snapshot(runtime, inputs):
                 payment_source_filename=payment['source_filename'],payment_comment=json.loads(payment['request_payload_json']).get('comment',''),
                 payment_detail_path='/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/requests/'+payment['request_id']))
         require(len({r['payment_request_id'] for r in invoice_refs})==3,'payment_reference_duplicate')
-    return dict(book_version=version,capture=capture,native_plan=plan,native_guard=guard,material=material,
+    return dict(book_version=version,capture=capture,native_plan=plan,native_guard=guard,material=material,freshness_policy=freshness_policy,
                 ready_target=target,ready_fingerprint=expected.fingerprint,documentary_digest=fingerprint(value),original_invoice_refs=invoice_refs)
 
 
@@ -302,6 +313,11 @@ def _file_proof(path, *, budget):
     with path.open('rb') as handle:
         for chunk in iter(lambda:handle.read(8*1024**2),b''):digest.update(chunk)
     return dict(path=str(path),size_bytes=path.stat().st_size,sha256=digest.hexdigest())
+
+
+def _check_source_copy_budget(*,table,count,size,elapsed):
+    exceeded=('rows' if count>MAX_ROWS else 'bytes' if size>MAX_SOURCE_COPY_BYTES else 'time' if elapsed>=120 else '')
+    require(not exceeded,f'subset_{exceeded}_budget:table={table}:rows={count}:bytes={size}:elapsed={elapsed:.3f}')
 
 
 def _subset(conn, destination, *, book, snapshot, now):
@@ -388,11 +404,11 @@ def _subset(conn, destination, *, book, snapshot, now):
     selected_sources=select_rehearsal_sources(conn,dates=dates,now=now,
         extra_ready_keys=[(snapshot['ready_target']['bundle_version'],snapshot['ready_target']['as_of_date'])])
     filters.update(selected_sources['filters'])
-    require(shutil.disk_usage(destination.parent).free >= MAX_BYTES+RESERVE,'simulation_disk_budget')
-    _admit(destination,MAX_BYTES)
+    require(shutil.disk_usage(destination.parent).free >= MAX_SOURCE_COPY_BYTES+RESERVE,'simulation_disk_budget')
+    _admit(destination,MAX_SOURCE_COPY_BYTES)
     fd=os.open(destination,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600);os.close(fd)
     schema=list(conn.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid"))
-    size=0;queries=list(selected_sources['selection_queries']);counts={};started=time.monotonic()
+    size=0;queries=list(selected_sources['selection_queries']);copy_queries=[];counts={};started=time.monotonic()
     with closing(sqlite3.connect(destination)) as dst:
         dst.execute('PRAGMA temp_store=MEMORY')
         for row in schema:
@@ -406,17 +422,19 @@ def _subset(conn, destination, *, book, snapshot, now):
             cursor=conn.execute(sql,args);count=0
             for source in cursor:
                 count+=1;size+=sum(len(v) if isinstance(v,bytes) else len(canonical(v).encode()) for v in source)
-                require(count<=MAX_ROWS and size<=MAX_BYTES and time.monotonic()-started<120,'subset_budget')
+                _check_source_copy_budget(table=table,count=count,size=size,elapsed=time.monotonic()-started)
                 dst.execute(f'INSERT INTO "{table}"(rowid,{",".join(chr(34)+c+chr(34) for c in columns)}) VALUES({",".join("?" for _ in range(len(columns)+1))})',
                     [source['__source_rowid__'],*[source[c] for c in columns]])
-            queries.append((sql,args));counts[table]=count
+            queries.append((sql,args));copy_queries.append((sql,args));counts[table]=count
         for row in schema:
             if row['type'] in {'index','trigger','view'}:
                 dst.execute(row['sql'])
-                require(time.monotonic()-started<120 and dst.execute('PRAGMA page_count').fetchone()[0]*dst.execute('PRAGMA page_size').fetchone()[0]<=MAX_BYTES,'subset_index_budget')
+                _check_source_copy_budget(table=row['name'],count=0,
+                    size=dst.execute('PRAGMA page_count').fetchone()[0]*dst.execute('PRAGMA page_size').fetchone()[0],elapsed=time.monotonic()-started)
         dst.commit()
         require(dst.execute('PRAGMA quick_check').fetchall()==[('ok',)],'subset_integrity')
-    return dict(query_fence=json.loads(canonical(ready.pin_queries(conn,queries))),rows=counts,bytes=size)
+    return dict(query_fence=json.loads(canonical(ready.pin_queries(conn,queries))),
+        copy_fence=json.loads(canonical(ready.pin_queries(conn,copy_queries))),rows=counts,bytes=size)
 
 
 def _numeric(manifest):
@@ -497,20 +515,23 @@ def _preflight(runtime, *, request, operation_id, directory, snapshot, inputs, n
     book,_=accounting.load(runtime.runtime_dir)
     with ready.readonly(runtime.db_path) as conn:
         subset=_subset(conn,directory/'sources.before.sqlite3',book=book,snapshot=snapshot,now=now)
-    _backup(directory/'sources.before.sqlite3',sandbox/'registry_upload_runtime.sqlite3',budget=MAX_BYTES)
+    _backup(directory/'sources.before.sqlite3',sandbox/'registry_upload_runtime.sqlite3',budget=MAX_SOURCE_COPY_BYTES)
     sim=_runtime(sandbox)
-    fresh=_snapshot(sim,inputs)
-    require(fresh['capture']==snapshot['capture'] and fresh['native_guard']==snapshot['native_guard'], 'simulation_source_changed')
-    with warehouse_functional_job_lock(sandbox) as owner:
-        recipe=_recipe(sim,operation_id=operation_id,snapshot=fresh,inputs=inputs,now=now)
-        recorded=typed.record_effect_intent(recipe,runtime=sim,recapture=_recapture(sim,inputs),owner_token=owner['owner_token'])
-        manifest=_pipeline(sim,recipe=recipe,binding=recorded['binding'],workbooks=inputs[-1],recapture=_recapture(sim,inputs),owner_token=owner['owner_token'],now=now)
-        # Numeric preview also proves the actual native Ready publication path.
-        typed.publication.publish(manifest,runtime_dir=sandbox)
+    from packages.application.fbs_current_snapshot_policy import rehearsal_snapshot_policy
+    with ready.readonly(runtime.db_path) as source, rehearsal_snapshot_policy(source,
+            runtime_dir=sandbox,db_path=sim.db_path,source_fence=subset['query_fence'],copy_fence=subset['copy_fence']):
+        fresh=_snapshot(sim,inputs)
+        require(fresh['capture']==snapshot['capture'] and fresh['native_guard']==snapshot['native_guard'] and fresh['freshness_policy']==snapshot['freshness_policy'], 'simulation_source_changed')
+        with warehouse_functional_job_lock(sandbox) as owner:
+            recipe=_recipe(sim,operation_id=operation_id,snapshot=fresh,inputs=inputs,now=now)
+            recorded=typed.record_effect_intent(recipe,runtime=sim,recapture=_recapture(sim,inputs),owner_token=owner['owner_token'])
+            manifest=_pipeline(sim,recipe=recipe,binding=recorded['binding'],workbooks=inputs[-1],recapture=_recapture(sim,inputs),owner_token=owner['owner_token'],now=now)
+            # Numeric preview also proves the actual native Ready publication path.
+            typed.publication.publish(manifest,runtime_dir=sandbox)
     require(code_authority==_preflight_code(),'preflight_code_changed')
     result=dict(code_authority=code_authority,snapshot=snapshot,subset=subset,numeric=_numeric(manifest),observed_at=now.isoformat(),retained_files=retained,
         documentary_digest=fingerprint(inputs[0]),backup_book=before_book,
-        backup_sources=_file_proof(directory/'sources.before.sqlite3',budget=MAX_BYTES),
+        backup_sources=_file_proof(directory/'sources.before.sqlite3',budget=MAX_SOURCE_COPY_BYTES),
         simulation_book=manifest['after_book'])
     result['digest']=fingerprint(result)
     _private(directory/'preflight.json',result)
@@ -563,7 +584,7 @@ class HistoricalFboAction:
             preflight=_read_json(directory/'preflight.json')
             require(preflight['digest']==fingerprint({k:v for k,v in preflight.items() if k!='digest'}),'preflight_corrupt')
             _check_preflight_code(preflight)
-            for key,budget in (('backup_book',128*1024**2),('backup_sources',MAX_BYTES)):
+            for key,budget in (('backup_book',128*1024**2),('backup_sources',MAX_SOURCE_COPY_BYTES)):
                 require(_file_proof(Path(preflight[key]['path']),budget=budget)==preflight[key],'before_image_changed')
             if continuation:
                 saved=_read_json(directory/'attempt.json')
