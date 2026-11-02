@@ -172,10 +172,18 @@ def _snapshot(runtime,inputs,*,now):
             if day.isoformat()=='2026-10-26':
                 correction_since=json.loads(dated_version['source_watermarks_json'])['captured_at']
             source_versions[day.isoformat()]=selected[0]
-            if day.isoformat()>='2026-10-27':
-                stock=archived_quantity_snapshot(conn,day=day.isoformat(),observed_at=now.isoformat())
+            if day.isoformat()>='2026-10-26':
+                frozen=(book['state']['periods'][day.isoformat()]['snapshot']
+                    if day.isoformat()=='2026-10-26' and day.isoformat() in book.get('retained_days',{}) else None)
+                stock=archived_quantity_snapshot(conn,day=day.isoformat(),observed_at=now.isoformat(),
+                    **({'generation_id':frozen['id']} if frozen else {}))
                 ids=sorted({int(row['nm_id']) for row in stock['rows']})
                 retained_inputs[day.isoformat()]=capture_retained_stages(runtime.db_path,day=day.isoformat(),wb_version_id=selected[0],nm_ids=ids,connection=conn)
+                if day.isoformat()=='2026-10-26' and day.isoformat() in book.get('retained_days',{}):
+                    require(book['wb_days'][day.isoformat()]['version_id']==selected[0]
+                        and book['state']['periods'][day.isoformat()]['snapshot']==stock,
+                        'closed_receipt_day_frozen_source_changed')
+                    retained_inputs[day.isoformat()]=deepcopy(book['retained_days'][day.isoformat()])
                 initial_queries.append((f'SELECT * FROM {P}warehouse_business_projection_current_rows WHERE as_of_date=? ORDER BY nm_id',(day.isoformat(),)))
             day+=timedelta(days=1)
         sql=f'''SELECT version_id FROM {P}warehouse_functional_versions
@@ -253,7 +261,7 @@ def _subset(conn,destination,*,book,now,snapshot):
     filters.update({P+'wb_fbs_warehouse_registry_runs':(f'run_id IN ({gm})',ga),P+'wb_fbs_warehouse_registry_rows':(f'run_id IN ({gm})',ga),
         P+'wb_fbs_stock_snapshot_runs':(f'registry_run_id IN ({gm})',ga),
         P+'wb_fbs_stock_snapshot_rows':(f'run_id IN (SELECT run_id FROM {P}wb_fbs_stock_snapshot_runs WHERE registry_run_id IN ({gm}))',ga)})
-    extras=('ff_pool_feature_epochs','ff_pool_cutover_manifests','ff_pool_cutover_order_classifications','ff_pool_fbs_lifecycle_current',
+    extras=('ff_pool_operator_confirmations','ff_pool_feature_epochs','ff_pool_cutover_manifests','ff_pool_cutover_order_classifications','ff_pool_fbs_lifecycle_current',
         'ff_pool_fbs_lifecycle_events','ff_pool_fbs_reconciliation_lane','ff_pool_fbs_drain_state','ff_pool_fbs_late_evidence',
         'ff_pool_fbs_identity_pending','ff_pool_fbs_identity_pending_resolutions','ff_pool_fbs_mapping_extensions','ff_pool_fbs_mapping_extension_allocations',
         'ff_pool_fbs_forward_generations','ff_pool_fbs_forward_state','ff_pool_fbs_applicability_events','wb_supply_ff_origin_assignments',
@@ -570,7 +578,18 @@ def prepare_publication(runtime,*,recipe,binding,now):
     captured,candidate=_build_candidate(runtime,book=book,version=version,native_plan=recipe['unit']['native_plan'],evidence=recipe['evidence'],now=now,
         source_versions=recipe['snapshot']['source_versions'],retained_inputs=recipe['snapshot']['retained_inputs'],
         targeted_version_ids=recipe['snapshot'].get('targeted_version_ids',[]))
-    dates=sorted(candidate['editions']);require(dates and dates[0]=='2026-10-27','full_27_suffix_required')
+    dates=sorted(candidate['editions'])
+    closed=candidate['quality_proof'].get('closed_prefix_repair')
+    first='2026-10-26' if closed else '2026-10-27'
+    require(dates and dates[0]==first,'complete_receipt_and_allocation_suffix_required')
+    if closed:
+        from packages.application.fbs_accounting_historical_revision import _prefix
+        require(closed.get('contract')=='temporary_fbs_closed_receipts_20261026_v1'
+            and closed.get('date')==first and len(closed.get('receipt_document_ids',[]))==2
+            and len(set(closed['receipt_document_ids']))==2
+            and closed.get('source_digest')==fingerprint({k:v for k,v in closed.items() if k!='source_digest'})
+            and closed.get('immutable_prefix_digest')==fingerprint(_prefix(book,first))
+            ==fingerprint(_prefix(candidate['candidate_book'],first)), 'closed_receipt_prefix_proof_changed')
     plan=dict(contract=CONTRACT,status='ready',before_book_digest=version,candidate_book=candidate['candidate_book'],
         scope=dict(dates=dates,date_from=dates[0],date_to=dates[-1]),observation=dict(captured_at=recipe['created_at']),
         effect_binding=binding,native_plan=recipe['unit']['native_plan'],quality_proof=candidate['quality_proof'])

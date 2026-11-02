@@ -25,6 +25,7 @@ from packages.application import wb_historical_fbs_cost as initial
 from packages.application import ff_pool_fbs_historical_handoff as handoff
 
 CONTRACT='fbs_temporary_allocation_repair_stages_v1'
+CLOSED_PREFIX_CONTRACT='temporary_fbs_closed_receipts_20261026_v1'
 P=stages.P
 
 
@@ -74,6 +75,98 @@ def _saved(reader, day, *, version_id):
     return dict(version=version,snapshot=snapshot,balances=balances,read_models=models,companions=companions)
 
 
+def _closed_prefix_receipts(conn,reader,*,book,accounting,native_plan,source_versions,retained_inputs):
+    """Admit only two already-posted, confirmed receipts behind closed26.
+
+    This is a source proof, never a posting or an ordinary-history bypass.
+    The accepted26 quantities and WB/retained sources remain immutable.
+    """
+    from packages.application import fbs_accounting_historical_revision as historical
+    from packages.application.ff_pool_documents import DOCUMENTS_TABLE,REQUESTS_TABLE
+    from packages.application.fbs_accounting_historical_revision_writer import REQUEST_PROOF_FIELDS
+    from packages.application.operator_warehouse_documents import TABLE,assert_source
+    from packages.application.fbs_snapshot_cost import _last_closed
+    query_start=len(reader.queries)
+    probe=evaluate_candidate(book['state'],accounting)
+    pending=probe['pending_documents']
+    if not pending:return None
+    day='2026-10-26';ids=sorted(p['document_id'] for p in pending)
+    require(len(ids)==len(set(ids))==2 and all(p.get('reason')=='late_closed_period_document'
+        and p.get('business_date')==day for p in pending),'closed_prefix_unapproved_pending')
+    periods=book['state']['periods']
+    require(periods.get(day,{}).get('status')=='closed'
+        and max(d for d,p in periods.items() if p['status']=='closed')==day
+        and _last_closed({**book['state'],'periods':{d:p for d,p in periods.items() if d<day}})[0]=='2026-10-25',
+        'closed_prefix_boundary_changed')
+    known=historical._manifest_known(book['state'])
+    by_id={d['document_id']:d for d in accounting['documents']}
+    require({d['document_id'] for d in accounting['documents'] if d['document_id'] not in known
+        and d['business_date']<=day}==set(ids),'closed_prefix_unselected_late_document')
+    require(all(k in book and day in book[k] for k in historical.BOOK_DAY_FIELDS),'closed_prefix_saved_day_missing')
+    frozen=deepcopy(periods[day]['snapshot'])
+    require(frozen.get('complete') is True and frozen['date']==day,'closed_prefix_quantity_incomplete')
+    exact=archived_quantity_snapshot(conn,day=day,observed_at=accounting['captured_at'],generation_id=frozen['id'])
+    require(exact==frozen,'closed_prefix_frozen_quantity_changed')
+    from packages.application.wb_fbs_warehouse_registry import REGISTRY_RUNS_TABLE,STOCK_RUNS_TABLE,STOCK_ROWS_TABLE
+    reader.rows(f'SELECT * FROM {REGISTRY_RUNS_TABLE} WHERE run_id=?',(frozen['id'],))
+    reader.rows(f'SELECT * FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=? ORDER BY seller_warehouse_id',(frozen['id'],))
+    reader.rows(f'SELECT r.* FROM {STOCK_ROWS_TABLE} r JOIN {STOCK_RUNS_TABLE} s ON s.run_id=r.run_id WHERE s.registry_run_id=? ORDER BY r.run_id,r.chrt_id',(frozen['id'],))
+    wb=book['wb_days'][day];retained=book['retained_days'][day]
+    require(source_versions.get(day)==wb['version_id'] and retained_inputs.get(day)==retained
+        and retained['source_digest']==fingerprint({k:v for k,v in retained.items() if k!='source_digest'}),
+        'closed_prefix_frozen_stage_changed')
+    saved=_saved(reader,day,version_id=wb['version_id'])
+    from packages.application.shared_sku_cost_sources import capture_wb_component
+    actual_wb=capture_wb_component(None,day=day,nm_ids=wb['requested_nm_ids'],version_id=wb['version_id'],connection=conn)
+    require(actual_wb==wb and wb['complete'] and wb['authority_complete'],'closed_prefix_frozen_wb_changed')
+    selected={int(nm) for nm in native_plan['sources']}
+    requested=json.loads(saved['snapshot']['requested_nm_ids_json'])
+    items={int(r['nm_id']):r for r in json.loads(saved['snapshot']['items_json'])}
+    require(len(selected)==4 and selected<=set(requested) and selected<=set(items)
+        and all(Decimal(items[nm]['wb_contour_quantity'])==0 for nm in selected),
+        'closed_prefix_selected_wb_not_explicit_zero')
+    proof={};requests={};actors={};receipts=[]
+    for identity in ids:
+        doc=by_id[identity]
+        require(doc['kind']=='china_acceptance' and doc['source_type'] in {'china_acceptance_form','china_acceptance_workbook'}
+            and doc['business_date']==day and doc['cost_document']['domain'].get('facility_id')==native_plan['facility_id']
+            and all(line['facility_id']==native_plan['facility_id'] and line['pool'] in {'FBS','FBO'}
+                for line in doc['cost_document']['lines']),'closed_prefix_receipt_scope_changed')
+        raw=reader.one(f'SELECT * FROM {DOCUMENTS_TABLE} WHERE document_id=?',(identity,))
+        posted=json.loads(raw['posted_manifest_json']);proof[identity]=raw['posted_manifest_json']
+        require(posted['primary_document_id']==identity and len(posted['documents'])==1,
+                'closed_prefix_receipt_companion_unapproved')
+        request=reader.one(f"SELECT {','.join(REQUEST_PROOF_FIELDS)} FROM {REQUESTS_TABLE} WHERE request_id=?",(raw['request_id'],))
+        request['state']=conn.execute(f'SELECT state FROM {REQUESTS_TABLE} WHERE request_id=?',(raw['request_id'],)).fetchone()[0]
+        requests[request['request_id']]=request;actors[identity]=raw['actor']
+        confirmation=reader.one(f'SELECT request_id,source_json,source_digest,accepted_at,actor FROM {TABLE} WHERE request_id=?',(raw['request_id'],))
+        source=assert_source(conn,request)
+        require(fingerprint(source)==confirmation['source_digest'] and confirmation['actor']
+            and historical._time(request['accepted_at'])<=historical._time(confirmation['accepted_at'])<=historical._time(doc['posted_at']),
+            'closed_prefix_confirmation_changed')
+        source_capture={**accounting,'posted_manifest_json_by_id':proof,'native_requests_by_id':requests,'posted_actors_by_id':actors}
+        historical._verify_native_operands({k:doc[k] for k in historical.HEADER_FIELDS},doc['cost_document'],posted)
+        historical._verify_request_operands(doc,source_capture);historical._verify_receipt(doc)
+        # Pin canonical normalized monetary operands, not only request metadata.
+        for suffix,where,order in [('ff_pool_document_lines','document_id=?','line_no'),
+                ('ff_pool_document_expense_lines','document_id=?','expense_line_no'),
+                ('ff_pool_document_relations','child_document_id=?','relation_type')]:
+            reader.rows(f'SELECT * FROM sheet_vitrina_v1_{suffix} WHERE {where} ORDER BY {order}',(identity,))
+        reader.rows('SELECT * FROM sheet_vitrina_v1_ff_pool_movement_lines WHERE operation_id=? ORDER BY line_no',(doc['operation_id'],))
+        reader.rows('SELECT * FROM sheet_vitrina_v1_warehouse_business_operations WHERE operation_id=?',(doc['operation_id'],))
+        receipts.append(dict(document_id=identity,fingerprint=doc['fingerprint'],source_id=doc['source_id'],
+            request_id=request['request_id'],request_digest=fingerprint({k:v for k,v in request.items() if k!='state'}),
+            posted_manifest_sha256=doc['posted_manifest_sha256'],confirmation_source_digest=confirmation['source_digest']))
+    require(len({r['source_id'] for r in receipts})==2 and len(requests)==2,'closed_prefix_receipt_source_duplicate')
+    result=dict(contract=CLOSED_PREFIX_CONTRACT,date=day,receipt_document_ids=ids,receipts=receipts,
+        frozen_quantity_digest=fingerprint(frozen),frozen_wb_digest=fingerprint(wb),frozen_retained_digest=fingerprint(retained),
+        immutable_prefix_digest=fingerprint(historical._prefix(book,day)),
+        known_manifest_digest=fingerprint(known),pending_documents=deepcopy(pending),
+        query_fence=json.loads(canonical(ready.pin_queries(conn,reader.queries[query_start:]))))
+    result['source_digest']=fingerprint(result)
+    return result
+
+
 def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,native_plan,evidence,now,source_versions,retained_inputs,targeted_version_ids=()):
     require(conn.in_transaction and conn.row_factory is sqlite3.Row and conn.execute('PRAGMA query_only').fetchone()[0]==1,'query_only_required')
     require(fingerprint(book)==book_version==native_plan['source_book_version'],'book_binding_changed')
@@ -87,7 +180,10 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
     observed=datetime.fromisoformat(timestamp.replace('Z','+00:00'))
     accounting=capture_current(db,now=observed,include_baseline=False,connection=conn)
     require(accounting['documents_complete'] and accounting['quantity_snapshot']['complete'],'complete_current_sources_required')
-    targets=_days(first,accounting['business_date'])
+    closed_prefix=_closed_prefix_receipts(conn,reader,book=book,accounting=accounting,native_plan=native_plan,
+        source_versions=source_versions,retained_inputs=retained_inputs)
+    repair_first=closed_prefix['date'] if closed_prefix else first
+    targets=_days(repair_first,accounting['business_date'])
     documents=accounting['documents'];by_id={d['document_id']:d for d in documents}
     allocation_id=native_plan['allocation']['document']['document_id']
     require(allocation_id in by_id,'allocation_cost_document_missing')
@@ -128,7 +224,8 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
     require(not acceptance,'selected_wb_acceptance_source_present')
     quantities={};saved={};retained={}
     for day in targets:
-        quantities[day]=archived_quantity_snapshot(conn,day=day,observed_at=timestamp)
+        quantities[day]=(deepcopy(book['state']['periods'][day]['snapshot']) if closed_prefix and day==repair_first
+            else archived_quantity_snapshot(conn,day=day,observed_at=timestamp))
         require(day in source_versions,'pre_native_version_binding_missing')
         saved[day]=_saved(reader,day,version_id=source_versions[day])
         ids=sorted({int(r['nm_id']) for r in quantities[day]['rows']})
@@ -151,7 +248,7 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
     all_physical.update({d['document_id']:d for d in physical})
     physical=list(all_physical.values())
     foreign=capture_foreign_suffix_sources(conn,saved_by_day=saved,documents=physical,
-        targeted_version_ids=list(targeted_version_ids),date_from=first,date_to=targets[-1])
+        targeted_version_ids=list(targeted_version_ids),date_from=repair_first,date_to=targets[-1])
     accounting['native_requests_by_id']={}
     accounting['archived_dated_inputs']={d:{'quantity_snapshot':q} for d,q in quantities.items()}
     source_queries=original_source_queries(accounting)
@@ -159,7 +256,8 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
     # The entire reconstruction consumes only immutable raw/native operands.
     result=dict(contract=CONTRACT,book_version=book_version,book=deepcopy(book),native_plan=deepcopy(native_plan),
         accounting_capture=accounting,quantity_snapshots=quantities,dates=saved,retained=retained,previous=previous,
-        physical_documents=physical,foreign_sources=foreign,return_document_id=returned['document_id'],selected_nm_ids=nms,prepared_at=timestamp,
+        physical_documents=physical,foreign_sources=foreign,closed_prefix_repair=closed_prefix,
+        return_document_id=returned['document_id'],selected_nm_ids=nms,prepared_at=timestamp,
         cost_interval_proof=dict(complete=True,unexpected_operations=[],native_plan_digest=native_plan['plan_digest'],
             date_from=first,date_to=targets[-1],movements_digest=fingerprint(all_movements)),
         query_fence=json.loads(canonical(ready.pin_queries(conn,reader.queries)))+foreign['query_fence'])
@@ -232,6 +330,17 @@ def _rebuild_retained(original,*,wb,balances,version_id,saved_version,source_pro
 def build_temporary_allocation_repair(book,*,capture,native_plan):
     require(capture['contract']==CONTRACT and capture['source_digest']==fingerprint({k:v for k,v in capture.items() if k!='source_digest'}),'capture_changed')
     require(fingerprint(book)==capture['book_version']==native_plan['source_book_version'] and native_plan==capture['native_plan'],'book_changed')
+    closed_prefix=capture.get('closed_prefix_repair')
+    if closed_prefix:
+        from packages.application.fbs_accounting_historical_revision import _prefix
+        require(closed_prefix['contract']==CLOSED_PREFIX_CONTRACT and closed_prefix['date']=='2026-10-26'
+            and len(set(closed_prefix['receipt_document_ids']))==len(closed_prefix['receipt_document_ids'])==2
+            and closed_prefix['source_digest']==fingerprint({k:v for k,v in closed_prefix.items() if k!='source_digest'})
+            and closed_prefix['immutable_prefix_digest']==fingerprint(_prefix(book,'2026-10-26'))
+            and closed_prefix['frozen_quantity_digest']==fingerprint(book['state']['periods']['2026-10-26']['snapshot'])
+            and closed_prefix['frozen_wb_digest']==fingerprint(book['wb_days']['2026-10-26'])
+            and closed_prefix['frozen_retained_digest']==fingerprint(book['retained_days']['2026-10-26']),
+            'closed_prefix_proof_changed')
     candidate=deepcopy(book);state=deepcopy(book['state']);first=min(capture['dates']);last=max(capture['dates'])
     state['periods']={d:p for d,p in state['periods'].items() if d<first}
     state['pending_documents']=[]
@@ -242,14 +351,16 @@ def build_temporary_allocation_repair(book,*,capture,native_plan):
         dated['quantity_snapshot']=deepcopy(capture['quantity_snapshots'][day])
         dated['source_digest']=fingerprint([capture['accounting_capture']['source_digest'],day,dated['quantity_snapshot']])
         state=evaluate_candidate(state,dated)
-        require(state['last_attempt']['status']=='evaluated' and not state['pending_documents'],'fbs_suffix_incomplete')
+        require(state['last_attempt']['status']=='evaluated' and not state['pending_documents'],
+            'fbs_suffix_incomplete:'+canonical(dict(day=day,pending=[{k:p.get(k) for k in ('document_id','reason','business_date')}
+                for p in state['pending_documents'][:8]],attempt=state['last_attempt']['status'])))
         if day<last:state=close_candidate_period(state,day,today=last)
         require(candidate_period_view(state,day)['quality']!='incomplete','fbs_period_unpriced')
         snapshot=deepcopy(saved['snapshot'])
         watermark=json.loads(saved['version']['source_watermarks_json'])['wb_snapshot']
         snapshot['source_snapshot_id']=watermark['snapshot_id']
-        basis=initial.build_basis(native_plan=native_plan,snapshot=snapshot,previous_snapshot=previous,
-            previous_version=saved['version']['version_id'],prepared_at=capture['prepared_at'],cost_interval_proof=capture['cost_interval_proof'])
+        basis=(None if closed_prefix and day==closed_prefix['date'] else initial.build_basis(native_plan=native_plan,snapshot=snapshot,previous_snapshot=previous,
+            previous_version=saved['version']['version_id'],prepared_at=capture['prepared_at'],cost_interval_proof=capture['cost_interval_proof']))
         items={int(r['nm_id']):r for r in json.loads(snapshot['items_json'])}
         from packages.application.fbs_temporary_allocation_foreign_sources import rebuild_foreign_suffix_day
         rebuilt=rebuild_foreign_suffix_day(saved,day=day,documents=capture['physical_documents'],
@@ -260,6 +371,9 @@ def build_temporary_allocation_repair(book,*,capture,native_plan):
             if row['warehouse_key']!='wb' or nm not in capture['selected_nm_ids']:continue
             item=items[nm];q=Decimal(item['wb_contour_quantity'])
             require(q==Decimal(row['quantity']),'raw_wb_quantity_changed')
+            if closed_prefix and day==closed_prefix['date']:
+                require(q==0,'closed_prefix_selected_wb_not_explicit_zero')
+                continue
             handoff_quantity=sum(1 for order in native_plan['orders'] if order['order']['nm_id']==nm
                 and 'dispatch' in order and order['dispatch']['business_date']<=day)
             require(q<=handoff_quantity,'wb_quantity_exceeds_documented_handoffs')
@@ -300,13 +414,17 @@ def build_temporary_allocation_repair(book,*,capture,native_plan):
     quality=dict(initial_wb_quality=initial.QUALITY,source_cost='immutable_documentary_fbs_handoff',
         initial_anchors={str(nm):a for nm,a in anchors.items()},specific_order_returns_proven=False,physical_ff_returns_created=0,
         pending_post_handoff_cancellations=[r['order']['order_id'] for r in native_plan['orders'] if 'dispatch' in r and r['status']['wb_status']=='canceled_by_client'])
+    if closed_prefix:
+        quality['closed_prefix_repair']=deepcopy(closed_prefix)
     candidate.update(state=state,prepared_at=capture['prepared_at'],source_digest=capture['accounting_capture']['source_digest'])
+    if closed_prefix:
+        require(fingerprint(_prefix(candidate,'2026-10-26'))==closed_prefix['immutable_prefix_digest'],'closed_prefix_changed')
     candidate.pop('publication_error',None)
     candidate['historical_revision']=dict(contract=CONTRACT,date_from=first,date_to=last,previous_revision=deepcopy(book.get('historical_revision')),
         native_stage_editions={d:e['version_id'] for d,e in editions.items()},quality_proof=quality)
     result=dict(contract=CONTRACT,candidate_book=candidate,after_book=fingerprint(candidate),editions=editions,
         query_fence=capture['query_fence'],dated_source_digest=capture['source_digest'],quality_proof=quality,
-        foreign_source_fence=capture['foreign_sources']['query_fence'],
+        foreign_source_fence=capture['foreign_sources']['query_fence']+(closed_prefix['query_fence'] if closed_prefix else []),
         native_handoff_plan_digest=native_plan['plan_digest'],daily_wb_costs=daily,initial_anchors=deepcopy(quality['initial_anchors']),
         source_document_manifest={d['document_id']:d['fingerprint'] for d in capture['accounting_capture']['documents']})
     result['manifest_digest']=fingerprint(result)
