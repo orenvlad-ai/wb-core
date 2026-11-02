@@ -282,7 +282,9 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
             result=action._preflight(self.runtime,request={},operation_id='selector-local-temporary',directory=directory,
                 snapshot=snapshot,inputs=self.inputs,now=self.now)
         recipe=action._make_recipe(self.runtime,snapshot=snapshot,unit=result['unit'],evidence=self.inputs[1],
-            operation_id='selector-local-temporary',created_at=STAMP,numeric=result['numeric'])
+            operation_id='selector-local-temporary',created_at=STAMP,numeric=result['numeric'],
+            source_selection_fence=result['subset']['selection_fence'])
+        self.assertTrue(recipe['source_selection_fence'])
         with warehouse_functional_job_lock(self.root) as owner:
             unpriced=deepcopy(recipe);unpriced['numeric']['candidate']['initial_anchors']={}
             unpriced['recipe_digest']=action.fingerprint({k:v for k,v in unpriced.items() if k!='recipe_digest'})
