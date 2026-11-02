@@ -46,7 +46,9 @@ class TemporaryAllocationNativeTests(unittest.TestCase):
         with sqlite3.connect(fixture.pre27) as src,sqlite3.connect(self.runtime.db_path) as dst:src.backup(dst)
         self.book=deepcopy(fixture.book);self.book.update(shared_days={},wb_days={},retained_days={},presentations={});self.book['state']['observed_documents']={};self.version=accounting._save_book(root,self.book,expected=None,operation_id='local-initial')
         handoffs.load.return_value=(self.book,self.version)
-        self.evidence=fixture.evidence;self.now=datetime.fromisoformat(STAMP.replace('Z','+00:00'))
+        # Match the offset-form evidence export that blocked the real 583 preview.
+        self.evidence=native_fixture.evidence_fixture(observed_at=STAMP.replace('Z','+00:00'))
+        self.now=datetime.fromisoformat(STAMP.replace('Z','+00:00'))
         # This unit test isolates the actual native/T1 machinery. It does not
         # substitute a mock candidate or claim archived WB/Ready completion.
         with closing(_connect(self.runtime.db_path)) as conn:
@@ -83,6 +85,8 @@ class TemporaryAllocationNativeTests(unittest.TestCase):
             operations=list(conn.execute("SELECT lifecycle_state FROM sheet_vitrina_v1_recovery_operations WHERE operation_kind='ff_pool_document_posting'"))
             self.assertEqual([r[0] for r in operations],['retained','retained'])
             self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {OPERATIONS_TABLE} WHERE operation_type='fbs_physical_handoff'").fetchone()[0],32)
+            observed=list(conn.execute(f"SELECT DISTINCT observed_at FROM {handoffs.orders.OBSERVATIONS_TABLE}"))
+            self.assertEqual([row[0] for row in observed],[STAMP])
             self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {action.lifecycle.RECONCILIATION_TABLE} WHERE state='open'").fetchone()[0],1)
 
     def test_faults_roll_back_all_monetary_effects_then_same_recipe_recovers(self):
