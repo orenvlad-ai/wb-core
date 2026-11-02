@@ -6319,7 +6319,11 @@ def _materialize_explicit_zero_balances(
 def _movement_capital_rub(movement):
     exact = movement.get('capital_delta_exact_rub')
     if exact is None:
-        return Decimal(_cents_text(int(movement['capital_delta_cents'])))
+        # Keep the ordinary writer's Decimal exponent as well as its value;
+        # formatting cents first would change persisted balances (1 -> 1.00).
+        with localcontext() as context:
+            context.prec = 160
+            return Decimal(int(movement['capital_delta_cents'])) / Decimal(100)
     if (movement.get('metadata', {}).get('capital_policy') != 'exact_full_pool_transfer_v1'
             or int(movement['capital_delta_cents']) != 0):
         raise FfPoolDocumentError('invalid_exact_pool_transfer', 'Exact capital has no typed transfer authority')

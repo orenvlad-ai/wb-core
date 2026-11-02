@@ -99,4 +99,16 @@ class ExactTransferTests(unittest.TestCase):
         with self.assertRaises(docs.FfPoolDocumentError):
             docs._validate_balance_effect(before_quantity=q,before_capital=c+Decimal('0.01'),movement=source)
 
+class OrdinaryCapitalCompatibilityTests(unittest.TestCase):
+    def test_ordinary_cents_preserve_legacy_text_without_context_rounding(self):
+        for cents, expected in ((0,'0'),(100,'1'),(10,'0.1'),(1,'0.01'),(-100,'-1'),
+                (12345678901234567890123456789012345678901,
+                 '123456789012345678901234567890123456789.01')):
+            with self.subTest(cents=cents),localcontext() as context:
+                context.prec=6
+                self.assertEqual(str(docs._movement_capital_rub({'capital_delta_cents':cents})),expected)
+        quantity,capital=docs._validate_balance_effect(before_quantity=0,before_capital=Decimal(0),
+            movement={'quantity_delta':1,'capital_delta_cents':100})
+        self.assertEqual((quantity,str(capital)),(1,'1'))
+
 if __name__=='__main__':unittest.main()
