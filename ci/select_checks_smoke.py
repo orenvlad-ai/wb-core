@@ -702,6 +702,14 @@ def command_dependency_checks():
         minimal = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD, paths=[script], file_exists=lambda _, p: p == script)
         verify_plan(minimal)
         assert minimal['commands'].count(['python3', script]) == 1, minimal
+    for script in ('apps/fbs_historical_fbo_action_smoke.py','apps/fbs_historical_fbo_publication_smoke.py',
+                   'apps/fbs_historical_fbo_ready_smoke.py','apps/sheet_vitrina_v1_fulfillment_services_smoke.py'):
+        fbo_documents=build_plan_from_paths(pull_request=1544,base=BASE,head=HEAD,
+            paths=[script],file_exists=lambda _,p:p==script)
+        verify_plan(fbo_documents)
+        assert {'openpyxl==3.1.5','pypdf==6.4.1','reportlab==4.4.5'} <= set(fbo_documents['pip']),fbo_documents
+        assert fbo_documents['commands'].count(['python3',script])==1,fbo_documents
+        assert 'playwright==1.58.0' not in fbo_documents['pip'],fbo_documents
     supplier_cycle = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD, paths=['apps/operator_supplier_history_cycle_smoke.py'], file_exists=lambda _, p: p == 'apps/operator_supplier_history_cycle_smoke.py')
     verify_plan(supplier_cycle)
     assert {'openpyxl==3.1.5', 'pypdf==6.4.1'} <= set(supplier_cycle['pip']), supplier_cycle
