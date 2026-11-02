@@ -147,6 +147,45 @@ class PolicyTests(unittest.TestCase):
             self.assertFalse((runtime/MANIFEST_FILENAME).exists())
             self.assertFalse((runtime/schedule.SELECTOR_FILENAME).exists())
 
+    def test_pruned_ready_headers_keep_full_source_and_copied_operand_fences(self):
+        select(self.runtime)
+        self.conn.execute("CREATE TABLE ready_fixture(id INTEGER PRIMARY KEY,body TEXT)")
+        self.conn.executemany("INSERT INTO ready_fixture VALUES(?,?)",[(1,'selected'),(2,'unconsumed')]);self.conn.commit()
+        with ready.readonly(self.path) as source:
+            runtime,path,all_tables=self.rehearsal_copy(source)
+            copied_fence=[item for item in all_tables if 'ready_fixture' not in item[0]]
+            copied_fence+=ready.pin_queries(source,[("SELECT * FROM ready_fixture WHERE id=1",())])
+            source_fence=[*all_tables,*copied_fence[-1:]]
+            with sqlite3.connect(path) as copied:copied.execute('DELETE FROM ready_fixture WHERE id=2')
+            with self.assertRaises(ValueError):
+                with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=source_fence):pass
+            with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=source_fence,copy_fence=copied_fence):
+                with ready.readonly(path) as copied:self.assertTrue(self.read(NOW+timedelta(hours=4),connection=copied)['available'])
+            for sql in ("UPDATE ready_fixture SET body='changed' WHERE id=1",
+                        "UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_rows SET amount=amount+1"):
+                shutil.copyfile(self.path,path)
+                with sqlite3.connect(path) as copied:
+                    copied.execute('DELETE FROM ready_fixture WHERE id=2');copied.execute(sql)
+                with self.assertRaises(ValueError):
+                    with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=source_fence,copy_fence=copied_fence):pass
+            for invalid in ([],[(copied_fence[0][0],copied_fence[0][1],'sha256:wrong')]):
+                with self.assertRaisesRegex(FbsSnapshotPolicyError,'copy_fence_not_source_bound'):
+                    with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=source_fence,copy_fence=invalid):pass
+
+    def test_pruned_source_only_selector_drift_is_still_rejected(self):
+        select(self.runtime)
+        self.conn.execute("CREATE TABLE selector_fixture(id INTEGER PRIMARY KEY,body TEXT)")
+        self.conn.executemany("INSERT INTO selector_fixture VALUES(?,?)",[(1,'selected'),(2,'omitted')]);self.conn.commit()
+        with ready.readonly(self.path) as source:
+            runtime,path,all_tables=self.rehearsal_copy(source)
+            copy_fence=[item for item in all_tables if 'selector_fixture' not in item[0]]
+            copy_fence+=ready.pin_queries(source,[("SELECT * FROM selector_fixture WHERE id=1",())])
+            source_fence=[*all_tables,*copy_fence[-1:]]
+        with sqlite3.connect(path) as copied:copied.execute('DELETE FROM selector_fixture WHERE id=2')
+        self.conn.execute("UPDATE selector_fixture SET body='changed' WHERE id=2");self.conn.commit()
+        with ready.readonly(self.path) as source,self.assertRaises(ValueError):
+            with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=source_fence,copy_fence=copy_fence):pass
+
     def test_rehearsal_source_fence_and_source_profile_changes_reject(self):
         select(self.runtime)
         with ready.readonly(self.path) as source:

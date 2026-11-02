@@ -163,7 +163,7 @@ class _RehearsalPolicy:
 
 
 @contextmanager
-def rehearsal_snapshot_policy(source, *, runtime_dir, db_path, source_fence):
+def rehearsal_snapshot_policy(source, *, runtime_dir, db_path, source_fence, copy_fence=None):
     """Lend verified source policy to one checked private copy for this scope.
 
     No persisted selector is created. Exact copied operands must match their
@@ -185,10 +185,16 @@ def rehearsal_snapshot_policy(source, *, runtime_dir, db_path, source_fence):
             or _REHEARSAL.get() is not None or not source_fence):
         raise FbsSnapshotPolicyError("fbs_rehearsal_copy_binding_invalid")
     queries = [(sql, tuple(params), digest) for sql, params, digest in source_fence]
+    copied_queries = queries if copy_fence is None else [(sql, tuple(params), digest) for sql, params, digest in copy_fence]
+    if not copied_queries or any(item not in queries for item in copied_queries):
+        raise FbsSnapshotPolicyError("fbs_rehearsal_copy_fence_not_source_bound")
+    # Source selector metadata can intentionally include omitted historical
+    # bodies. Retain its full live fence; compare only actual copied operands
+    # on the bounded destination. Each copied fence must come from that source.
     ready.check_queries(source, queries)
     with closing(open_current_snapshot_readonly(path)) as copied:
         copied.execute("BEGIN")
-        ready.check_queries(copied, queries)
+        ready.check_queries(copied, copied_queries)
         scope = _RehearsalPolicy(source, policy, runtime, path, _opened_generation(copied))
         scope.validate(copied)
     token = _REHEARSAL.set(scope)

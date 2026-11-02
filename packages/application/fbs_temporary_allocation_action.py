@@ -233,7 +233,7 @@ def _subset(conn,destination,*,book,now,snapshot):
     require(not destination.exists() and shutil.disk_usage(destination.parent).free>=MAX_BYTES+shared.RESERVE,'copy_disk_budget')
     shared._admit(destination,MAX_BYTES)
     fd=os.open(destination,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600);os.close(fd)
-    queries=list(selected_sources['selection_queries']);counts={};size=0;started=time.monotonic()
+    queries=list(selected_sources['selection_queries']);copy_queries=[];counts={};size=0;started=time.monotonic()
     with closing(sqlite3.connect(destination)) as dst:
         for row in schema:
             if row['type']=='table':dst.execute(row['sql'])
@@ -249,7 +249,7 @@ def _subset(conn,destination,*,book,now,snapshot):
                 _check_source_copy_budget(table=table,count=count,size=size,elapsed=time.monotonic()-started)
                 dst.execute(f'INSERT INTO "{table}"(rowid,{",".join(chr(34)+c+chr(34) for c in columns)}) VALUES({",".join("?" for _ in range(len(columns)+1))})',
                             [source['__source_rowid__'],*[source[c] for c in columns]])
-            queries.append((sql,args));counts[table]=count
+            queries.append((sql,args));copy_queries.append((sql,args));counts[table]=count
         # AUTOINCREMENT is global even when a source table is scoped or empty.
         for sequence in conn.execute('SELECT name,seq FROM sqlite_sequence'):
             if sequence['name'] in allowed:
@@ -262,6 +262,7 @@ def _subset(conn,destination,*,book,now,snapshot):
     selection_queries=[*selected_sources['selection_queries'],
         (f'SELECT rowid __source_rowid__,* FROM "{ready.TABLE}" WHERE {ready_where} ORDER BY rowid',ready_args)]
     return dict(query_fence=json.loads(canonical(ready.pin_queries(conn,queries))),
+        copy_fence=json.loads(canonical(ready.pin_queries(conn,copy_queries))),
         selection_fence=json.loads(canonical(ready.pin_queries(conn,selection_queries))),rows=counts,bytes=size)
 
 
@@ -672,7 +673,7 @@ def _preflight(runtime,*,request,operation_id,directory,snapshot,inputs,now):
     sim=shared._runtime(simroot)
     from packages.application.fbs_current_snapshot_policy import rehearsal_snapshot_policy
     with ready.readonly(runtime.db_path) as source, rehearsal_snapshot_policy(source,
-            runtime_dir=simroot,db_path=sim.db_path,source_fence=subset['query_fence']):
+            runtime_dir=simroot,db_path=sim.db_path,source_fence=subset['query_fence'],copy_fence=subset['copy_fence']):
         require(_snapshot(sim,inputs,now=now)==snapshot,'private_source_copy_changed')
         with warehouse_functional_job_lock(simroot) as owner:
             unit=_simulate_unit(sim,snapshot=snapshot,evidence=inputs[1],operation_id=operation_id,now=now,owner_token=owner['owner_token'])
