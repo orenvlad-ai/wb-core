@@ -162,6 +162,9 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
             conn.execute('UPDATE sheet_vitrina_v1_ff_stock_operations SET source_file_blob=?',
                          (b'\x00original source attachment\xff',))
         self.book=deepcopy(fixture.book);self.book['effective_date']='2026-10-26'
+        if self._testMethodName.startswith('test_closed_receipts_'):
+            # Establish the accepted opening once, before its immutable save.
+            self.book=repair_fixture.seed_closed_receipts_for_action(fixture,self.book)
         self.version=accounting._save_book(self.root,self.book,expected=None,operation_id='initial-source-book')
         handoffs.load.return_value=(self.book,self.version)
         self.now=datetime.fromisoformat(STAMP.replace('Z','+00:00'))
@@ -225,6 +228,59 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
 
     def test_full_private_preflight_real_T1_material_WB_book_and_Ready(self):
         self._published_history_fixture()
+
+    def test_closed_receipts_full_private_preflight_history_and_pre_money_fence(self):
+        from packages.application.fbs_accounting_historical_revision import _prefix
+        from packages.application.fbs_accounting_historical_history import pending_receipt
+        from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter,update_live_history
+        from packages.application.web_vitrina_history_store import HistoryStore
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+        import time
+        before=action.fingerprint(_prefix(self.book,'2026-10-26'))
+        snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
+        operation='closed-receipts-local-temporary';directory=action._directory(self.root,operation)
+        with patch.object(action,'_retain',return_value={}):
+            result=action._preflight(self.runtime,request={},operation_id=operation,directory=directory,
+                snapshot=snapshot,inputs=self.inputs,now=self.now)
+        candidate=result['numeric']['candidate'];proof=candidate['quality_proof']['closed_prefix_repair']
+        self.assertEqual(proof['immutable_prefix_digest'],before)
+        self.assertEqual(action.fingerprint(_prefix(candidate['candidate_book'],'2026-10-26')),before)
+        self.assertEqual(len(proof['receipt_document_ids']),2)
+        self.assertEqual(min(candidate['editions']),'2026-10-26')
+        self.assertFalse(candidate['candidate_book'].get('publication_error'))
+        self.assertEqual(accounting.load(self.root)[1],self.version)
+        sim=action.shared._runtime(directory/'simulation');OwnProductCapitalBlock(runtime=sim)
+        receipt=pending_receipt(sim);self.assertIsNotNone(receipt)
+        receipt.freeze_scope(self.now);receipt.validate_sources_readonly(now=self.now)
+        store=HistoryStore(directory/'history')
+        adapter=LiveNativeAdapter(db_path=sim.db_path,runtime_dir=sim.runtime_dir,cache_dir=directory/'proofs',now=self.now,
+            date_from='2026-10-26',date_to='2026-11-02',formula_epoch='local-closed-receipts')
+        history=update_live_history(adapter=adapter,runtime=sim,store=store,max_recomputes=31,
+            deadline_monotonic=time.monotonic()+45,rolling14=False,group_blocks=True,backfill_dates=list(receipt.dates))
+        self.assertIn(history['status'],{'published','unchanged'})
+        native=receipt.validate_native_readonly(adapter=adapter,store=store,now=self.now)
+        self.assertEqual(set(native['native']),set(receipt.dates));self.assertEqual(len(receipt.dates),7)
+        recipe=action._make_recipe(self.runtime,snapshot=snapshot,unit=result['unit'],evidence=self.inputs[1],
+            operation_id=operation,created_at=STAMP,numeric=result['numeric'],
+            source_selection_fence=result['subset']['selection_fence'])
+        with warehouse_functional_job_lock(self.root) as owner:
+            binding=action._record_recipe(self.runtime,recipe,owner_token=owner['owner_token'])
+            with closing(_connect(self.runtime.db_path)) as conn,conn:
+                with self.assertRaisesRegex(sqlite3.IntegrityError,'confirmed warehouse source is immutable'):
+                    conn.execute("UPDATE sheet_vitrina_v1_ff_pool_operator_confirmations SET actor='changed-proof'")
+                # Simulate out-of-band corruption in this disposable fixture;
+                # restore the exact triggers before testing the independent fence.
+                triggers=conn.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='sheet_vitrina_v1_ff_pool_operator_confirmations'").fetchall()
+                for trigger in triggers:conn.execute(f'DROP TRIGGER "{trigger["name"]}"')
+                conn.execute("UPDATE sheet_vitrina_v1_ff_pool_operator_confirmations SET actor='changed-proof'")
+                for trigger in triggers:conn.execute(trigger['sql'])
+            with self.assertRaisesRegex(Exception,'ready_repair_source_changed'):
+                action._record_recipe(self.runtime,recipe,owner_token=owner['owner_token'])
+            with self.assertRaisesRegex(Exception,'ready_repair_source_changed'):
+                action._apply_native_unit(self.runtime,recipe,binding=binding,owner_token=owner['owner_token'])
+        with ready.readonly(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {OPERATIONS_TABLE} WHERE operation_type='fbs_physical_handoff'").fetchone()[0],0)
+            self.assertEqual(conn.execute(f"SELECT SUM(quantity) FROM {BALANCES_TABLE} WHERE pool='FBO' AND nm_id IN (101,102,103,104)").fetchone()[0],5400)
 
     def test_supplier_effective_date_does_not_replace_the_dated_wb_source(self):
         with closing(_connect(self.runtime.db_path)) as conn:
