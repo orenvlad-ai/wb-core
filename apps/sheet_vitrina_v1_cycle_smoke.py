@@ -955,7 +955,10 @@ class BoundWarehouseTests(unittest.TestCase):
     def test_known_unavailable_accounting_has_exact_degraded_generation_proof(self):
         self._owned_handler_case(unavailable=True)
 
-    def _owned_handler_case(self, unavailable=False):
+    def test_historical_valuation_gap_preserves_degraded_receipt_and_skips_all_cost_tails(self):
+        self._owned_handler_case(unavailable=True, historical_unavailable=True)
+
+    def _owned_handler_case(self, unavailable=False, historical_unavailable=False):
         from packages.application.warehouse_update_journal import WarehouseUpdateJournal, PHASES
         from packages.application.storage_registry import StoreRegistry
         from unittest.mock import Mock
@@ -996,9 +999,16 @@ class BoundWarehouseTests(unittest.TestCase):
                         'state': {'periods': {'2026-09-28': {'status': 'open', 'quality': 'incomplete'}}}}
             from packages.application.fbs_accounting_runtime import FbsAccountingUnavailable
             failure = FbsAccountingUnavailable(version='book', blocked_date='2026-09-28') if unavailable else None
+            historical_failure = None
+            blocker = {'business_date': '2026-09-29', 'reason': 'wb_cost_coverage_incomplete',
+                'source': {'version_id': 'archived-wb'}, 'source_digest': 'sha256:' + 'a' * 64,
+                'missing_by_nm_id': {'101': {'quantity': 4, 'reason': 'wb_cost_coverage_incomplete'}}}
+            if historical_unavailable:
+                from packages.application.fbs_accounting_historical_stages import HistoricalArchivedWbValuationUnavailable
+                historical_failure = HistoricalArchivedWbValuationUnavailable(book_version='book', blocker=blocker)
             # This fixture exercises ordinary publication without a historical
             # cohort; the owned handler still consults the historical path first.
-            with patch('packages.application.fbs_accounting_historical_cycle.refresh',return_value=None) as historical_refresh, \
+            with patch('packages.application.fbs_accounting_historical_cycle.refresh',return_value=None,side_effect=historical_failure) as historical_refresh, \
                  patch('packages.application.fbs_accounting_runtime.refresh',return_value=accounting,side_effect=failure) as refresh, \
                  patch('packages.application.fbs_accounting_runtime.load',return_value=(book,'book')), \
                  patch('packages.application.fbs_accounting_runtime.current_publication_receipt',return_value=publication) as publication_read, \
@@ -1021,6 +1031,9 @@ class BoundWarehouseTests(unittest.TestCase):
                 run_id = proof.versions['warehouse_run']
                 with sqlite3.connect(db) as conn:
                     result = json.loads(conn.execute('SELECT result_json FROM sheet_vitrina_v1_warehouse_update_runs WHERE run_id=?', (run_id,)).fetchone()[0])
+                if historical_unavailable:
+                    refresh.assert_not_called()
+                    self.assertEqual(result['fbs_snapshot_accounting']['historical_valuation_blocker'], blocker)
                 with patch('packages.application.fbs_accounting_runtime.load', return_value=(book, 'changed-book')):
                     with self.assertRaisesRegex(CycleStageFailure, 'invalidation_unproven'):
                         entry._cycle_unavailable_accounting_proof(receipt, run_id, result)

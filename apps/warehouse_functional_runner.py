@@ -973,10 +973,25 @@ def _collect_autonomous_transit_costs(
 
 
 def _publish_fbs_snapshot_accounting(runtime: RegistryUploadDbBackedRuntime) -> dict[str, Any]:
-    from packages.application.fbs_accounting_runtime import refresh
+    from packages.application.fbs_accounting_runtime import refresh, load, FbsAccountingUnavailable
+    from packages.application.fbs_accounting_historical_stages import HistoricalArchivedWbValuationUnavailable
 
     from packages.application.fbs_accounting_historical_cycle import refresh as historical_refresh
-    result = historical_refresh(runtime)
+    try:
+        result = historical_refresh(runtime)
+    except HistoricalArchivedWbValuationUnavailable as exc:
+        # Reuse only an already durable native invalidation. The historical
+        # gap cannot itself grant degraded publication or mutate the book.
+        book, version = load(runtime.runtime_dir)
+        periods = (book or {}).get('state', {}).get('periods', {})
+        open_days = sorted(day for day, period in periods.items() if period.get('status') == 'open')
+        if (not book or not book.get('active') or version != exc.book_version
+                or (book.get('publication_error') or {}).get('reason') != 'incomplete_period_cannot_close'
+                or not open_days or periods[open_days[0]].get('quality') != 'incomplete'
+                or open_days[0] > exc.blocker['business_date']):
+            raise
+        raise FbsAccountingUnavailable(version=version, blocked_date=open_days[0],
+            historical_valuation_blocker=exc.blocker) from exc
     return result if result is not None else refresh(runtime.runtime_dir, ready_runtime=runtime)
 
 

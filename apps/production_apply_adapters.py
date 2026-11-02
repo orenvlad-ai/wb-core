@@ -18,6 +18,9 @@ class Adapter(Protocol):
 
 
 _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
+    "warehouse_hourly_rollback_reconciliation_v1": (
+        "apps.warehouse_hourly_rollback_reconciliation", "WarehouseHourlyRollbackReconciliationAdapter",
+    ),
     "supplier_shared_customs_allocation_v1": (
         "apps.supplier_shared_customs_allocation", "SupplierSharedCustomsAllocationAdapter",
     ),

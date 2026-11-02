@@ -141,6 +141,7 @@ expected = {
     "web_vitrina_wb_history_recovery_v1",
     "wb_fbs_mapping_evidence_v1",
     "search_cluster_cleaner_manual_v1",
+    "warehouse_hourly_rollback_reconciliation_v1",
 }
 assert set(ADAPTERS) == expected
 from apps import production_apply_launcher

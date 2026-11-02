@@ -17,6 +17,17 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "fbs_accounting_historical_unavailable_smoke": (
+        "packages/application/fbs_accounting_historical_stages.py",
+        "packages/application/fbs_accounting_historical_sources.py",
+        "packages/application/fbs_accounting_runtime.py",
+        "apps/warehouse_functional_runner.py",
+    ),
+    "warehouse_day_boundary_recovery_smoke": (
+        "packages/application/warehouse_functional.py",
+        "packages/application/warehouse_recovery_policy.py",
+        "apps/warehouse_hourly_rollback_reconciliation.py",
+    ),
     "operator_policy_history_smoke": ("packages/application/operator_policy_history.py", "packages/application/owned_history_worker.py", "packages/application/historical_dated_inputs.py"),
     "operator_policy_journal_smoke": ("packages/application/operator_operations.py", "packages/adapters/registry_upload_http_entrypoint.py"),
     "operator_policy_browser_smoke": ("packages/adapters/templates/sheet_vitrina_v1_operator_policy.js", "packages/adapters/templates/sheet_vitrina_v1_settings.html"),
