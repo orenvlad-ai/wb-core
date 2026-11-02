@@ -147,6 +147,44 @@ class ForeignSourcesTests(unittest.TestCase):
         self.assertEqual(self.capture(duplicates),self.capture())
         self.assertEqual(self.build('2026-10-31',docs=duplicates),self.build('2026-10-31'))
 
+    def test_physical_provenance_scopes_movements_without_repeating_global_proof(self):
+        self.fee['cost_document']['movements'].append(dict(facility_id='moscow',pool='FBO',
+            nm_id=11,quantity_delta=0,capital_delta_rub='5'))
+        for day,saved in self.saved.items():
+            for nm in range(11,43):
+                capital='35' if nm==11 and day>='2026-11-02' else '30'
+                saved['balances'].append(row('ff',nm,3,capital,records=[dict(locations=[dict(
+                    facility_id='moscow',pool='FBO',quantity='3',capital_rub=capital)])]))
+            saved['balances'].sort(key=lambda r:(r['warehouse_key'],r['nm_id']))
+        before=deepcopy(self.saved)
+        capture=self.capture();day='2026-11-02';saved=self.saved[day]
+        with localcontext() as context:
+            context.prec=160
+            baseline,whole=foreign.stages._physical_ff_revision(saved,day=day,documents=self.documents)
+        result=self.build(day,capture)
+        self.assertEqual(result['proof']['physical_ff'],whole)
+        self.assertEqual(self.saved,before)
+        actual={r['nm_id']:r for r in result['balances'] if r['warehouse_key']=='ff'}
+        for prior in baseline:
+            nm=prior['nm_id'];revised=actual[nm]
+            self.assertEqual({k:v for k,v in revised.items() if k!='provenance'},
+                             {k:v for k,v in prior.items() if k!='provenance'})
+            record=revised['provenance']['source_records'][0]
+            self.assertEqual(record['locations'],prior['provenance']['source_records'][0]['locations'])
+            self.assertEqual(record['native_movement_proof_global_digest'],fingerprint(whole))
+            self.assertEqual(record['native_movement_proof_nm_id'],nm)
+            expected=[{**item,'movements':[m for m in item['movements'] if int(m['nm_id'])==nm]}
+                      for item in whole if any(int(m['nm_id'])==nm for m in item['movements'])]
+            self.assertEqual(record['native_movement_proof'],expected)
+        scoped=sum(len(item['movements']) for r in actual.values()
+                   for item in r['provenance']['source_records'][0]['native_movement_proof'])
+        self.assertEqual(scoped,sum(len(item['movements']) for item in whole))
+        self.assertEqual(actual[42]['provenance']['source_records'][0]['native_movement_proof'],[])
+        self.assertLess(len(canonical(list(actual.values())).encode()),len(canonical(baseline).encode()))
+        self.assertEqual(self.build(day,json.loads(canonical(capture))),result)
+        self.assertEqual(next(r for r in result['balances'] if r['warehouse_key']=='wb'),
+                         next(r for r in saved['balances'] if r['warehouse_key']=='wb'))
+
     def test_targeted_native_six_decimal_aggregate_does_not_truncate_source_records(self):
         own=source('870',7,'90');other=source('other',4,'40.00000000000000000000001')
         mixed=row('china_to_ff',20,11,130,records=[own,other]);before=deepcopy(mixed)

@@ -353,6 +353,44 @@ class ClosedPrefixReceiptRepairTests(unittest.TestCase):
             self.assertEqual(counts,tuple(conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] for table in (
                 'sheet_vitrina_v1_warehouse_business_operations','sheet_vitrina_v1_ff_pool_documents')))
 
+    def test_unique_operands_fit_without_losing_exact_book_or_recovery_sources(self):
+        from packages.application import fbs_accounting_historical_publication as publication
+        captured=self.capture()
+        self.assertNotIn('book',captured)
+        self.assertEqual(captured['book_version'],fingerprint(self.book))
+        self.assertEqual(set(captured['dates']),set(self.versions))
+        self.assertTrue(all(saved['balances'] and saved['snapshot'] and saved['read_models']
+                            for saved in captured['dates'].values()))
+        candidate=repair.build_temporary_allocation_repair(self.book,capture=captured,native_plan=self.plan)
+        self.assertTrue(all('saved' not in edition for edition in candidate['editions'].values()))
+        # The retained, JSON-roundtripped source capture is sufficient after a
+        # restart; recovery still uses the separately authenticated exact book.
+        restored=json.loads(canonical(captured))
+        self.assertEqual(repair.build_temporary_allocation_repair(deepcopy(self.book),
+            capture=restored,native_plan=json.loads(canonical(self.plan))),candidate)
+        changed=deepcopy(self.book);changed['active']=False
+        with self.assertRaisesRegex(ValueError,'book_changed'):
+            repair.build_temporary_allocation_repair(changed,capture=restored,native_plan=self.plan)
+        changed=deepcopy(restored);changed['book_version']=fingerprint({})
+        changed['source_digest']=fingerprint({k:v for k,v in changed.items() if k!='source_digest'})
+        with self.assertRaisesRegex(ValueError,'book_changed'):
+            repair.build_temporary_allocation_repair(self.book,capture=changed,native_plan=self.plan)
+        changed=deepcopy(restored);changed['dates']['2026-10-31']['snapshot']['items_json']='[]'
+        with self.assertRaisesRegex(ValueError,'capture_changed'):
+            repair.build_temporary_allocation_repair(self.book,capture=changed,native_plan=self.plan)
+        unique=dict(original_capture=captured,candidate=candidate)
+        repeated=deepcopy(unique);repeated['original_capture']['book']=deepcopy(self.book)
+        for day,edition in repeated['candidate']['editions'].items():
+            edition['saved']=deepcopy(captured['dates'][day])
+        size=publication._json_size(unique,publication.MAX_EXPANDED_BYTES,'test_size')
+        saved=publication._json_size(self.book,publication.MAX_EXPANDED_BYTES,'test_size')
+        saved+=sum(publication._json_size(day,publication.MAX_EXPANDED_BYTES,'test_size')
+                   for day in captured['dates'].values())
+        self.assertGreater(publication._json_size(repeated,publication.MAX_EXPANDED_BYTES,'test_size')-size,saved)
+        self.assertEqual(publication._json_size(unique,size,'test_size'),size)
+        with self.assertRaisesRegex(ValueError,'test_size'):
+            publication._json_size(repeated,size,'test_size')
+
     def test_frozen26_is_read_once_and_all_exact_source_fences_survive(self):
         from packages.application.fbs_historical_fbo_stage_sources import MAX_BYTES
         self.assertEqual(MAX_BYTES,64*1024**2)

@@ -284,6 +284,23 @@ def rebuild_foreign_suffix_day(saved, *, day, documents, foreign_capture):
                 restored.append(_supplier_row(prior, row['provenance']['source_records']))
         balances = restored
         physical, physical_proof = stages._physical_ff_revision(saved, day=day, documents=docs)
+        # Keep the complete cross-SKU proof once in the edition. A row's
+        # provenance carries its own exact movements and binds that full proof,
+        # rather than multiplying every document's movements by the catalog.
+        physical_digest = fingerprint(physical_proof)
+        by_nm = {}
+        for item in physical_proof:
+            movements = {}
+            for movement in item['movements']:
+                movements.setdefault(int(movement['nm_id']), []).append(movement)
+            for nm, own in movements.items():
+                by_nm.setdefault(nm, []).append({**item, 'movements': deepcopy(own)})
+        for row in physical:
+            nm = int(row['nm_id'])
+            for record in row['provenance']['source_records']:
+                require(record.get('native_movement_proof') == physical_proof, 'physical_proof_shape_changed')
+                record.update(native_movement_proof=by_nm.get(nm, []), native_movement_proof_nm_id=nm,
+                              native_movement_proof_global_digest=physical_digest)
         balances = [r for r in balances if r['warehouse_key'] != 'ff'] + physical
         companions = deepcopy(saved['companions']); applied = []
         for replay in foreign_capture['replays']:

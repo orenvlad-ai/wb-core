@@ -268,7 +268,9 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
             reader.rows(sql,args)
             already_read.add(key)
     # The entire reconstruction consumes only immutable raw/native operands.
-    result=dict(contract=CONTRACT,book_version=book_version,book=deepcopy(book),native_plan=deepcopy(native_plan),
+    # The immutable original book is loaded by book_version for every rebuild;
+    # retaining another full copy here adds no source authority.
+    result=dict(contract=CONTRACT,book_version=book_version,native_plan=deepcopy(native_plan),
         accounting_capture=accounting,quantity_snapshots=quantities,dates=saved,retained=retained,previous=previous,
         physical_documents=physical,foreign_sources=foreign,closed_prefix_repair=closed_prefix,
         return_document_id=returned['document_id'],selected_nm_ids=nms,prepared_at=timestamp,
@@ -421,7 +423,9 @@ def build_temporary_allocation_repair(book,*,capture,native_plan):
         candidate['shared_days'][day]=build_shared_cost_day(state,wb,day)
         candidate['presentations'][day]=FbsInventorySnapshot(fbs_state=state,wb_capture=wb,retained=retained,day=day).payload()
         require(candidate['shared_days'][day]['quality']=='complete' and candidate['presentations'][day]['totals']['total']['capital_rub'] is not None,'shared_cost_incomplete')
-        editions[day]=dict(version_id=version_id,version=version,snapshot=cloned,saved=saved,balances=balances,
+        # Original edition operands remain in capture['dates'] for recovery.
+        # The published candidate needs only the derived edition and its proof.
+        editions[day]=dict(version_id=version_id,version=version,snapshot=cloned,balances=balances,
             companions=deepcopy(rebuilt['companions']),full_physical_ff_proof=rebuilt['proof'])
         previous=snapshot
     require(anchors,'initial_wb_anchor_scope_missing')
