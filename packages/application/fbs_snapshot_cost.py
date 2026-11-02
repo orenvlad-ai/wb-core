@@ -195,9 +195,22 @@ def cost_continuity_missing_dates(state: dict) -> set[str]:
     opening_day = state["baseline"]["business_date"]
     opening = state["baseline"]["rows"]
     known = dict(state["baseline"]["absorbed_documents"])
+    opening_auxiliary = state["baseline"]["document_cost_state"]
     for day, period in sorted(state["periods"].items()):
         proof = period.get("cost_continuity")
         if proof is not None:
+            if proof.get("contract") == "fbs_historical_fbo_documentary_gap_v1":
+                from packages.application.fbs_historical_fbo_gap import validate_documentary_gap
+                days = validate_documentary_gap(period, opening_day=opening_day, opening=opening,
+                                                known=known, opening_auxiliary=opening_auxiliary)
+                if set(days) & set(state["periods"]):
+                    raise FbsSnapshotCostError("cost_continuity_proof_invalid", invalid_from_date=day)
+                missing.update(days)
+                if period["status"] == "closed":
+                    opening_day, opening = day, period["rows"]
+                    opening_auxiliary = period["document_cost_state"]
+                    known.update(period["applied_documents"])
+                continue
             days = [(_day(opening_day) + timedelta(days=n)).isoformat()
                     for n in range(1, (_day(day) - _day(opening_day)).days)]
             if (proof != {"contract": "fbs_no_document_gap_v1", "opening_date": opening_day,
@@ -212,6 +225,7 @@ def cost_continuity_missing_dates(state: dict) -> set[str]:
             missing.update(days)
         if period["status"] == "closed":
             opening_day, opening = day, period["rows"]
+            opening_auxiliary = period["document_cost_state"]
             known.update(period["applied_documents"])
     return missing
 
@@ -241,7 +255,11 @@ def evaluate_candidate(state: dict, capture: dict, *, allow_cost_continuity_gap:
         proof = period.get("cost_continuity")
         if proof:
             try:
-                _check_gap_documents(state, documents, proof["document_manifest"], proof["resumed_date"])
+                from packages.application.fbs_historical_fbo_gap import document_manifest_for_gap
+                _check_gap_documents(state, documents, document_manifest_for_gap(proof), proof["resumed_date"])
+                if proof.get("contract") == "fbs_historical_fbo_documentary_gap_v1":
+                    if any(documents.get(d["document_id"]) != d for d in proof["documents"]):
+                        raise FbsSnapshotCostError("cost_continuity_native_document_changed")
             except FbsSnapshotCostError as exc:
                 raise FbsSnapshotCostError(str(exc), invalid_from_date=proof["resumed_date"]) from exc
     if _timestamp(capture["captured_at"]) < _timestamp(state["last_document_capture_at"]):

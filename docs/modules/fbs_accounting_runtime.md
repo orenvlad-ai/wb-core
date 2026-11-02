@@ -106,3 +106,122 @@ Finance при штатном поступлении/обновлении нед
 Оценка предварительная: доступный FBS не включает подтверждённый полный резерв
 и транзит, а снимки не восстанавливают точную последовательность движений.
 Погрешности прибыли могут иметь оба знака и не обязаны компенсироваться.
+
+### Исторические FBO отправки через существующий production adapter
+
+Зарегистрированный `fbs_snapshot_accounting_v1` поддерживает действия
+`restore_historical_fbo` и `recover_historical_fbo`; отдельной записи registry,
+нового worker или сборщика источников нет. Неизвестное действие отклоняется до
+открытия источников. Прежние `activate` и `pause` сохраняют свой контракт.
+
+Запрос `restore_historical_fbo` содержит обычные `runtime_dir`, `runtime_sha`,
+`storage_manifest_sha256`, а также `window_id`, `maintenance_env_file`,
+`evidence_manifest_path`, `evidence_manifest_sha256`. Последний — bare SHA256
+байтов приватного документального JSON. Он содержит ровно:
+
+- `scope`: facility, три dispatch с canonical supply IDs/датами/packed quantity,
+  одну разрешённую FBS→FBO reallocation;
+- `opening_date`: действительную закрытую исходную дату книги;
+- `physical` и `restored`: раздельные доказательства физики и разрешённого
+  восстановления аллокации в формате pure dispatch planner;
+- `evidence_files`: список абсолютных `path` и bare `sha256` первичных файлов.
+  `source_digest` обеих доказательных веток равен `fingerprint` этого списка
+  с разрешёнными абсолютными путями. Это документальное утверждение оператора,
+  а не выведенный из WB availability физический остаток;
+- `fees`: три записи существующего fee-request контракта (`request_scope`,
+  `request_id`, `file_sha256`, `wb_supply_id`, `amount_with_vat_rub`) плюс `path`
+  к проверенным XLSX и `original_invoice`: `path`, bare `sha256`, `invoice_no`,
+  `payment_request_id`, `payment_source_sha256` с префиксом `sha256:`. Оригинал
+  счёта и платёжное поручение — разные документы. Ссылка платежа проверяется
+  против существующего отменённого непроведённого native request и SHA его BLOB.
+  Разница между суммой счёта и платежа не создаёт дополнительный расход. Эти
+  файлы и первичные доказательства не входят в Git.
+
+Готовые capture JSON, цены или candidate book в запросе запрещены. Открывающие
+FBO/FBS строки и их стоимость читаются из подлинной книги. Все исходные native
+документы сверяются с её поглощённым manifest; интервал после opening до
+последней отправки должен иметь доказанное отсутствие native документов и
+заявок. Три canonical goods и отсутствие прежних debit проверяются заново.
+
+`preview` требует существующее held/quiet maintenance с точной window/baseline
+связью, полным штатным HTTP/systemd/readiness readback. При этом maintenance
+не создаётся и не снимается. На production preflight/before-images/simulation
+находятся в зарегистрированной области private-evidence существующего producer
+`warehouse_fbs_historical_recovery_plan`, с его проверкой capacity/destination;
+локальная disposable fixture использует `runtime/evidence/historical-fbo`.
+Simulation копирует schema и
+явно ограниченные необходимые строки в отдельную SQLite: максимум100000 строк
+на таблицу,512MiB исходных данных,120 секунд копирования; запас диска≥10GiB.
+Она не клонирует целиком operational DB. На копии выполняются настоящие native
+эффекты, три XLSX upload, frozen cost layers, WB/retained stages и публикация
+Ready. Успех означает полный числовой preflight до первой денежной записи,
+включая Ready grid. Отсутствующие официальные даты остаются отсутствующими.
+
+Preflight сохраняет coherent `accounting.before.sqlite3` через RO SQLite
+source с quick-check/SHA256, immutable bounded `sources.before.sqlite3` с
+исходными native/current-pool/Ready/cost-layer строками, и отдельную simulation
+копию только этого ограниченного набора. Operational DB целиком не копируется
+и не откатывается. Проверенные XLSX, оригинальные PDF счетов, documentary JSON
+и первичные доказательства сохраняются отдельными приватными файлами по хэшу;
+продолжение не зависит от прежних локальных путей оператора.
+
+`apply` повторяет RO capture/CAS и проверяет срок preflight≤10минут. Под
+существующими maintenance-controller и warehouse-job locks сохраняет immutable effect
+intent до первого money append. Перед первым native append та же транзакция
+проверяет закреплённые источники preflight. Все native/fee phases принадлежат
+своим существующим владельцам. После фактических источников результаты stage
+и Ready grid должны совпасть с предварительным числовым кандидатом.
+
+Публикация Ready **не** означает завершение всей операции. `apply` возвращает
+через штатный launcher ambiguous/pending и только readback. После явного
+восстановления maintenance обычный owned cycle получает настоящий History ACK,
+пересчитывает Finance, проверяет Economics и завершает scope. Только тогда
+readback исходного operation ID показывает `applied`. Readback ничего не пишет.
+
+При прерывании source phases запрещён повтор исходного submit. Явное действие
+`recover_historical_fbo` использует **новый continuation operation ID**, поля
+`recovery_ref` (исходный operation ID) и `original_recipe_digest` из readback,
+а также текущие runtime/storage/held-window параметры. Оно связано с прежним
+приватным attempt и immutable recipe. Уже проведённые native эффекты и
+подтверждённые fee requests только читаются. Неопределённый `submitting` или
+`needs_review` без принятого native REQUESTS запрещает повтор upload; readback
+показывает сохранённые fee-attempt states. Новый coordinator ID не создаёт новых
+денежных/source identity. Готовый child publication возобновляется тем же
+поддержанным publisher; History/Finance по-прежнему завершает только owned cycle.
+
+Неполная simulation, превышенный размер, изменение источников, нездоровая книга
+или неполный quiet proof блокируют работу до первого денежного эффекта. При
+ошибке после effect intent сохраняются доказательства и честный pending статус;
+приватные artifacts и before-images нельзя удалять до проверенного завершения.
+Карточка принятой загрузки услуг FF показывает исходный XLSX и отдельную ссылку
+«Счёт №…» из immutable recipe `original_documents`. Штатная PDF-виза остаётся
+отдельным файлом. Authenticated GET `uploads/{upload_id}/original-invoice.pdf`
+проверяет принадлежность request/upload/supply, immutable recipe и source receipt,
+а также SHA256 PDF и его расположение в retained bundle именно этой операции.
+`uploads/{upload_id}/source.xlsx` сверяет исходный XLSX с SHA сохранённой загрузки.
+Недоступный или изменённый invoice не скрывает сам принятый расход; ссылка на
+оригинал не выдаётся. Ни чтение, ни скачивание не создаёт документа или расхода.
+
+
+### Ограниченная локальная репетиция восстановления
+
+Обе команды восстановления используют общий выбор источников
+`fbs_accounting_rehearsal_sources`. Тела Ready копируются только для дат,
+выбранных штатным `_selected_ready_rows`, исходной default-версии и текущей
+целевой версии. Полные заголовки архива и проверенные recovery-метаданные
+остаются в source fence: появление более подходящей версии блокирует первую
+запись. Неиспользуемые тела Ready не копируются.
+
+Для истории сохраняются все метаданные captures и finalizations, а components —
+для последнего capture каждой даты и каждого capture, на который ссылается
+finalization. Это сохраняет штатные чтения последнего/закрытого состояния без
+копирования вытесненных незакрытых компонентов. Лимиты 100000 строк на таблицу,
+512 MiB и резерв диска 10 GiB не увеличены. Превышение лимита остаётся отказом.
+
+`restore_temporary_fbs_allocation` / `recover_temporary_fbs_allocation` — действия
+того же `fbs_snapshot_accounting_v1`; документальные входы задаются
+`evidence_manifest_path` и `evidence_manifest_sha256`, вместе с обычными
+параметрами runtime и maintenance. Восстановление временного распределения
+должно завершить свой штатный цикл History/Finance/Economics до подготовки
+отдельной операции `restore_historical_fbo`. Выпуск кода сам по себе не запускает
+эти команды и не разрешает проведение бизнес-документов.

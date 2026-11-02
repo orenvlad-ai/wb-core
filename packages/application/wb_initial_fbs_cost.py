@@ -27,8 +27,14 @@ def resolve(nm_id, item, basis, *, business_date, snapshot_id, fetched_at, previ
     its last available unit has gone. Available stock is never treated as a
     receipt and this function cannot manufacture a transfer or change FF stock.
     """
+    from packages.application.wb_historical_fbs_cost import CONTRACT as HISTORICAL_CONTRACT, resolve_historical
+    if isinstance(basis, dict) and basis.get('contract') == HISTORICAL_CONTRACT:
+        return resolve_historical(nm_id,item,basis,business_date=business_date,snapshot_id=snapshot_id,
+            fetched_at=fetched_at,previous_version=previous_version)
     def missing(reason):
         return {"available": False, "reason": reason}
+    if not isinstance(basis, dict) or not isinstance(item, dict):
+        return missing("accepted_fbs_predecessor_invalid")
     try:
         if decimal(item.get("quantity", "0")) != 0:
             return missing("initial_physical_wb_cost_unproved")
@@ -87,6 +93,11 @@ def resolve(nm_id, item, basis, *, business_date, snapshot_id, fetched_at, previ
 
 def valid_anchor(anchor):
     """A persisted valuation anchor is authenticated independently of its row."""
+    from packages.application.wb_historical_fbs_cost import POLICY as HISTORICAL_POLICY, valid_historical_anchor
+    if isinstance(anchor, dict) and anchor.get('policy') == HISTORICAL_POLICY:
+        return valid_historical_anchor(anchor)
+    if not isinstance(anchor, dict):
+        return False
     try:
         return (anchor.get("policy") == POLICY and anchor.get("quality") == QUALITY
             and anchor.get("proves_physical_movement") is False

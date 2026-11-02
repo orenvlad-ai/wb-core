@@ -2490,15 +2490,15 @@ def _posting_plan_preview(*, plan: Mapping[str, Any], epoch: int) -> dict[str, A
         for movement in document.get("movements") or []
     ]
     quantity_by_pool: dict[str, int] = {}
-    capital_cents_by_pool: dict[str, int] = {}
+    capital_rub_by_pool: dict[str, Decimal] = {}
     for movement in movements:
         pool = str(movement["pool"])
         quantity_by_pool[pool] = quantity_by_pool.get(pool, 0) + int(
             movement["quantity_delta"]
         )
-        capital_cents_by_pool[pool] = capital_cents_by_pool.get(pool, 0) + int(
-            movement["capital_delta_cents"]
-        )
+        with localcontext() as context:
+            context.prec = 160
+            capital_rub_by_pool[pool] = capital_rub_by_pool.get(pool, ZERO) + _movement_capital_rub(movement)
     domain = _json_object(plan.get("domain_manifest") or {})
     before = _json_object(domain.get("guided_acceptance_before_state") or {})
     aggregate_before = list(before.get("aggregate_balances") or [])
@@ -2506,6 +2506,9 @@ def _posting_plan_preview(*, plan: Mapping[str, Any], epoch: int) -> dict[str, A
         before.get("aggregate_pool_parity") or {}
     )
     business_effect = _guided_business_effect(plan=plan, epoch=epoch)
+    with localcontext() as context:
+        context.prec = 160
+        capital_total = sum(capital_rub_by_pool.values(), ZERO)
     return {
         "confirm_plan_ready": True,
         "business_mutation_applied": False,
@@ -2517,13 +2520,11 @@ def _posting_plan_preview(*, plan: Mapping[str, Any], epoch: int) -> dict[str, A
         "movement_count": len(movements),
         "balance_key_count": len(plan.get("balance_keys") or []),
         "quantity_delta": sum(int(item["quantity_delta"]) for item in movements),
-        "capital_delta_rub": _cents_text(
-            sum(int(item["capital_delta_cents"]) for item in movements)
-        ),
+        "capital_delta_rub": format(capital_total, ".2f") if not any("capital_delta_exact_rub" in m for m in movements) else canonical_decimal_text(capital_total),
         "quantity_delta_by_pool": dict(sorted(quantity_by_pool.items())),
         "capital_delta_rub_by_pool": {
-            pool: _cents_text(value)
-            for pool, value in sorted(capital_cents_by_pool.items())
+            pool: (canonical_decimal_text(value) if any(m['pool']==pool and 'capital_delta_exact_rub' in m for m in movements) else format(value,'.2f'))
+            for pool, value in sorted(capital_rub_by_pool.items())
         },
         "aggregate_semantic_zero_nm_ids": sorted(
             int(item["nm_id"])
@@ -4282,6 +4283,7 @@ def _plan_pool_reallocation(
     expenses = _expense_lines(manifest.get("expenses") or [])
     weights: list[tuple[int, int]] = []
     frozen: dict[int, tuple[int, str]] = {}
+    exact_full: dict[int, str] = {}
     seen: set[int] = set()
     physical_before = _facility_quantity(conn, facility_id=facility_id, epoch=epoch)
     for item in items:
@@ -4292,7 +4294,19 @@ def _plan_pool_reallocation(
         quantity = _positive_int(item.get("quantity"), field="reallocation quantity")
         balance = _balance_row(conn, (facility_id, source_pool, nm_id), epoch=epoch, required=True)
         before_q = int(balance["quantity"])
-        before_c = _money_cents(balance["capital_rub"], field="source capital")
+        source_capital = _positive_decimal(balance["capital_rub"], field="source capital")
+        try:
+            before_c = _money_cents(balance["capital_rub"], field="source capital")
+        except FfPoolDocumentError as exc:
+            if exc.code != "money_minor_unit_required":
+                raise
+            if quantity != before_q or expenses:
+                raise FfPoolDocumentError("exact_full_pool_transfer_required",
+                    "Fractional native capital requires a complete expense-free pool transfer") from exc
+            exact_full[nm_id] = canonical_decimal_text(source_capital)
+            frozen[nm_id] = (0, _decimal_ratio_text(source_capital, before_q))
+            weights.append((nm_id, quantity))
+            continue
         if quantity > before_q or before_q <= 0 or before_c <= 0:
             raise FfPoolDocumentError(
                 "insufficient_source_balance",
@@ -4338,11 +4352,25 @@ def _plan_pool_reallocation(
                     nm_id=nm_id,
                     quantity_delta=quantity,
                     capital_delta_cents=capital + expense,
-                    wac_snapshot=_ratio_text(capital + expense, quantity),
+                    wac_snapshot=wac if nm_id in exact_full else _ratio_text(capital + expense, quantity),
                     metadata={"pool_reallocation_destination": True, "expense_rub": _cents_text(expense)},
                 ),
             ]
         )
+    for line in lines:
+        nm_id = line['nm_id']
+        if nm_id in exact_full:
+            line['capital_exact_rub'] = exact_full[nm_id]
+            line['metadata']['capital_policy'] = 'exact_full_pool_transfer_v1'
+    for movement in movements:
+        nm_id = movement['nm_id']
+        if nm_id in exact_full:
+            value = Decimal(exact_full[nm_id])
+            if movement['quantity_delta'] < 0:
+                value = value.copy_negate()
+            movement['capital_delta_exact_rub'] = canonical_decimal_text(value)
+            movement['metadata']['capital_policy'] = 'exact_full_pool_transfer_v1'
+            movement['wac_snapshot'] = frozen[nm_id][1]
     document_id = _request_document_id(request)
     document = _document_blueprint(
         document_id=document_id,
@@ -5824,7 +5852,7 @@ def _apply_plan(
             "lines": [
                 {
                     **{key: value for key, value in item.items() if key not in {"capital_cents", "expense_cents"}},
-                    "capital_rub": _cents_text(int(item["capital_cents"])),
+                    "capital_rub": _line_capital_text(item),
                     "expense_rub": _cents_text(int(item["expense_cents"])),
                 }
                 for item in document.get("lines", [])
@@ -5877,7 +5905,7 @@ def _apply_plan(
                     str(line["pool"]) if line.get("pool") else None,
                     int(line["nm_id"]),
                     int(line["quantity"]),
-                    _cents_text(int(line["capital_cents"])),
+                    _line_capital_text(line),
                     _cents_text(int(line["expense_cents"])),
                     _json(dict(line.get("metadata") or {})),
                 ),
@@ -6288,8 +6316,58 @@ def _materialize_explicit_zero_balances(
         )
 
 
+def _movement_capital_rub(movement):
+    exact = movement.get('capital_delta_exact_rub')
+    if exact is None:
+        return Decimal(_cents_text(int(movement['capital_delta_cents'])))
+    if (movement.get('metadata', {}).get('capital_policy') != 'exact_full_pool_transfer_v1'
+            or int(movement['capital_delta_cents']) != 0):
+        raise FfPoolDocumentError('invalid_exact_pool_transfer', 'Exact capital has no typed transfer authority')
+    result = Decimal(str(exact))
+    if not result.is_finite() or result == 0:
+        raise FfPoolDocumentError('invalid_exact_pool_transfer', 'Exact transfer capital must be finite and nonzero')
+    return result
+
+
+def _line_capital_text(line):
+    exact = line.get('capital_exact_rub')
+    if exact is None:
+        return _cents_text(int(line['capital_cents']))
+    if (line.get('metadata', {}).get('capital_policy') != 'exact_full_pool_transfer_v1'
+            or int(line['capital_cents']) != 0 or int(line['expense_cents']) != 0):
+        raise FfPoolDocumentError('invalid_exact_pool_transfer', 'Exact document line has no typed transfer authority')
+    return canonical_decimal_text(_positive_decimal(exact, field='exact transfer capital'))
+
+
+def _validate_exact_pool_transfer(document):
+    exact = [m for m in document.get('movements', []) if 'capital_delta_exact_rub' in m]
+    if not exact:
+        if any('capital_exact_rub' in line for line in document.get('lines', [])):
+            raise FfPoolDocumentError('invalid_exact_pool_transfer', 'Exact line has no movements')
+        return
+    if document['document_kind'] != 'pool_reallocation' or document.get('expenses'):
+        raise FfPoolDocumentError('invalid_exact_pool_transfer', 'Exact capital is restricted to expense-free pool transfers')
+    for line in document['lines']:
+        if 'capital_exact_rub' not in line:
+            continue
+        pair = [m for m in exact if m['nm_id'] == line['nm_id']]
+        if len(pair) != 2:
+            raise FfPoolDocumentError('invalid_exact_pool_transfer', 'Exact transfer needs an opposite pair')
+        source, destination = sorted(pair,key=lambda m:m['quantity_delta'])
+        amount = Decimal(_line_capital_text(line))
+        if (source['quantity_delta'] != -line['quantity'] or destination['quantity_delta'] != line['quantity']
+                or source['facility_id'] != destination['facility_id'] or source['facility_id'] != line['facility_id']
+                or source['pool'] == destination['pool'] or destination['pool'] != line['pool']
+                or _movement_capital_rub(source) != amount.copy_negate()
+                or _movement_capital_rub(destination) != amount):
+            raise FfPoolDocumentError('invalid_exact_pool_transfer', 'Exact transfer does not conserve quantity/capital')
+    if {m['nm_id'] for m in exact} != {line['nm_id'] for line in document['lines'] if 'capital_exact_rub' in line}:
+        raise FfPoolDocumentError('invalid_exact_pool_transfer', 'Exact movement has no document line')
+
+
 def _typed_adjustment_allowed(conn, document):
     """Only explicit correction or its exact native reversal has independent signs."""
+    _validate_exact_pool_transfer(document)
     kind=document['document_kind']
     if kind=='correction':
         lines=document.get('lines',[]);movements=document.get('movements',[])
@@ -6326,11 +6404,14 @@ def _typed_adjustment_allowed(conn, document):
 
 
 def _validate_balance_effect(*, before_quantity, before_capital, movement, typed_adjustment=False):
-    quantity_delta=int(movement['quantity_delta']);capital_delta=int(movement['capital_delta_cents'])
+    quantity_delta=int(movement['quantity_delta']);capital_delta=_movement_capital_rub(movement)
+    if movement.get('capital_delta_exact_rub') is not None and quantity_delta < 0:
+        if -quantity_delta != before_quantity or capital_delta.copy_negate() != before_capital:
+            raise FfPoolDocumentError('exact_full_pool_source_changed', 'Exact transfer must drain its complete original pool')
     with localcontext() as context:
         context.prec=160
         after_quantity=before_quantity+quantity_delta
-        after_capital=before_capital+Decimal(capital_delta)/100
+        after_capital=before_capital+capital_delta
     if after_quantity<0 or after_capital<ZERO:
         raise FfPoolDocumentError(
             'negative_pool_balance','Pool movement would create negative quantity or capital',
@@ -6387,7 +6468,7 @@ def _apply_balance_movement(
     pool = _pool(str(movement["pool"]))
     nm_id = int(movement["nm_id"])
     quantity_delta = int(movement["quantity_delta"])
-    capital_delta = int(movement["capital_delta_cents"])
+    capital_delta = _movement_capital_rub(movement)
     key = (facility_id, pool, nm_id)
     row = _balance_row(conn, key, epoch=epoch, required=False)
     if pool == "FBS" and not allow_missing_fbs:
@@ -6432,7 +6513,8 @@ def _apply_balance_movement(
             pool,
             nm_id,
             quantity_delta,
-            _cents_text(capital_delta),
+            (canonical_decimal_text(capital_delta) if movement.get('capital_delta_exact_rub') is not None
+             else _cents_text(int(movement['capital_delta_cents']))),
             str(movement.get("wac_snapshot") or "") or None,
             _json(dict(movement.get("metadata") or {})),
         ),

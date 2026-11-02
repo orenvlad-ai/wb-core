@@ -398,7 +398,15 @@ class OurWbCostBlock:
         *,
         opening_date: str = OUR_WB_COST_OPENING_DATE,
         supply_ids: Iterable[str] | None = None,
+        historical_fbo_effect_binding: Mapping[str, str] | None = None,
+        historical_fbo_materialization_plan: Mapping[str, Any] | None = None,
     ) -> int:
+        if historical_fbo_effect_binding is not None:
+            from packages.application.fbs_historical_fbo_publication import materialize_cost_layers
+            return materialize_cost_layers(self,binding=historical_fbo_effect_binding,
+                expected=historical_fbo_materialization_plan,supply_ids=supply_ids)
+        if historical_fbo_materialization_plan is not None:
+            raise ValueError("historical_fbo_materialization_binding_required")
         target_supply_ids = {
             str(value).strip()
             for value in (supply_ids or [])
@@ -412,8 +420,17 @@ class OurWbCostBlock:
             if _canonical_seller_portal_transit_enrichment(item)
             and str(item.get("supply_id") or "")
         }
+        from packages.application.fbs_historical_fbo_publication import refresh_ordinary_protected_cost_layers
+        protected=refresh_ordinary_protected_cost_layers(self,supply_ids=target_supply_ids,opening_date=opening_date)
+        protected_ids=set(protected['supply_ids'])
+        if protected_ids:
+            with _connect(self.runtime.db_path) as source_conn:
+                remaining={str(row[0]) for row in source_conn.execute(
+                    "SELECT supply_id FROM sheet_vitrina_v1_wb_supplies WHERE COALESCE(supply_date,fact_date,updated_date,'')>=?",(opening_date,))}
+            if target_supply_ids:remaining&=target_supply_ids
+            if not (remaining-protected_ids):return int(protected['count'])
         current_ff_lines = self._load_current_supplier_ff_cost_lines_by_nm()
-        count = 0
+        count = int(protected['count'])
         now = self.timestamp_factory()
         with _connect(self.runtime.db_path) as conn:
             _ensure_schema(conn)
@@ -430,6 +447,8 @@ class OurWbCostBlock:
                 supply = _wb_supply_row_to_dict(row)
                 supply_id = str(supply.get("supply_id") or "")
                 if target_supply_ids and supply_id not in target_supply_ids:
+                    continue
+                if supply_id in protected_ids:
                     continue
                 transit_enrichment = transit_enrichments.get(
                     supply_id

@@ -15,7 +15,7 @@ from packages.application import fbs_accounting_historical_sqlite as historical_
 from packages.application import ready_publication as ready
 from packages.application import fbs_accounting_runtime as accounting
 from packages.application.fbs_snapshot_cost import canonical, fingerprint
-from packages.application.fbs_accounting_historical_publication import CONTRACT,expand_manifest
+from packages.application.fbs_accounting_historical_publication import CONTRACT,PUBLICATION_CONTRACTS,PUBLICATION_SQL_PLACEHOLDERS,FBO_CONTRACT,TEMPORARY_CONTRACT,expand_manifest
 from packages.application.fbs_accounting_historical_stages import require
 
 MAX_READY_HEADERS = 10000
@@ -78,7 +78,7 @@ class HistoricalReceipt:
         self.runtime = runtime
         self.operation_id, self.attempt_id = operation_id, attempt_id
         self.manifest = self._read()[0]
-        require(self.manifest['contract'] == CONTRACT, 'historical_history_wrong_publication_kind')
+        require(self.manifest['contract'] in PUBLICATION_CONTRACTS, 'historical_history_wrong_publication_kind')
         self.dates = tuple(day for day in self.manifest['plan']['scope']['dates'] if day < self.manifest['plan']['scope']['date_to'])
         require(0 < len(self.dates) <= 366 and self.dates == tuple(sorted(set(self.dates))), 'historical_history_scope_invalid')
         for day in self.dates:
@@ -89,8 +89,9 @@ class HistoricalReceipt:
             size=conn.execute('SELECT length(inputs_json),length(diagnostics_json) FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(self.operation_id,self.attempt_id)).fetchone()
             require(size and size[0]<=160*1024**2 and size[1]<=32*1024**2,'historical_history_publication_size_limit')
             row = conn.execute('SELECT kind,state,inputs_json,book_version,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?', (self.operation_id,self.attempt_id)).fetchone()
-        require(row and row['kind']==CONTRACT and row['state']=='complete', 'historical_history_publication_not_complete')
+        require(row and row['kind'] in PUBLICATION_CONTRACTS and row['state']=='complete', 'historical_history_publication_not_complete')
         manifest = expand_manifest(json.loads(row['inputs_json']))
+        require(manifest['contract']==row['kind'],'historical_history_publication_kind_changed')
         require(manifest['manifest_digest'] == fingerprint({k:v for k,v in manifest.items() if k not in {'manifest_digest','prepare_seconds'}})
                 and manifest['after_book'] == row['book_version'], 'historical_history_manifest_corrupt')
         return manifest, json.loads(row['diagnostics_json'])
@@ -145,6 +146,12 @@ class HistoricalReceipt:
         proof = {}
         with ready.readonly(self.runtime.db_path) as conn:
             ready.check_pinned_authority(conn,manifest['authority'])
+            if manifest['contract']==TEMPORARY_CONTRACT:
+                from packages.application.fbs_temporary_allocation_action import validate_source_receipt
+                validate_source_receipt(conn,manifest=manifest)
+            elif manifest['contract']==FBO_CONTRACT:
+                from packages.application.fbs_historical_fbo_publication import validate_source_receipt
+                validate_source_receipt(conn,manifest=manifest)
             for identity,confirmation in manifest['operator_confirmation'].items():
                 actual = conn.execute(f'SELECT source_json,source_digest,accepted_at,actor FROM {TABLE} WHERE request_id=?',(identity,)).fetchone()
                 request = conn.execute(f'SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?',(identity,)).fetchone()
@@ -196,9 +203,9 @@ def pending_receipt(runtime):
     if not hasattr(runtime,'db_path'):return None  # Existing cycle test doubles carry no database.
     with ready.readonly(runtime.db_path) as conn:
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='sheet_vitrina_v1_ready_publications'").fetchone():return None
-        rows=conn.execute('SELECT operation_id,attempt_id,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE kind=? AND state=\'complete\' ORDER BY created_at,operation_id,attempt_id',(CONTRACT,)).fetchall()
+        rows=conn.execute(f'SELECT operation_id,attempt_id,kind,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE kind IN ({PUBLICATION_SQL_PLACEHOLDERS}) AND state=\'complete\' ORDER BY created_at,operation_id,attempt_id',PUBLICATION_CONTRACTS).fetchall()
     require(len(rows)<=10000,'historical_history_publication_limit')
-    selected=[r for r in rows if not json.loads(r['diagnostics_json']).get('historical_operator_complete')]
+    selected=[r for r in rows if not json.loads(r['diagnostics_json']).get('temporary_allocation_scope_complete' if r['kind']==TEMPORARY_CONTRACT else 'historical_fbo_scope_complete' if r['kind']==FBO_CONTRACT else 'historical_operator_complete')]
     require(len(selected)<=1,'historical_history_multiple_unfinished_publications')
     return HistoricalReceipt(runtime,selected[0]['operation_id'],selected[0]['attempt_id']) if selected else None
 
@@ -225,8 +232,8 @@ def restore_revision_rows(rows, *, runtime, plan, inventory_history, business_da
         require(dated.get('finalization_id') or dated.get('accepted_publication'),'historical_management_quantity_publication_missing',day=day)
         with ready.readonly(runtime.db_path) as conn:
             from packages.application.sheet_vitrina_v1_inventory_history import CAPTURES_TABLE
-            publication=conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE kind=? AND state='complete' AND json_extract(inputs_json,?)=? LIMIT 1",
-                (CONTRACT,'$.candidate.editions.\"'+day+'\".version_id',edition)).fetchone()
+            publication=conn.execute(f"SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE kind IN ({PUBLICATION_SQL_PLACEHOLDERS}) AND state='complete' AND json_extract(inputs_json,?)=? LIMIT 1",
+                (*PUBLICATION_CONTRACTS,'$.candidate.editions.\"'+day+'\".version_id',edition)).fetchone()
             require(publication is not None,'historical_management_native_publication_missing',day=day)
             capture=conn.execute(f'SELECT source_manifest_json FROM {CAPTURES_TABLE} WHERE capture_id=?',(dated.get('capture_id',''),)).fetchone()
             require(capture and json.loads(capture[0])['source_refs']['presentation_digest']==fingerprint(book['presentations'][day]),

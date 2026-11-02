@@ -125,10 +125,14 @@ def _documents(conn: sqlite3.Connection, *, document_id: str | None = None) -> l
     # FBO's auxiliary book must remain completely document-owned. Unlike the
     # intentionally excluded FBS observer, an unmapped FBO movement is a source
     # contract change, not an operand to import from the old ledger.
+    from packages.application.fbs_historical_fbo_sources import capture_historical_fbo_documents
+    historical = capture_historical_fbo_documents(conn)
+    historical_ids = tuple(d["operation_id"] for d in historical)
+    admitted = (" AND m.operation_id NOT IN (" + ",".join("?" for _ in historical_ids) + ")") if historical_ids else ""
     unmapped = conn.execute(
         f"SELECT 1 FROM {PREFIX}ff_pool_movement_lines m "
         f"LEFT JOIN {PREFIX}ff_pool_documents d ON d.operation_id=m.operation_id "
-        "WHERE m.pool='FBO' AND d.document_id IS NULL LIMIT 1"
+        "WHERE m.pool='FBO' AND d.document_id IS NULL" + admitted + " LIMIT 1", historical_ids
     ).fetchone() if document_id is None else None
     if unmapped is not None:
         raise ValueError("unmapped_fbo_document_movement")
@@ -212,13 +216,16 @@ def _documents(conn: sqlite3.Connection, *, document_id: str | None = None) -> l
         result.append(normalized)
     if (set(by_id) | set(by_expense)) - seen:
         raise ValueError("orphan_document_lines")
+    result.extend(d for d in historical if document_id is None or d["document_id"] == document_id)
     return result
 
 
 def _verify_typed_lines(document, posted, lines, movements):
     """The native saved bytes own W2 operands, before normalized hashing."""
     kind = document['document_kind']
-    if kind not in {'correction', 'inventory_surplus', 'inventory_shortage', 'storno', 'late_expense', 'pool_inventory'} and posted.get('document_role')!='china_discrepancy':
+    exact_transfer = kind == 'pool_reallocation' and any(
+        json.loads(line['metadata_json']).get('capital_policy') == 'exact_full_pool_transfer_v1' for line in lines)
+    if not exact_transfer and kind not in {'correction', 'inventory_surplus', 'inventory_shortage', 'storno', 'late_expense', 'pool_inventory'} and posted.get('document_role')!='china_discrepancy':
         return
     saved = posted.get('lines')
     # Existing zero-effect opening inventory manifests predate typed lines.
@@ -232,6 +239,15 @@ def _verify_typed_lines(document, posted, lines, movements):
                 or any(_money(canonical[k]) != _money(line[k]) for k in ('capital_rub', 'expense_rub'))
                 or canonical.get('metadata') != json.loads(line['metadata_json'])):
             raise ValueError('typed_document_saved_line_mismatch')
+    if exact_transfer:
+        from packages.application.ff_pool_documents import _validate_exact_pool_transfer
+        selected = [line for line in saved if line.get('metadata', {}).get('capital_policy') == 'exact_full_pool_transfer_v1']
+        nms = {line['nm_id'] for line in selected}
+        typed = {'document_kind':kind, 'expenses':[],
+            'lines':[{**line, 'capital_cents':0, 'expense_cents':0, 'capital_exact_rub':line['capital_rub']} for line in selected],
+            'movements':[{**movement, 'capital_delta_cents':0, 'capital_delta_exact_rub':movement['capital_delta_rub'],
+                'metadata':json.loads(movement['metadata_json'])} for movement in movements if movement['nm_id'] in nms]}
+        _validate_exact_pool_transfer(typed)
     if kind == 'correction':
         from packages.application.fbs_document_cost import correction_operands
         correction_operands({'lines': lines, 'movements': movements})

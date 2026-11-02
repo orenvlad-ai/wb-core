@@ -27,6 +27,14 @@ from packages.application.fbs_snapshot_cost import canonical, fingerprint
 from packages.application.warehouse_functional_lock import require_warehouse_job_owner,warehouse_functional_write_lock
 
 CONTRACT="fbs_accounting_historical_receipt_publication_v1"
+FBO_CONTRACT="fbs_historical_fbo_publication_v1"
+TEMPORARY_CONTRACT="fbs_temporary_allocation_publication_v1"
+PUBLICATION_CONTRACTS=(CONTRACT,FBO_CONTRACT,TEMPORARY_CONTRACT)
+PUBLICATION_SQL_PLACEHOLDERS=",".join("?" for _ in PUBLICATION_CONTRACTS)
+
+
+def _operation_prefix(contract):
+    return "temporary-fbs" if contract==TEMPORARY_CONTRACT else "historical-fbo" if contract==FBO_CONTRACT else "historical-receipt"
 MAX_BYTES=160*1024**2
 MAX_READY_HEADERS=10000
 MAX_READY_HEADER_BYTES=8*1024**2
@@ -167,7 +175,7 @@ def _promoted_envelope(donor, day):
     return _serialize_sheet_vitrina_plan(replace(envelope,as_of_date=day))
 
 
-def _selected_ready_rows(conn, *, plan, authority, current_envelope, now):
+def _selected_ready_rows(conn, *, plan, authority, current_envelope, now, selection_proof=None, keys_only=False):
     """Choose native date bindings from bounded headers before loading bodies.
 
     The archive is not an operand of every receipt. Keep its original selection
@@ -175,10 +183,13 @@ def _selected_ready_rows(conn, *, plan, authority, current_envelope, now):
     The current builder replaces a header, but retains its persisted before CAS.
     """
     from packages.application.registry_upload_db_backed_runtime import _serialize_sheet_vitrina_plan
-    from packages.application.web_vitrina_window_v3 import _ReadyHeader,_select_bindings,has_complete_recovery
+    from packages.application.web_vitrina_window_v3 import _ReadyHeader,_select_bindings,_selected_default_header,has_complete_recovery
     from packages.application.sheet_vitrina_v1 import _require_date_columns_or_infer
     from packages.business_time import default_business_as_of_date
     require=stages.require
+    require(not keys_only or current_envelope is None,'historical_source_keys_overlay_forbidden')
+    if selection_proof is not None:
+        selection_proof.update(queries=[('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1',())])
     active=conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()
     require(active is not None,'historical_active_ready_bundle_missing')
     bundle=active[0]
@@ -196,6 +207,8 @@ def _selected_ready_rows(conn, *, plan, authority, current_envelope, now):
         FROM ({query})''',(bundle,)).fetchone()
     require(count<=MAX_READY_HEADERS and size<=MAX_READY_HEADER_BYTES,'historical_ready_header_size_limit')
     raw=[dict(r) for r in conn.execute(query+' ORDER BY activated_at DESC,refreshed_at DESC,as_of_date DESC',(bundle,))]
+    if selection_proof is not None:
+        selection_proof['queries'].append((query+' ORDER BY activated_at DESC,refreshed_at DESC,as_of_date DESC',(bundle,)))
     prior_raw=list(raw)
     overlay=None
     if current_envelope is not None:
@@ -222,6 +235,9 @@ def _selected_ready_rows(conn, *, plan, authority, current_envelope, now):
         require(isinstance(header,list),'historical_ready_header_invalid')
         dates=_require_date_columns_or_infer({'date_columns':json.loads(row['dates_json']) if row['dates_json'] is not None else None},header)
         headers.append(_ReadyHeader(bundle,row['as_of_date'],row['snapshot_id'],row['activated_at'],row['refreshed_at'],tuple(dates),'{}',0))
+    if selection_proof is not None:
+        default=_selected_default_header(headers,bundle,default_business_as_of_date(now))
+        selection_proof['default_key']=default.key if default else None
     recovery_bytes=0
     recovery_cache={}
     def bounded_recovery(connection,header,day):
@@ -231,7 +247,9 @@ def _selected_ready_rows(conn, *, plan, authority, current_envelope, now):
             size=connection.execute(f"SELECT length(CAST(json_extract(plan_json,'$.metadata.server_cell_presentation') AS BLOB)) FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?",header.key).fetchone()
             recovery_bytes+=(size[0] or 0) if size else 0
             require(recovery_bytes<=MAX_BYTES,'historical_ready_recovery_size_limit')
-            row=connection.execute(f"SELECT json_extract(plan_json,'$.metadata.server_cell_presentation') FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?",key).fetchone()
+            recovery_sql=f"SELECT json_extract(plan_json,'$.metadata.server_cell_presentation') FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?"
+            if selection_proof is not None:selection_proof['queries'].append((recovery_sql,key))
+            row=connection.execute(recovery_sql,key).fetchone()
             try:recovery_cache[key]=json.loads(row[0] or '{}') if row else {}
             except json.JSONDecodeError:recovery_cache[key]={}
         return has_complete_recovery({'server_cell_presentation':recovery_cache[key]},day)
@@ -266,6 +284,7 @@ def _selected_ready_rows(conn, *, plan, authority, current_envelope, now):
             require(row is not None,'historical_exact_ready_dates_missing')
             total+=row[0]*(2 if key in promoted else 1)
         require(total<=MAX_BYTES,'historical_ready_source_size_limit')
+    if keys_only:return [dict(bundle_version=k[0],as_of_date=k[1]) for k in keys],selected
     rows=[]
     for key in keys:
         if overlay is not None and key==(bundle,overlay['as_of_date']):rows.append(overlay)
@@ -283,12 +302,12 @@ def _expected(row, authority):
 
 def _code():
     result=staging._code_authority()
-    for path in (Path(__file__),Path(stages.__file__),Path(sources.__file__)):
+    for path in (Path(__file__),Path(stages.__file__),Path(sources.__file__),Path(__file__).with_name("fbs_historical_fbo_publication.py"),Path(__file__).with_name("fbs_temporary_allocation_action.py")):
         result[path.name]="sha256:"+hashlib.sha256(path.read_bytes()).hexdigest()
     return result
 
 
-def materialize_exact_dates(plan, *, book, version, runtime_dir, target, dates, now, connection=None):
+def materialize_exact_dates(plan, *, book, version, runtime_dir, target, dates, now, connection=None, operation_prefix="historical-receipt"):
     """Native cells, bindings and economics; immutable untouched date prefix."""
     from packages.application.registry_upload_db_backed_runtime import _serialize_sheet_vitrina_plan,_deserialize_sheet_vitrina_plan
     prior=json.loads(_serialize_sheet_vitrina_plan(plan))
@@ -329,8 +348,44 @@ def materialize_exact_dates(plan, *, book, version, runtime_dir, target, dates, 
     require(connection is not None,'historical_dated_parameters_connection_required')
     for day in sorted(changed):
         payload=recalculate_dated_proxy(payload,day=day,parameters=dated_parameters(connection,day),
-            operation_id='historical-receipt:'+version)['plan']
+            operation_id=operation_prefix+':'+version)['plan']
     return _deserialize_sheet_vitrina_plan(canonical(payload))
+
+
+def prepare_ready_targets(conn, *, plan, candidate, runtime_dir, authority, now, current_envelope=None):
+    """Build real dated Ready and quantity-history targets for either typed owner."""
+    # Select only the active bundle's actual native ready rows. An absent
+    # dated target is an input gap, not permission to invent a ready source.
+    from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan,_serialize_sheet_vitrina_plan
+    rows,selected=_selected_ready_rows(conn,plan=plan,authority=authority,
+        current_envelope=current_envelope,now=now)
+    targets=[];covered=set()
+    for row in rows:
+        envelope=_deserialize_sheet_vitrina_plan(row["plan_json"])
+        dates=sorted(d for d,key in selected.items() if key==(row['bundle_version'],row['as_of_date']))
+        if not dates:continue
+        expected_ready=ready.ExpectedReady(**row["_expected"]) if "_expected" in row else _expected(row,authority)
+        target={"bundle_version":row["bundle_version"],"as_of_date":row["as_of_date"]}
+        after=materialize_exact_dates(envelope,book=candidate["candidate_book"],version=candidate["after_book"],runtime_dir=runtime_dir,target=target,dates=dates,now=now,connection=conn,operation_prefix=_operation_prefix(plan.get("contract")))
+        from packages.application.inventory_quantity import resolve_plan_quantities,CONTRACT as QUANTITY_CONTRACT
+        from packages.application.sheet_vitrina_v1_inventory_history import FINALIZATIONS_TABLE
+        inventory=[]
+        for day in dates:
+            operands=resolve_plan_quantities(after,day=day,prepared_book=candidate['candidate_book'],ready_target=target,require_closed=day<plan['scope']['date_to'])
+            stages.require(operands is not None,'historical_inventory_exact_quantity_source_missing',day=day)
+            prior=conn.execute(f'SELECT finalization_digest FROM {FINALIZATIONS_TABLE} WHERE business_date=? ORDER BY finalization_sequence DESC LIMIT 1',(day,)).fetchone()
+            inventory.append(dict(business_date=day,capture_kind='accepted_refresh',formula_version=QUANTITY_CONTRACT,
+                bundle_version=row['bundle_version'],ready_snapshot_id=after.snapshot_id,ready_plan_version=after.plan_version,generation_identity=row['bundle_version'],
+                facility_roster=operands['facility_roster'],source_manifest=operands['source_manifest'],components=operands['components'],captured_at=plan['observation']['captured_at'],
+                expected_predecessor=prior[0] if prior else '',closed=day<plan['scope']['date_to']))
+        targets.append({"inventory":inventory,"expected":asdict(expected_ready),"after_json":_serialize_sheet_vitrina_plan(after),"dates":dates,"before_envelope_json":row["plan_json"],"build_inputs":row.get("_build_inputs"),"donor_expected":row.get("_donor_expected")})
+        covered.update(dates)
+    # Each business date owns exactly one quantity finalization. The real
+    # current-date ready target owns the durable publication intent even
+    # when many historical envelopes overlap the same suffix.
+    targets.sort(key=lambda t:(plan['scope']['date_to'] in t['dates'],t['expected']['as_of_date']))
+    stages.require(covered==set(plan["scope"]["dates"]),"historical_exact_ready_dates_missing",source=",".join(sorted(set(plan["scope"]["dates"])-covered)))
+    return targets
 
 
 def prepare_publication(plan, *, runtime_dir, owner_generation, operation_id, attempt_id="1", now=None, current_envelope=None):
@@ -349,37 +404,8 @@ def prepare_publication(plan, *, runtime_dir, owner_generation, operation_id, at
         validate_historical_revision_plan(plan,book=book,capture=capture)
         dated=stages.capture_dated_stages(conn,db_path=db,book=plan["candidate_book"],dates=plan["scope"]["dates"])
         candidate=stages.build_dated_stage_revision(plan,capture=capture,dated=dated)
-        # Select only the active bundle's actual native ready rows. An absent
-        # dated target is an input gap, not permission to invent a ready source.
-        from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan,_serialize_sheet_vitrina_plan
-        rows,selected=_selected_ready_rows(conn,plan=plan,authority=authority,
-            current_envelope=current_envelope,now=now)
-        targets=[];covered=set()
-        for row in rows:
-            envelope=_deserialize_sheet_vitrina_plan(row["plan_json"])
-            dates=sorted(d for d,key in selected.items() if key==(row['bundle_version'],row['as_of_date']))
-            if not dates:continue
-            expected_ready=ready.ExpectedReady(**row["_expected"]) if "_expected" in row else _expected(row,authority)
-            target={"bundle_version":row["bundle_version"],"as_of_date":row["as_of_date"]}
-            after=materialize_exact_dates(envelope,book=candidate["candidate_book"],version=candidate["after_book"],runtime_dir=runtime_dir,target=target,dates=dates,now=now,connection=conn)
-            from packages.application.inventory_quantity import resolve_plan_quantities,CONTRACT as QUANTITY_CONTRACT
-            from packages.application.sheet_vitrina_v1_inventory_history import FINALIZATIONS_TABLE
-            inventory=[]
-            for day in dates:
-                operands=resolve_plan_quantities(after,day=day,prepared_book=candidate['candidate_book'],ready_target=target,require_closed=day<plan['scope']['date_to'])
-                stages.require(operands is not None,'historical_inventory_exact_quantity_source_missing',day=day)
-                prior=conn.execute(f'SELECT finalization_digest FROM {FINALIZATIONS_TABLE} WHERE business_date=? ORDER BY finalization_sequence DESC LIMIT 1',(day,)).fetchone()
-                inventory.append(dict(business_date=day,capture_kind='accepted_refresh',formula_version=QUANTITY_CONTRACT,
-                    bundle_version=row['bundle_version'],ready_snapshot_id=after.snapshot_id,ready_plan_version=after.plan_version,generation_identity=row['bundle_version'],
-                    facility_roster=operands['facility_roster'],source_manifest=operands['source_manifest'],components=operands['components'],captured_at=plan['observation']['captured_at'],
-                    expected_predecessor=prior[0] if prior else '',closed=day<plan['scope']['date_to']))
-            targets.append({"inventory":inventory,"expected":asdict(expected_ready),"after_json":_serialize_sheet_vitrina_plan(after),"dates":dates,"before_envelope_json":row["plan_json"],"build_inputs":row.get("_build_inputs"),"donor_expected":row.get("_donor_expected")})
-            covered.update(dates)
-        # Each business date owns exactly one quantity finalization. The real
-        # current-date ready target owns the durable publication intent even
-        # when many historical envelopes overlap the same suffix.
-        targets.sort(key=lambda t:(plan['scope']['date_to'] in t['dates'],t['expected']['as_of_date']))
-        stages.require(covered==set(plan["scope"]["dates"]),"historical_exact_ready_dates_missing",source=",".join(sorted(set(plan["scope"]["dates"])-covered)))
+        targets=prepare_ready_targets(conn,plan=plan,candidate=candidate,runtime_dir=runtime_dir,
+            authority=authority,now=now,current_envelope=current_envelope)
         material=ready.capture_material(conn,tables=staging.SOURCE_TABLES)
         original_source_fence=json.loads(canonical(ready.pin_queries(conn,sources.original_source_queries(capture))))
         parameter_proof=_parameter_proof(conn,plan['scope']['dates'])
@@ -400,7 +426,7 @@ def prepare_publication(plan, *, runtime_dir, owner_generation, operation_id, at
 
 
 def _verify(manifest):
-    stages.require(manifest["contract"]==CONTRACT and manifest["manifest_digest"]==fingerprint({k:v for k,v in manifest.items() if k not in {"manifest_digest","prepare_seconds"}}),"historical_publication_manifest_corrupt")
+    stages.require(manifest["contract"] in PUBLICATION_CONTRACTS and manifest["manifest_digest"]==fingerprint({k:v for k,v in manifest.items() if k not in {"manifest_digest","prepare_seconds"}}),"historical_publication_manifest_corrupt")
     stages.require(_code()==manifest["code_authority"],"historical_publication_code_changed")
     stages.require(fingerprint(manifest["candidate"]["candidate_book"])==manifest["after_book"],"historical_publication_candidate_corrupt")
 
@@ -429,6 +455,12 @@ def _fence(conn,manifest,runtime_dir,*,recovering=False):
 def _independent_rebuild(manifest,runtime_dir,*,recovering=False):
     """Do not treat caller-provided hashes as numerical authorization."""
     from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan,_serialize_sheet_vitrina_plan
+    if manifest["contract"] == TEMPORARY_CONTRACT:
+        from packages.application.fbs_temporary_allocation_action import independent_rebuild
+        return independent_rebuild(manifest,runtime_dir=runtime_dir,recovering=recovering)
+    if manifest["contract"] == FBO_CONTRACT:
+        from packages.application.fbs_historical_fbo_publication import independent_rebuild
+        return independent_rebuild(manifest,runtime_dir=runtime_dir,recovering=recovering)
     now=datetime.fromisoformat(manifest["created_at"].replace("Z","+00:00"))
     book,version=accounting.load(runtime_dir,version=manifest["expected_book"])
     stages.require(version==manifest["plan"]["before_book_digest"],"historical_before_book_missing")
@@ -443,22 +475,27 @@ def _independent_rebuild(manifest,runtime_dir,*,recovering=False):
         dated=stages.capture_dated_stages(conn,db_path=Path(manifest["authority"]["path"]),book=manifest["plan"]["candidate_book"],dates=manifest["plan"]["scope"]["dates"])
         candidate=stages.build_dated_stage_revision(manifest["plan"],capture=capture,dated=dated)
         stages.require(candidate==manifest["candidate"],"historical_numeric_or_stage_rebuild_mismatch")
-        for target in manifest["targets"]:
-            expected=ready.ExpectedReady(**target["expected"])
-            if target.get('donor_expected'):
-                donor=ready.ExpectedReady(**target['donor_expected'])
-                ready.check_expected(conn,donor)
-                stages.require(expected.plan_json is None and expected.bundle_version==donor.bundle_version
-                    and _promoted_envelope(donor,expected.as_of_date)==target['before_envelope_json'],
-                    'historical_ready_donor_changed')
-            envelope=_deserialize_sheet_vitrina_plan(target["before_envelope_json"])
-            rebuilt=materialize_exact_dates(envelope,book=candidate["candidate_book"],version=candidate["after_book"],runtime_dir=runtime_dir,
-                target={"bundle_version":expected.bundle_version,"as_of_date":expected.as_of_date},dates=target["dates"],now=now,connection=conn)
-            stages.require(_serialize_sheet_vitrina_plan(rebuilt)==target['after_json'],'historical_ready_numeric_rebuild_mismatch')
-            from packages.application.inventory_quantity import resolve_plan_quantities
-            for item in target['inventory']:
-                operands=resolve_plan_quantities(rebuilt,day=item['business_date'],prepared_book=candidate['candidate_book'],ready_target={'bundle_version':expected.bundle_version,'as_of_date':expected.as_of_date},require_closed=item['closed'])
-                stages.require(all(operands[k]==item[k] for k in ('facility_roster','source_manifest','components')),'historical_inventory_numeric_rebuild_mismatch')
+        verify_ready_targets(conn,manifest=manifest,candidate=candidate,runtime_dir=runtime_dir,now=now)
+
+
+def verify_ready_targets(conn, *, manifest, candidate, runtime_dir, now):
+    from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan,_serialize_sheet_vitrina_plan
+    for target in manifest["targets"]:
+        expected=ready.ExpectedReady(**target["expected"])
+        if target.get('donor_expected'):
+            donor=ready.ExpectedReady(**target['donor_expected'])
+            ready.check_expected(conn,donor)
+            stages.require(expected.plan_json is None and expected.bundle_version==donor.bundle_version
+                and _promoted_envelope(donor,expected.as_of_date)==target['before_envelope_json'],
+                'historical_ready_donor_changed')
+        envelope=_deserialize_sheet_vitrina_plan(target["before_envelope_json"])
+        rebuilt=materialize_exact_dates(envelope,book=candidate["candidate_book"],version=candidate["after_book"],runtime_dir=runtime_dir,
+            target={"bundle_version":expected.bundle_version,"as_of_date":expected.as_of_date},dates=target["dates"],now=now,connection=conn,operation_prefix=_operation_prefix(manifest['contract']))
+        stages.require(_serialize_sheet_vitrina_plan(rebuilt)==target['after_json'],'historical_ready_numeric_rebuild_mismatch')
+        from packages.application.inventory_quantity import resolve_plan_quantities
+        for item in target['inventory']:
+            operands=resolve_plan_quantities(rebuilt,day=item['business_date'],prepared_book=candidate['candidate_book'],ready_target={'bundle_version':expected.bundle_version,'as_of_date':expected.as_of_date},require_closed=item['closed'])
+            stages.require(all(operands[k]==item[k] for k in ('facility_roster','source_manifest','components')),'historical_inventory_numeric_rebuild_mismatch')
 
 
 def _append_and_activate(runtime_dir,manifest):
@@ -509,13 +546,21 @@ def publish(manifest, *, runtime_dir, fault_injector=None):
             with historical_sqlite.transaction(conn,db_path=db,phase_name="publication_intent"):
                 _fence(conn,manifest,runtime_dir,recovering=recovering)
                 if not existing:
-                    ready.record_intent(conn,operation_id=manifest["operation_id"],attempt_id=manifest["attempt_id"],kind=CONTRACT,
+                    ready.record_intent(conn,operation_id=manifest["operation_id"],attempt_id=manifest["attempt_id"],kind=manifest["contract"],
                         expected=ready.ExpectedReady(**manifest["targets"][-1]["expected"]),inputs=stored_manifest,expected_book=manifest["expected_book"],book_required=True,ready_required=True,created_at=manifest["created_at"],book_operation_id=manifest["book_operation_id"])
             inject("after_intent")
             with historical_sqlite.transaction(conn,db_path=db,phase_name="ready_activation"):
                 _fence(conn,manifest,runtime_dir,recovering=recovering)
                 _append_and_activate(runtime_dir,manifest);inject("after_book")
-                stages.publish_dated_stages(conn,manifest=manifest["candidate"]);inject("after_stages")
+                if manifest["contract"] == TEMPORARY_CONTRACT:
+                    from packages.application.fbs_temporary_allocation_action import publish_stages
+                    publish_stages(conn,candidate=manifest["candidate"])
+                elif manifest["contract"] == FBO_CONTRACT:
+                    from packages.application.fbs_historical_fbo_publication import publish_stages
+                    publish_stages(conn,candidate=manifest["candidate"])
+                else:
+                    stages.publish_dated_stages(conn,manifest=manifest["candidate"])
+                inject("after_stages")
                 for target in manifest["targets"]:
                     envelope=json.loads(target['after_json'])
                     ready.replace_ready(conn,expected=ready.ExpectedReady(**target['expected']),plan_json=target['after_json'],
@@ -527,7 +572,7 @@ def publish(manifest, *, runtime_dir, fault_injector=None):
                         if item['closed']:
                             append_inventory_history_finalization(conn,business_date=item['business_date'],capture_id=capture['capture_id'],
                                 finalization_identity=manifest['operation_id']+':'+item['business_date'],finalized_at=manifest['created_at'],
-                                expected_predecessor=item['expected_predecessor'],provenance=dict(contract=CONTRACT,manifest_digest=manifest['manifest_digest'],book_version=manifest['after_book']))
+                                expected_predecessor=item['expected_predecessor'],provenance=dict(contract=manifest["contract"],manifest_digest=manifest['manifest_digest'],book_version=manifest['after_book']))
                 inject("after_ready")
                 ready.complete_publication(conn,operation_id=manifest["operation_id"],attempt_id=manifest["attempt_id"],book_version=manifest["after_book"],after_digest=ready.digest(manifest["targets"][-1]["after_json"]),finished_at=manifest["created_at"])
     result=publication_receipt(manifest,runtime_dir=runtime_dir);result["writer_seconds"]=time.monotonic()-started
@@ -547,6 +592,12 @@ def publication_receipt(manifest, *, runtime_dir):
             expected=ready.ExpectedReady(**target["expected"])
             actual=ready.capture_expected(conn,bundle_version=expected.bundle_version,as_of_date=expected.as_of_date)
             stages.require(actual.plan_json==target["after_json"],"historical_ready_readback_changed")
+        if manifest["contract"] == TEMPORARY_CONTRACT:
+            from packages.application.fbs_temporary_allocation_action import verify_stage_readback
+            verify_stage_readback(conn,manifest=manifest)
+        elif manifest["contract"] == FBO_CONTRACT:
+            from packages.application.fbs_historical_fbo_publication import verify_stage_readback
+            verify_stage_readback(conn,manifest=manifest)
         for day,edition in manifest["candidate"]["editions"].items():
             actual=dict(conn.execute('SELECT * FROM '+stages.P+'functional_versions WHERE version_id=?',(edition['version_id'],)).fetchone() or {})
             stages.require(actual==edition['version'],'historical_stage_readback_changed')
@@ -567,7 +618,7 @@ def publication_receipt(manifest, *, runtime_dir):
                     expected.append(value)
                 actual=[dict(r) for r in conn.execute(f'SELECT * FROM {stages.P}{table} WHERE version_id=?',(edition['version_id'],))]
                 stages.require(sorted(actual,key=canonical)==sorted(expected,key=canonical),'historical_stage_companion_readback_changed')
-    return {"contract":CONTRACT,"status":"published","operation_id":manifest["operation_id"],"attempt_id":manifest["attempt_id"],"book_version":version,
+    return {"contract":manifest["contract"],"status":"published","operation_id":manifest["operation_id"],"attempt_id":manifest["attempt_id"],"book_version":version,
         "manifest_digest":manifest["manifest_digest"],"dates":manifest["plan"]["scope"]["dates"],"native_dated_stages":True,"ready":True,
         "history_complete":False,"finance_complete":False,"operator_complete":False,
         "version":version,"date":max(book["shared_days"]),"ready_obligation":"complete"}
