@@ -23,6 +23,20 @@ from packages.application.registry_upload_db_backed_runtime import _connect
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
 
 
+class TemporaryAllocationCopyBudgetTests(unittest.TestCase):
+    def test_measured_source_size_fits_but_each_safety_bound_still_blocks(self):
+        action._check_source_copy_budget(table='source',count=50000,size=700*1024**2,elapsed=60)
+        action._check_source_copy_budget(table='source',count=action.MAX_ROWS,size=action.MAX_BYTES,elapsed=119.9)
+        for dimension,values in (
+            ('rows',dict(count=action.MAX_ROWS+1,size=1,elapsed=0)),
+            ('bytes',dict(count=1,size=action.MAX_BYTES+1,elapsed=0)),
+            ('time',dict(count=1,size=1,elapsed=120)),
+        ):
+            with self.subTest(dimension=dimension):
+                with self.assertRaisesRegex(ValueError,'source_copy_budget:'+dimension+':table=source:rows='):
+                    action._check_source_copy_budget(table='source',**values)
+
+
 class TemporaryAllocationNativeTests(unittest.TestCase):
     def setUp(self):
         fixture=native_fixture.HistoricalHandoffTests();fixture.setUp();self.addCleanup(fixture.doCleanups)

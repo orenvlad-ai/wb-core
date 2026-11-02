@@ -48,7 +48,9 @@ RESTORE = 'restore_temporary_fbs_allocation'
 RECOVER = 'recover_temporary_fbs_allocation'
 CONTRACT = 'fbs_temporary_allocation_publication_v1'
 EFFECT_CONTRACT = 'fbs_temporary_allocation_effect_intent_v1'
-MAX_BYTES = 512 * 1024**2
+# Retain the complete prior historical receipt: measured source operands exceed
+# 512 MiB. This private-copy budget does not change publication/apply limits.
+MAX_BYTES = 1024 * 1024**2
 MAX_ROWS = 100000
 P = 'sheet_vitrina_v1_'
 
@@ -170,6 +172,11 @@ def _snapshot(runtime,inputs,*,now):
                 retained_inputs=retained_inputs,selector_fence=selector_fence)
 
 
+def _check_source_copy_budget(*,table,count,size,elapsed):
+    exceeded=('rows' if count>MAX_ROWS else 'bytes' if size>MAX_BYTES else 'time' if elapsed>=120 else '')
+    require(not exceeded,f'source_copy_budget:{exceeded}:table={table}:rows={count}:bytes={size}:seconds={elapsed:.3f}')
+
+
 def _subset(conn,destination,*,book,now,snapshot):
     """Bounded coherent source copy; preserve rowids and global native sequences."""
     require(conn.in_transaction and conn.execute('PRAGMA query_only').fetchone()[0]==1,'query_only_copy_required')
@@ -237,7 +244,7 @@ def _subset(conn,destination,*,book,now,snapshot):
             count=0
             for source in conn.execute(sql,args):
                 count+=1;size+=sum(len(v) if isinstance(v,bytes) else len(canonical(v).encode()) for v in source)
-                require(count<=MAX_ROWS and size<=MAX_BYTES and time.monotonic()-started<120,'source_copy_budget')
+                _check_source_copy_budget(table=table,count=count,size=size,elapsed=time.monotonic()-started)
                 dst.execute(f'INSERT INTO "{table}"(rowid,{",".join(chr(34)+c+chr(34) for c in columns)}) VALUES({",".join("?" for _ in range(len(columns)+1))})',
                             [source['__source_rowid__'],*[source[c] for c in columns]])
             queries.append((sql,args));counts[table]=count
