@@ -140,6 +140,9 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         fixture=repair_fixture.TemporaryRepairTests();fixture.prepare_only=True;fixture.setUp();self.addCleanup(fixture.doCleanups)
         self.fixture=fixture;self.root=fixture.runtime.runtime_dir;target=self.root/'registry_upload_runtime.sqlite3'
         fixture.runtime.db_path.rename(target);fixture.runtime.db_path=target;self.runtime=fixture.runtime
+        with closing(_connect(target)) as conn, conn:
+            conn.execute('UPDATE sheet_vitrina_v1_ff_stock_operations SET source_file_blob=?',
+                         (b'\x00original source attachment\xff',))
         self.book=deepcopy(fixture.book);self.book['effective_date']='2026-10-26'
         self.version=accounting._save_book(self.root,self.book,expected=None,operation_id='initial-source-book')
         handoffs.load.return_value=(self.book,self.version)

@@ -5,6 +5,7 @@ Publication and typed historical-book admission remain separate obligations.
 """
 from contextlib import closing
 from decimal import Decimal, localcontext
+import hashlib
 import json
 
 from packages.application.fbs_snapshot_cost import fingerprint, canonical
@@ -90,7 +91,13 @@ def capture_native_guard(conn, plan):
     ])
     result = {}
     for key,sql,args in queries:
-        rows = [dict(r) for r in conn.execute(sql, args).fetchmany(100001)]
+        # SQLite BLOBs are document bytes, not JSON operands. Fence their
+        # actual content (not a potentially stale source_sha256 column).
+        # A tagged object also distinguishes BLOBs from NULL and TEXT.
+        rows = [{name: ({'sqlite_blob_sha256': hashlib.sha256(value).hexdigest(),
+                        'byte_length': len(value)} if isinstance(value, bytes) else value)
+                 for name, value in dict(r).items()}
+                for r in conn.execute(sql, args).fetchmany(100001)]
         require(len(rows) <= 100000, 'guard_row_limit')
         result[key] = rows
     require(len(canonical(result).encode('utf-8')) <= 64 * 1024**2, 'guard_size_limit')

@@ -41,6 +41,8 @@ class NativeHistoricalFboTests(unittest.TestCase):
                 conn.execute(f'INSERT INTO {BALANCES_TABLE} VALUES(?,?,?,?,?,?,?,?,?)',('synthetic-moscow',pool,1,1,q,cost,str(int(cost)/q),'seed',STAMP))
             conn.execute(f'INSERT INTO {native.AGGREGATE}(operation_id,operation_type,source_type,source_key,created_at,total_quantity_delta,total_quantity_abs) VALUES(?,?,?,?,?,?,?)',('seed','receipt','synthetic','seed',STAMP,200,200))
             conn.execute(f'INSERT INTO {native.AGGREGATE_LINES}(operation_id,line_no,nm_id,quantity_delta) VALUES(?,?,?,?)',('seed',1,1,200))
+            conn.execute(f'UPDATE {native.AGGREGATE} SET source_file_blob=? WHERE operation_id=?',
+                         (b'\x00original attachment\xff', 'seed'))
             conn.commit();conn.execute('BEGIN')
             self.guard=native.capture_native_guard(conn,self.plan)
         self.book={'schema':native.SCHEMA,'active':True}
@@ -114,6 +116,27 @@ class NativeHistoricalFboTests(unittest.TestCase):
         changed=self.snapshot()
         with self.assertRaisesRegex(ValueError,'current_source_compare_and_swap_failed'):self.apply()
         self.assertEqual(changed,self.snapshot())
+
+    def test_attachment_content_and_sqlite_type_drift_reject_before_append(self):
+        # Same-length replacement must be detected even when the stored file
+        # metadata/hash is unchanged. Empty BLOB, NULL and TEXT stay distinct.
+        for value in (b'\x00modified attachment\xff', b'', None, 'original attachment'):
+            with self.subTest(value=value), closing(_connect(self.runtime.db_path)) as conn:
+                conn.execute(f'UPDATE {native.AGGREGATE} SET source_file_blob=? WHERE operation_id=?',
+                             (value, 'seed'))
+                conn.commit()
+            self.assert_blocked_without_changes('current_source_compare_and_swap_failed')
+
+    def test_empty_attachment_and_null_have_different_guards(self):
+        guards = []
+        with closing(_connect(self.runtime.db_path)) as conn:
+            for value in (b'', None, ''):
+                conn.execute(f'UPDATE {native.AGGREGATE} SET source_file_blob=? WHERE operation_id=?',
+                             (value, 'seed'))
+                conn.commit();conn.execute('BEGIN')
+                guards.append(native.capture_native_guard(conn,self.plan)['digest'])
+                conn.rollback()
+        self.assertEqual(len(set(guards)),3)
 
     def test_tampered_durable_money_is_conflict_not_retry(self):
         self.apply()
