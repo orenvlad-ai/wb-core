@@ -66,7 +66,7 @@ def _repair():
 
 def _code():
     names=('fbs_temporary_allocation_action.py','fbs_temporary_allocation_repair.py','wb_historical_fbs_cost.py',
-           'ff_pool_fbs_historical_handoff.py','ff_pool_fbs_lifecycle.py','ff_pool_documents.py')
+           'ff_pool_fbs_historical_handoff.py','ff_pool_fbs_lifecycle.py','ff_pool_documents.py','fbs_current_snapshot_policy.py')
     return {**shared._preflight_code(),**{name:'sha256:'+hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in names}}
 
 
@@ -125,6 +125,8 @@ def _snapshot(runtime,inputs,*,now):
     handoffs._boundary(book,allocation_date='2026-10-27',handoff_dates=['2026-10-28','2026-10-29'])
     nms=sorted({row['order']['nm_id'] for row in evidence['orders']});facility=source['facility_id']
     with ready.readonly(runtime.db_path) as conn:
+        from packages.application.fbs_current_snapshot_policy import resolve_current_snapshot_policy
+        freshness_policy=asdict(resolve_current_snapshot_policy(connection=conn))
         original=handoffs._document(conn,source['original_document_id'])
         require(original['document']['document_kind']=='china_acceptance' and original['document']['business_date']=='2026-10-07', 'original_october_receipt_required')
         lines={row['nm_id']:row for row in original['lines'] if row['facility_id']==facility and row['pool']=='FBO' and row['nm_id'] in nms}
@@ -166,7 +168,7 @@ def _snapshot(runtime,inputs,*,now):
                 initial_queries.append((f'SELECT * FROM {P}warehouse_business_projection_current_rows WHERE as_of_date=? ORDER BY nm_id',(day.isoformat(),)))
             day+=timedelta(days=1)
         selector_fence=json.loads(canonical(ready.pin_queries(conn,initial_queries)))
-    return dict(book_version=version,original=original,native_guard=guard,ready_expected=asdict(expected),
+    return dict(book_version=version,original=original,native_guard=guard,ready_expected=asdict(expected),freshness_policy=freshness_policy,
                 documentary_digest=fingerprint(source),evidence_digest=evidence['evidence_digest'],facility_id=facility,
                 nm_ids=nms,source_lines={str(k):v for k,v in lines.items()},source_versions=source_versions,
                 retained_inputs=retained_inputs,selector_fence=selector_fence)
@@ -668,17 +670,20 @@ def _preflight(runtime,*,request,operation_id,directory,snapshot,inputs,now):
         subset=_subset(conn,directory/'sources.before.sqlite3',book=book,now=now,snapshot=snapshot)
     shared._backup(directory/'sources.before.sqlite3',simroot/'registry_upload_runtime.sqlite3',budget=MAX_BYTES)
     sim=shared._runtime(simroot)
-    require(_snapshot(sim,inputs,now=now)==snapshot,'private_source_copy_changed')
-    with warehouse_functional_job_lock(simroot) as owner:
-        unit=_simulate_unit(sim,snapshot=snapshot,evidence=inputs[1],operation_id=operation_id,now=now,owner_token=owner['owner_token'])
-        stamp=now.astimezone(timezone.utc).isoformat().replace('+00:00','Z')
-        # First build the complete real archived-WB candidate after the actual
-        # native unit. A provisional recipe is not admitted to production.
-        recipe=_make_recipe(sim,snapshot=snapshot,unit=unit,evidence=inputs[1],operation_id=operation_id,created_at=stamp,numeric=None)
-        binding=_record_recipe(sim,recipe,owner_token=owner['owner_token'])
-        _apply_native_unit(sim,recipe,binding=binding,owner_token=owner['owner_token'])
-        manifest=prepare_publication(sim,recipe=recipe,binding=binding,now=now)
-        publication.publish(manifest,runtime_dir=simroot)
+    from packages.application.fbs_current_snapshot_policy import rehearsal_snapshot_policy
+    with ready.readonly(runtime.db_path) as source, rehearsal_snapshot_policy(source,
+            runtime_dir=simroot,db_path=sim.db_path,source_fence=subset['query_fence']):
+        require(_snapshot(sim,inputs,now=now)==snapshot,'private_source_copy_changed')
+        with warehouse_functional_job_lock(simroot) as owner:
+            unit=_simulate_unit(sim,snapshot=snapshot,evidence=inputs[1],operation_id=operation_id,now=now,owner_token=owner['owner_token'])
+            stamp=now.astimezone(timezone.utc).isoformat().replace('+00:00','Z')
+            # First build the complete real archived-WB candidate after the actual
+            # native unit. A provisional recipe is not admitted to production.
+            recipe=_make_recipe(sim,snapshot=snapshot,unit=unit,evidence=inputs[1],operation_id=operation_id,created_at=stamp,numeric=None)
+            binding=_record_recipe(sim,recipe,owner_token=owner['owner_token'])
+            _apply_native_unit(sim,recipe,binding=binding,owner_token=owner['owner_token'])
+            manifest=prepare_publication(sim,recipe=recipe,binding=binding,now=now)
+            publication.publish(manifest,runtime_dir=simroot)
     require(code_authority==_code(),'preflight_code_changed')
     result=dict(code_authority=code_authority,snapshot=snapshot,unit=unit,numeric=_numeric(manifest),subset=subset,observed_at=now.isoformat(),retained_files=retained,
         file_authority=staging._file_authority(runtime.runtime_dir,runtime.db_path),

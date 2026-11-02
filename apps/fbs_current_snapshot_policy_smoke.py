@@ -18,7 +18,8 @@ from apps.web_vitrina_official_fbs_smoke import fixture
 from apps.fbs_inventory_presentation_smoke import snapshot
 from packages.application import fbs_accounting_runtime as book
 from packages.application import business_data_schedule_profile as schedule
-from packages.application.fbs_current_snapshot_policy import resolve_current_snapshot_policy, FbsSnapshotPolicyError, open_current_snapshot_readonly
+from packages.application.fbs_current_snapshot_policy import resolve_current_snapshot_policy, FbsSnapshotPolicyError, open_current_snapshot_readonly, rehearsal_snapshot_policy
+from packages.application import ready_publication as ready
 from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock, current_official_fbs_facilities
 from packages.application.storage_registry import build_manifest, atomic_write_manifest, StoreRegistry, MANIFEST_FILENAME
 from packages.application.wb_fbs_warehouse_registry import _freshness, FACILITIES_TABLE
@@ -115,6 +116,94 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(resolve_current_snapshot_policy(connection=conn).book_max_age_seconds, 10800)
         unproven = self.root / "unproven"; unproven.mkdir(); select(unproven)
         self.assertFalse(resolve_current_snapshot_policy(runtime_dir=unproven).selected)
+
+    def rehearsal_copy(self, source):
+        runtime=self.root/'rehearsal';runtime.mkdir()
+        path=runtime/'registry_upload_runtime.sqlite3';shutil.copyfile(self.path,path)
+        tables=[row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+        fence=ready.pin_queries(source,[(f'SELECT * FROM "{table}"',()) for table in tables])
+        return runtime,path,fence
+
+    def test_rehearsal_exact_copy_uses_source_policy_only_inside_scope(self):
+        select(self.runtime)
+        with ready.readonly(self.path) as source:
+            runtime,path,fence=self.rehearsal_copy(source)
+            expected=self.read(NOW+timedelta(hours=4),connection=source)
+            with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=fence):
+                with ready.readonly(path) as copied:
+                    self.assertEqual(self.read(NOW+timedelta(hours=4),connection=copied),expected)
+                    self.assertEqual(resolve_current_snapshot_policy(runtime_dir=runtime),resolve_current_snapshot_policy(connection=source))
+                    self.assertTrue(self.read(NOW+timedelta(hours=9),connection=copied)['available'])
+                    for invalid in (NOW+timedelta(hours=9,seconds=1),NOW+timedelta(days=1),NOW-timedelta(minutes=5,seconds=1)):
+                        with self.assertRaisesRegex(ValueError,'not_fresh'):self.read(invalid,connection=copied)
+                    with self.assertRaisesRegex(FbsSnapshotPolicyError,'runtime_mismatch'):
+                        resolve_current_snapshot_policy(connection=copied,runtime_dir=self.runtime)
+                with closing(sqlite3.connect(path)) as raw:
+                    with self.assertRaisesRegex(FbsSnapshotPolicyError,'copy_authority_changed'):
+                        resolve_current_snapshot_policy(connection=raw)
+            with ready.readonly(path) as copied:
+                self.assertFalse(resolve_current_snapshot_policy(connection=copied).selected)
+                with self.assertRaisesRegex(ValueError,'not_fresh'):self.read(NOW+timedelta(hours=4),connection=copied)
+            self.assertFalse((runtime/MANIFEST_FILENAME).exists())
+            self.assertFalse((runtime/schedule.SELECTOR_FILENAME).exists())
+
+    def test_rehearsal_source_fence_and_source_profile_changes_reject(self):
+        select(self.runtime)
+        with ready.readonly(self.path) as source:
+            runtime,path,fence=self.rehearsal_copy(source)
+            with sqlite3.connect(path) as copied:
+                copied.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_rows SET amount=amount+1")
+            with self.assertRaises(ValueError):
+                with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=fence):pass
+            shutil.copyfile(self.path,path)
+            with self.assertRaises(FbsSnapshotPolicyError):
+                with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=fence):
+                    (self.runtime/schedule.SELECTOR_FILENAME).unlink()
+                    resolve_current_snapshot_policy(runtime_dir=runtime)
+            self.assertFalse(resolve_current_snapshot_policy(runtime_dir=runtime).selected)
+
+    def test_rehearsal_canonical_legacy_policy_keeps_identity_and_limits(self):
+        with ready.readonly(self.path) as source:
+            runtime,path,fence=self.rehearsal_copy(source)
+            with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=fence):
+                with ready.readonly(path) as copied:
+                    self.assertEqual(resolve_current_snapshot_policy(connection=copied),resolve_current_snapshot_policy(connection=source))
+                    self.assertEqual(resolve_current_snapshot_policy(connection=copied).official_max_age_seconds,1800)
+                    with self.assertRaisesRegex(ValueError,'not_fresh'):self.read(NOW+timedelta(minutes=31),connection=copied)
+
+    def test_rehearsal_source_inode_replacement_rejects(self):
+        select(self.runtime)
+        with ready.readonly(self.path) as source:
+            runtime,path,fence=self.rehearsal_copy(source)
+            with self.assertRaises(FbsSnapshotPolicyError):
+                with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=fence):
+                    old=self.path.with_suffix('.old');self.path.rename(old);shutil.copyfile(old,self.path)
+                    resolve_current_snapshot_policy(runtime_dir=runtime)
+            self.assertFalse(resolve_current_snapshot_policy(runtime_dir=runtime).selected)
+
+    def test_rehearsal_copy_replacement_and_exception_cleanup(self):
+        select(self.runtime)
+        with ready.readonly(self.path) as source:
+            runtime,path,fence=self.rehearsal_copy(source)
+            with self.assertRaisesRegex(FbsSnapshotPolicyError,'copy_authority_changed'):
+                with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=fence):
+                    path.rename(path.with_suffix('.old'));shutil.copyfile(self.path,path)
+                    resolve_current_snapshot_policy(runtime_dir=runtime)
+            self.assertFalse(resolve_current_snapshot_policy(runtime_dir=runtime).selected)
+            with self.assertRaisesRegex(RuntimeError,'injected'):
+                with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=fence):
+                    raise RuntimeError('injected')
+            self.assertFalse(resolve_current_snapshot_policy(runtime_dir=runtime).selected)
+
+    def test_rehearsal_does_not_relax_mapping_or_provenance(self):
+        select(self.runtime)
+        with ready.readonly(self.path) as source:
+            runtime,path,fence=self.rehearsal_copy(source)
+            with rehearsal_snapshot_policy(source,runtime_dir=runtime,db_path=path,source_fence=fence):
+                with sqlite3.connect(path) as copied:
+                    copied.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_rows SET provenance='unknown'")
+                with ready.readonly(path) as copied:
+                    with self.assertRaises(ValueError):self.read(NOW+timedelta(hours=4),connection=copied)
 
     def test_canonical_bad_profile_and_generation_fail_closed(self):
         select(self.runtime, phase="selector_selected")
