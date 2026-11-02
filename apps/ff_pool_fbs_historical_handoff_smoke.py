@@ -30,7 +30,7 @@ QUANTITIES = (1600, 1800, 1200, 800)
 VECTORS = ((4,7,3,0), (0,1,2,0), (2,2,2,3), (1,0,1,0), (1,2,0,1))
 
 
-def evidence_fixture(*, duplicate_status=False):
+def evidence_fixture(*, duplicate_status=False, observed_at=STAMP):
     raw, statuses, groups = [], [], []
     oid = 1000
     for g, vector in enumerate(VECTORS):
@@ -51,7 +51,7 @@ def evidence_fixture(*, duplicate_status=False):
         warehouseId=501, officeId=601, article='seller-101', skus=['sku-101']))
     statuses.append(dict(order_id=oid,supplier_status='new',wb_status='declined_by_client'))
     if duplicate_status:statuses.append(dict(order_id=1001,supplier_status='complete',wb_status='sold'))
-    official=dict(at=STAMP, date_from='2026-10-26T00:00:00Z',date_to=STAMP,orders=raw,statuses=statuses,
+    official=dict(at=observed_at, date_from='2026-10-26T00:00:00Z',date_to=STAMP,orders=raw,statuses=statuses,
         pages=[dict(cursor=0,next_cursor=50,returned=33)])
     terminal=dict(date_to=STAMP,cursor=50,returned=0,next_cursor=0,coverage_terminal=True,orders=[],statuses=[])
     return historical.build_handoff_evidence(official,terminal,groups=groups,
@@ -174,6 +174,28 @@ class HistoricalHandoffTests(unittest.TestCase):
                     context.prec=160
                     self.assertEqual(Decimal(row[1])+Decimal(self.plan['sources'][str(nm)]['wac_rub'])*count,Decimal(c))
                 self.assertEqual(row[0],q-count);self.assertLessEqual(len(row[2]),80)
+
+    def test_offset_observations_persist_with_same_instant_and_identity(self):
+        expected='2026-11-02T15:00:00.850115Z'
+        self.evidence=evidence_fixture(observed_at=expected)
+        for stamp in ('2026-11-02T15:00:00.850115+00:00', '2026-11-02T19:00:00.850115+04:00'):
+            equivalent=evidence_fixture(observed_at=stamp)
+            self.assertEqual(equivalent['orders'],self.evidence['orders'])
+            self.assertNotEqual(equivalent['official_payload_digest'],self.evidence['official_payload_digest'])
+        self.evidence=equivalent
+        with closing(_connect(self.runtime.db_path)) as conn:
+            conn.execute('BEGIN')
+            self.plan=historical.prepare_historical_handoffs(conn,runtime_dir=self.runtime.runtime_dir,evidence=self.evidence,
+                allocation_document_id=self.allocation_id,original_document_id='original07',posted_at=STAMP,approval_reference='local-owner')
+        self.assertEqual(self.apply()['physical_debits'],32)
+        with closing(_connect(self.runtime.db_path)) as conn:
+            for table in (orders.OBSERVATIONS_TABLE,orders.STATUS_OBSERVATIONS_TABLE):
+                self.assertEqual([tuple(row) for row in conn.execute(f'SELECT observed_at,COUNT(*) FROM {table} GROUP BY observed_at')],[(expected,33)])
+        before=self.snapshot();self.assertTrue(self.apply()['idempotent']);self.assertEqual(before,self.snapshot())
+
+    def test_observation_without_timezone_is_rejected(self):
+        with self.assertRaisesRegex(ValueError,'observation_timezone_required'):
+            evidence_fixture(observed_at='2026-11-02T15:00:00')
 
     def test_every_physical_boundary_and_events_rollback(self):
         before=self.snapshot()

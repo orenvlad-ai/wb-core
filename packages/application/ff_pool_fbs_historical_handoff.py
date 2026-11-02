@@ -8,7 +8,7 @@ locks before BEGIN IMMEDIATE, and commits allocation/handoffs/return together.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 import hashlib
 import json
@@ -111,14 +111,20 @@ def build_handoff_evidence(official, terminal, *, groups, source_files, approval
     require(len(raw) == len(official["orders"]) == len(statuses) == len(official["statuses"]) == 33
             and set(raw) == set(statuses), "exact_33_order_scope_required")
     normalized = []
+    # Evidence exports may use ISO offsets; native observations require UTC Z.
+    # Normalize before deriving observation identities, retaining the instant
+    # and fractional seconds without rewriting the reviewed source files.
+    observed_time = datetime.fromisoformat(official["at"].replace("Z", "+00:00"))
+    require(observed_time.tzinfo is not None, "observation_timezone_required")
+    observed_at = observed_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     start = int(datetime.fromisoformat(official["date_from"].replace("Z", "+00:00")).timestamp())
     end = int(datetime.fromisoformat(official["date_to"].replace("Z", "+00:00")).timestamp())
     for oid, row in sorted(raw.items()):
-        observation = orders._normalize_order(row, observed_at=official["at"], date_from=start, date_to=end, cursor=0)
+        observation = orders._normalize_order(row, observed_at=observed_at, date_from=start, date_to=end, cursor=0)
         require(observation is not None and len(observation["skus"]) == 1, "exact_fbs_order_identity_required")
         status = statuses[oid]
         status = orders._normalize_status(WbFbsOrderStatus(oid, status.get("supplier_status", status.get("supplierStatus", "")),
-            status.get("wb_status", status.get("wbStatus", ""))), order=observation, observed_at=official["at"])
+            status.get("wb_status", status.get("wbStatus", ""))), order=observation, observed_at=observed_at)
         normalized.append({"order": observation, "status": status})
     group_index = {str(group["supply_id"]): _copy(group) for group in groups}
     require(len(group_index) == len(groups) == 5, "five_unique_dispatch_groups_required")
