@@ -1533,6 +1533,111 @@ class WarehouseRecoveryRegistry:
             )
         return self.get_operation(operation_id)
 
+    def complete_hourly_transaction_rollback(
+        self,
+        operation_id: str,
+        *,
+        expected_state_version: int,
+        plan_fingerprint: str,
+        base_active_version_id: str,
+        evidence: Mapping[str, Any],
+        validate: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> dict[str, Any]:
+        """Terminalize one proven rolled-back hourly transaction, without restore.
+
+        Native callers hold the warehouse writer lock and call only after a
+        successful SQLite rollback. Legacy reconciliation supplies a validator
+        that rechecks its reviewed receipt/checkpoint proof in this same CAS
+        transaction. Artifacts, errors and reservations remain audit evidence.
+        """
+        contract = str(evidence.get("contract") or "")
+        if contract == "hourly_business_date_rollback_v1":
+            if evidence.get("error") not in {
+                "functional plan crossed the canonical business-date boundary while acquiring apply lock",
+                "functional plan crossed the canonical business-date boundary before commit",
+            }:
+                raise RecoveryPolicyError("hourly transaction rollback requires an exact date guard")
+        elif contract != "hourly_checkpoint_date_boundary_reconciliation_v1" or validate is None:
+            raise RecoveryPolicyError("hourly transaction rollback requires native or reviewed proof")
+        candidate_version_id = "whfv_" + plan_fingerprint.removeprefix("sha256:")[:24]
+        now = self._now()
+        with _connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_recovery_operations WHERE operation_id=?",
+                    (operation_id,),
+                ).fetchone()
+                active = conn.execute(
+                    "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+                ).fetchone()
+                candidate = conn.execute(
+                    "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_versions "
+                    "WHERE version_id=? OR plan_fingerprint=?",
+                    (candidate_version_id, plan_fingerprint),
+                ).fetchone()
+                failed_from = conn.execute(
+                    "SELECT from_state FROM sheet_vitrina_v1_recovery_transitions "
+                    "WHERE operation_id=? AND to_state='failed_recoverable' "
+                    "ORDER BY transition_id DESC LIMIT 1", (operation_id,),
+                ).fetchone()
+                scope = _json_object(row["target_scope_json"]) if row is not None else {}
+                if not (
+                    row is not None
+                    and row["operation_kind"] == "hourly_warehouse_sync"
+                    and row["tier"] == RecoveryTier.T2.value
+                    and row["lifecycle_state"] == RecoveryState.FAILED_RECOVERABLE.value
+                    and int(row["state_version"]) == expected_state_version
+                    and row["plan_fingerprint"] == plan_fingerprint
+                    and not row["after_digest"]
+                    and set(scope) == {"base_active_version_id", "effective_date"}
+                    and scope["base_active_version_id"] == base_active_version_id
+                    and (contract != "hourly_business_date_rollback_v1"
+                         or evidence.get("planned_business_date") == scope["effective_date"])
+                    and active is not None and active[0] == base_active_version_id
+                    and candidate is None
+                    and failed_from is not None
+                    and failed_from[0] == RecoveryState.MUTATION_RUNNING.value
+                    and evidence.get("sqlite_rollback_completed") is True
+                ):
+                    raise RecoveryPolicyError("hourly transaction rollback proof or CAS drifted")
+                if validate is not None:
+                    validate(conn)
+                proof = {
+                    **dict(evidence),
+                    "operation_id": operation_id,
+                    "plan_fingerprint": plan_fingerprint,
+                    "base_active_version_id": base_active_version_id,
+                    "candidate_version_id": candidate_version_id,
+                    "candidate_version_absent": True,
+                    "artifacts_preserved": True,
+                    "business_publication_completed": False,
+                }
+                changed = conn.execute(
+                    "UPDATE sheet_vitrina_v1_recovery_operations SET lifecycle_state='rolled_back',"
+                    "state_version=state_version+1,next_action='capture_new_business_date_plan',"
+                    "writer_state='idle',rollback_available=0,updated_at=?,last_heartbeat_at=? "
+                    "WHERE operation_id=? AND lifecycle_state='failed_recoverable' AND state_version=?",
+                    (now, now, operation_id, expected_state_version),
+                )
+                if changed.rowcount != 1:
+                    raise RecoveryPolicyError("hourly transaction rollback CAS update lost")
+                conn.execute(
+                    "INSERT INTO sheet_vitrina_v1_recovery_transitions("
+                    "operation_id,from_state,to_state,state_version,transitioned_at,detail_json) "
+                    "VALUES(?,'failed_recoverable','rolled_back',?,?,?)",
+                    (operation_id, expected_state_version + 1, now, _json(proof)),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self._fsync_registry()
+        result = self.get_operation(operation_id)
+        if result is None:
+            raise RecoveryPolicyError("rolled-back hourly operation disappeared")
+        return result
+
     def supersede_failed_operation(
         self,
         operation_id: str,

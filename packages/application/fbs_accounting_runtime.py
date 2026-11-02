@@ -37,15 +37,19 @@ TABLES = {"accounting_revisions", "accounting_current", "accounting_blobs"}
 class FbsAccountingUnavailable(ValueError):
     """A verified quality invalidation, never an uncertain publication failure."""
 
-    def __init__(self, *, version, blocked_date):
+    def __init__(self, *, version, blocked_date, historical_valuation_blocker=None):
         super().__init__("incomplete_period_cannot_close")
         self.version = version
         self.blocked_date = blocked_date
+        self.historical_valuation_blocker = deepcopy(historical_valuation_blocker)
 
     def diagnostic(self):
-        return {"status": "unavailable", "reason": str(self),
+        result = {"status": "unavailable", "reason": str(self),
                 "version": self.version, "blocked_date": self.blocked_date,
                 "ready_obligation": "not_performed"}
+        if self.historical_valuation_blocker is not None:
+            result['historical_valuation_blocker'] = deepcopy(self.historical_valuation_blocker)
+        return result
 
 
 

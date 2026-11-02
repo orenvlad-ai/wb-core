@@ -12,7 +12,7 @@ from packages.application.fbs_accounting_historical_revision import _manifest_kn
 from packages.application.fbs_accounting_historical_revision_writer import REQUEST_PROOF_FIELDS
 from packages.application.fbs_snapshot_cost_sources import capture_current
 from packages.application.ff_pool_documents import DOCUMENTS_TABLE, REQUESTS_TABLE
-from packages.application.fbs_snapshot_cost import fingerprint
+from packages.application.fbs_snapshot_cost import fingerprint, canonical
 
 
 def archived_quantity_snapshot(conn, *, day, observed_at, generation_id=None):
@@ -105,6 +105,33 @@ def archived_quantity_snapshot(conn, *, day, observed_at, generation_id=None):
                 source='official_fbs_stock_snapshot_v1', facility_evidence=evidence)
 
 
+def _require_archived_wb_valuation(wb, *, day, book):
+    from packages.application.fbs_accounting_historical_stages import HistoricalArchivedWbValuationUnavailable, require
+    rows = wb.get('rows') or []
+    missing = [row for row in rows if row.get('status') == 'missing']
+    source = wb.get('source') or {}
+    digest = wb.get('source_digest') or ''
+    if (wb.get('complete') is False and wb.get('authority_complete') is True
+            and wb.get('reason') == 'wb_sku_components_incomplete'
+            and wb.get('business_date') == day and wb.get('version_id')
+            and source.get('version_id') == wb['version_id'] and source.get('snapshot_date') == day
+            and len(digest) == 71 and digest.startswith('sha256:')
+            and all(char in '0123456789abcdef' for char in digest[7:])
+            and missing and all(row.get('status') in {'available', 'missing'} for row in rows)
+            and all(row.get('reason') == 'wb_cost_coverage_incomplete' for row in missing)):
+        blocker = {
+            'business_date': day, 'reason': 'wb_cost_coverage_incomplete',
+            'source': source, 'source_digest': digest,
+            'missing_by_nm_id': {str(row['nm_id']): {key: row[key] for key in ('quantity', 'components', 'reason')}
+                                 for row in missing}}
+        # The durable warehouse journal must retain every diagnostic operand;
+        # its bounded serializer must never truncate a degraded proof.
+        if len(canonical(blocker).encode('utf-8')) <= 8 * 1024:
+            raise HistoricalArchivedWbValuationUnavailable(book_version=fingerprint(book), blocker=blocker)
+    require(wb['complete'] and wb.get('authority_complete') is True,
+            'historical_archived_wb_incomplete', day=day)
+
+
 def capture_missing_dated_inputs(conn, *, db_path, book, capture, plan=None):
     """Fill only absent interior tail days; re-read pinned sources for a plan."""
     from datetime import date, timedelta
@@ -140,7 +167,7 @@ def capture_missing_dated_inputs(conn, *, db_path, book, capture, plan=None):
             count, size = conn.execute(f'SELECT count(*),coalesce(sum({sizes}),0) FROM sheet_vitrina_v1_{table} WHERE {clause}', args).fetchone()
             require(count <= 100000 and size <= MAX_CAPTURE_BYTES, 'historical_archived_dated_source_size_limit', day=day)
         wb = capture_wb_component(db_path, day=day, nm_ids=nm_ids, version_id=version, connection=conn)
-        require(wb['complete'] and wb.get('authority_complete') is True, 'historical_archived_wb_incomplete', day=day)
+        _require_archived_wb_valuation(wb, day=day, book=book)
         retained = capture_retained_stages(db_path, day=day, wb_version_id=version, nm_ids=nm_ids, connection=conn)
         result[day] = dict(quantity_snapshot=snapshot, wb_capture=wb, retained_capture=retained)
         require(len(canonical(result).encode()) <= MAX_CAPTURE_BYTES, 'historical_archived_dated_source_size_limit', day=day)

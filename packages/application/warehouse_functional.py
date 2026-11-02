@@ -227,6 +227,10 @@ class WarehouseFunctionalError(WarehouseOpeningSnapshotError):
     """Fail-closed functional warehouse invariant error."""
 
 
+class WarehouseBusinessDateBoundaryError(WarehouseFunctionalError):
+    """A coherent plan expired; a new source capture is required."""
+
+
 def _current_snapshot_effective_date(*, captured_at: str, snapshot_date: Any) -> str:
     """Bind a current-state version only to its canonical capture business date."""
 
@@ -4339,7 +4343,7 @@ class WarehouseFunctionalBlock:
             )
         apply_business_date = business_date_from_timestamp(self.timestamp_factory())
         if apply_business_date != planned_effective_date:
-            raise WarehouseFunctionalError(
+            raise WarehouseBusinessDateBoundaryError(
                 "functional plan crossed the canonical business-date boundary before apply: "
                 f"planned={planned_effective_date}, apply={apply_business_date}"
             )
@@ -4501,6 +4505,10 @@ class WarehouseFunctionalBlock:
                 str(recovery["operation_id"]),
                 expected_source_digest=current_digest,
             )
+        if recovery is not None and recovery.get("lifecycle") != RecoveryState.MUTATION_RUNNING.value:
+            raise WarehouseFunctionalError(
+                "functional recovery operation is terminal; capture and review a new plan"
+            )
         backup = recovery
         now = self.timestamp_factory()
         # ``effective_at`` remains a compatibility audit timestamp.  Functional
@@ -4537,7 +4545,7 @@ class WarehouseFunctionalBlock:
                     self.timestamp_factory()
                 )
                 if locked_apply_business_date != planned_effective_date:
-                    raise WarehouseFunctionalError(
+                    raise WarehouseBusinessDateBoundaryError(
                         "functional plan crossed the canonical business-date boundary "
                         "while acquiring apply lock"
                     )
@@ -4904,18 +4912,38 @@ class WarehouseFunctionalBlock:
                 from packages.application.operator_supplier_processing import record_functional_publication as record_supplier_publication
                 record_supplier_publication(conn, plan=normalized, version_id=version_id)
                 if business_date_from_timestamp(self.timestamp_factory()) != planned_effective_date:
-                    raise WarehouseFunctionalError(
+                    raise WarehouseBusinessDateBoundaryError(
                         "functional plan crossed the canonical business-date boundary before commit"
                     )
                 conn.commit()
-            except Exception:
+            except Exception as exc:
                 conn.rollback()
                 if recovery is not None:
-                    recovery_registry.fail_recoverable(
+                    failed_recovery = recovery_registry.fail_recoverable(
                         str(recovery["operation_id"]),
-                        error=f"{kind} transaction failed",
+                        error=f"{kind} transaction failed: {type(exc).__name__}: {exc}",
                         next_action=f"resume_or_rollback_{kind}",
                     )
+                    if kind == "hourly_wb_sync" and isinstance(exc, WarehouseBusinessDateBoundaryError):
+                        # SQLite's successful rollback is authoritative only
+                        # here, before leaving the serialized native writer.
+                        # Keep this cycle failed and all recovery artifacts;
+                        # terminalize the proven no-commit operation so the
+                        # next cycle can capture the new business date.
+                        if conn.in_transaction:
+                            raise WarehouseFunctionalError("warehouse rollback did not finish") from exc
+                        recovery_registry.complete_hourly_transaction_rollback(
+                            str(recovery["operation_id"]),
+                            expected_state_version=int(failed_recovery["state_version"]),
+                            plan_fingerprint=fingerprint,
+                            base_active_version_id=str(normalized.get("base_active_version_id") or ""),
+                            evidence={
+                                "contract": "hourly_business_date_rollback_v1",
+                                "sqlite_rollback_completed": True,
+                                "planned_business_date": planned_effective_date,
+                                "error": str(exc),
+                            },
+                        )
                 raise
         readback = self.readback()
         if recovery is not None:

@@ -417,6 +417,31 @@
         ["python3", "apps/search_cluster_cleaner_browser_smoke.py", "--output", "/tmp/wbc-cleaner-browser-ci"]
       ]
     },
+    "fbs_accounting_historical_unavailable": {
+      "patterns": [
+        "packages/application/fbs_accounting_historical_stages.py",
+        "packages/application/fbs_accounting_historical_sources.py",
+        "packages/application/fbs_accounting_runtime.py",
+        "apps/warehouse_functional_runner.py",
+        "apps/fbs_accounting_historical_unavailable_smoke.py"
+      ],
+      "commands": [
+        ["python3", "apps/fbs_accounting_historical_unavailable_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "warehouse_day_boundary_recovery": {
+      "patterns": [
+        "packages/application/warehouse_functional.py",
+        "packages/application/warehouse_recovery_policy.py",
+        "apps/warehouse_hourly_rollback_reconciliation.py",
+        "apps/warehouse_day_boundary_recovery_smoke.py"
+      ],
+      "commands": [
+        ["python3", "apps/warehouse_day_boundary_recovery_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "warehouse_recovery_retention": {
       "patterns": [
         "packages/application/warehouse_recovery_sync_retention.py",

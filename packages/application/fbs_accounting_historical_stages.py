@@ -28,6 +28,15 @@ MAX_ROWS = 100000
 MAX_BYTES = 64 * 1024**2
 
 
+class HistoricalArchivedWbValuationUnavailable(ValueError):
+    """A pinned authoritative quantity source with known missing cost coverage."""
+
+    def __init__(self, *, book_version, blocker):
+        super().__init__('historical_archived_wb_incomplete:' + blocker['business_date'])
+        self.book_version = book_version
+        self.blocker = deepcopy(blocker)
+
+
 def require(value, code, *, day="", source=""):
     if not value:
         raise ValueError(code + (":" + day if day else "") + (":" + source if source else ""))
