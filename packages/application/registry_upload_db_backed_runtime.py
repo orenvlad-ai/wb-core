@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -3920,8 +3920,14 @@ class RegistryUploadDbBackedRuntime:
         expected_ledger_totals: Mapping[str, float] | None = None,
         reservation_transition: Mapping[str, Any] | None = None,
         expected_downstream_costs: Mapping[int, Mapping[str, Any]] | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
-        """Atomically recheck a targeted plan and append one ledger operation."""
+        """Recheck and append within an owned or caller-owned transaction.
+
+        A supplied connection must already target this runtime and own a write
+        transaction. It is never bootstrapped, committed, closed or rolled back
+        here: the owner must roll back its entire unit on any exception.
+        """
         normalized_operation_id = str(operation_id or "").strip()
         normalized_source_key = str(source_key or "").strip()
         if not normalized_operation_id:
@@ -3947,15 +3953,31 @@ class RegistryUploadDbBackedRuntime:
 
         total_quantity_delta = sum(float(item.get("quantity_delta") or 0.0) for item in normalized_lines)
         total_quantity_abs = sum(abs(float(item.get("quantity_delta") or 0.0)) for item in normalized_lines)
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+        owns_transaction = connection is None
+        if connection is not None:
+            paths = {Path(row[2]).resolve() for row in connection.execute("PRAGMA database_list")
+                     if row[1] == "main" and row[2]}
+            if (not connection.in_transaction or connection.row_factory is not sqlite3.Row
+                    or connection.execute("PRAGMA query_only").fetchone()[0]
+                    or paths != {Path(self.db_path).resolve()}):
+                raise ValueError("ff_stock_owned_connection_invalid")
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                "AND name='warehouse_projection_ff_operation_line'"
+            ).fetchone() is None:
+                raise ValueError("ff_stock_owned_connection_outbox_not_admitted")
+        else:
+            self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with (nullcontext(connection) if connection is not None else _connect(self.db_path)) as conn:
+            if owns_transaction:
+                _ensure_schema(conn)
             from packages.application.warehouse_business_projection import (
                 ensure_warehouse_projection_source_outbox,
             )
 
-            ensure_warehouse_projection_source_outbox(conn)
-            conn.execute("BEGIN IMMEDIATE")
+            if owns_transaction:
+                ensure_warehouse_projection_source_outbox(conn)
+                conn.execute("BEGIN IMMEDIATE")
             try:
                 existing = conn.execute(
                     "SELECT * FROM sheet_vitrina_v1_ff_stock_operations WHERE source_key = ?",
@@ -3964,7 +3986,8 @@ class RegistryUploadDbBackedRuntime:
                 if existing is not None:
                     payload = _ff_stock_operation_to_dict(existing)
                     payload["idempotent"] = True
-                    conn.rollback()
+                    if owns_transaction:
+                        conn.rollback()
                     return payload
 
                 if expected_supply_guard is not None:
@@ -4268,9 +4291,11 @@ class RegistryUploadDbBackedRuntime:
                             "targeted_ff_stock_post_write_total_mismatch: "
                             + _canonical_json({"expected": expected_total_map["after"], "actual": post_total})
                         )
-                conn.commit()
-            except Exception:
-                conn.rollback()
+                if owns_transaction:
+                    conn.commit()
+            except BaseException:
+                if owns_transaction:
+                    conn.rollback()
                 raise
             row = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_ff_stock_operations WHERE operation_id = ?",

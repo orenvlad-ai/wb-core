@@ -5634,6 +5634,19 @@ def _build_handler(
                 )
                 return
 
+            if _is_fulfillment_source_document_path(parsed.path):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    parts=_fulfillment_upload_path_parts(parsed.path)
+                    upload_id=urllib_parse.unquote(parts[0])
+                    file_bytes,filename,content_type=entrypoint.handle_fulfillment_services_source_document_request(upload_id,parts[1])
+                except (ValueError,OSError):
+                    _write_json_response(self,HTTPStatus.NOT_FOUND,{"error":"Документ услуг ФФ недоступен"})
+                    return
+                _write_binary_response(self,HTTPStatus.OK,file_bytes,content_type=content_type,filename=filename,as_attachment=True)
+                return
+
             if _is_fulfillment_payment_validation_pdf_path(parsed.path):
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -8254,6 +8267,11 @@ def _resolve_ff_stock_operation_id_from_file_path(path: str) -> str:
 def _is_fulfillment_payment_validation_pdf_path(path: str) -> bool:
     parts = _fulfillment_upload_path_parts(path)
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "payment-validation.pdf"
+
+
+def _is_fulfillment_source_document_path(path: str) -> bool:
+    parts=_fulfillment_upload_path_parts(path)
+    return len(parts)==2 and bool(parts[0]) and parts[1] in {"source.xlsx","original-invoice.pdf"}
 
 
 def _resolve_fulfillment_upload_id_from_detail_path(path: str) -> str:

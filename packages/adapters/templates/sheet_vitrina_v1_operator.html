@@ -5347,7 +5347,7 @@
                     <th>Итого</th>
                     <th>НДС 5%</th>
                     <th>К оплате</th>
-                    <th>PDF-виза</th>
+                    <th>Документы</th>
                     <th>Удалить</th>
                   </tr>
                 </thead>
@@ -12221,15 +12221,24 @@
           return;
         }
         fulfillmentUploadsBody.innerHTML = uploads.map((upload) => {
-          const pdfCell = upload.pdf_available && upload.pdf_path
+          let pdfCell = upload.pdf_available && upload.pdf_path
             ? "<a class=\"dataset-file-link\" href=\"" + escapeHtml(upload.pdf_path) + "\" target=\"_blank\" rel=\"noreferrer\" title=\"" + escapeHtml(valueOrDash(upload.payment_validation_id)) + "\">Скачать PDF-визу</a>"
             : "—";
+          const invoice = upload.original_invoice;
+          if (invoice && invoice.path) {
+            pdfCell = "<a class=\"dataset-file-link\" href=\"" + escapeHtml(invoice.path) + "\" target=\"_blank\" rel=\"noreferrer\">Счёт №" + escapeHtml(invoice.invoice_no) + "</a><br>" + pdfCell;
+          } else if (upload.original_invoice_status === "unavailable") {
+            pdfCell = "<span>Оригинал счёта недоступен</span><br>" + pdfCell;
+          }
+          const sourceName = upload.source_path
+            ? "<a class=\"dataset-file-link\" href=\"" + escapeHtml(upload.source_path) + "\">" + escapeHtml(valueOrDash(upload.original_filename)) + "</a>"
+            : escapeHtml(valueOrDash(upload.original_filename));
           const uploadId = String(upload.upload_id || "");
           const deleteCell = renderFulfillmentDeleteCell(upload);
           return [
             "<tr>",
             "<td>" + escapeHtml(formatFulfillmentUploadedAt(upload.uploaded_at)) + "</td>",
-            "<td><span class=\"wb-supplies-main\">" + escapeHtml(valueOrDash(upload.original_filename)) + "</span></td>",
+            "<td><span class=\"wb-supplies-main\">" + sourceName + "</span></td>",
             "<td>" + escapeHtml(valueOrDash(upload.rows_matched)) + "/" + escapeHtml(valueOrDash(upload.rows_total)) + "</td>",
             "<td>" + escapeHtml(formatWbRub(upload.amount_without_vat_total)) + "</td>",
             "<td>" + escapeHtml(formatWbRub(upload.vat_total)) + "</td>",

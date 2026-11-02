@@ -22,7 +22,16 @@ def target(request):
 
 class FbsAccountingAdapter:
     def preview(self, request, operation_id):
+        action=request.get('action','activate')
+        if action not in {'activate','pause','restore_historical_fbo','recover_historical_fbo','restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
+            raise ValueError('fbs_accounting_unknown_action')
         root = target(request)
+        if action in {'restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
+            from packages.application.fbs_temporary_allocation_action import TemporaryAllocationAction
+            return TemporaryAllocationAction().preview(request,operation_id,root=root)
+        if action in {'restore_historical_fbo','recover_historical_fbo'}:
+            from packages.application.fbs_historical_fbo_action import HistoricalFboAction
+            return HistoricalFboAction().preview(request,operation_id,root=root)
         before, version = load(root)
         if request.get("action", "activate") == "pause":
             if before is None:
@@ -52,7 +61,16 @@ class FbsAccountingAdapter:
             "prepared": book, "expected_version": version}
 
     def apply(self, request, operation_id, preview):
+        action=request.get('action','activate')
+        if action not in {'activate','pause','restore_historical_fbo','recover_historical_fbo','restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
+            raise ValueError('fbs_accounting_unknown_action')
         root = target(request)
+        if action in {'restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
+            from packages.application.fbs_temporary_allocation_action import TemporaryAllocationAction
+            return TemporaryAllocationAction().apply(request,operation_id,preview,root=root)
+        if action in {'restore_historical_fbo','recover_historical_fbo'}:
+            from packages.application.fbs_historical_fbo_action import HistoricalFboAction
+            return HistoricalFboAction().apply(request,operation_id,preview,root=root)
         fresh = self.preview(request, operation_id)
         if any(fresh[k] != preview[k] for k in ("prestate_sha256", "candidate_sha256")):
             raise ValueError("fbs_activation_compare_failed")
@@ -60,7 +78,16 @@ class FbsAccountingAdapter:
         return {"operation_id": operation_id, "disposition": "submitted"}
 
     def readback(self, request, operation_id):
+        action=request.get('action','activate')
+        if action not in {'activate','pause','restore_historical_fbo','recover_historical_fbo','restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
+            raise ValueError('fbs_accounting_unknown_action')
         root = target(request)
+        if action in {'restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
+            from packages.application.fbs_temporary_allocation_action import TemporaryAllocationAction
+            return TemporaryAllocationAction().readback(request,operation_id,root=root)
+        if action in {'restore_historical_fbo','recover_historical_fbo'}:
+            from packages.application.fbs_historical_fbo_action import HistoricalFboAction
+            return HistoricalFboAction().readback(request,operation_id,root=root)
         if not path(root).exists():
             return {"operation_id": operation_id, "state": "not_submitted"}
         book, version = load(root)

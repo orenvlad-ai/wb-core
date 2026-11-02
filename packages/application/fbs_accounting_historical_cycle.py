@@ -35,7 +35,7 @@ def refresh(runtime, *, now=None):
     prepared=[]
     with ready.readonly(runtime.db_path) as conn:
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sheet_vitrina_v1_ready_publications'").fetchone():
-            prepared=conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE kind=? AND state<>'complete' ORDER BY created_at,operation_id,attempt_id",(publication.CONTRACT,)).fetchall()
+            prepared=conn.execute(f"SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE kind IN ({publication.PUBLICATION_SQL_PLACEHOLDERS}) AND state<>'complete' ORDER BY created_at,operation_id,attempt_id",publication.PUBLICATION_CONTRACTS).fetchall()
             require(len(prepared)<=1,'historical_multiple_prepared_publications')
     # Reopening the native writer while this reader is alive blocks its own
     # commit under DELETE journaling. The stored intent is revalidated by the
@@ -132,6 +132,12 @@ def finalize(runtime, *, config, now=None):
         and finance.get('source_advanced_after_apply') is not True,'historical_completion_finance_unproven')
     require(receipt.validate_sources_readonly(now=now)==sources_before,'historical_completion_source_changed')
     economics=accounting.current_publication_receipt(runtime,now=now)
+    if manifest['contract']==publication.TEMPORARY_CONTRACT:
+        from packages.application.fbs_temporary_allocation_action import finalize_scope
+        return finalize_scope(runtime,manifest=manifest,history_ack=ack,finance=finance,economics=economics,now=now)
+    if manifest['contract']==publication.FBO_CONTRACT:
+        from packages.application.fbs_historical_fbo_publication import finalize_scope
+        return finalize_scope(runtime,manifest=manifest,history_ack=ack,finance=finance,economics=economics,now=now)
     identities=list(manifest['operator_confirmation'])
     with ready.readonly(runtime.db_path) as conn:
         rows=[dict(conn.execute(f'SELECT * FROM {TABLE} WHERE request_id=?',(identity,)).fetchone()) for identity in identities]

@@ -7274,6 +7274,9 @@ class RegistryUploadHttpEntrypoint:
     ) -> tuple[bytes, str, str]:
         return self.fulfillment_services_block.download_pdf(upload_id)
 
+    def handle_fulfillment_services_source_document_request(self, upload_id: str, kind: str) -> tuple[bytes,str,str]:
+        return self.fulfillment_services_block.download_source_document(upload_id,kind)
+
     def handle_warehouses_overview_request(self) -> dict[str, Any]:
         functional = self.warehouse_functional_block.overview()
         return functional if functional.get("status") == "ready" else self.warehouse_stocks_block.overview()

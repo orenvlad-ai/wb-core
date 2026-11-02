@@ -257,6 +257,11 @@ class FulfillmentServicesBlock:
                 (VALIDATION_OK, normalized_limit),
             ).fetchall() if operator_receipts._exists(conn, UPLOADS_TABLE) else []
         uploads = [_upload_row_to_dict(row, include_links=True) for row in rows]
+        if uploads:
+            from packages.application.fbs_historical_fbo_documents import public_invoice
+            with closing(operator_receipts.readonly(self.runtime.db_path)) as conn:
+                for upload in uploads:
+                    upload.update(public_invoice(conn,runtime_dir=self.runtime.runtime_dir,upload_id=upload['upload_id']))
         latest = uploads[0] if uploads else None
         return {
             "contract_name": CONTRACT_NAME,
@@ -305,6 +310,9 @@ class FulfillmentServicesBlock:
             ).fetchall()
             recalculation = recalc_intents.read_request(conn, normalized_id, recalc_intents.source_revision(upload_row))
         upload = _upload_row_to_dict(upload_row, include_links=True)
+        from packages.application.fbs_historical_fbo_documents import public_invoice
+        with closing(operator_receipts.readonly(self.runtime.db_path)) as conn:
+            upload.update(public_invoice(conn,runtime_dir=self.runtime.runtime_dir,upload_id=normalized_id))
         lines = [_line_row_to_dict(row) for row in line_rows]
         return {
             "contract_name": CONTRACT_NAME,
@@ -346,6 +354,24 @@ class FulfillmentServicesBlock:
             raise ValueError("PDF payment validation file is missing in runtime storage")
         filename = f"fulfillment-payment-validation-{upload['upload_id']}.pdf"
         return pdf_path.read_bytes(), filename, PDF_CONTENT_TYPE
+
+    def download_source_document(self, upload_id: str, kind: str) -> tuple[bytes,str,str]:
+        """Existing upload identity owns both the XLSX and optional invoice."""
+        if kind=='original-invoice.pdf':
+            from packages.application.fbs_historical_fbo_documents import original_invoice
+            with closing(operator_receipts.readonly(self.runtime.db_path)) as conn:
+                result=original_invoice(conn,runtime_dir=self.runtime.runtime_dir,upload_id=upload_id)
+            if result is None:raise ValueError('Original invoice is not attached')
+            return result[1],'fulfillment-original-invoice-'+upload_id+'.pdf',PDF_CONTENT_TYPE
+        if kind!='source.xlsx':raise ValueError('Unsupported fulfillment source document')
+        payload=self.get_upload(upload_id)['upload']
+        file=self._runtime_path(payload['stored_file_path'])
+        if not file.is_file() or file.is_symlink() or file.stat().st_size>16*1024**2:
+            raise ValueError('Fulfillment source XLSX unavailable')
+        data=file.read_bytes()
+        if hashlib.sha256(data).hexdigest()!=payload['file_sha256']:
+            raise ValueError('Fulfillment source XLSX changed')
+        return data,'fulfillment-source-'+upload_id+'.xlsx',XLSX_CONTENT_TYPE
 
     def delete_upload(
         self,
@@ -1247,6 +1273,7 @@ def _upload_row_to_dict(row: sqlite3.Row, *, include_links: bool = False) -> dic
         "updated_at": row["updated_at"],
     }
     if include_links:
+        payload['source_path']=f"{FULFILLMENT_SERVICES_BASE_PATH}/uploads/{row['upload_id']}/source.xlsx"
         payload["pdf_path"] = (
             f"{FULFILLMENT_SERVICES_BASE_PATH}/uploads/{row['upload_id']}/payment-validation.pdf"
             if payload["pdf_available"]

@@ -22,6 +22,7 @@ from packages.application.ff_pool_foundation import (
     LINES_TABLE,
     OPERATIONS_TABLE,
     canonical_decimal_text,
+    canonical_decimal_ratio_text,
     evaluate_ff_pool_aggregate_parity,
     ensure_ff_pool_foundation_schema,
     record_ff_pool_parity_diagnostic,
@@ -1801,7 +1802,7 @@ def _apply_exact_physical_delta(
     new_wac = (
         None
         if new_quantity == 0
-        else canonical_decimal_text(_decimal_ratio(new_capital, new_quantity))
+        else canonical_decimal_text(_stored_wac_ratio(new_capital, new_quantity))
     )
     exact_source_business_date = str(
         source_business_date or manifest["business_date"]
@@ -2849,6 +2850,26 @@ def _frozen_wac(
     manifest: Mapping[str, Any],
     order: Mapping[str, Any],
 ) -> Decimal:
+    # A terminal observation belongs to the already frozen lifecycle episode,
+    # even after the remaining pool stock has been reallocated elsewhere. A
+    # physical debit's immutable event authenticates that cost; no live price
+    # or positive current balance is required for a subsequent zero effect.
+    completed = conn.execute(
+        f"""SELECT current.frozen_wac_rub,current.state,current.debit_event_id,
+                   debit.frozen_wac_rub,debit.physical_quantity_delta
+            FROM {CURRENT_TABLE} current
+            LEFT JOIN {EVENTS_TABLE} debit
+              ON debit.event_id=current.debit_event_id
+             AND debit.cutover_id=current.cutover_id AND debit.order_id=current.order_id
+            WHERE current.cutover_id=? AND current.order_id=?""",
+        (str(manifest["cutover_id"]), int(order["order_id"])),
+    ).fetchone()
+    if completed is not None and str(completed[1]) in {"fulfilled", "fulfilled_reconciliation"}:
+        if completed[3] is None or int(completed[4]) >= 0:
+            raise FfPoolFbsLifecycleError("frozen_debit_event_missing", "Completed order lacks its immutable debit cost")
+        return Decimal(str(completed[3]))
+    if completed is not None and str(completed[1]) in {"cancelled_noop", "released"}:
+        return Decimal(str(completed[0]))
     match = next(
         (
             item
@@ -2876,7 +2897,7 @@ def _frozen_wac(
         quantity = int(current[0][0])
         capital = Decimal(str(current[0][1]))
         if quantity > 0 and capital > ZERO:
-            return _decimal_ratio(capital, quantity)
+            return _stored_wac_ratio(capital, quantity)
     extension_id = str(order.get("mapping_extension_id") or "")
     extension_rows = (
         conn.execute(
@@ -2942,7 +2963,9 @@ def _current_handoff_wac(
                 "requested_quantity": requested,
             },
         )
-    current_wac = _decimal_ratio(capital, quantity)
+    # WAC is a stored ledger field with a bounded Decimal-text representation.
+    # Capital multiplication and addition stay exact at their wider precision.
+    current_wac = _stored_wac_ratio(capital, quantity)
     if current_wac <= ZERO:
         raise FfPoolFbsLifecycleError(
             "handoff_current_wac_non_positive",
@@ -3276,6 +3299,20 @@ def _decimal_ratio(capital: Decimal, quantity: int) -> Decimal:
     with localcontext() as context:
         context.prec = 160
         return Decimal(capital) / Decimal(int(quantity))
+
+
+def _stored_wac_ratio(capital: Decimal, quantity: int) -> Decimal:
+    """Preserve representable exact tails; bound repeating stored ratios.
+
+    In particular a final one-unit exit must consume its entire native capital,
+    including a legal fractional tail beyond precision38. Only a ratio that
+    cannot fit the existing 80-character WAC field uses the ledger WAC policy.
+    Capital remains independently authoritative and is never rounded here.
+    """
+    ratio = _decimal_ratio(capital, quantity)
+    if len(canonical_decimal_text(ratio)) <= 80:
+        return ratio
+    return Decimal(canonical_decimal_ratio_text(capital, quantity))
 
 
 def _require_utc(value: str) -> None:

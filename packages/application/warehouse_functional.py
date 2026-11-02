@@ -9,6 +9,7 @@ replace the last good version.
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, localcontext
@@ -6671,6 +6672,14 @@ class WarehouseFunctionalBlock:
                                 "cost_freshness": "current",
                             }
                         )
+                        if component.get("historical_ff_unit_cost_rub") is not None and _decimal(component["historical_ff_unit_cost_rub"]) != outbound_ff_wac:
+                            raise WarehouseFunctionalError("historical downstream frozen FF basis changed")
+                        if component.get("historical_native_plan_digest"):
+                            provenance["historical_native_plan_digest"] = component["historical_native_plan_digest"]
+                        if component.get("missing_cost_components"):
+                            supply_cost_quality = "physical_movement_costs_pending"
+                            provenance.update(cost_freshness="preliminary", downstream_cost_status="partially_available",
+                                missing_cost_components=list(component["missing_cost_components"]))
                         supply_cost_covered = True
                 source_fingerprint = _hash(
                     {
@@ -7120,6 +7129,8 @@ class WarehouseFunctionalBlock:
         opening_cost_map: Iterable[Mapping[str, Any]],
         cutover_mode: bool,
         allow_partial: bool = False,
+        connection: sqlite3.Connection | None = None,
+        replay_nm_ids: Iterable[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Replay versioned post-cutover WB WAC through the current snapshot day.
 
@@ -7187,7 +7198,10 @@ class WarehouseFunctionalBlock:
                 )
             return rows
 
-        with _connect(self.runtime.db_path) as conn:
+        if connection is not None and (not connection.in_transaction
+                or connection.execute("PRAGMA query_only").fetchone()[0] != 1):
+            raise WarehouseFunctionalError("daily WB replay requires an owned query-only snapshot")
+        with (nullcontext(connection) if connection is not None else _connect(self.runtime.db_path)) as conn:
             cutover = conn.execute(
                 "SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers WHERE cutover_id=?",
                 (FUNCTIONAL_CUTOVER_ID,),
@@ -7346,6 +7360,11 @@ class WarehouseFunctionalBlock:
         for rows in events_by_day.values():
             target_nm_ids.update(int(item.get("nm_id") or 0) for item in rows)
         target_nm_ids.discard(0)
+        if replay_nm_ids is not None:
+            requested = {int(nm) for nm in replay_nm_ids}
+            if not requested or any(nm <= 0 for nm in requested):
+                raise WarehouseFunctionalError("daily WB replay SKU scope is invalid")
+            target_nm_ids.intersection_update(requested)
 
         previous_quantity = {
             nm_id: opening_quantity.get(nm_id, ZERO) for nm_id in target_nm_ids
@@ -7365,8 +7384,12 @@ class WarehouseFunctionalBlock:
             for nm_id in target_nm_ids
         }
         result: list[dict[str, Any]] = []
+        historical_uncertainty: dict[int, dict[str, Any]] = {}
+        carried_dates: list[str] = []
         for day in _date_range(cutover_date, current_date):
             snapshot = snapshots_by_day.get(day)
+            if snapshot is None:
+                carried_dates.append(day)
             event_groups: defaultdict[int, list[Mapping[str, Any]]] = defaultdict(list)
             for event in events_by_day.get(day, []):
                 event_groups[int(event.get("nm_id") or 0)].append(event)
@@ -7374,6 +7397,14 @@ class WarehouseFunctionalBlock:
                 prior_qty = previous_quantity.get(nm_id, ZERO)
                 prior_wac = previous_wac.get(nm_id)
                 event_rows = event_groups.get(nm_id, [])
+                if snapshot is None and nm_id in historical_uncertainty:
+                    historical_uncertainty[nm_id]["missing_quantity_dates"] = sorted(set(historical_uncertainty[nm_id]["missing_quantity_dates"]) | {day})
+                historical = [e for e in event_rows if (e.get("provenance") or {}).get("historical_native_plan_digest")]
+                if historical:
+                    uncertainty = historical_uncertainty.setdefault(nm_id, {"missing_quantity_dates": [], "missing_cost_components": []})
+                    uncertainty["missing_quantity_dates"] = sorted(set(uncertainty["missing_quantity_dates"]) | set(carried_dates))
+                    if any((e.get("provenance") or {}).get("cost_freshness") == "preliminary" for e in historical):
+                        uncertainty["missing_cost_components"] = ["transit_or_downstream_services"]
                 quantity_delta = sum((_decimal(item.get("quantity")) for item in event_rows), ZERO)
                 capital_delta = sum((_decimal(item.get("capital_rub")) for item in event_rows), ZERO)
                 if prior_wac is None and prior_qty > ZERO and (quantity_delta != ZERO or capital_delta != ZERO):
@@ -7428,6 +7459,9 @@ class WarehouseFunctionalBlock:
                     if day == current_date
                     else "periodic_snapshot_wac_closed"
                 )
+                uncertainty = historical_uncertainty.get(nm_id)
+                if uncertainty and (uncertainty["missing_quantity_dates"] or uncertainty["missing_cost_components"]):
+                    quality = "periodic_snapshot_wac_provisional"
                 result.append(
                     _daily_wb_cost_row(
                         day=day,
@@ -7437,6 +7471,7 @@ class WarehouseFunctionalBlock:
                         quality=quality,
                         provenance={
                             **({"initial_valuation_anchor": anchor} if anchor else {}),
+                            **({"historical_fbo_quality": {k:list(v) for k,v in uncertainty.items()}} if uncertainty else {}),
                             "source": "versioned_functional_wb_daily_replay",
                             "snapshot_id": str((snapshot or {}).get("snapshot_id") or "carried_last_good"),
                             "snapshot_version_id": str((snapshot or {}).get("version_id") or "carried_last_good"),
@@ -8004,7 +8039,7 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
 
 
 # The same numeric native operands are retained by operator publication proof.
-_DOWNSTREAM_COST_ROWS_SQL = 'SELECT wb_supply_id,nm_id,accepted_qty quantity,accepted_date,supply_date,sku_ff_unit_cost_rub ff_unit_cost_rub,transit_cost_status,transit_per_unit_rub,ff_services_per_unit_rub,ff_storage_per_unit_rub,pre_acceptance_unit_cost_rub,wb_acceptance_amount_total,wb_acceptance_per_accepted_unit_rub,our_wb_unit_cost_rub wb_unit_cost_rub,source_status,component_status_json,inputs_hash FROM sheet_vitrina_v1_wb_supply_cost_layers WHERE is_current=1 ORDER BY wb_supply_id,nm_id'
+_DOWNSTREAM_COST_ROWS_SQL = 'SELECT wb_supply_id,nm_id,accepted_qty quantity,accepted_date,supply_date,sku_ff_unit_cost_rub ff_unit_cost_rub,transit_cost_status,transit_per_unit_rub,qty_denominator,ff_services_amount_total,ff_storage_amount_total,ff_services_per_unit_rub,ff_storage_per_unit_rub,pre_acceptance_unit_cost_rub,wb_acceptance_amount_total,wb_acceptance_per_accepted_unit_rub,our_wb_unit_cost_rub wb_unit_cost_rub,source_status,component_status_json,inputs_hash FROM sheet_vitrina_v1_wb_supply_cost_layers WHERE is_current=1 ORDER BY wb_supply_id,nm_id'
 
 
 def _source_rows(
@@ -8800,6 +8835,31 @@ def _supply_downstream_component_index(
         if not supply_id or nm_id <= 0:
             continue
         transit_status = str(row.get("transit_cost_status") or "")
+        historical = _loads(row.get("component_status_json"), {}).get("historical_fbo_native_source") or {}
+        if historical.get("contract") == "historical_fbo_frozen_native_cost_layers_v1":
+            # This typed source has immutable FF money and independently
+            # accepted fees. Unknown WB add-ons must not erase known FF fees.
+            missing = []
+            denominator = _decimal(row.get("qty_denominator"))
+            if denominator <= ZERO or row.get("ff_services_amount_total") is None or row.get("ff_storage_amount_total") is None:
+                raise WarehouseFunctionalError("historical supply exact fee allocation is missing")
+            pre = (_decimal(row["ff_services_amount_total"]) + _decimal(row["ff_storage_amount_total"])) / denominator
+            if transit_status in {"transit_confirmed", "direct_zero_confirmed"} and row.get("transit_per_unit_rub") is not None:
+                pre += _decimal(row["transit_per_unit_rub"])
+            else:
+                missing.append("wb_transit")
+            acceptance = ZERO
+            if row.get("wb_acceptance_per_accepted_unit_rub") is not None:
+                acceptance = _decimal(row["wb_acceptance_per_accepted_unit_rub"])
+            else:
+                missing.append("wb_paid_acceptance")
+            if min(pre, acceptance) < ZERO or row.get("ff_services_per_unit_rub") is None or row.get("ff_storage_per_unit_rub") is None:
+                raise WarehouseFunctionalError("historical supply has invalid known downstream fees")
+            result[(supply_id, nm_id)] = {"pre_acceptance_addon": pre, "acceptance_addon": acceptance,
+                "inputs_hash": str(row.get("inputs_hash") or ""), "missing_cost_components": missing,
+                "historical_ff_unit_cost_rub": abs(_decimal(historical["capital_delta_rub"]) / _decimal(historical["quantity_delta"])),
+                "historical_native_plan_digest": historical.get("plan_digest")}
+            continue
         if transit_status not in {"transit_confirmed", "direct_zero_confirmed"}:
             continue
         transit = _decimal(row.get("transit_per_unit_rub"))

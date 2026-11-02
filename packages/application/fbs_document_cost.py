@@ -260,13 +260,19 @@ def _solve(nodes, links):
     return prices
 
 
-def resolve_document_costs(state, capture, opening, absorbed):
+def resolve_document_costs(state, capture, opening, absorbed, *, historical_fbo_outgoings=()):
+    """Price native documents and optional unconnected historical FBO drafts.
+
+    The explicit keyword is a pure planning seam, not document admission. Its
+    output carries no native posting or publication authority. Ordinary callers
+    keep their existing contract and document-kind allowlist.
+    """
     with localcontext() as decimal_context:
         decimal_context.prec = 50
-        return _resolve(state, capture, opening, absorbed)
+        return _resolve(state, capture, opening, absorbed, historical_fbo_outgoings)
 
 
-def _resolve(state, capture, opening, absorbed):
+def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
     day = capture["business_date"]
     prior = state["baseline"]["document_cost_state"]
     for _date, period in sorted(state["periods"].items()):
@@ -277,6 +283,8 @@ def _resolve(state, capture, opening, absorbed):
     documents = {d["document_id"]: deepcopy(d) for d in capture["documents"]}
     current = {i: d for i, d in documents.items() if i not in absorbed and d["business_date"] == day}
     nodes, effects, links, bindings, overheads = {}, {}, [], [], []
+    historical_fbo_outgoings = list(historical_fbo_outgoings)
+    native_fbo_costs = {}
 
     def node(k):
         if k not in nodes:
@@ -364,6 +372,18 @@ def _resolve(state, capture, opening, absorbed):
                     "base_capital_rub": None, "expense_components": {doc["document_id"]: allocations.get(nm, 0)},
                     "outcomes": [], "terminal_quantity": 0, "new_source_key": src_key,
                     "cost_reference": {**source(doc), "business_date": day, "source_key": src_key}}
+        elif kind == "historical_wb_dispatch":
+            if data.get("contract") != "historical_fbo_native_cost_source_v1" or not doc.get("historical_fbo_native"):
+                raise ValueError("historical_fbo_native_cost_source_required")
+            domain = data["domain"]
+            outgoing = {"supply_id": domain["supply_id"], "source_key": domain["source_key"],
+                "business_date": day, "facility_id": domain["facility_id"], "source_digest": doc["fingerprint"],
+                "items": [{"nm_id": line["nm_id"], "quantity": units(line["quantity"])} for line in data["lines"]]}
+            if data["expense_lines"] or len(data["movements"]) != len(outgoing["items"]):
+                raise ValueError("historical_fbo_native_cost_operands_invalid")
+            for movement in data["movements"]:
+                native_fbo_costs[(domain["source_key"], movement["nm_id"])] = movement
+            historical_fbo_outgoings.append(outgoing)
         elif kind == "pool_reallocation":
             domain = data["domain"]
             weights = {int(line["nm_id"]): units(line["quantity"]) for line in data["lines"]}
@@ -503,9 +523,47 @@ def _resolve(state, capture, opening, absorbed):
                 effect(doc, k, "expense", value=Decimal(amount) / 100,
                        reference={"allocation_basis_id": basis["id"]})
 
+    # Outgoing stock does not enter the daily cost mass. These typed operands
+    # deliberately cannot masquerade as a receipt, correction or native row.
+    outgoing_sources = set()
+    for outgoing in historical_fbo_outgoings:
+        supply = outgoing.get("supply_id")
+        if (type(supply) is not str or not supply.isdecimal() or int(supply) <= 0
+                or outgoing.get("source_key") != "wb_supply_debit:supply:" + supply
+                or outgoing.get("business_date") != day
+                or not outgoing.get("source_digest")
+                or supply in outgoing_sources or not outgoing.get("items")):
+            raise ValueError("historical_fbo_outgoing_identity_invalid")
+        outgoing_sources.add(supply)
+        seen = set()
+        for line in outgoing["items"]:
+            nm, q = line["nm_id"], units(line["quantity"])
+            if type(nm) is not int or nm <= 0 or nm in seen or q <= 0:
+                raise ValueError("historical_fbo_outgoing_line_invalid")
+            seen.add(nm)
+            node(key(outgoing["facility_id"], "FBO", nm))["outgoing"] += q
     prices = _solve(nodes, links)
-    basis_id = digest({"date": day, "opening": opening, "auxiliary_opening": prior,
-                       "documents": {i: d["fingerprint"] for i, d in current.items()}, "allocations": allocations_evidence})
+    basis = {"date": day, "opening": opening, "auxiliary_opening": prior,
+             "documents": {i: d["fingerprint"] for i, d in current.items()}, "allocations": allocations_evidence}
+    if historical_fbo_outgoings:
+        basis["historical_fbo_outgoings"] = list(historical_fbo_outgoings)
+    basis_id = digest(basis)
+    outgoing_values = []
+    for outgoing in historical_fbo_outgoings:
+        for line in outgoing["items"]:
+            k = key(outgoing["facility_id"], "FBO", line["nm_id"])
+            wac = prices[k]
+            if wac is None:
+                raise ValueError("historical_fbo_outgoing_cost_missing")
+            outgoing_values.append({"source_key": outgoing["source_key"], "supply_id": outgoing["supply_id"],
+                "source_digest": outgoing["source_digest"], "business_date": day,
+                "facility_id": outgoing["facility_id"], "pool": "FBO", "nm_id": line["nm_id"],
+                "quantity_delta": -units(line["quantity"]), "capital_delta_rub": text(-wac * units(line["quantity"])),
+                "wac_rub": text(wac), "valuation_basis_id": basis_id})
+            native = native_fbo_costs.get((outgoing["source_key"], line["nm_id"]))
+            if native is not None and (number(native["capital_delta_rub"], signed=True) != -wac * units(line["quantity"])
+                    or native["quantity_delta"] != -units(line["quantity"])):
+                raise ValueError("historical_fbo_native_frozen_cost_drift")
     for binding in bindings:
         event = effects[binding["document_id"]][binding["effect_index"]]
         wac = prices[binding["source_key"]]
@@ -545,4 +603,7 @@ def _resolve(state, capture, opening, absorbed):
                 events.append({k: v for k, v in item.items() if k != "key"} | {
                     "facility_id": n["facility_id"], "nm_id": n["nm_id"]})
         documents[identity]["events"] = events
-    return documents, auxiliary, {"id": basis_id, "policy": DOCUMENT_POLICY, "allocations": allocations_evidence}
+    valuation = {"id": basis_id, "policy": DOCUMENT_POLICY, "allocations": allocations_evidence}
+    if historical_fbo_outgoings:
+        valuation["historical_fbo_outgoings"] = outgoing_values
+    return documents, auxiliary, valuation
