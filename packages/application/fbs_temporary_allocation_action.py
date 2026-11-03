@@ -605,7 +605,7 @@ def prepare_publication(runtime,*,recipe,binding,now):
         source_confirmation=confirmations,operator_confirmation={},plan=plan,original_capture=captured,
         original_source_fence=candidate['query_fence'],parameter_proof=parameters,
         book_operation_id='temporary-fbs-publish:'+fingerprint([recipe['operation_id'],recipe['attempt_id']])[7:],created_at=recipe['created_at'])
-    publication._json_size(result,publication.MAX_EXPANDED_BYTES,'temporary_allocation_publication_size_limit')
+    publication._json_size(result,publication.publication_limits(CONTRACT)[1],'temporary_allocation_publication_size_limit')
     result['manifest_digest']=fingerprint(result)
     return result
 
@@ -673,9 +673,10 @@ def finalize_scope(runtime,*,manifest,history_ack,finance,economics,now):
             conn.row_factory=sqlite3.Row
             with owned_sqlite.transaction(conn,db_path=runtime.db_path,phase_name='temporary_completion'):
                 proof=validate_source_receipt(conn,manifest=manifest)
-                row=conn.execute('SELECT inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND state=\'complete\'',
+                row=conn.execute('SELECT kind,inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND state=\'complete\'',
                     (manifest['operation_id'],manifest['attempt_id'])).fetchone()
-                require(row and publication.expand_manifest(json.loads(row['inputs_json']))==manifest,'completed_publication_changed')
+                require(row and row['kind']==CONTRACT
+                    and publication.decode_manifest(row['inputs_json'],kind=row['kind'])==manifest,'completed_publication_changed')
                 diagnostics=json.loads(row['diagnostics_json']);require(diagnostics.get('historical_history_ack')==history_ack,'stored_history_ack_changed')
                 diagnostics.update(temporary_allocation_scope_complete=True,temporary_allocation_finance=finance,
                     temporary_allocation_economics=economics,temporary_allocation_quality_proof=manifest['candidate']['quality_proof'])
@@ -716,9 +717,10 @@ def _pipeline(runtime,*,recipe,binding,owner_token,now,fault=None):
     # A crash after book activation resumes the immutable stored child; it
     # never re-plans from a current pool that already contains all effects.
     with ready.readonly(runtime.db_path) as conn:
-        child=conn.execute('SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+        child=conn.execute('SELECT kind,inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
             (recipe['publication_operation_id'],recipe['attempt_id'])).fetchone()
-    manifest=publication.expand_manifest(json.loads(child[0])) if child else prepare_publication(runtime,recipe=recipe,binding=binding,now=now)
+    require(not child or child['kind']==CONTRACT,'publication_kind_changed')
+    manifest=publication.decode_manifest(child['inputs_json'],kind=child['kind']) if child else prepare_publication(runtime,recipe=recipe,binding=binding,now=now)
     require(_numeric(manifest)==recipe['numeric'],'approved_full_preflight_changed')
     publication.publish(manifest,runtime_dir=runtime.runtime_dir)
     return manifest

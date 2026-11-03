@@ -44,6 +44,31 @@ BOOK_DAY_FIELDS=('wb_days','retained_days','shared_days','presentations')
 # visits repeated references; bound that expanded representation before any
 # large reconstruction/serialization (the measured real contour is 235 MB).
 MAX_EXPANDED_BYTES=320*1024**2
+# Measured TEMP-only unique operands: 383,865,799 bytes stored and
+# 548,178,970 expanded (eight exact Ready before/after images retained).
+TEMPORARY_MAX_BYTES=384*1024**2
+TEMPORARY_MAX_EXPANDED_BYTES=640*1024**2
+
+
+def publication_limits(contract):
+    stages.require(type(contract) is str and contract in PUBLICATION_CONTRACTS,
+                   'historical_publication_contract_invalid')
+    return ((TEMPORARY_MAX_BYTES,TEMPORARY_MAX_EXPANDED_BYTES)
+            if contract==TEMPORARY_CONTRACT else (MAX_BYTES,MAX_EXPANDED_BYTES))
+
+
+def decode_manifest(encoded, *, kind):
+    """Bound actual stored UTF-8 bytes before parsing; never trust a length hint."""
+    limit,_=publication_limits(kind)
+    stages.require(type(encoded) is str and len(encoded)<=limit,'historical_publication_size_limit')
+    size=0
+    for offset in range(0,len(encoded),65536):
+        size+=len(encoded[offset:offset+65536].encode())
+        stages.require(size<=limit,'historical_publication_size_limit')
+    stored=json.loads(encoded)
+    stages.require(type(stored) is dict and stored.get('contract')==kind,
+                   'historical_publication_kind_changed')
+    return expand_manifest(stored)
 
 
 def _same_json(left, right):
@@ -83,6 +108,8 @@ def compact_manifest(manifest):
     book and target before-images. No external lookup, recursive reference or
     compression is involved. Original unencoded intents remain readable.
     """
+    stored_limit,expanded_limit=publication_limits(manifest.get('contract'))
+    _json_size(manifest,expanded_limit,'historical_manifest_expanded_size_limit')
     stages.require('storage_encoding' not in manifest,'historical_manifest_already_encoded')
     base=manifest['plan']['candidate_book'];book=manifest['candidate']['candidate_book']
     stages.require(set(base)==set(book),'historical_manifest_book_shape_changed')
@@ -104,17 +131,24 @@ def compact_manifest(manifest):
         elif donor and target['before_envelope_json']==_promoted_envelope(ready.ExpectedReady(**donor),target['expected']['as_of_date']):
             target.pop('before_envelope_json');target['before_envelope_source']='donor_promoted'
         targets.append(target)
-    return {**manifest,'storage_encoding':STORAGE_ENCODING,'candidate':candidate,'targets':targets}
+    result={**manifest,'storage_encoding':STORAGE_ENCODING,'candidate':candidate,'targets':targets}
+    _json_size(result,stored_limit,'historical_publication_size_limit')
+    return result
 
 
 def expand_manifest(stored):
     """Resolve only fixed, nonrecursive references, before normal verification."""
-    if 'storage_encoding' not in stored:return stored
     require=stages.require
+    require(type(stored) is dict,'historical_publication_contract_invalid')
+    stored_limit,expanded_limit=publication_limits(stored.get('contract'))
+    if 'storage_encoding' not in stored:
+        _json_size(stored,expanded_limit,'historical_manifest_expanded_size_limit')
+        return stored
     require(stored['storage_encoding']==STORAGE_ENCODING,'historical_manifest_encoding_unknown')
-    expanded_size=_json_size(stored,MAX_BYTES,'historical_publication_size_limit')
+    expanded_size=_json_size(stored,stored_limit,'historical_publication_size_limit')
     base=stored['plan']['candidate_book'];candidate=dict(stored['candidate'])
-    expanded_size+=_json_size(base,MAX_EXPANDED_BYTES,'historical_manifest_expanded_size_limit')
+    expanded_size+=_json_size(base,expanded_limit,'historical_manifest_expanded_size_limit')
+    require(expanded_size<=expanded_limit,'historical_manifest_expanded_size_limit')
     require('candidate_book' not in candidate,'historical_manifest_duplicate_book')
     overlay=candidate.pop('candidate_book_overlay')
     require(set(overlay)=={'fields','days'} and set(overlay['days'])==set(BOOK_DAY_FIELDS)
@@ -133,23 +167,24 @@ def expand_manifest(stored):
                 and 'donor_expected' not in target,'historical_manifest_donor_reference_invalid')
             target['donor_expected']=stored['targets'][index]['expected']
             require(target['donor_expected']['plan_json'] is not None,'historical_manifest_donor_reference_invalid')
-            expanded_size+=_json_size(target['donor_expected'],MAX_EXPANDED_BYTES,'historical_manifest_expanded_size_limit')
+            expanded_size+=_json_size(target['donor_expected'],expanded_limit,'historical_manifest_expanded_size_limit')
+            require(expanded_size<=expanded_limit,'historical_manifest_expanded_size_limit')
         if 'before_envelope_source' in target:
             source=target.pop('before_envelope_source')
             require('before_envelope_json' not in target,'historical_manifest_duplicate_before')
             if source=='expected':
                 require(target['expected']['plan_json'] is not None,'historical_manifest_before_reference_invalid')
-                expanded_size+=_json_size(target['expected']['plan_json'],MAX_EXPANDED_BYTES,'historical_manifest_expanded_size_limit')
-                require(expanded_size<=MAX_EXPANDED_BYTES,'historical_manifest_expanded_size_limit')
+                expanded_size+=_json_size(target['expected']['plan_json'],expanded_limit,'historical_manifest_expanded_size_limit')
+                require(expanded_size<=expanded_limit,'historical_manifest_expanded_size_limit')
                 target['before_envelope_json']=target['expected']['plan_json']
             elif source=='donor_promoted':
                 require(target.get('donor_expected') is not None,'historical_manifest_before_reference_invalid')
-                expanded_size+=_json_size(target['donor_expected']['plan_json'],MAX_EXPANDED_BYTES,'historical_manifest_expanded_size_limit')+1024
-                require(expanded_size<=MAX_EXPANDED_BYTES,'historical_manifest_expanded_size_limit')
+                expanded_size+=_json_size(target['donor_expected']['plan_json'],expanded_limit,'historical_manifest_expanded_size_limit')+1024
+                require(expanded_size<=expanded_limit,'historical_manifest_expanded_size_limit')
                 target['before_envelope_json']=_promoted_envelope(ready.ExpectedReady(**target['donor_expected']),target['expected']['as_of_date'])
             else:require(False,'historical_manifest_before_reference_invalid')
         targets.append(target)
-    require(expanded_size<=MAX_EXPANDED_BYTES,'historical_manifest_expanded_size_limit')
+    require(expanded_size<=expanded_limit,'historical_manifest_expanded_size_limit')
     return {**{k:v for k,v in stored.items() if k!='storage_encoding'},'candidate':candidate,'targets':targets}
 
 
@@ -533,7 +568,8 @@ def publish(manifest, *, runtime_dir, fault_injector=None):
             conn.row_factory=sqlite3.Row
             existing=conn.execute("SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?",(manifest["operation_id"],manifest["attempt_id"])).fetchone()
             if existing:
-                stored=json.loads(existing["inputs_json"])
+                stages.require(existing['kind']==manifest['contract'],'historical_publication_kind_changed')
+                stored=decode_manifest(existing['inputs_json'],kind=existing['kind'])
                 stages.require(stored["manifest_digest"]==manifest["manifest_digest"],"historical_publication_retry_identity_conflict")
                 if existing["state"]=="complete":return publication_receipt(manifest,runtime_dir=runtime_dir)
             # This additive bootstrap may use executescript (implicit COMMIT).

@@ -191,4 +191,26 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(result['readback']['fee_attempts'][0]['state'],'needs_review')
 
 
+class ChildPublicationKindTests(unittest.TestCase):
+    def test_recovery_cannot_parse_a_temporary_child_through_the_fbo_route(self):
+        import sqlite3
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        with closing(sqlite3.connect(':memory:')) as conn:
+            conn.row_factory=sqlite3.Row
+            conn.execute('CREATE TABLE sheet_vitrina_v1_ready_publications(operation_id,attempt_id,kind,inputs_json)')
+            temporary=typed.publication.TEMPORARY_CONTRACT
+            conn.execute("INSERT INTO sheet_vitrina_v1_ready_publications VALUES('child','1',?,'not JSON')",(temporary,))
+            recipe={'publication_operation_id':'child','publication_attempt_id':'1'}
+            with patch.object(action.ready,'readonly',side_effect=lambda _:nullcontext(conn)), \
+                 patch.object(typed,'apply_native_from_effect_intent',side_effect=AssertionError('native effects')):
+                with patch.object(typed.publication,'decode_manifest',side_effect=AssertionError('wrong native kind decoded')):
+                    with self.assertRaisesRegex(ValueError,'publication_kind_changed'):
+                        action._pipeline(SimpleNamespace(db_path='fixture'),recipe=recipe,binding={},workbooks={},recapture=None,owner_token='none',now=None)
+                conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET kind=?,inputs_json=?',
+                             (typed.CONTRACT,canonical({'contract':temporary})))
+                with self.assertRaisesRegex(ValueError,'publication_kind_changed'):
+                    action._pipeline(SimpleNamespace(db_path='fixture'),recipe=recipe,binding={},workbooks={},recapture=None,owner_token='none',now=None)
+
+
 if __name__=='__main__':unittest.main()

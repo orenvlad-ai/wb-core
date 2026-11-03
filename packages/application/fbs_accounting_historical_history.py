@@ -15,7 +15,7 @@ from packages.application import fbs_accounting_historical_sqlite as historical_
 from packages.application import ready_publication as ready
 from packages.application import fbs_accounting_runtime as accounting
 from packages.application.fbs_snapshot_cost import canonical, fingerprint
-from packages.application.fbs_accounting_historical_publication import CONTRACT,PUBLICATION_CONTRACTS,PUBLICATION_SQL_PLACEHOLDERS,FBO_CONTRACT,TEMPORARY_CONTRACT,expand_manifest
+from packages.application.fbs_accounting_historical_publication import CONTRACT,PUBLICATION_CONTRACTS,PUBLICATION_SQL_PLACEHOLDERS,FBO_CONTRACT,TEMPORARY_CONTRACT,decode_manifest,publication_limits
 from packages.application.fbs_accounting_historical_stages import require
 
 MAX_READY_HEADERS = 10000
@@ -86,11 +86,13 @@ class HistoricalReceipt:
 
     def _read(self):
         with ready.readonly(self.runtime.db_path) as conn:
-            size=conn.execute('SELECT length(inputs_json),length(diagnostics_json) FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(self.operation_id,self.attempt_id)).fetchone()
-            require(size and size[0]<=160*1024**2 and size[1]<=32*1024**2,'historical_history_publication_size_limit')
+            size=conn.execute('SELECT kind,length(CAST(inputs_json AS BLOB)),length(CAST(diagnostics_json AS BLOB)) FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(self.operation_id,self.attempt_id)).fetchone()
+            require(size is not None,'historical_history_publication_size_limit')
+            limit,_=publication_limits(size[0])
+            require(size[1]<=limit and size[2]<=32*1024**2,'historical_history_publication_size_limit')
             row = conn.execute('SELECT kind,state,inputs_json,book_version,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?', (self.operation_id,self.attempt_id)).fetchone()
         require(row and row['kind'] in PUBLICATION_CONTRACTS and row['state']=='complete', 'historical_history_publication_not_complete')
-        manifest = expand_manifest(json.loads(row['inputs_json']))
+        manifest = decode_manifest(row['inputs_json'],kind=row['kind'])
         require(manifest['contract']==row['kind'],'historical_history_publication_kind_changed')
         require(manifest['manifest_digest'] == fingerprint({k:v for k,v in manifest.items() if k not in {'manifest_digest','prepare_seconds'}})
                 and manifest['after_book'] == row['book_version'], 'historical_history_manifest_corrupt')
@@ -192,10 +194,11 @@ class HistoricalReceipt:
         # The live supervisor still owns every history descriptor. A short CAS
         # appends evidence to this real publication, never changes its inputs.
         with historical_sqlite.connection(self.runtime.db_path,phase_name='history_ack_connection') as conn, historical_sqlite.transaction(conn,db_path=self.runtime.db_path,phase_name='history_ack'):
-            row=conn.execute('SELECT inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND state=\'complete\'',(self.operation_id,self.attempt_id)).fetchone()
-            require(row and expand_manifest(json.loads(row[0]))==self.manifest,'historical_history_receipt_changed')
-            diagnostics=json.loads(row[1]);diagnostics['historical_history_ack']=dict(manifest_digest=self.manifest['manifest_digest'],native={d:dict(v) for d,v in native.items()})
-            require(conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=? WHERE operation_id=? AND attempt_id=? AND diagnostics_json=?',(canonical(diagnostics),self.operation_id,self.attempt_id,row[1])).rowcount==1,'historical_history_ack_cas_failed')
+            row=conn.execute('SELECT kind,inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND state=\'complete\'',(self.operation_id,self.attempt_id)).fetchone()
+            require(row and row[0]==self.manifest['contract']
+                and decode_manifest(row[1],kind=row[0])==self.manifest,'historical_history_receipt_changed')
+            diagnostics=json.loads(row[2]);diagnostics['historical_history_ack']=dict(manifest_digest=self.manifest['manifest_digest'],native={d:dict(v) for d,v in native.items()})
+            require(conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=? WHERE operation_id=? AND attempt_id=? AND diagnostics_json=?',(canonical(diagnostics),self.operation_id,self.attempt_id,row[2])).rowcount==1,'historical_history_ack_cas_failed')
 
 
 def pending_receipt(runtime):

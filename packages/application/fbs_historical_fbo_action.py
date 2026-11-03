@@ -454,10 +454,11 @@ def _numeric(manifest):
 
 def _pipeline(runtime, *, recipe, binding, workbooks, recapture, owner_token, now):
     with ready.readonly(runtime.db_path) as conn:
-        row=conn.execute('SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+        row=conn.execute('SELECT kind,inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
             (recipe['publication_operation_id'],recipe['publication_attempt_id'])).fetchone()
     if row:
-        manifest=typed.publication.expand_manifest(json.loads(row[0]))
+        require(row['kind']==typed.CONTRACT,'publication_kind_changed')
+        manifest=typed.publication.decode_manifest(row['inputs_json'],kind=row['kind'])
     else:
         typed.apply_native_from_effect_intent(binding,runtime=runtime,recapture=recapture,owner_token=owner_token)
         fees=typed.apply_fees_from_effect_intent(binding,runtime=runtime,workbooks=workbooks,owner_token=owner_token)
