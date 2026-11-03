@@ -122,6 +122,33 @@ class CurrentFboTests(unittest.TestCase):
         self.assertFalse(pruned['publication_retained'])
         self.assertEqual(self.adapter.apply(self.request,self.operation,preview)['disposition'],'already_applied')
 
+    def test_current_dispatch_without_late_receipt_keeps_ordinary_capture(self):
+        from datetime import datetime, timedelta
+        from packages.application import fbs_accounting_historical_sources as historical
+        from packages.application.fbs_snapshot_cost_sources import capture_current
+        from packages.application import ready_publication
+        preview=self.adapter.preview(self.request,self.operation)
+        self.adapter.apply(self.request,self.operation,preview)
+        now=datetime.fromisoformat(NOW.replace('Z','+00:00'))
+        yesterday=(now.date()-timedelta(days=1)).isoformat()
+        book=dict(state=dict(baseline=dict(absorbed_documents={}),periods={
+            yesterday:dict(status='closed',applied_documents={})}))
+        with ready_publication.readonly(self.runtime.db_path) as conn:
+            ordinary=capture_current(self.runtime.db_path,now=now,include_baseline=False,connection=conn)
+            self.assertTrue(ordinary['documents_complete'],ordinary['documents_reason'])
+            typed=[d['document_id'] for d in ordinary['documents'] if d['kind']=='current_fbo_dispatch']
+            self.assertEqual(len(typed),3)
+            cohort=historical.capture_confirmed_cohort(conn,db_path=self.runtime.db_path,book=book,now=now)
+            self.assertEqual(cohort['receipt_document_ids'],[])
+            self.assertTrue(set(typed)<=set(cohort['current_document_ids']))
+            self.assertEqual(cohort['capture']['documents'],ordinary['documents'])
+            self.assertEqual(cohort['capture']['source_digest'],ordinary['source_digest'])
+            self.assertNotIn('native_requests_by_id',cohort['capture'])
+            # No missing native-document guard is weakened for a genuinely
+            # selected historical contour; this source remains receipt-owned.
+            with self.assertRaisesRegex(ValueError,'historical_native_document_missing:'):
+                historical.augment_native_requests(conn,ordinary,document_ids=typed)
+
     def test_current_close_does_not_replay_historical_wb_acceptance(self):
         from packages.application.current_fbo_supply_cost_source import capture_warehouse_closures
         from packages.application.warehouse_functional import _wb_supplies_for_current_replay, _guarded_local_sources
