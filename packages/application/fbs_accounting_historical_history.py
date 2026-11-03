@@ -163,6 +163,8 @@ class HistoricalReceipt:
             while chunk := blob.read(_CHUNK): hashed.update(chunk)
         observed = (*row, size, hashed.hexdigest())
         require(not hasattr(self, '_stored') or observed == self._stored, 'historical_history_receipt_changed')
+        retirement=conn.execute('SELECT diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE rowid=?',(row[0],)).fetchone()[0]
+        require('historical_publication_retirement' not in json.loads(retirement), 'historical_history_publication_retired')
         return observed
 
     def _diagnostics(self, conn, rowid):
@@ -312,8 +314,10 @@ def pending_receipt(runtime):
     with ready.readonly(runtime.db_path) as conn:
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='sheet_vitrina_v1_ready_publications'").fetchone():return None
         rows=conn.execute(f'SELECT operation_id,attempt_id,kind,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE kind IN ({PUBLICATION_SQL_PLACEHOLDERS}) AND state=\'complete\' ORDER BY created_at,operation_id,attempt_id',PUBLICATION_CONTRACTS).fetchall()
-    require(len(rows)<=10000,'historical_history_publication_limit')
-    selected=[r for r in rows if not json.loads(r['diagnostics_json']).get('temporary_allocation_scope_complete' if r['kind']==TEMPORARY_CONTRACT else 'historical_fbo_scope_complete' if r['kind']==FBO_CONTRACT else 'historical_operator_complete')]
+        require(len(rows)<=10000,'historical_history_publication_limit')
+        from packages.application.historical_publication_retirement import retirement_status
+        selected=[r for r in rows if not json.loads(r['diagnostics_json']).get('temporary_allocation_scope_complete' if r['kind']==TEMPORARY_CONTRACT else 'historical_fbo_scope_complete' if r['kind']==FBO_CONTRACT else 'historical_operator_complete')
+            and not retirement_status(conn,r['operation_id'],r['attempt_id'])]
     require(len(selected)<=1,'historical_history_multiple_unfinished_publications')
     return HistoricalReceipt(runtime,selected[0]['operation_id'],selected[0]['attempt_id']) if selected else None
 

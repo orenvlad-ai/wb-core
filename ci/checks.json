@@ -1272,6 +1272,18 @@
       ],
       "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     },
+    "historical_publication_retirement": {
+      "patterns": [
+        "packages/application/historical_publication_retirement.py",
+        "packages/application/fbs_accounting_apply.py",
+        "packages/application/fbs_accounting_historical_history.py",
+        "packages/application/fbs_temporary_allocation_action.py",
+        "packages/application/fbs_historical_fbo_action.py",
+        "apps/historical_publication_retirement_smoke.py"
+      ],
+      "commands": [["python3", "apps/historical_publication_retirement_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "warehouse": {
       "patterns": [
         "apps/*warehouse*.py",

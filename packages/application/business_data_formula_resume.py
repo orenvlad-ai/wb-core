@@ -38,11 +38,13 @@ CONFIG_PROPERTIES = ('FragmentPath', 'DropInPaths', 'ExecStart', 'Triggers', 'Pe
     'TimersCalendar', 'TimersMonotonic', 'AccuracyUSec', 'RandomizedDelayUSec', 'RemainAfterElapse')
 
 BUYER_UNIT = 'wb-core-buyer-authenticated-collect.service'
-# Reviewed installed base e47c7aa78b48a3cecb6f45506bab42ee46859d95.
+# Reviewed installed base f92fc5f54d23296e30a67d672b8c063192e5d14e.
+# Its explicit held-history lease does not change guarded_cli/admitted_write:
+# the buyer still uses the default lease and both ordinary barrier checks.
 # Formula pins alone do not prove that this CLI is guarded before main().
 BUYER_GUARD_SOURCES = {
     'apps/wb_buyer_authenticated_collect.py': '62b1cf880bcfb1ef1d027502fd8da3f605f9fa78c5aa65458a1cfbbfa2d4624a',
-    'packages/application/business_data_procedure_admission.py': '3048383340b37cbb56665f6cc06cb61de2b7ac390d2b929275eca394dbbd7af0',
+    'packages/application/business_data_procedure_admission.py': 'a9c31e3937f605b7c63f0c3bbdae89fd90fa0cff6e2db73af772b2b8657d5b9d',
     'packages/application/business_data_write_barrier.py': 'f39e27d2c9f54812a565bc670fd79ea5132552caf8c82d9bc4360d2d408bb116',
 }
 
@@ -298,9 +300,9 @@ def _save(runtime, state, event):
         proof=state['plan'] if event == 'prepared' else state.get('receipt') if event == 'committed' else None))
 
 
-def _authority(runtime, operation_id, window_id, expected_sha, app, unit_directory, systemd):
+def _authority(runtime, operation_id, window_id, expected_sha, app, unit_directory, systemd, *, _completed_owner=None):
     deploy._sha(expected_sha)
-    owner = deploy.load(runtime)
+    owner = deploy.load(runtime) if _completed_owner is None else _completed_owner
     if (not owner or owner['phase'] != 'complete' or owner['operation_id'] != operation_id
             or owner['window_id'] != window_id or owner['expected_sha'] != expected_sha):
         raise RuntimeError('formula resume requires same completed canonical deploy owner')
@@ -613,7 +615,7 @@ def _buyer_guarded_completion(runtime, plan, old, current, systemd, activity_rea
         journal_events=events, source_hashes=BUYER_GUARD_SOURCES)
 
 
-def _observe(runtime, plan, systemd, activity_reader, proc_root, *, final=False):
+def _observe(runtime, plan, systemd, activity_reader, proc_root, *, final=False, _completed_owner=None):
     old = pause.load_state(runtime)
     if (not old or old['window_id'] != plan['window_id'] or old['baseline'] != plan['baseline']
             or old['baseline_fingerprint'] != plan['baseline_fingerprint']):
@@ -649,7 +651,8 @@ def _observe(runtime, plan, systemd, activity_reader, proc_root, *, final=False)
             current['guarded_service_completions'] = {
                 unit: _buyer_guarded_completion(runtime, plan, old, current, systemd, activity_reader, proc_root)}
     app, directory = Path(plan['app_dir']), Path(plan['unit_directory'])
-    authority = _authority(runtime, plan['operation_id'], plan['window_id'], plan['expected_sha'], app, directory, systemd)
+    authority = _authority(runtime, plan['operation_id'], plan['window_id'], plan['expected_sha'], app, directory, systemd,
+        _completed_owner=_completed_owner)
     if authority != plan['authority'] or _delta(plan['baseline'], current, app, directory, authority['new_epoch']) != plan['delta']:
         raise RuntimeError('formula resume exact deployment/configuration proof changed')
     return old, current
