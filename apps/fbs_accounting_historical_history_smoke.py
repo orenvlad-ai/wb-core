@@ -384,6 +384,31 @@ class HistoricalHistory(unittest.TestCase):
 
 
 class HistoricalReceiptLimits(unittest.TestCase):
+    def test_ack_uses_native_tuple_connection_and_checks_kind_before_decode(self):
+        from unittest.mock import patch
+        with TemporaryDirectory() as temporary:
+            root=Path(temporary);db=root/'ack.sqlite3'
+            manifest={'contract':publication.TEMPORARY_CONTRACT}
+            manifest['manifest_digest']=fingerprint(manifest)
+            encoded=canonical(manifest);native={'2026-10-26':{'proof':'verified-supervisor'}}
+            with closing(sqlite3.connect(db)) as conn,conn:
+                conn.execute('CREATE TABLE sheet_vitrina_v1_ready_publications(operation_id,attempt_id,kind,state,inputs_json,diagnostics_json)')
+                conn.execute("INSERT INTO sheet_vitrina_v1_ready_publications VALUES('op','1',?,'complete',?,'{}')",(manifest['contract'],encoded))
+            receipt=history.HistoricalReceipt.__new__(history.HistoricalReceipt)
+            receipt.runtime=SimpleNamespace(db_path=db,runtime_dir=root)
+            receipt.operation_id='op';receipt.attempt_id='1';receipt.manifest=manifest;receipt.dates=tuple(native)
+            with patch('packages.application.owned_history_native_ack.consume_historical_history_ack',return_value=native):
+                receipt._acknowledge_verified_native({'native':'verified-by-supervisor'})
+                with closing(sqlite3.connect(db)) as conn,conn:
+                    actual=conn.execute('SELECT inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications').fetchone()
+                    self.assertEqual(actual[0],encoded)
+                    self.assertEqual(json.loads(actual[1])['historical_history_ack'],
+                                     {'manifest_digest':manifest['manifest_digest'],'native':native})
+                    conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET kind=?',(publication.FBO_CONTRACT,))
+                with patch.object(history,'decode_manifest',side_effect=AssertionError('wrong kind decoded')):
+                    with self.assertRaisesRegex(ValueError,'historical_history_receipt_changed'):
+                        receipt._acknowledge_verified_native({'native':'verified-by-supervisor'})
+
     def test_native_kind_and_real_utf8_bytes_gate_history_before_parse(self):
         from contextlib import nullcontext
         from unittest.mock import patch

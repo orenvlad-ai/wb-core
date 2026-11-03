@@ -195,10 +195,10 @@ class HistoricalReceipt:
         # appends evidence to this real publication, never changes its inputs.
         with historical_sqlite.connection(self.runtime.db_path,phase_name='history_ack_connection') as conn, historical_sqlite.transaction(conn,db_path=self.runtime.db_path,phase_name='history_ack'):
             row=conn.execute('SELECT kind,inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND state=\'complete\'',(self.operation_id,self.attempt_id)).fetchone()
-            require(row and row['kind']==self.manifest['contract']
-                and decode_manifest(row['inputs_json'],kind=row['kind'])==self.manifest,'historical_history_receipt_changed')
-            diagnostics=json.loads(row['diagnostics_json']);diagnostics['historical_history_ack']=dict(manifest_digest=self.manifest['manifest_digest'],native={d:dict(v) for d,v in native.items()})
-            require(conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=? WHERE operation_id=? AND attempt_id=? AND diagnostics_json=?',(canonical(diagnostics),self.operation_id,self.attempt_id,row['diagnostics_json'])).rowcount==1,'historical_history_ack_cas_failed')
+            require(row and row[0]==self.manifest['contract']
+                and decode_manifest(row[1],kind=row[0])==self.manifest,'historical_history_receipt_changed')
+            diagnostics=json.loads(row[2]);diagnostics['historical_history_ack']=dict(manifest_digest=self.manifest['manifest_digest'],native={d:dict(v) for d,v in native.items()})
+            require(conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=? WHERE operation_id=? AND attempt_id=? AND diagnostics_json=?',(canonical(diagnostics),self.operation_id,self.attempt_id,row[2])).rowcount==1,'historical_history_ack_cas_failed')
 
 
 def pending_receipt(runtime):
