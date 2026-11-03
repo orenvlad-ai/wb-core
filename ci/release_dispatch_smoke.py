@@ -207,6 +207,8 @@ def workflow_checks() -> None:
     for name in ("repo_release", "deployed_release"):
         steps = release["jobs"][name]["steps"]
         step = next(s for s in steps if "github_release_runner.py run" in s.get("run", ""))
+        expected_entry = "ci/" if name == "deployed_release" else "apps/"
+        assert "python3 " + expected_entry + "github_release_runner.py run" in step["run"]
         assert step["env"]["GATE_RUN_ID"] == "${{ needs.route.outputs.gate_run_id }}"
         assert '--workflow-run-id "$GATE_RUN_ID"' in step["run"]
         assert "${{ inputs." not in step["run"]
@@ -219,4 +221,6 @@ def workflow_checks() -> None:
 if __name__ == "__main__":
     admission_checks()
     workflow_checks()
+    from ci.held_formula_deploy_claim_smoke import run as held_claim_checks
+    held_claim_checks()
     print("release_dispatch_smoke: ok")
