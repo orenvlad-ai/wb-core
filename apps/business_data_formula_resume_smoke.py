@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -236,8 +236,11 @@ class FormulaResumeTests(unittest.TestCase):
         from packages.application.business_data_procedure_admission import guarded_cli
         called = []
         output = io.StringIO()
-        with redirect_stdout(output):
+        history_authority = Mock(side_effect=AssertionError('buyer must not request held-history admission'))
+        with patch.dict(sys.modules, {'packages.application.historical_receipt_completion':
+                SimpleNamespace(require_held_completion=history_authority)}), redirect_stdout(output):
             self.assertEqual(guarded_cli(lambda: called.append('main'), argv=['--runtime-dir', str(self.runtime)]), 0)
+        history_authority.assert_not_called()
         self.assertEqual(called, [])
         self.assertEqual(output.getvalue().strip(), events[1]['MESSAGE'])
         with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
@@ -250,6 +253,26 @@ class FormulaResumeTests(unittest.TestCase):
         self.assertEqual(pause.load_state(self.runtime)['baseline'], self.baseline)
         self.assertEqual(pause.load_state(self.runtime)['restore_readback'], receipt)
         self.assertEqual(formula.prove_recorded_release(formula.load(self.runtime, OP), barrier._load_state(self.runtime)), receipt)
+
+    def test_guarded_buyer_default_admission_rechecks_barrier_after_lock(self):
+        from packages.application import business_data_procedure_admission as admission
+        called = []
+        output = io.StringIO()
+        history_authority = Mock(side_effect=AssertionError('buyer must not request held-history admission'))
+        # The pause becomes active between the ordinary precheck and the shared
+        # lease acquisition. The new history-only factory cannot authorize this CLI.
+        with patch.dict(sys.modules, {'packages.application.historical_receipt_completion':
+                SimpleNamespace(require_held_completion=history_authority)}), \
+                patch.object(admission, 'barrier_status', side_effect=[{'active': False}, {'active': True}]) as status, \
+                redirect_stdout(output):
+            self.assertEqual(admission.guarded_cli(lambda: called.append('main'),
+                argv=['--tick', '--runtime-dir', str(self.runtime)]), 0)
+        self.assertEqual(status.call_count, 2)
+        self.assertEqual(called, [])
+        history_authority.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue()),
+            {'status': 'skipped_maintenance', 'reason': 'skipped_maintenance'})
+        self.assertTrue(admission.admission_idle(self.runtime)['idle'])
 
     def test_guarded_buyer_preview_and_prepared_remain_strict(self):
         plan, events = self.guarded_buyer_fixture()

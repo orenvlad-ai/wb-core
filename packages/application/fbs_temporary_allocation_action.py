@@ -1297,6 +1297,8 @@ class TemporaryAllocationAction:
                     (recipe['operation_id'],recipe['attempt_id'])).fetchone()
                 child=conn.execute('SELECT state FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
                     (recipe['publication_operation_id'],recipe['attempt_id'])).fetchone()
+                from packages.application.historical_publication_retirement import retirement_status
+                retired=retirement_status(conn,recipe['publication_operation_id'],recipe['attempt_id'])
                 complete=parent['state']=='complete'
                 if complete:
                     proof=json.loads(parent['diagnostics_json']).get('temporary_allocation_completion',{})
@@ -1305,7 +1307,8 @@ class TemporaryAllocationAction:
             return dict(operation_id=operation_id,state='applied' if complete else 'ambiguous',original_operation_id=original,
                 native_complete=native,ready_complete=bool(child and child['state']=='complete'),scope_complete=complete,
                 recipe_digest=recipe['recipe_digest'],book_version=parent['book_version'],recovery_ref=original,
-                next_step='none' if complete else 'owned_cycle_or_explicit_same_recipe_recovery',
+                history_status='retired_unconfirmed' if retired else ('complete' if complete else 'unconfirmed'),
+                next_step='none' if complete or retired else 'owned_cycle_or_explicit_same_recipe_recovery',
                 **(dict(historical_after_book=proof.get('historical_after_book',parent['book_version']),
                     current_completion_book=proof.get('current_completion_book',proof.get('economics',{}).get('accounting_version')))
                     if complete else {}))

@@ -230,8 +230,12 @@ def _maintenance(root, request):
     env=_read_env_file(Path(request['maintenance_env_file']))
     base=env.get('BUSINESS_DATA_MAINTENANCE_BASE_URL') or f"http://{env.get('REGISTRY_UPLOAD_HTTP_HOST','127.0.0.1')}:{env.get('REGISTRY_UPLOAD_HTTP_PORT','8765')}"
     client=RuntimeScheduleClient(base_url=base,cookie=_build_web_auth_cookie(env))
-    current=pause.readback(root,systemd=SystemdClient(),activity_reader=lambda:client._request(pause.ACTIVITY_PATH))
-    pause._unchanged(old,current)
+    from packages.application import business_data_held_formula as held_formula
+    systemd=SystemdClient()
+    activity=lambda:client._request(pause.ACTIVITY_PATH)
+    current=pause.readback(root,systemd=systemd,activity_reader=activity)
+    held_formula.unchanged(root,old,current,app_dir=Path(__file__).resolve().parents[2],
+        systemd=systemd,activity_reader=activity)
     require(current['quiet'] is True,'quiet_pause_required')
     return dict(window_id=old['window_id'],baseline_fingerprint=old['baseline_fingerprint'])
 
@@ -654,6 +658,8 @@ class HistoricalFboAction:
                 if present:
                     try:fees=typed.capture_fee_scope(conn,native_plan=recipe['native_plan'],fee_requests=recipe['fee_requests'])
                     except (ValueError,sqlite3.Error):pass
+                from packages.application.historical_publication_retirement import retirement_status
+                retired=retirement_status(conn,recipe['publication_operation_id'],recipe['publication_attempt_id'])
                 complete=row['state']=='complete'
                 attempts=json.loads(row['diagnostics_json']).get('historical_fbo_fee_attempts',{})
                 if complete:
@@ -662,7 +668,8 @@ class HistoricalFboAction:
                 original_operation_id=original,native_complete=present,fee_sources_complete=fees is not None,
                 ready_complete=bool(child and child['state']=='complete'),scope_complete=complete,
                 recipe_digest=recipe['recipe_digest'],recovery_ref=original,
-                next_step='none' if complete else 'owned_cycle_after_ready_or_explicit_bound_recovery',
+                history_status='retired_unconfirmed' if retired else ('complete' if complete else 'unconfirmed'),
+                next_step='none' if complete or retired else 'owned_cycle_after_ready_or_explicit_bound_recovery',
                 fee_attempts=list(attempts.values()),book_version=row['book_version'])
         except (ValueError,sqlite3.Error,KeyError):
             return dict(operation_id=operation_id,state='ambiguous',original_operation_id=original,scope_complete=False,

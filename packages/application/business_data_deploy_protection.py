@@ -119,7 +119,7 @@ def _locked(runtime):
         yield
 
 
-def claim(runtime, operation, *, quiet_reader):
+def claim(runtime, operation, *, quiet_reader, formula_context=None):
     runtime = Path(runtime).resolve()
     barrier._validate_identifier(operation, label='deploy operation')
     if not _selected(runtime) and load(runtime) is None:
@@ -130,13 +130,20 @@ def claim(runtime, operation, *, quiet_reader):
         result = quiet_reader()
         if result.get('quiet') is not True:
             raise RuntimeError('deploy requires fresh held/quiet proof')
-        pause._unchanged(state, result)
+        formula_plan = None
+        if formula_context is None:
+            pause._unchanged(state, result)
+        else:
+            from packages.application import business_data_held_formula as held_formula
+            formula_plan = held_formula.unchanged(runtime, state, result, **formula_context)
         if old and old['phase'] in ACTIVE:
             if old['operation_id'] != operation:
                 raise RuntimeError('another deploy owns the maintenance pause')
             return old
         if old and old['operation_id'] == operation:
             raise RuntimeError('terminal deploy operation cannot be restarted')
+        if formula_plan is not None:
+            held_formula.retain_claim(runtime, operation, old, formula_plan)
         return _save(runtime, dict(schema=SCHEMA, phase='prepared', operation_id=operation,
             window_id=state['window_id'], baseline_fingerprint=state['baseline_fingerprint'],
             expected_sha='', updated_at='', fingerprint=''))
@@ -209,7 +216,7 @@ def finish(runtime, operation, expected_sha, *, app_dir, registry_reader):
         return value if value['phase'] == 'complete' else _save(runtime, dict(value, phase='complete'))
 
 
-def _clients(runtime, env_file):
+def _clients(runtime, env_file, *, include_activity_reader=False):
     from apps.business_data_maintenance import (
         SystemdClient, RuntimeScheduleClient, _read_env_file, _build_web_auth_cookie)
     env = _read_env_file(Path(env_file))
@@ -217,8 +224,9 @@ def _clients(runtime, env_file):
         f"http://{env.get('REGISTRY_UPLOAD_HTTP_HOST', '127.0.0.1')}:{env.get('REGISTRY_UPLOAD_HTTP_PORT', '8765')}",
         cookie=_build_web_auth_cookie(env))
     systemd = SystemdClient()
-    return systemd, lambda: pause.readback(Path(runtime), systemd=systemd,
-        activity_reader=lambda: client._request(pause.ACTIVITY_PATH))
+    activity = lambda: client._request(pause.ACTIVITY_PATH)
+    quiet = lambda: pause.readback(Path(runtime), systemd=systemd, activity_reader=activity)
+    return (systemd, quiet, activity) if include_activity_reader else (systemd, quiet)
 
 
 def remote_shell(action, *, app_dir, runtime_dir, env_file, operation, expected_sha='', bootstrap=False):
@@ -236,6 +244,20 @@ def remote_shell(action, *, app_dir, runtime_dir, env_file, operation, expected_
         return (f"cd {shlex.quote(str(app_dir))} && {ENV_OPERATION}={shlex.quote(operation)} "
                 + 'python3 -m packages.application.business_data_deploy_protection '
                 + shlex.join(args))
+    proof_bootstrap = ''
+    if action == 'claim':
+        # The second claim runs before sync. Load the exact merged proof code in
+        # this process only, like the owner bootstrap; never alter installed files.
+        for module in ('business_data_formula_resume', 'business_data_held_formula'):
+            module_path = Path(__file__).with_name(module + '.py')
+            module_name = 'packages.application.' + module
+            proof_bootstrap += (
+                "import types,packages.application; "
+                f"proof_module=types.ModuleType({module_name!r}); "
+                f"proof_module.__file__={str(Path(app_dir) / 'packages/application' / (module + '.py'))!r}; "
+                f"sys.modules[{module_name!r}]=proof_module; "
+                f"setattr(packages.application,{module!r},proof_module); "
+                f"exec(compile({module_path.read_text()!r},proof_module.__file__,'exec'),proof_module.__dict__); ")
     bootstrap = (
         "import sys; from pathlib import Path; "
         f"sys.path.insert(0, {str(app_dir)!r}); "
@@ -253,6 +275,7 @@ def remote_shell(action, *, app_dir, runtime_dir, env_file, operation, expected_
         "and held.get('window_id')==state['window_id'] "
         "and held.get('plan_fingerprint')==state['baseline_fingerprint'] "
         "and idle.get('ready') is True and idle.get('idle') is True), 'deploy requires existing held/quiet pause'; "
+        + proof_bootstrap +
         f"namespace={{'__name__':'deploy_owner_bootstrap','__file__':{str(Path(app_dir) / 'packages/application/business_data_deploy_protection.py')!r}}}; "
         f"exec(compile({source!r}, namespace['__file__'], 'exec'), namespace); "
         f"sys.exit(namespace['main']({args!r}))")
@@ -279,12 +302,14 @@ def _main(argv=None):
     # Bootstrap the trusted source only inside an independently proven existing
     # held pause. No installed helper or force flag is required before first sync.
     if args.action == 'claim':
+        formula_context = None
         if _selected(args.runtime_dir) or load(args.runtime_dir) is not None:
             _binding(args.runtime_dir)
-            systemd, quiet = _clients(args.runtime_dir, args.env_file)
+            systemd, quiet, activity = _clients(args.runtime_dir, args.env_file, include_activity_reader=True)
+            formula_context = dict(app_dir=args.app_dir, systemd=systemd, activity_reader=activity)
         else:
             quiet = lambda: {}
-        result = claim(args.runtime_dir, args.operation, quiet_reader=quiet)
+        result = claim(args.runtime_dir, args.operation, quiet_reader=quiet, formula_context=formula_context)
     elif args.action in {'start', 'recovery-start'}:
         result = start(args.runtime_dir, args.operation, args.expected_sha, recovery=args.action == 'recovery-start')
     elif args.action == 'check':
