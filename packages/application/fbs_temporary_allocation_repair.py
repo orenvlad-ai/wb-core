@@ -32,6 +32,43 @@ P=stages.P
 def require(value,reason):stages.require(value,'temporary_fbs_repair_'+reason)
 
 
+def supplier_source_query(nms):
+    marks=','.join('?' for _ in nms)
+    return ('SELECT s.* FROM sheet_vitrina_v1_wb_supplies s WHERE EXISTS(SELECT 1 FROM json_each(s.raw_goods_json) g '
+        f"WHERE CAST(coalesce(json_extract(g.value,'$.nmID'),json_extract(g.value,'$.nmId')) AS INTEGER) IN ({marks})) ORDER BY s.supply_id",list(nms))
+
+
+def is_unshipped_supplier_draft(row):
+    """Require affirmative draft evidence; absent actual quantities are unknown."""
+    try:
+        normalized=json.loads(row['normalized_row_json']);listed=json.loads(row['raw_list_json']);detail=json.loads(row['raw_detail_json'])
+        goods=json.loads(row['raw_goods_json'])
+        return (row['status_id']==normalized['status_id']==listed['statusID']==detail['statusID']==1
+            and str(row['preorder_id'])==str(listed['preorderID']) and bool(row['preorder_id'])
+            and row['supply_id']==row['cache_key']==normalized['supply_id']==normalized['cache_key']=='preorder:'+str(row['preorder_id'])
+            and normalized['preorder_id']==row['preorder_id']
+            and not row['wb_supply_id'] and not normalized.get('wb_supply_id')
+            and 'supplyID' in listed and listed['supplyID'] is None
+            and all(not source.get(key) for source in (normalized,listed,detail) for key in ('wbSupplyID','wb_supply_id'))
+            and not detail.get('supplyID')
+            and 'actualWarehouseID' in detail and detail['actualWarehouseID'] is None
+            and 'supplyDate' in listed and 'factDate' in listed and 'supplyDate' in detail and 'factDate' in detail
+            and not row['supply_date'] and not row['fact_date']
+            and all(not source.get(key) for source in (normalized,listed,detail)
+                for key in ('supply_date','fact_date','supplyDate','factDate','actual_warehouse_id','actualWarehouseID','actual_warehouse_name','actualWarehouseName'))
+            and all(key in normalized and type(normalized[key]) in (int,float) and normalized[key]==0
+                for key in ('accepted_quantity','unloading_quantity'))
+            and all(source[key]==0 for source in (normalized,listed,detail)
+                for key in ('acceptedQuantity','unloadingQuantity','readyForSaleQuantity','accepted_quantity','unloading_quantity') if key in source)
+            and all(key in detail and type(detail[key]) in (int,float) and detail[key]==0
+                for key in ('acceptedQuantity','unloadingQuantity','readyForSaleQuantity'))
+            and isinstance(goods,list) and bool(goods)
+            and all(key in item and type(item[key]) in (int,float) and item[key]==0
+                for item in goods for key in ('acceptedQuantity','unloadingQuantity','readyForSaleQuantity')))
+    except (KeyError,TypeError,ValueError):
+        return False
+
+
 def _days(first,last):
     first,last=date.fromisoformat(first),date.fromisoformat(last)
     require(0<=(last-first).days<=31,'date_scope_invalid')
@@ -226,9 +263,8 @@ def capture_temporary_allocation_repair(conn,*,runtime_dir,book,book_version,nat
     require(all(m['operation_id'] in known for m in all_movements),'unapproved_selected_cost_operation')
     # A supplier WB source would require its own shipment-specific cost; this
     # initial-FBS bridge cannot silently price or attribute such stock.
-    fbo=reader.rows('SELECT s.* FROM sheet_vitrina_v1_wb_supplies s WHERE EXISTS(SELECT 1 FROM json_each(s.raw_goods_json) g '
-        f"WHERE CAST(coalesce(json_extract(g.value,'$.nmID'),json_extract(g.value,'$.nmId')) AS INTEGER) IN ({marks})) ORDER BY s.supply_id",nms)
-    require(not fbo,'selected_wb_supplier_source_present')
+    fbo=reader.rows(*supplier_source_query(nms))
+    require(all(is_unshipped_supplier_draft(row) for row in fbo),'selected_wb_supplier_source_present')
     acceptance=reader.rows(f"SELECT * FROM {P}functional_events WHERE event_type='wb_final_acceptance' AND nm_id IN ({marks}) ORDER BY event_id",nms)
     require(not acceptance,'selected_wb_acceptance_source_present')
     quantities={};saved={};retained={}
@@ -449,9 +485,9 @@ def build_temporary_allocation_repair(book,*,capture,native_plan):
     return result
 
 
-def publish_temporary_allocation_stages(conn,*,manifest):
+def publish_temporary_allocation_stages(conn,*,manifest,source_fence_verifier=None):
     require(conn.in_transaction,'owned_transaction_required')
-    receipts=stages.publish_dated_stages(conn,manifest=manifest)
+    receipts=stages.publish_dated_stages(conn,manifest=manifest,source_fence_verifier=source_fence_verifier)
     for item in manifest['daily_wb_costs']:
         row=dict(cutover_id=wf.FUNCTIONAL_CUTOVER_ID,as_of_date=item['as_of_date'],nm_id=item['nm_id'],quantity=item['quantity'],
             wac_rub=item['wac_rub'],capital_rub=item['capital_rub'],quality=item['quality'],provenance_json=canonical(item['provenance']),

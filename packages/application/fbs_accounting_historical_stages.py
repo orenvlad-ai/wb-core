@@ -351,13 +351,16 @@ def _build_dated_stage_revision(plan, *, capture, dated):
     return result
 
 
-def publish_dated_stages(conn, *, manifest):
+def publish_dated_stages(conn, *, manifest, source_fence_verifier=None):
     """Append editions in an already-owned transaction after the source CAS."""
     from packages.application.warehouse_functional import _materialize_compact_warehouse_read_models
     from packages.application.warehouse_business_projection import publish_functional_version_business_projection
     require(conn.in_transaction,"historical_stage_publication_transaction_required")
     require(manifest["manifest_digest"]==fingerprint({k:v for k,v in manifest.items() if k!="manifest_digest"}),"historical_stage_manifest_corrupt")
-    check_query_fence(conn,manifest["query_fence"])
+    if source_fence_verifier is None:
+        check_query_fence(conn,manifest["query_fence"])
+    else:
+        source_fence_verifier(conn,manifest["query_fence"])
     receipts={}
     for day,edition in manifest["editions"].items():
         require(not conn.execute(f"SELECT 1 FROM {P}functional_versions WHERE version_id=?",(edition["version_id"],)).fetchone(),"historical_stage_edition_already_exists",day=day)
