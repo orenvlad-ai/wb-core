@@ -76,6 +76,24 @@ class TailGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'tail_original_history_config_changed'):
                 tail._cycle(self.root,{**request,'source_history_budget_seconds':180})
 
+    def test_continuation_preserves_verified_source_cycle_limits(self):
+        from packages.application.owned_history_worker_capability import file_digest
+        source=self.root/'source-contract.json';source.write_text('{"formula_epoch":"old"}')
+        candidate=self.root/'candidate';target=self.root/'target-contract.json'
+        target.write_text(json.dumps(dict(formula_epoch='new',candidate_root=str(candidate))))
+        request=dict(source_runtime_contract=str(source),source_runtime_contract_sha256='sha256:'+file_digest(source),
+            runtime_contract=str(target),runtime_contract_sha256='sha256:'+file_digest(target),
+            source_formula_epoch='old',formula_epoch='new',candidate_root=str(candidate),
+            source_history_budget_seconds=240,source_history_max_recomputes=7)
+        with patch('apps.web_vitrina_history_candidate_build.runtime_storage_admission'):
+            config=tail._config(request)
+        self.assertEqual(config.budget_seconds,240)
+        self.assertEqual(config.max_recomputes,7)
+        # A request cannot expand the native per-worker hard limit.
+        with patch('apps.web_vitrina_history_candidate_build.runtime_storage_admission'), \
+             self.assertRaisesRegex(ValueError,'cycle_history_budget_invalid'):
+            tail._config({**request,'source_history_budget_seconds':241})
+
     def test_operational_marker_uses_bounded_native_atomic_not_hosted_backup_owner(self):
         from packages.application import fbs_historical_fbo_action as backup
         from packages.application import root_storage_policy as storage

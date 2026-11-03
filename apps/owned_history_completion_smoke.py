@@ -7,7 +7,8 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -104,6 +105,20 @@ class DerivedReadbackFenceTests(unittest.TestCase):
             calls.append(args[1])
             return result
         return patch.object(ack, '_object', side_effect=read), calls
+
+    def test_preparation_consumes_the_existing_child_budget(self):
+        from apps import web_vitrina_owned_history_worker as child
+        from packages.application.web_vitrina_history_store import HistoryStore
+        runtime,root,cap=self.fixture()
+        before=HistoryStore(root/'history')._current()
+        cap['inner_seconds']=1
+        # A slow preparation must not reset the clock before native work.
+        with patch.object(child,'time',SimpleNamespace(monotonic=Mock(side_effect=[0,2]))), \
+             patch('packages.application.owned_history_native_ack.verified_derived_state') as verify:
+            with self.assertRaisesRegex(HistoryDelegationError,'history_worker_preparation_deadline'):
+                child.execute(cap)
+            verify.assert_not_called()
+        self.assertEqual(HistoryStore(root/'history')._current(),before)
 
     def test_cleaner_commit_during_native_object_readback_delete_and_wal(self):
         from apps import web_vitrina_owned_history_worker as child

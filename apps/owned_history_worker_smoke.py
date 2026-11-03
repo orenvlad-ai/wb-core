@@ -125,6 +125,7 @@ class LinuxWorkerSmoke(unittest.TestCase):
                 start = time.monotonic()
                 result = worker.capture(NOW)
                 self.assertEqual(result["status"], "outcome_unknown")
+                self.assertEqual(result["transport_reason"], "history_transport_timeout")
                 self.assertLess(time.monotonic() - start, 3)
                 self.assertIsNone(worker._process)
                 self.assertFalse(admission_idle(runtime.runtime_dir)["idle"])

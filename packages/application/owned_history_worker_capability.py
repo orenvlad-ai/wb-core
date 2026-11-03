@@ -127,6 +127,10 @@ HISTORY_ERROR_CODES = frozenset({
     'history_standalone_limits_invalid',
     'history_supervisor_owner_mismatch',
     'history_transport_outcome_unknown',
+    'history_transport_timeout',
+    'history_transport_channel_closed',
+    'history_transport_terminal_unproven',
+    'history_worker_preparation_deadline',
     'history_worker_anchor_changed',
     'history_worker_base_catalog_changed',
     'history_worker_base_changed',
@@ -285,7 +289,15 @@ def history_result_error(code, result, *, mode):
     payload = payload if isinstance(payload, dict) else {}
     diagnostic = payload.get("diagnostic", {})
     diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
-    reason = "history_transport_outcome_unknown" if unknown else diagnostic.get("reason_code", payload.get("reason", code))
+    # Preserve only parent-owned, payload-free transport classifications.
+    # A known timeout still does not prove whether a child published anything.
+    reason = diagnostic.get("reason_code", payload.get("reason", code))
+    if unknown:
+        reason = result.get("transport_reason")
+        if not isinstance(reason, str) or reason not in {
+                "history_transport_timeout", "history_transport_channel_closed",
+                "history_transport_terminal_unproven"}:
+            reason = "history_transport_outcome_unknown"
     return HistoryDelegationError(code, mode=mode, reason_code=reason,
                                   outcome="outcome_unknown" if unknown else "failed")
 
