@@ -18,6 +18,9 @@ class Adapter(Protocol):
 
 
 _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
+    "historical_receipt_completion_v1": (
+        "packages.application.historical_receipt_completion", "HistoricalReceiptCompletionAdapter",
+    ),
     "warehouse_hourly_rollback_reconciliation_v1": (
         "apps.warehouse_hourly_rollback_reconciliation", "WarehouseHourlyRollbackReconciliationAdapter",
     ),

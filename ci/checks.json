@@ -1287,6 +1287,7 @@
     },
     "web_vitrina_history_activation": {
       "patterns": [
+        "packages/application/historical_receipt_completion.py",
         "packages/application/web_vitrina_official_fbs.py",
         "packages/application/official_fbs_stock_read.py",
         "packages/application/official_wb_physical_read.py",
