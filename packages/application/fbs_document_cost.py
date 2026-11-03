@@ -303,6 +303,8 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
     for k, row in prior["fbo_rows"].items():
         q, wac = units(row["quantity"]), None if row["wac_rub"] is None else number(row["wac_rub"])
         node(k).update(opening_q=q, opening_wac=wac, mass=q, value=number(row["capital_rub"]))
+        if (row.get('source') or {}).get('current_fbo_boundary'):
+            node(k)['current_fbo_boundary']=deepcopy(row['source']['current_fbo_boundary'])
 
     def effect(doc, k, kind, q=0, value=ZERO, reference=None):
         n = node(k)
@@ -310,14 +312,20 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
             "capital_rub": text(value), "source": {**source(doc), **(reference or {})}})
         if kind == "receipt":
             n["mass"] += q
-            n["value"] += value
+            with localcontext() as context:
+                context.prec=160 if n.get('current_fbo_boundary') else context.prec
+                n["value"] += value
         elif kind == "expense":
-            n["value"] += value
+            with localcontext() as context:
+                context.prec=160 if n.get('current_fbo_boundary') else context.prec
+                n["value"] += value
         elif kind == "outgoing":
             n["outgoing"] += q
         elif kind == 'adjustment':
             n['mass']+=q
-            n['value']+=value
+            with localcontext() as context:
+                context.prec=160 if n.get('current_fbo_boundary') else context.prec
+                n['value']+=value
 
     # Same-open-day reversals remove their source facts before any allocation.
     cancelled = set()
@@ -328,6 +336,8 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
                 raise ValueError("closed_document_reversal_requires_separate_adjustment")
             cancelled.update({doc["document_id"], target})
     active = [d for i, d in current.items() if i not in cancelled]
+    from packages.application.current_fbo_supply_cost_source import apply_opening_dispatches
+    current_fbo_bridges, current_fbo_boundaries = apply_opening_dispatches(nodes, active, node, key)
     companions={d['document_id'] for d in active if china_discrepancy_companion(d,documents)}
     for identity in cancelled:
         effects[identity] = []
@@ -341,6 +351,8 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
                            event["kind"], units(event["quantity"]), number(event["capital_rub"], signed=event["kind"] == "expense"))
             continue
         effects[doc["document_id"]] = []
+        if kind == 'current_fbo_dispatch':
+            continue  # exact owned current boundary was consumed before daily mass
         if doc['document_id'] in companions:
             continue
         if kind == "china_acceptance":
@@ -505,6 +517,30 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
 
     allocations_evidence = []
     for doc, facility, scope, total in overheads:
+        boundary = current_fbo_boundaries.get(facility)
+        if boundary and scope == 'FBO' and doc['posted_at'] >= boundary['posted_at']:
+            # The actual posted document owns the remaining-stock allocation.
+            # Later same-day receipts must not redistribute an earlier fee.
+            amounts={};weights={}
+            for line in raw(doc)['lines']:
+                k=location(line)
+                if line['facility_id'] != facility or line['pool'] != 'FBO' or line['line_role'] != 'overhead_allocation' or k in amounts:
+                    raise ValueError('current_fbo_overhead_allocation_invalid')
+                amount=cents(line['expense_rub'])
+                if amount!=cents(line['capital_rub']) or units(line['quantity'])<=0:
+                    raise ValueError('current_fbo_overhead_allocation_invalid')
+                amounts[k]=amount;weights[k]=units(line['quantity'])
+            if sum(amounts.values())!=total:
+                raise ValueError('current_fbo_overhead_allocation_total')
+            basis=dict(document_id=doc['document_id'],document_fingerprint=doc['fingerprint'],business_date=day,
+                policy='native_posted_current_fbo_allocation_v1',weights=weights,amounts_kopecks=amounts,total_kopecks=total,
+                dispatch_boundary=boundary)
+            basis['id']=digest(basis);allocations_evidence.append(basis)
+            for k,amount in amounts.items():
+                if amount:
+                    node(k)['current_fbo_boundary']=dict(boundary,policy='native_posted_current_fbo_allocation_v1')
+                    effect(doc,k,'expense',value=Decimal(amount)/100,reference={'allocation_basis_id':basis['id']})
+            continue
         pools = {"FBS", "FBO"} if scope == "both" else {scope}
         weights = {k: n["mass"] for k, n in nodes.items()
                    if n["facility_id"] == facility and n["pool"] in pools and n["mass"] > 0}
@@ -545,6 +581,8 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
     prices = _solve(nodes, links)
     basis = {"date": day, "opening": opening, "auxiliary_opening": prior,
              "documents": {i: d["fingerprint"] for i, d in current.items()}, "allocations": allocations_evidence}
+    if current_fbo_bridges:
+        basis['current_fbo_dispatch_bridges']=current_fbo_bridges
     if historical_fbo_outgoings:
         basis["historical_fbo_outgoings"] = list(historical_fbo_outgoings)
     basis_id = digest(basis)
@@ -590,9 +628,17 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
         wac = prices[k]
         if q and wac is None:
             raise ValueError("independent_fbo_cost_missing")
+        # Preserve authoritative capital when no outgoing/link valuation is
+        # needed, including on the next quiet day after a current boundary.
+        exact_carry = bool(n.get('current_fbo_boundary')) and not n['outgoing'] and not any(dst==k for dst,_src,_q in links)
+        legacy_capital = q*wac if wac is not None else ZERO
+        capital = n['value'] if exact_carry and n['value'] != legacy_capital else legacy_capital
         auxiliary["fbo_rows"][k] = {"facility_id": n["facility_id"], "nm_id": n["nm_id"],
             "quantity": str(q), "wac_rub": text(wac), "capital_rub": text(q * wac) if wac is not None else "0",
             "source": {"policy": DOCUMENT_POLICY, "business_date": day, "valuation_basis_id": basis_id}}
+        auxiliary['fbo_rows'][k]['capital_rub']=text(capital)
+        if n.get('current_fbo_boundary'):
+            auxiliary['fbo_rows'][k]['source']['current_fbo_boundary']=deepcopy(n['current_fbo_boundary'])
     for identity, items in effects.items():
         if not raw(documents[identity]):
             continue  # existing normalized fixtures keep their own validation
@@ -604,6 +650,8 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
                     "facility_id": n["facility_id"], "nm_id": n["nm_id"]})
         documents[identity]["events"] = events
     valuation = {"id": basis_id, "policy": DOCUMENT_POLICY, "allocations": allocations_evidence}
+    if current_fbo_bridges:
+        valuation['current_fbo_dispatch_bridges']=current_fbo_bridges
     if historical_fbo_outgoings:
         valuation["historical_fbo_outgoings"] = outgoing_values
     return documents, auxiliary, valuation

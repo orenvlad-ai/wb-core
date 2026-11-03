@@ -3780,7 +3780,12 @@ def replay_ff_cost_pools(*, opening_pools, operations, lines, supplier_flow_cost
                         "reason": "non_supplier_positive_FF_ledger_operation",
                     }
                 pool["quantity"] = current_qty + delta
-                pool["capital"] = current_capital + delta * inbound_wac
+                if exact_cost is not None:
+                    with localcontext() as exact_context:
+                        exact_context.prec = 160
+                        pool["capital"] = current_capital + exact_cost["capital_delta_rub"]
+                else:
+                    pool["capital"] = current_capital + delta * inbound_wac
             else:
                 if current_wac is None:
                     raise WarehouseFunctionalError(
@@ -3804,7 +3809,12 @@ def replay_ff_cost_pools(*, opening_pools, operations, lines, supplier_flow_cost
                 else:
                     outbound_wac = exact_cost["unit_cost_rub"]
                     remaining_qty = current_qty - outbound
-                    remaining_capital = current_capital - outbound * outbound_wac
+                    # The immutable amount is authoritative. Re-multiplying
+                    # its rounded display ratio can strand a fractional tail
+                    # on full depletion or lose it on a later replay.
+                    with localcontext() as exact_context:
+                        exact_context.prec = 160
+                        remaining_capital = current_capital + exact_cost["capital_delta_rub"]
                 if remaining_capital < ZERO or (
                     remaining_qty > ZERO and remaining_capital <= ZERO
                 ) or (
@@ -3835,6 +3845,8 @@ def replay_ff_cost_pools(*, opening_pools, operations, lines, supplier_flow_cost
                     "source_object_id": source_object_id,
                     "quantity_delta": _text(delta),
                     "unit_cost_rub": _text(inbound_wac),
+                    **({"capital_delta_rub": format(exact_cost["capital_delta_rub"], "f")}
+                       if exact_cost is not None and exact_cost["provenance"].get("contract") == "current_fbo_supply_close_v1" else {}),
                     "source": inbound_provenance,
                 }
             )

@@ -173,6 +173,9 @@ def _policy(
 
 
 OPERATION_POLICIES: Mapping[str, OperationPolicy] = {
+    "current_fbo_supply_close": _policy(
+        "current_fbo_supply_close", RecoveryTier.T2, "warehouse_domain"
+    ),
     "fbs_scoped_lifecycle_recovery": _policy(
         "fbs_scoped_lifecycle_recovery", RecoveryTier.T2, "warehouse_domain"
     ),
