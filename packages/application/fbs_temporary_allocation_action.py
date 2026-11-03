@@ -55,6 +55,7 @@ MAX_ROWS = 100000
 MAX_PREFLIGHT_BUILD_SECONDS = 1800
 MAX_COMPLETION_AGE_SECONDS = 600
 COMPLETION_CONTRACT = 'temporary_fbs_verified_completion_v1'
+MAX_COMPLETION_ANCESTORS = 10000
 P = 'sheet_vitrina_v1_'
 
 
@@ -653,6 +654,109 @@ def validate_source_receipt(conn,*,manifest):
     return dict(contract=CONTRACT,recipe_digest=recipe['recipe_digest'],native_plan_digest=recipe['unit']['native_plan']['plan_digest'])
 
 
+def _completion_books(runtime, *, manifest):
+    """Bind real ledger ancestry and every originally closed operand."""
+    from packages.application.fbs_accounting_historical_revision import _prefix
+    original_version = manifest['after_book']
+    with ready.readonly(accounting.path(runtime.runtime_dir)) as ledger:
+        current, version = accounting.load(runtime.runtime_dir, connection=ledger)
+        original, original_version = accounting.load(runtime.runtime_dir,
+            version=original_version, connection=ledger)
+        require(current and current.get('active') is True and not current.get('publication_error'),
+            'healthy_current_book_required')
+        require(original == manifest['candidate']['candidate_book'], 'original_book_changed')
+        row = ledger.execute('SELECT operation_id,previous_version FROM accounting_revisions WHERE version=?',
+            (original_version,)).fetchone()
+        require(row and row[0] == manifest['book_operation_id'] and row[1] == manifest['expected_book'],
+            'original_book_revision_changed')
+        chain, seen, cursor = [], set(), version
+        while cursor != original_version:
+            require(cursor and cursor not in seen and len(chain) < MAX_COMPLETION_ANCESTORS, 'book_ancestry_unproved')
+            seen.add(cursor)
+            row = ledger.execute('SELECT version,operation_id,previous_version FROM accounting_revisions WHERE version=?',
+                (cursor,)).fetchone()
+            require(row is not None, 'book_ancestry_unproved')
+            chain.append(list(row));cursor = row[2]
+        # Validate the middle revisions too; metadata links alone must not
+        # grant ancestry through a corrupt payload. Current/original already
+        # passed the same native unpack/fingerprint check above.
+        for ancestor in chain[1:]:
+            accounting.load(runtime.runtime_dir, version=ancestor[0], connection=ledger)
+    boundary = manifest['plan']['scope']['date_to']
+    prefix = _prefix(original, boundary)
+    require(_prefix(current, boundary) == prefix, 'closed_book_prefix_changed')
+    for day, period in original['state']['periods'].items():
+        if period.get('status') != 'closed':
+            continue
+        require(current['state']['periods'].get(day) == period and all(
+            current[field].get(day) == original[field].get(day)
+            for field in ('wb_days', 'retained_days', 'shared_days', 'presentations')),
+            'closed_book_date_changed')
+    require(current.get('historical_revision') == original.get('historical_revision')
+        and current['historical_revision']['quality_proof'] == manifest['candidate']['quality_proof'],
+        'historical_quality_proof_changed')
+    return current, version, dict(historical_after_book=original_version,
+        current_completion_book=version, lineage_digest=fingerprint(chain),
+        descendant_revision_count=len(chain), closed_prefix_digest=fingerprint(prefix))
+
+
+def _verify_original_publication(conn, *, manifest):
+    """Read the original immutable child and stage editions, never old Ready."""
+    from packages.application.fbs_accounting_historical_publication import decode_manifest
+    from decimal import Decimal, localcontext
+    ready.check_pinned_authority(conn, manifest['authority'])
+    row = conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+        (manifest['operation_id'], manifest['attempt_id'])).fetchone()
+    require(row and row['kind'] == CONTRACT and row['state'] == 'complete'
+        and row['book_version'] == manifest['after_book']
+        and row['book_operation_id'] == manifest['book_operation_id']
+        and row['expected_book'] == manifest['expected_book']
+        and row['after_digest'] == ready.digest(manifest['targets'][-1]['after_json'])
+        and decode_manifest(row['inputs_json'], kind=row['kind']) == manifest,
+        'original_publication_changed')
+    validate_source_receipt(conn, manifest=manifest)
+    for edition in manifest['candidate']['editions'].values():
+        actual = conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',
+            (edition['version_id'],)).fetchone()
+        require(actual and dict(actual) == edition['version'], 'original_stage_version_changed')
+        balances = stages._version_balances(conn, version_id=edition['version_id'])
+        require(balances == edition['balances'], 'original_stage_balances_changed')
+        models = conn.execute(f'SELECT warehouse_key,payload_json FROM {stages.P}functional_read_models WHERE version_id=?',
+            (edition['version_id'],)).fetchall()
+        require({row[0] for row in models} == set(stages.STAGES.values()), 'original_stage_models_missing')
+        with localcontext() as context:
+            context.prec = 28  # Native compact summaries; individual rows remain exact.
+            for key, serialized in models:
+                value = json.loads(serialized)
+                expected = [r for r in balances if r['warehouse_key'] == key]
+                require(value.get('status') == 'ready' and
+                    [(r['nm_id'], r['quantity'], r['capital_rub']) for r in value.get('balances', [])] ==
+                    [(r['nm_id'], r['quantity'], r['capital_rub']) for r in expected]
+                    and Decimal(value['warehouse']['total_quantity']) == sum((Decimal(r['quantity']) for r in expected), Decimal(0))
+                    and Decimal(value['warehouse']['total_capital_rub']) == sum((Decimal(r['capital_rub']) for r in expected), Decimal(0)),
+                    'original_stage_models_changed')
+        for table, old_rows in edition['companions'].items():
+            expected = []
+            for old in old_rows:
+                value = {**old, 'version_id': edition['version_id']}
+                if table == 'unmatched_doprinato':
+                    value['unmatched_id'] = 'historical-unmatched:' + fingerprint([edition['version_id'], old['unmatched_id']])[7:]
+                expected.append(value)
+            actual = [dict(row) for row in conn.execute(f'SELECT * FROM {stages.P}{table} WHERE version_id=?',
+                (edition['version_id'],))]
+            require(sorted(actual, key=canonical) == sorted(expected, key=canonical), 'original_stage_companions_changed')
+    # wb_daily_cost is an unversioned projection: ordinary refresh owns the
+    # current suffix. Only the original closed prefix remains this receipt's.
+    for item in manifest['candidate']['daily_wb_costs']:
+        if item['as_of_date'] >= manifest['plan']['scope']['date_to']:
+            continue
+        from packages.application.warehouse_functional import FUNCTIONAL_CUTOVER_ID
+        row = conn.execute(f'SELECT * FROM {stages.P}wb_daily_cost WHERE cutover_id=? AND as_of_date=? AND nm_id=?',
+            (FUNCTIONAL_CUTOVER_ID, item['as_of_date'], item['nm_id'])).fetchone()
+        require(row and all(row[key] == item[key] for key in ('quantity', 'wac_rub', 'capital_rub', 'quality', 'fingerprint'))
+            and json.loads(row['provenance_json']) == item['provenance'], 'closed_daily_cost_changed')
+
+
 def _history_ack_dates(scope,*,now):
     from packages.business_time import current_business_date_iso
     return {day for day in scope['dates'] if day<scope['date_to'] or current_business_date_iso(now)>scope['date_to']}
@@ -663,23 +767,29 @@ def finalize_scope(runtime,*,manifest,history_ack,finance,economics,now):
     require(require_heavy_owner(runtime.runtime_dir).operation=='cycle','owned_cycle_required')
     require_warehouse_job_owner(runtime.runtime_dir)
     publication._verify(manifest)
-    book,version=accounting.load(runtime.runtime_dir)
-    require(version==manifest['after_book'] and book==manifest['candidate']['candidate_book'] and not book.get('publication_error'),'healthy_published_book_required')
-    # Match HistoricalReceipt.freeze_scope without admitting a later book or
-    # changed Ready. Successful completion after either changes is not implied.
+    from packages.application.fbs_accounting_historical_history import HistoricalReceipt
     closed_dates=_history_ack_dates(manifest['plan']['scope'],now=now)
     require(history_ack and history_ack.get('manifest_digest')==manifest['manifest_digest']
         and set(history_ack.get('native',{}))==closed_dates,'exact_history_ack_required')
-    require(finance.get('status') in {'applied','already_current'} and finance.get('non_target_preserved') is True
-        and finance.get('post_verify_stale_week_count')==0 and finance.get('accounting_version_unchanged') is True,'finance_completion_unproven')
-    require(economics and economics==accounting.current_publication_receipt(runtime,now=now)
-            and economics.get('accounting_version')==version,'economics_completion_unproven')
-    require(book.get('historical_revision',{}).get('quality_proof')==manifest['candidate']['quality_proof'],'published_quality_proof_changed')
-    publication.publication_receipt(manifest,runtime_dir=runtime.runtime_dir)
+    # The normal owned cycle legitimately advances today's book and Ready.
+    # Hold the existing book/writer owners across descendant proof and receipt.
     with warehouse_functional_write_lock(runtime.runtime_dir),accounting.writer_lock(runtime.runtime_dir):
+        book,version,books=_completion_books(runtime,manifest=manifest)
+        require(finance.get('status') in {'applied','already_current'} and finance.get('non_target_preserved') is True
+            and finance.get('post_verify_stale_week_count')==0 and finance.get('accounting_version_unchanged') is True
+            and finance.get('accounting_version_before')==finance.get('accounting_version')==version
+            and finance.get('source_advanced_after_apply') is not True,'finance_completion_unproven')
+        require(economics and economics==accounting.current_publication_receipt(runtime,now=now)
+                and economics.get('accounting_version')==version,'economics_completion_unproven')
+        receipt=HistoricalReceipt(runtime,manifest['operation_id'],manifest['attempt_id']).freeze_scope(now)
+        require(receipt.manifest==manifest and set(receipt.dates)==closed_dates,'historical_receipt_changed')
+        receipt.validate_sources_readonly(now=now)
+        with ready.readonly(runtime.db_path) as conn:
+            _verify_original_publication(conn,manifest=manifest)
         with owned_sqlite.connection(runtime.db_path,phase_name='temporary_completion_connection') as conn:
             conn.row_factory=sqlite3.Row
             with owned_sqlite.transaction(conn,db_path=runtime.db_path,phase_name='temporary_completion'):
+                require(accounting.load(runtime.runtime_dir)[1]==version,'completion_book_changed')
                 proof=validate_source_receipt(conn,manifest=manifest)
                 row=conn.execute('SELECT kind,inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND state=\'complete\'',
                     (manifest['operation_id'],manifest['attempt_id'])).fetchone()
@@ -687,19 +797,21 @@ def finalize_scope(runtime,*,manifest,history_ack,finance,economics,now):
                     and publication.decode_manifest(row['inputs_json'],kind=row['kind'])==manifest,'completed_publication_changed')
                 diagnostics=json.loads(row['diagnostics_json']);require(diagnostics.get('historical_history_ack')==history_ack,'stored_history_ack_changed')
                 diagnostics.update(temporary_allocation_scope_complete=True,temporary_allocation_finance=finance,
-                    temporary_allocation_economics=economics,temporary_allocation_quality_proof=manifest['candidate']['quality_proof'])
+                    temporary_allocation_economics=economics,temporary_allocation_quality_proof=manifest['candidate']['quality_proof'],
+                    temporary_allocation_completion_books=books)
                 conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=? WHERE operation_id=? AND attempt_id=?',
                     (canonical(diagnostics),manifest['operation_id'],manifest['attempt_id']))
                 binding=manifest['plan']['effect_binding'];recipe=_read_recipe(conn,binding)
                 completion=dict(child_operation_id=manifest['operation_id'],child_attempt_id=manifest['attempt_id'],
                     manifest_digest=manifest['manifest_digest'],history_ack=history_ack,finance=finance,economics=economics,
-                    quality_proof=manifest['candidate']['quality_proof'],**proof)
-                ready.complete_publication(conn,operation_id=binding['operation_id'],attempt_id=binding['attempt_id'],book_version=version,
+                    historical_ready_digest=ready.digest(manifest['targets'][-1]['after_json']),
+                    current_ready_digest=economics['ready_digest'],quality_proof=manifest['candidate']['quality_proof'],**proof,**books)
+                ready.complete_publication(conn,operation_id=binding['operation_id'],attempt_id=binding['attempt_id'],book_version=manifest['after_book'],
                     after_digest=ready.digest(manifest['targets'][-1]['after_json']),finished_at=now.isoformat())
                 conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=? WHERE operation_id=? AND attempt_id=?',
                     (canonical(dict(temporary_allocation_completion=completion)),binding['operation_id'],binding['attempt_id']))
     return dict(status='scope_complete',operation_id=manifest['operation_id'],book_version=version,
-                quality_proof=manifest['candidate']['quality_proof'],operator_receipts_completed=False)
+                **books,quality_proof=manifest['candidate']['quality_proof'],operator_receipts_completed=False)
 
 
 def _make_recipe(runtime,*,snapshot,unit,evidence,operation_id,created_at,numeric,source_selection_fence=(),completion_authority=None):
@@ -820,7 +932,7 @@ def _normalized_completion_fence(conn, *, authority, recipe=None):
                 continue
             if sql==normal[ready.REVISIONS] and row['source_table']==docs.REQUESTS_TABLE:
                 row['revision']-=inserted
-            hashed.update(canonical(list(row.values())).encode());hashed.update(b'\n')
+            hashed.update(ready.canonical(list(row.values())).encode());hashed.update(b'\n')
         require('sha256:'+hashed.hexdigest()==digest,'completion_full_source_changed')
 
 
@@ -1009,7 +1121,10 @@ class TemporaryAllocationAction:
             return dict(operation_id=operation_id,state='applied' if complete else 'ambiguous',original_operation_id=original,
                 native_complete=native,ready_complete=bool(child and child['state']=='complete'),scope_complete=complete,
                 recipe_digest=recipe['recipe_digest'],book_version=parent['book_version'],recovery_ref=original,
-                next_step='none' if complete else 'owned_cycle_or_explicit_same_recipe_recovery')
+                next_step='none' if complete else 'owned_cycle_or_explicit_same_recipe_recovery',
+                **(dict(historical_after_book=proof.get('historical_after_book',parent['book_version']),
+                    current_completion_book=proof.get('current_completion_book',proof.get('economics',{}).get('accounting_version')))
+                    if complete else {}))
         except (ValueError,sqlite3.Error,KeyError):
             return dict(operation_id=operation_id,state='ambiguous',original_operation_id=original,scope_complete=False,
                 recipe_digest=recipe['recipe_digest'],next_step='same_recipe_readonly_diagnosis_no_new_effect_identity')
