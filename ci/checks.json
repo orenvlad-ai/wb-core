@@ -747,12 +747,15 @@
         "packages/application/registry_upload_db_backed_runtime.py",
         "packages/application/registry_upload_http_entrypoint.py",
         "packages/application/fbs_accounting_runtime.py",
-        "apps/web_vitrina_management_history.py"
+        "apps/web_vitrina_management_history.py",
+        "packages/application/management_accounting_reconciliation.py",
+        "apps/management_accounting_reconciliation_smoke.py"
       ],
       "commands": [
         ["python3", "apps/web_vitrina_catalog_economics_smoke.py"],
         ["python3", "apps/web_vitrina_daily_pool_smoke.py"],
-        ["python3", "apps/web_vitrina_management_history_smoke.py"]
+        ["python3", "apps/web_vitrina_management_history_smoke.py"],
+        ["python3", "apps/management_accounting_reconciliation_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5"]
     },
