@@ -470,8 +470,13 @@ def _fence(conn,manifest,runtime_dir,*,recovering=False):
     ready.check_pinned_authority(conn,manifest["authority"])
     stages.require(staging._file_authority(runtime_dir,manifest["authority"]["path"])==manifest["file_authority"],"historical_publication_file_replaced")
     if not recovering:ready.check_material(conn,manifest["source_revisions"])
-    stages.check_query_fence(conn,manifest["candidate"]["query_fence"])
-    stages.check_query_fence(conn,manifest['original_source_fence'])
+    if manifest['contract']==TEMPORARY_CONTRACT:
+        from packages.application.fbs_temporary_allocation_action import check_publication_source_fence
+        check_publication_source_fence(conn,manifest=manifest,fence=manifest['candidate']['query_fence'])
+        check_publication_source_fence(conn,manifest=manifest,fence=manifest['original_source_fence'])
+    else:
+        stages.check_query_fence(conn,manifest["candidate"]["query_fence"])
+        stages.check_query_fence(conn,manifest['original_source_fence'])
     from packages.application.operator_warehouse_documents import TABLE
     for identity,expected in manifest["operator_confirmation"].items():
         actual=conn.execute(f"SELECT source_json,source_digest,accepted_at,actor FROM {TABLE} WHERE request_id=?",(identity,)).fetchone()
@@ -590,7 +595,7 @@ def publish(manifest, *, runtime_dir, fault_injector=None):
                 _append_and_activate(runtime_dir,manifest);inject("after_book")
                 if manifest["contract"] == TEMPORARY_CONTRACT:
                     from packages.application.fbs_temporary_allocation_action import publish_stages
-                    publish_stages(conn,candidate=manifest["candidate"])
+                    publish_stages(conn,candidate=manifest["candidate"],publication_manifest=manifest)
                 elif manifest["contract"] == FBO_CONTRACT:
                     from packages.application.fbs_historical_fbo_publication import publish_stages
                     publish_stages(conn,candidate=manifest["candidate"])

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Native owned unit/recovery tests; full WB/Ready integration is separate."""
-from contextlib import closing
+from contextlib import closing,nullcontext
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime,timedelta,timezone
@@ -21,6 +21,47 @@ from packages.application import ff_pool_fbs_historical_handoff as handoffs
 from packages.application.ff_pool_foundation import BALANCES_TABLE,OPERATIONS_TABLE
 from packages.application.registry_upload_db_backed_runtime import _connect
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
+
+
+def supplier_draft(preorder='1'):
+    identity='preorder:'+preorder
+    normalized=dict(supply_id=identity,cache_key=identity,preorder_id=preorder,wb_supply_id='',status_id=1,
+        supply_date='',fact_date='',actual_warehouse_id='',accepted_quantity=0,unloading_quantity=0)
+    listed=dict(preorderID=int(preorder),supplyID=None,statusID=1,supplyDate=None,factDate=None)
+    detail=dict(statusID=1,supplyDate=None,factDate=None,actualWarehouseID=None,
+        acceptedQuantity=0,unloadingQuantity=0,readyForSaleQuantity=0)
+    goods=[dict(nmID=nm,quantity=100,acceptedQuantity=0,unloadingQuantity=0,readyForSaleQuantity=0) for nm in range(101,105)]
+    return dict(supply_id=identity,cache_key=identity,preorder_id=preorder,wb_supply_id='',status_id=1,
+        supply_date='',fact_date='',normalized_row_json=action.canonical(normalized),raw_list_json=action.canonical(listed),
+        raw_detail_json=action.canonical(detail),raw_goods_json=action.canonical(goods),synced_at=STAMP)
+
+
+def insert_supplier_draft(conn,preorder='1'):
+    row=supplier_draft(preorder)
+    conn.execute(f'INSERT INTO {action.P}wb_supplies({",".join(row)}) VALUES({",".join("?" for _ in row)})',tuple(row.values()))
+    return dict(conn.execute(f'SELECT * FROM {action.P}wb_supplies WHERE supply_id=?',(row['supply_id'],)).fetchone())
+
+
+class SupplierDraftEvidenceTests(unittest.TestCase):
+    def test_only_affirmatively_unshipped_drafts_are_nonphysical(self):
+        row=supplier_draft();self.assertTrue(action._repair().is_unshipped_supplier_draft(row))
+        for column,key,value in (
+            ('raw_list_json','supplyID',123),('raw_list_json','preorderID',2),('raw_list_json','statusID',2),
+            ('raw_list_json','supplyDate',STAMP),('raw_detail_json','factDate',STAMP),
+            ('raw_detail_json','actualWarehouseID',1),('raw_detail_json','acceptedQuantity',1),
+            ('raw_detail_json','unloadingQuantity',1),('raw_detail_json','readyForSaleQuantity',1),
+            ('normalized_row_json','wb_supply_id','real'),('normalized_row_json','status_id',2),
+        ):
+            changed=deepcopy(row);value_json=action.json.loads(changed[column]);value_json[key]=value;changed[column]=action.canonical(value_json)
+            with self.subTest(column=column,key=key):self.assertFalse(action._repair().is_unshipped_supplier_draft(changed))
+        for key in ('actualWarehouseID','acceptedQuantity','unloadingQuantity','readyForSaleQuantity','supplyDate','factDate'):
+            changed=deepcopy(row);value=action.json.loads(changed['raw_detail_json']);value.pop(key);changed['raw_detail_json']=action.canonical(value)
+            self.assertFalse(action._repair().is_unshipped_supplier_draft(changed))
+        for key in ('acceptedQuantity','unloadingQuantity','readyForSaleQuantity'):
+            changed=deepcopy(row);goods=action.json.loads(changed['raw_goods_json']);goods[0][key]=1;changed['raw_goods_json']=action.canonical(goods)
+            self.assertFalse(action._repair().is_unshipped_supplier_draft(changed))
+            goods[0].pop(key);changed['raw_goods_json']=action.canonical(goods)
+            self.assertFalse(action._repair().is_unshipped_supplier_draft(changed))
 
 
 def replay_native_daily_projection(runtime, *, version_id):
@@ -218,6 +259,8 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         if self._testMethodName.startswith('test_closed_receipts_'):
             # Establish the accepted opening once, before its immutable save.
             self.book=repair_fixture.seed_closed_receipts_for_action(fixture,self.book)
+            if self._testMethodName=='test_closed_receipts_registered_draft_continuation_never_repeats_native_and_completes_history':
+                self.book['effective_date']=self.book['state']['baseline']['business_date']
         self.version=accounting._save_book(self.root,self.book,expected=None,operation_id='initial-source-book')
         handoffs.load.return_value=(self.book,self.version)
         self.now=datetime.fromisoformat(STAMP.replace('Z','+00:00'))
@@ -230,7 +273,8 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
             # fixture's missing active-version shortcut.
             conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_active SET version_id='saved:2026-11-02'")
             conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_wb_sync_status VALUES(1,?,?,NULL,'saved:2026-11-02',?)",(STAMP,STAMP,STAMP))
-            if self._testMethodName=='test_ordinary_refresh_new_generation_then_history_finance_completes_descendant':
+            if self._testMethodName in {'test_ordinary_refresh_new_generation_then_history_finance_completes_descendant',
+                    'test_closed_receipts_registered_draft_continuation_never_repeats_native_and_completes_history'}:
                 # The ordinary native daily owner requires the genuine cutover
                 # baseline; the narrower repair-only fixtures do not consume it.
                 conn.execute(f'INSERT INTO {action.stages.P}functional_cutovers VALUES(?,?,?,?,?,?,?,?,?)',
@@ -357,6 +401,115 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
 
     def test_full_private_preflight_real_T1_material_WB_book_and_Ready(self):
         self._published_history_fixture()
+
+    def test_supplier_rows_are_copied_pinned_and_physical_sources_reject_private_preflight(self):
+        with closing(_connect(self.runtime.db_path)) as conn,conn:insert_supplier_draft(conn)
+        snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
+        directory=action._directory(self.root,'supplier-copy');directory.mkdir(parents=True)
+        destination=directory/'sources.sqlite3'
+        with ready.readonly(self.runtime.db_path) as conn:
+            copied=action._subset(conn,destination,book=self.book,now=self.now,snapshot=snapshot)
+        self.assertEqual(copied['rows'][action.P+'wb_supplies'],1)
+        with ready.readonly(destination) as conn:
+            row=dict(conn.execute(f'SELECT * FROM {action.P}wb_supplies').fetchone())
+            self.assertTrue(action._repair().is_unshipped_supplier_draft(row))
+        with patch.object(action,'_retain',return_value={}):
+            result=action._preflight(self.runtime,request=dict(evidence_manifest_path='fixture',evidence_manifest_sha256='fixture'),
+                operation_id='draft-supplier',directory=action._directory(self.root,'draft-supplier'),snapshot=snapshot,inputs=self.inputs,now=self.now)
+        self.assertFalse(result['numeric']['candidate']['candidate_book'].get('publication_error'))
+        with closing(_connect(self.runtime.db_path)) as conn,conn:
+            detail=action.json.loads(row['raw_detail_json']);detail['acceptedQuantity']=1
+            conn.execute(f'UPDATE {action.P}wb_supplies SET raw_detail_json=?',(action.canonical(detail),))
+        with ready.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(Exception,'ready_repair_source_changed'):action.stages.check_query_fence(conn,copied['query_fence'])
+        with patch.object(action,'_retain',return_value={}):
+            with self.assertRaisesRegex(ValueError,'selected_wb_supplier_source_present'):
+                action._preflight(self.runtime,request=dict(evidence_manifest_path='fixture',evidence_manifest_sha256='fixture'),
+                    operation_id='physical-supplier',directory=action._directory(self.root,'physical-supplier'),snapshot=snapshot,inputs=self.inputs,now=self.now)
+
+    def test_closed_receipts_registered_draft_continuation_never_repeats_native_and_completes_history(self):
+        operation='legacy-draft-local';directory=action._directory(self.root,operation)
+        legacy_code={**action._code(),'fbs_temporary_allocation_action.py':'sha256:legacy-fixture'}
+        snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
+        with patch.object(action,'_code',return_value=legacy_code),patch.object(action,'_retain',return_value={}):
+            result=action._preflight(self.runtime,request=dict(evidence_manifest_path='fixture',evidence_manifest_sha256='fixture'),
+                operation_id=operation,directory=directory,snapshot=snapshot,inputs=self.inputs,now=self.now)
+            recipe=action._make_recipe(self.runtime,snapshot=snapshot,unit=result['unit'],evidence=self.inputs[1],operation_id=operation,
+                created_at=STAMP,numeric=result['numeric'],source_selection_fence=result['subset']['selection_fence'],completion_authority=result['completion_authority'])
+            with warehouse_functional_job_lock(self.root) as owner:
+                binding=action._record_recipe(self.runtime,recipe,owner_token=owner['owner_token'])
+                action._apply_native_unit(self.runtime,recipe,binding=binding,owner_token=owner['owner_token'])
+                action._finalize_native_documents(self.runtime,recipe['unit'])
+        saved=dict(recipe=recipe,binding=binding,request=dict(action=action.RESTORE))
+        action.shared._private(directory/'attempt.json',saved)
+        with closing(_connect(self.runtime.db_path)) as conn,conn:
+            rows=[insert_supplier_draft(conn,str(i)) for i in (1,2,3)]
+        registration=dict(operation_id=operation,original_code_digest=action.fingerprint(legacy_code),preorder_ids=['1','2','3'],
+            row_digests={row['supply_id']:action.fingerprint(row) for row in rows})
+        with ready.readonly(action.shared._runtime(directory/'simulation').db_path) as conn:
+            stored=conn.execute(f'SELECT inputs_json FROM {action.P}ready_publications WHERE operation_id=?',(recipe['publication_operation_id'],)).fetchone()[0]
+            registration.update(rehearsal_inputs_sha256='sha256:'+hashlib.sha256(stored.encode()).hexdigest(),
+                rehearsal_manifest_digest=action.json.loads(stored)['manifest_digest'])
+        with patch.dict(action.DRAFT_CONTINUATIONS,{recipe['recipe_digest']:registration}):
+            manifest=action._prepare_draft_continuation(self.runtime,saved=saved,cached=result)
+            self.assertEqual(action._numeric(manifest),recipe['numeric'])
+            action.independent_rebuild(manifest,runtime_dir=self.root)
+            self.assertEqual(accounting.load(self.root)[1],self.version)
+            for kind in ('changed_row','fourth_row','other_source','native'):
+                with closing(_connect(self.runtime.db_path)) as conn,conn:
+                    if kind=='changed_row':conn.execute(f"UPDATE {action.P}wb_supplies SET synced_at='changed' WHERE preorder_id='1'")
+                    elif kind=='fourth_row':insert_supplier_draft(conn,'4')
+                    elif kind=='other_source':conn.execute(f"UPDATE {action.stages.P}wb_snapshots SET raw_rows_digest='changed' WHERE version_id='saved:2026-10-31'")
+                    else:
+                        native_document=recipe['unit']['ordinary'][0]['plan']['primary_document_id']
+                        before=conn.execute(f'SELECT business_date FROM {action.docs.DOCUMENTS_TABLE} WHERE document_id=?',(native_document,)).fetchone()[0]
+                        triggers=conn.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?",(action.docs.DOCUMENTS_TABLE,)).fetchall()
+                        for trigger in triggers:conn.execute(f'DROP TRIGGER "{trigger[0]}"')
+                        conn.execute(f'UPDATE {action.docs.DOCUMENTS_TABLE} SET business_date=? WHERE document_id=?',('2026-10-30',native_document))
+                        for trigger in triggers:conn.execute(trigger[1])
+                try:
+                    with self.subTest(kind=kind),self.assertRaises(Exception):action.independent_rebuild(manifest,runtime_dir=self.root)
+                finally:
+                    with closing(_connect(self.runtime.db_path)) as conn,conn:
+                        if kind=='changed_row':conn.execute(f'UPDATE {action.P}wb_supplies SET synced_at=? WHERE preorder_id=?',(STAMP,'1'))
+                        elif kind=='fourth_row':conn.execute(f"DELETE FROM {action.P}wb_supplies WHERE preorder_id='4'")
+                        elif kind=='other_source':
+                            original=manifest['original_capture']['dates']['2026-10-31']['snapshot']['raw_rows_digest']
+                            conn.execute(f"UPDATE {action.stages.P}wb_snapshots SET raw_rows_digest=? WHERE version_id='saved:2026-10-31'",(original,))
+                        else:
+                            for trigger in triggers:conn.execute(f'DROP TRIGGER "{trigger[0]}"')
+                            conn.execute(f'UPDATE {action.docs.DOCUMENTS_TABLE} SET business_date=? WHERE document_id=?',(before,native_document))
+                            for trigger in triggers:conn.execute(trigger[1])
+            manifest=action._prepare_draft_continuation(self.runtime,saved=saved,cached=result)
+            request=dict(action=action.RECOVER,recovery_ref=operation,original_recipe_digest=recipe['recipe_digest'])
+            before_attempt=(directory/'attempt.json').read_bytes();before_preflight=(directory/'preflight.json').read_bytes()
+            with patch.object(action.shared,'_held',return_value=nullcontext({})),patch.object(action,'_record_recipe',side_effect=AssertionError('native admission forbidden')),\
+                    patch.object(action,'_apply_native_unit',side_effect=AssertionError('native write forbidden')),patch.object(action,'_finalize_native_documents',side_effect=AssertionError('native finalization forbidden')):
+                with warehouse_functional_job_lock(self.root):
+                    for crash_boundary in ('after_intent','after_book'):
+                        with self.assertRaisesRegex(RuntimeError,'crash-after-child-intent'):
+                            action.publication.publish(manifest,runtime_dir=self.root,
+                                fault_injector=lambda boundary:(_ for _ in ()).throw(RuntimeError('crash-after-child-intent')) if boundary==crash_boundary else None)
+                preview=action.TemporaryAllocationAction().preview(request,'continuation-local',root=self.root)
+                with self.assertRaises(action.AmbiguousSubmit):action.TemporaryAllocationAction().apply(request,'continuation-local',preview,root=self.root)
+            self.assertEqual((directory/'attempt.json').read_bytes(),before_attempt)
+            self.assertEqual((directory/'preflight.json').read_bytes(),before_preflight)
+            self.assertEqual(accounting.load(self.root)[1],recipe['numeric']['after_book'])
+            from packages.application.fbs_accounting_historical_history import pending_receipt
+            from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter,update_live_history
+            from packages.application.web_vitrina_history_store import HistoryStore
+            from packages.application.own_product_capital import OwnProductCapitalBlock
+            from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
+            from packages.application.business_data_heavy_admission import heavy_admitted
+            import time
+            historical_runtime=action.shared._runtime(self.root)
+            OwnProductCapitalBlock(runtime=historical_runtime)
+            receipt=pending_receipt(historical_runtime);self.assertIsNotNone(receipt)
+            self.assertEqual(action._numeric(receipt.manifest),recipe['numeric']);receipt.freeze_scope(self.now)
+            # The admitted historical absence proof survives later draft sync.
+            with closing(_connect(self.runtime.db_path)) as conn,conn:conn.execute(f"UPDATE {action.P}wb_supplies SET synced_at='later-sync'")
+            receipt.validate_sources_readonly(now=self.now)
+            self._ordinary_refresh_history_finance_descendant(historical_runtime,receipt)
 
     def test_closed_receipts_full_private_preflight_history_and_pre_money_fence(self):
         from packages.application.fbs_accounting_historical_revision import _prefix
@@ -509,6 +662,10 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
             self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {action.lifecycle.RECONCILIATION_TABLE} WHERE state='open'").fetchone()[0],1)
 
     def test_ordinary_refresh_new_generation_then_history_finance_completes_descendant(self):
+        sim,receipt,_=self._published_history_fixture()
+        self._ordinary_refresh_history_finance_descendant(sim,receipt)
+
+    def _ordinary_refresh_history_finance_descendant(self,sim,receipt):
         from packages.application import business_data_heavy_admission as admission
         from packages.application import registry_upload_db_backed_runtime as db_runtime
         from packages.application import fbs_accounting_historical_cycle as historical_cycle
@@ -520,7 +677,7 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         from packages.application.web_vitrina_history_store import HistoryStore
         from packages import business_time
         from apps.warehouse_functional_runner import _publish_fbs_snapshot_accounting,_recalculate_downstream_finance_cost
-        sim,receipt,_=self._published_history_fixture();manifest=receipt.manifest
+        manifest=receipt.manifest
         later=self.now+timedelta(minutes=1);stamp=later.isoformat().replace('+00:00','Z');day=business_time.current_business_date_iso(later)
         original=deepcopy(accounting.load(sim.runtime_dir)[0]);old_version=manifest['after_book']
         middle=deepcopy(original);middle['prepared_at']=(self.now+timedelta(seconds=30)).isoformat()
@@ -662,10 +819,10 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
                 conn.execute(f'UPDATE {action.docs.DOCUMENTS_TABLE} SET posted_manifest_sha256=? WHERE document_id=?',(saved,identity))
                 for trigger in triggers:conn.execute(trigger[1])
         receipt=historical_history.pending_receipt(sim).freeze_scope(later);receipt.validate_sources_readonly(now=later)
-        directory=action._directory(self.root,'full-local-temporary')
+        directory=self.root.parent/'ordinary-descendant-proof'
         store=HistoryStore(directory/'history')
         adapter=LiveNativeAdapter(db_path=sim.db_path,runtime_dir=sim.runtime_dir,cache_dir=directory/'descendant-proofs',now=later,
-            date_from='2026-10-27',date_to=day,formula_epoch='local-temporary-fbs')
+            date_from=min(manifest['plan']['scope']['dates']),date_to=day,formula_epoch='local-temporary-fbs')
         updated=update_live_history(adapter=adapter,runtime=sim,store=store,max_recomputes=31,
             deadline_monotonic=action.time.monotonic()+45,rolling14=False,group_blocks=True,backfill_dates=list(receipt.dates))
         self.assertIn(updated['status'],{'published','unchanged'})

@@ -56,6 +56,20 @@ MAX_PREFLIGHT_BUILD_SECONDS = 1800
 MAX_COMPLETION_AGE_SECONDS = 600
 COMPLETION_CONTRACT = 'temporary_fbs_verified_completion_v1'
 MAX_COMPLETION_ANCESTORS = 10000
+DRAFT_CONTINUATION_CONTRACT='temporary_fbs_unshipped_draft_continuation_v1'
+# This authority admits only publication of one already committed native unit.
+# It cannot admit, replan, or repeat a financial effect.
+DRAFT_CONTINUATIONS={
+    'sha256:fe4ff164f80a0993217332b8722585692d5a412b2df9b14c20eca15e75fefc08':dict(
+        operation_id='wbc-583-finalization-preview-20261103',
+        original_code_digest='sha256:bf58cbc1e024a8c59409c8ed0ea3357b3a26ee82581bcd1ab34bee06c141dfab',
+        rehearsal_inputs_sha256='sha256:81d3bdc875e68b641344bd45f017395ff9c3c14d52c86472966c77492264480a',
+        rehearsal_manifest_digest='sha256:0db9ad091d7c14866a3c77d662711392a50a9725ee280fb0055900203703c8f0',
+        preorder_ids=['53923271','53923373','53923468'],
+        row_digests={
+            'preorder:53923271':'sha256:13cbd7238709e8894373d519151562f69c6607f034344385ff7ce897b68ab090',
+            'preorder:53923373':'sha256:4646d727d923f68d5d4c5cd6a4d3df7044c5916d678d94c9334ef4b2203e9430',
+            'preorder:53923468':'sha256:36da16b6788f286ab53817b8e6e9832d62eb127d359035981e8f8cd8ad82338f'})}
 P = 'sheet_vitrina_v1_'
 
 
@@ -232,6 +246,8 @@ def _subset(conn,destination,*,book,now,snapshot):
     nativeops=f'SELECT operation_id FROM {LINES_TABLE} WHERE nm_id IN ({marks}) UNION SELECT operation_id FROM {docs.DOCUMENTS_TABLE} UNION SELECT operation_id FROM {OPERATIONS_TABLE} WHERE (julianday(posted_at)>=julianday(?) OR julianday(posted_at) IS NULL) AND business_date<=?'
     native_args=[*nms,*late_args]
     filters={LINES_TABLE:(f'operation_id IN ({nativeops})',native_args),OPERATIONS_TABLE:(f'operation_id IN ({nativeops})',native_args)}
+    supplier_sql,supplier_args=_repair().supplier_source_query(nms)
+    filters[P+'wb_supplies']=(supplier_sql.split(' WHERE ',1)[1].rsplit(' ORDER BY ',1)[0].replace('s.raw_goods_json','raw_goods_json'),supplier_args)
     for table in ('wb_supplies_fbs_order_observations','wb_supplies_fbs_status_observations','wb_supplies_fbs_status_current','wb_supplies_fbs_status_transitions','wb_supplies_fbs_identity_evidence'):
         filters[P+table]=(f'order_id IN ({selected_orders})',nms)
     for table in ('ff_pool_fbs_lifecycle_current','ff_pool_fbs_lifecycle_events','ff_pool_fbs_applicability_events'):
@@ -578,15 +594,118 @@ def _finalize_native_documents(runtime,unit):
         require(value['state']=='complete','ordinary_native_document_incomplete')
 
 
-def prepare_publication(runtime,*,recipe,binding,now):
+def _draft_registration(recipe):
+    registration=DRAFT_CONTINUATIONS.get(recipe['recipe_digest'])
+    require(registration and recipe['operation_id']==registration['operation_id']
+        and fingerprint(recipe['adapter_code'])==registration['original_code_digest']
+        and recipe['recipe_digest']==fingerprint({k:v for k,v in recipe.items() if k!='recipe_digest'}),
+        'unregistered_code_continuation')
+    return registration
+
+
+def _check_draft_continuation(conn, *, manifest, recipe=None, live=True):
+    proof=manifest['draft_continuation'];recipe=recipe or _read_recipe(conn,manifest['plan']['effect_binding'])
+    registration=_draft_registration(recipe)
+    require(proof['contract']==DRAFT_CONTINUATION_CONTRACT and proof['recipe_digest']==recipe['recipe_digest']
+        and proof['original_code_digest']==registration['original_code_digest']
+        and proof['original_rehearsal_digest']==registration['rehearsal_manifest_digest']
+        and proof['original_rehearsal_inputs_sha256']==registration['rehearsal_inputs_sha256']
+        and proof['new_code']==_code() and manifest['adapter_code_authority']==_code()
+        and proof['original_capture_digest']==fingerprint(manifest['original_capture'])
+        and _numeric(manifest)==recipe['numeric'] and _verify_unit(conn,recipe['unit']), 'draft_continuation_changed')
+    sql,args=_repair().supplier_source_query(recipe['snapshot']['nm_ids'])
+    rows=proof['draft_rows']
+    require({row['supply_id']:fingerprint(row) for row in rows}==registration['row_digests']
+        and sorted(str(row['preorder_id']) for row in rows)==registration['preorder_ids']
+        and all(_repair().is_unshipped_supplier_draft(row) for row in rows),'draft_continuation_sources_changed')
+    hashed=hashlib.sha256()
+    columns=[row[1] for row in conn.execute(f'PRAGMA table_info({P}wb_supplies)')]
+    for row in rows:hashed.update(ready.canonical([row[column] for column in columns]).encode()+b'\n')
+    require(proof['draft_fence']==[[sql,args,'sha256:'+hashed.hexdigest()]],'draft_continuation_fence_changed')
+    if live:
+        require([dict(row) for row in conn.execute(sql,args)]==rows,'draft_continuation_sources_changed')
+        stages.check_query_fence(conn,proof['draft_fence'])
+    return sql,args
+
+
+def check_publication_source_fence(conn, *, manifest, fence):
+    if not manifest.get('draft_continuation'):
+        return stages.check_query_fence(conn,fence)
+    sql,args=_check_draft_continuation(conn,manifest=manifest)
+    empty='sha256:'+hashlib.sha256(b'').hexdigest()
+    exempt=[entry for entry in fence if entry[0]==sql and list(entry[1])==args]
+    require(len(exempt)==1 and exempt[0][2]==empty,'draft_continuation_original_guard_changed')
+    stages.check_query_fence(conn,[entry for entry in fence if entry not in exempt])
+
+
+def _prepare_draft_continuation(runtime, *, saved, cached):
+    recipe=saved['recipe'];registration=_draft_registration(recipe)
+    require(cached['digest']==fingerprint({k:v for k,v in cached.items() if k!='digest'})
+        and cached['code_authority']==recipe['adapter_code'] and cached['numeric']==recipe['numeric'], 'original_preflight_changed')
+    require(cached['file_authority']==recipe['file_authority']==staging._file_authority(runtime.runtime_dir,runtime.db_path),
+        'continuation_file_replaced')
+    _completion_evidence(recipe['completion_authority'],snapshot=recipe['snapshot'])
+    with ready.readonly(runtime.db_path) as conn:
+        require(_read_recipe(conn,saved['binding'])==recipe and _verify_unit(conn,recipe['unit']),'continuation_native_incomplete')
+        parent=conn.execute(f'SELECT state FROM {P}ready_publications WHERE operation_id=? AND attempt_id=?',
+            (recipe['operation_id'],recipe['attempt_id'])).fetchone()
+        require(parent and parent[0]=='prepared','continuation_parent_changed')
+        child=conn.execute(f'SELECT kind,inputs_json FROM {P}ready_publications WHERE operation_id=? AND attempt_id=?',
+            (recipe['publication_operation_id'],recipe['attempt_id'])).fetchone()
+        if child:
+            require(child['kind']==CONTRACT,'continuation_child_changed')
+            manifest=publication.decode_manifest(child['inputs_json'],kind=child['kind'])
+            publication._verify(manifest);_check_draft_continuation(conn,manifest=manifest,recipe=recipe)
+            require(accounting.load(runtime.runtime_dir)[1] in {recipe['expected_book'],manifest['after_book']},'continuation_book_changed')
+            return manifest
+        require(accounting.load(runtime.runtime_dir)[1]==recipe['expected_book'],'publication_original_book_changed')
+        sql,args=_repair().supplier_source_query(recipe['snapshot']['nm_ids'])
+        rows=[dict(row) for row in conn.execute(sql,args)]
+        require({row['supply_id']:fingerprint(row) for row in rows}==registration['row_digests']
+            and sorted(str(row['preorder_id']) for row in rows)==registration['preorder_ids']
+            and all(_repair().is_unshipped_supplier_draft(row) for row in rows),'draft_continuation_sources_changed')
+        proof=dict(contract=DRAFT_CONTINUATION_CONTRACT,recipe_digest=recipe['recipe_digest'],original_preflight_digest=cached['digest'],
+            original_code_digest=registration['original_code_digest'],new_code=_code(),draft_rows=rows,
+            draft_fence=json.loads(canonical(ready.pin_queries(conn,[(sql,args)]))))
+    sim=shared._runtime(_directory(Path(runtime.runtime_dir),recipe['operation_id'])/'simulation')
+    with ready.readonly(sim.db_path) as conn:
+        row=conn.execute(f'SELECT rowid,kind,state,length(CAST(inputs_json AS BLOB)) AS bytes FROM {P}ready_publications WHERE operation_id=? AND attempt_id=?',
+            (recipe['publication_operation_id'],recipe['attempt_id'])).fetchone()
+        require(row and row['kind']==CONTRACT and row['state']=='complete'
+            and row['bytes']<=publication.publication_limits(CONTRACT)[0],'original_rehearsal_missing')
+        hashed=hashlib.sha256()
+        # Hash the exact reviewed stored bytes without decoding duplicate book
+        # and Ready images. The only loaded operand is the retained capture.
+        with conn.blobopen(P+'ready_publications','inputs_json',row['rowid'],readonly=True) as blob:
+            while chunk:=blob.read(1024**2):hashed.update(chunk)
+        require('sha256:'+hashed.hexdigest()==registration['rehearsal_inputs_sha256'],'original_rehearsal_changed')
+        original=conn.execute(f'''SELECT json_extract(inputs_json,'$.manifest_digest'),json_extract(inputs_json,'$.adapter_code_authority'),
+            json_extract(inputs_json,'$.after_book'),json_extract(inputs_json,'$.expected_book'),json_extract(inputs_json,'$.original_capture')
+            FROM {P}ready_publications WHERE rowid=?''',(row['rowid'],)).fetchone()
+        require(original[0]==registration['rehearsal_manifest_digest'] and json.loads(original[1])==recipe['adapter_code']
+            and original[2]==recipe['numeric']['after_book'] and original[3]==recipe['expected_book'],'original_rehearsal_changed')
+        capture=json.loads(original[4])
+        del original
+    proof.update(original_rehearsal_digest=registration['rehearsal_manifest_digest'],
+        original_rehearsal_inputs_sha256=registration['rehearsal_inputs_sha256'],original_capture_digest=fingerprint(capture))
+    return prepare_publication(runtime,recipe=recipe,binding=saved['binding'],now=datetime.fromisoformat(recipe['created_at'].replace('Z','+00:00')),
+        continuation=(proof,capture))
+
+
+def prepare_publication(runtime,*,recipe,binding,now,continuation=None):
     book,version=accounting.load(runtime.runtime_dir)
     require(version==recipe['expected_book'],'publication_original_book_changed')
     authority=ready.capture_authority(runtime.runtime_dir);db=Path(authority['path'])
     with ready.readonly(db) as conn:
         require(_read_recipe(conn,binding)==recipe and _verify_unit(conn,recipe['unit']),'publication_native_unit_unproven')
-    captured,candidate=_build_candidate(runtime,book=book,version=version,native_plan=recipe['unit']['native_plan'],evidence=recipe['evidence'],now=now,
-        source_versions=recipe['snapshot']['source_versions'],retained_inputs=recipe['snapshot']['retained_inputs'],
-        targeted_version_ids=recipe['snapshot'].get('targeted_version_ids',[]))
+    if continuation:
+        _draft_registration(recipe)
+        captured=continuation[1]
+        candidate=_repair().build_temporary_allocation_repair(book,capture=captured,native_plan=recipe['unit']['native_plan'])
+    else:
+        captured,candidate=_build_candidate(runtime,book=book,version=version,native_plan=recipe['unit']['native_plan'],evidence=recipe['evidence'],now=now,
+            source_versions=recipe['snapshot']['source_versions'],retained_inputs=recipe['snapshot']['retained_inputs'],
+            targeted_version_ids=recipe['snapshot'].get('targeted_version_ids',[]))
     dates=sorted(candidate['editions'])
     closed=candidate['quality_proof'].get('closed_prefix_repair')
     first='2026-10-26' if closed else '2026-10-27'
@@ -614,6 +733,10 @@ def prepare_publication(runtime,*,recipe,binding,now):
         source_confirmation=confirmations,operator_confirmation={},plan=plan,original_capture=captured,
         original_source_fence=candidate['query_fence'],parameter_proof=parameters,
         book_operation_id='temporary-fbs-publish:'+fingerprint([recipe['operation_id'],recipe['attempt_id']])[7:],created_at=recipe['created_at'])
+    if continuation:
+        result['draft_continuation']=continuation[0]
+        with ready.readonly(db) as conn:
+            check_publication_source_fence(conn,manifest=result,fence=result['original_source_fence'])
     publication._json_size(result,publication.publication_limits(CONTRACT)[1],'temporary_allocation_publication_size_limit')
     result['manifest_digest']=fingerprint(result)
     return result
@@ -625,9 +748,9 @@ def independent_rebuild(manifest,*,runtime_dir,recovering=False):
     with ready.readonly(Path(manifest['authority']['path'])) as conn:
         recipe=_read_recipe(conn,plan['effect_binding'])
         require(version==recipe['expected_book'] and _verify_unit(conn,recipe['unit']),'publication_source_unit_changed')
-        stages.check_query_fence(conn,manifest['original_source_fence'])
+        check_publication_source_fence(conn,manifest=manifest,fence=manifest['original_source_fence'])
     now=datetime.fromisoformat(manifest['created_at'].replace('Z','+00:00'))
-    if recovering:
+    if recovering or manifest.get('draft_continuation'):
         captured=manifest['original_capture']
         candidate=_repair().build_temporary_allocation_repair(book,capture=captured,native_plan=recipe['unit']['native_plan'])
     else:
@@ -640,7 +763,10 @@ def independent_rebuild(manifest,*,runtime_dir,recovering=False):
         publication.verify_ready_targets(conn,manifest=manifest,candidate=candidate,runtime_dir=runtime_dir,now=now)
 
 
-def publish_stages(conn,*,candidate):
+def publish_stages(conn,*,candidate,publication_manifest=None):
+    if publication_manifest and publication_manifest.get('draft_continuation'):
+        return _repair().publish_temporary_allocation_stages(conn,manifest=candidate,
+            source_fence_verifier=lambda source,fence:check_publication_source_fence(source,manifest=publication_manifest,fence=fence))
     return _repair().publish_temporary_allocation_stages(conn,manifest=candidate)
 
 
@@ -651,6 +777,9 @@ def verify_stage_readback(conn,*,manifest):
 def validate_source_receipt(conn,*,manifest):
     recipe=_read_recipe(conn,manifest['plan']['effect_binding'])
     require(_verify_unit(conn,recipe['unit']),'publication_native_source_receipt_changed')
+    # Source admission was bound to exact draft rows before activation. Later
+    # ordinary supplier facts do not rewrite that immutable admission proof.
+    if manifest.get('draft_continuation'):_check_draft_continuation(conn,manifest=manifest,recipe=recipe,live=False)
     return dict(contract=CONTRACT,recipe_digest=recipe['recipe_digest'],native_plan_digest=recipe['unit']['native_plan']['plan_digest'])
 
 
@@ -1083,9 +1212,12 @@ class TemporaryAllocationAction:
             saved=shared._read_json(_directory(root,request['recovery_ref'])/'attempt.json')
             require(saved['recipe']['recipe_digest']==request['original_recipe_digest'],'recovery_recipe_changed')
             cached=shared._read_json(_directory(root,request['recovery_ref'])/'preflight.json')
-            require(cached.get('code_authority')==_code(),'preflight_code_changed')
+            bridge=None
+            if cached.get('code_authority')!=_code():
+                bridge=_prepare_draft_continuation(runtime,saved=saved,cached=cached)
             status=self.readback(saved['request'],request['recovery_ref'],root=root)
             prepared=dict(original=request['recovery_ref'],recipe_digest=request['original_recipe_digest'],status=status)
+            if bridge:prepared['draft_continuation']=bridge['draft_continuation'];prepared['publication_manifest_digest']=bridge['manifest_digest']
             return dict(operation_id=operation_id,target=str(root),scope=dict(action=RECOVER,original=request['recovery_ref']),
                 prestate_sha256=fingerprint(status),candidate_sha256=fingerprint(prepared),prepared=prepared,
                 recovery=dict(kind='same_immutable_native_recipe',original=request['recovery_ref']))
@@ -1115,7 +1247,7 @@ class TemporaryAllocationAction:
         original=request['recovery_ref'] if continuation else operation_id;directory=_directory(root,original)
         with shared._held(root,request),warehouse_functional_job_lock(root) as owner:
             cached=shared._read_json(directory/'preflight.json')
-            require(cached.get('code_authority')==_code(),'preflight_code_changed')
+            require(continuation or cached.get('code_authority')==_code(),'preflight_code_changed')
             if continuation:
                 saved=shared._read_json(directory/'attempt.json');recipe=saved['recipe']
                 require(recipe['recipe_digest']==request['original_recipe_digest'],'continuation_recipe_changed')
@@ -1133,8 +1265,15 @@ class TemporaryAllocationAction:
                     binding={k:recipe[k] for k in ('operation_id','attempt_id','recipe_digest')},backup=dict(book=preflight['backup_book'],sources=preflight['backup_sources']))
                 shared._private(directory/'attempt.json',saved)
             try:
-                binding=_record_recipe(runtime,recipe,owner_token=owner['owner_token'])
-                _pipeline(runtime,recipe=recipe,binding=binding,owner_token=owner['owner_token'],now=datetime.fromisoformat(recipe['created_at'].replace('Z','+00:00')))
+                if cached.get('code_authority')!=_code():
+                    # Already committed unit: never enter any native mutator or
+                    # request finalizer on the registered code continuation.
+                    manifest=_prepare_draft_continuation(runtime,saved=saved,cached=cached)
+                    require(manifest['manifest_digest']==preview['prepared']['publication_manifest_digest'], 'draft_continuation_preview_changed')
+                    publication.publish(manifest,runtime_dir=runtime.runtime_dir)
+                else:
+                    binding=_record_recipe(runtime,recipe,owner_token=owner['owner_token'])
+                    _pipeline(runtime,recipe=recipe,binding=binding,owner_token=owner['owner_token'],now=datetime.fromisoformat(recipe['created_at'].replace('Z','+00:00')))
             except Exception:
                 raise AmbiguousSubmit('temporary_allocation_same_recipe_readback_required') from None
         raise AmbiguousSubmit('temporary_allocation_Ready_published_pending_owned_History_Finance_cycle')
