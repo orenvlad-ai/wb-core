@@ -130,12 +130,15 @@ def read_management_inventory_history(db_path, *, runtime_dir, plan, current_dat
                 continue
             if not verify_capture_content(conn, capture):
                 continue
-            # Capture and complete intent were committed by the same ready owner.
+            # Capture and complete publication were committed by the same Ready
+            # owner. A temporary-allocation effect intent is an orchestration
+            # recipe; completing its metadata never makes it a Ready publisher.
             # Later scoped recoveries can change unrelated ready cells: they do
             # not change this exact retained inventory slice or its source digest.
             receipt = conn.execute("""SELECT operation_id,attempt_id,after_digest FROM
                 sheet_vitrina_v1_ready_publications WHERE bundle_version=? AND as_of_date=?
-                AND state='complete' AND ready_required=1 AND book_version=?
+                AND state='complete' AND ready_required=1
+                AND kind<>'fbs_temporary_allocation_effect_intent_v1' AND book_version=?
                 AND finished_at=? ORDER BY operation_id,attempt_id LIMIT 1""",
                 (*key, binding['book_version'], capture['captured_at'])).fetchone()
             if receipt is None or not receipt['after_digest']:
@@ -143,7 +146,8 @@ def read_management_inventory_history(db_path, *, runtime_dir, plan, current_dat
             current_digest = digest(row['plan_json'])
             current_receipts = conn.execute("""SELECT kind,inputs_json FROM
                 sheet_vitrina_v1_ready_publications WHERE bundle_version=? AND as_of_date=?
-                AND state='complete' AND ready_required=1 AND after_digest=?""", (*key, current_digest)).fetchall()
+                AND state='complete' AND ready_required=1
+                AND kind<>'fbs_temporary_allocation_effect_intent_v1' AND after_digest=?""", (*key, current_digest)).fetchall()
             certified = False
             for current_receipt in current_receipts:
                 if current_receipt['kind'] != 'inventory_retention':

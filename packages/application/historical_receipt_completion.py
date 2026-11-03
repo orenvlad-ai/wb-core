@@ -26,6 +26,7 @@ from packages.application.owned_history_worker_capability import file_digest, re
 OPERATION = 'historical_receipt_completion'
 CONTRACT = 'historical_receipt_completion_v1'
 DIRECTORY = 'historical-receipt-completions'
+MAX_MARKER_BYTES = 2*1024**2
 _HELD = ContextVar('historical_receipt_completion_held',default=None)
 STAGES = ('closed_sources','api_sources','finance_sources','fbs_generation','warehouse',
           'daily_projection','closed_ready','final_ready','rolling14')
@@ -46,6 +47,7 @@ def _unclaimed(root,request):
 
 
 def _exclusive_private(path,value):
+    require(len(canonical(value).encode())<=MAX_MARKER_BYTES,'tail_marker_size_limit')
     path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
     require(not path.parent.is_symlink() and not path.parent.stat().st_mode&0o077,'tail_private_directory_required')
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
@@ -54,6 +56,22 @@ def _exclusive_private(path,value):
     directory_fd=os.open(path.parent,os.O_RDONLY)
     try:os.fsync(directory_fd)
     finally:os.close(directory_fd)
+
+
+def _write_attempt(path,value):
+    """Bounded operational checkpoint, like formula/cycle control journals.
+
+    This is not a backup/evidence artifact. Its full completion proof remains
+    in the native publication; this small marker retains only its digest.
+    """
+    from packages.application.business_data_write_barrier import _atomic_write_private_json
+    require(len(canonical(value).encode())+1<=MAX_MARKER_BYTES,'tail_marker_size_limit')
+    require(not path.is_symlink() and not path.parent.is_symlink()
+        and not path.parent.stat().st_mode&0o077,'tail_private_directory_required')
+    previous=read_json(path,limit=MAX_MARKER_BYTES)
+    require(previous.get('contract')==value.get('contract')==CONTRACT and previous.get('owner')==value.get('owner')
+        and previous.get('request')==value.get('request'),'tail_marker_identity_changed')
+    _atomic_write_private_json(path,value)
 
 
 def _sha(path, expected):
@@ -258,9 +276,14 @@ def _predecessors(runtime,request,cycle):
     require(active and active[0]==versions['functional_version'] and accounting.load(runtime.runtime_dir)[1]==versions['fbs_book'],
         'tail_material_predecessor_changed')
     saved=cycle['stages'][7]['versions']
-    plan=runtime.load_sheet_vitrina_ready_snapshot(as_of_date=saved['as_of_date'])
-    require(plan and plan.snapshot_id==saved['snapshot_id'] and plan.plan_version==saved['plan_version']
-        and runtime.load_current_state().bundle_version==saved['bundle_version'],'tail_ready_predecessor_changed')
+    # The runtime convenience loaders bootstrap schema through a RW connection.
+    # A completion preflight consumes only these exact persisted RO headers.
+    with ready.readonly(runtime.db_path) as conn:
+        header=conn.execute(f'SELECT snapshot_id,plan_version FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',
+            (saved['bundle_version'],saved['as_of_date'])).fetchone()
+        bundle=conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()
+    require(header and header['snapshot_id']==saved['snapshot_id'] and header['plan_version']==saved['plan_version']
+        and bundle and bundle[0]==saved['bundle_version'],'tail_ready_predecessor_changed')
     current=runtime.prepare_sheet_vitrina_ready_publication(bundle_version=saved['bundle_version'],as_of_date=saved['as_of_date'])
     require(current.exists and current.fingerprint==saved['ready_fingerprint'],'tail_ready_predecessor_changed')
     publication=ready.publication_status(runtime.db_path,operation_id=saved['publication_operation_id'],attempt_id=saved['publication_attempt_id'])
@@ -426,7 +449,7 @@ class HistoricalReceiptCompletionAdapter:
 
     def apply(self,request,operation_id,preview):
         from packages.application.fbs_accounting_apply import target
-        from packages.application.fbs_historical_fbo_action import _runtime,_private
+        from packages.application.fbs_historical_fbo_action import _runtime
         from packages.application.business_data_heavy_admission import heavy_admitted
         from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
         from packages.application.owned_history_worker import historical_receipt_history_worker
@@ -464,8 +487,8 @@ class HistoricalReceiptCompletionAdapter:
                         fresh['tail_operation_id']=operation_id
                         error_phase='metadata_finalization'
                         completion=_finalize(runtime,request,config=config,finance=finance,now=now,expected=fresh)
-                    attempt.update(phase='complete',history=history,completion=completion,finished_at=datetime.now(timezone.utc).isoformat())
-                    _private(path,attempt)
+                    attempt.update(phase='complete',history=history,completion_fingerprint=fingerprint(completion),finished_at=datetime.now(timezone.utc).isoformat())
+                    _write_attempt(path,attempt)
             except BaseException as exc:
                 attempt['error_phase']=error_phase
                 attempt['error_type']=type(exc).__name__
@@ -474,7 +497,7 @@ class HistoricalReceiptCompletionAdapter:
                     attempt['error_code']=code
                 # Payload-free native diagnostic only; never persist exception text.
                 if hasattr(exc,'diagnostic'):attempt['error_diagnostic']=exc.diagnostic()
-                _private(path,attempt)
+                _write_attempt(path,attempt)
                 # The durable marker remains submitted even if only startup
                 # was attempted. No automatic resubmit is authorized.
                 raise AmbiguousSubmit('historical_tail_readback_required') from exc
@@ -505,6 +528,8 @@ class HistoricalReceiptCompletionAdapter:
         require(parent['inputs_sha256']==request['parent_inputs_sha256'] and child==prestate['child'],'tail_readback_source_changed')
         require(_held_binding(root,request)==attempt['owner']['held'],'tail_maintenance_changed')
         require('sha256:'+file_digest(root/'sheet-vitrina-cycles'/(request['original_cycle_id']+'.json'))==request['original_cycle_sha256'],'tail_original_cycle_changed')
+        if attempt.get('phase')=='complete':
+            require(attempt.get('completion_fingerprint')==fingerprint(completion),'tail_completion_marker_changed')
         complete=bool(parent['state']=='complete' and completion.get('history_only_tail')==operation_id
             and completion.get('history_ack')==child_diagnostics.get('historical_history_ack')
             and child_diagnostics.get('temporary_allocation_scope_complete') is True

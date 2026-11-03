@@ -359,7 +359,9 @@ class LiveNativeAdapter:
                 continue
             # These are the fields consumed by the native accepted inventory
             # receipt. Ordinary intent inputs and mutable finalize diagnostics
-            # are not renderer inputs. Retention pointers are consumed in full.
+            # are not renderer inputs. A temporary effect intent never owns
+            # Ready, including after its metadata completion. Retention pointers
+            # and the real child publications remain consumed in full.
             # Read each selected group afresh within this pinned capture; no
             # cross-capture identity cache can hide update/delete/re-date.
             proofs[key] = digest(self._rows(conn,
@@ -367,7 +369,8 @@ class LiveNativeAdapter:
                 "book_version,finished_at,after_digest,"
                 "CASE WHEN kind='inventory_retention' THEN inputs_json ELSE NULL END "
                 "FROM " + PREFIX + "ready_publications WHERE bundle_version=? AND as_of_date=? "
-                "AND state='complete' AND ready_required=1 ORDER BY operation_id,attempt_id", key))
+                "AND state='complete' AND ready_required=1 "
+                "AND kind<>'fbs_temporary_allocation_effect_intent_v1' ORDER BY operation_id,attempt_id", key))
         return proofs
 
     def _cache_reserve(self, size, *, replacing=None):

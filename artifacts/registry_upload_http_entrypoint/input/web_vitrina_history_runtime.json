@@ -2,12 +2,12 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:8028985d92abb27748da5048dc275c067972e4d2a37b2cda592d888da6e7579e",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:b2bb4deff6580a6dbe1652f2d7df71cbae0906fd4cf8c42204a21e55789665f9",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
     "packages/application/sheet_vitrina_v1_web_vitrina.py": "426ca35dc0074d87c064df72cdfbb2e3798a725c75e374df9f6e6b2c9c4c1f13",
     "packages/application/sheet_vitrina_v1_inventory_planning.py": "379b513e50bc13c4c4bc616e9c17a6b7d37ec5253bc08c303964fcc6d5ec1701",
-    "packages/application/management_inventory_history.py": "bb1ea1c6d5fb873d0169bfe20a5e691cfc820d90eef3fc6b752ee4edf36aa2a4",
+    "packages/application/management_inventory_history.py": "8fd19d91d31f8682da44cf7c87f38a5faf22d1c5430b7a81fb946ec01bd6cbd2",
     "packages/application/inventory_planning_read_model.py": "b2b3be72731af1a730c949683c85931241d7a995a9a44679ab67985da22341bf",
     "packages/application/canonical_wb_cost_resolver.py": "cf91ff4f2c9ae01827b87181edd214338178464123f853b72d5a7bdaf9b3ca50",
     "packages/application/inventory_cost_blend.py": "e86949aef6462ca2244d8d6772d0f733dcaf781d2d1a1c5ac942854687c88218",
@@ -42,7 +42,7 @@
     "packages/application/official_fbs_stock_read.py": "db5fa2f431f7a193d2da583dc978544e0c584c3d6a90e07c2ae78483af2aaeb1",
     "packages/application/official_wb_physical_read.py": "4588fcc5c85a8ba63eb92f7bec14b0c27f46cf6c9b52686be5c2dbc179de9b2e",
     "packages/application/wb_fbs_warehouse_registry.py": "42f7fcd62b16cc4d6e0a2ee5f4e3f6f4485248f4f4c34efdb9cf488eb0aacef8",
-    "packages/application/historical_receipt_completion.py": "057036b3cf37df65a07d2e013efe262e5f87c1faae36c99d6222419fd615e525"
+    "packages/application/historical_receipt_completion.py": "934beefa1078490bf08f75643ac5854e3caf2cddaef319a000e517ade0fae713"
   },
   "group_migration_root": "/mnt/wb-core-extra100/web-vitrina-history-groups-candidate",
   "repair_code_hashes": {
@@ -50,6 +50,6 @@
     "packages/application/web_vitrina_history_group_repair.py": "55980d00f189b7adb210bafa94f29be4fd77d7dc1831111fe00bfb7ebd4ffab4",
     "packages/application/web_vitrina_group_repair_inputs.py": "493ffb5ec2ec96861027071ef0d1a71c180aabaffe93511359abb82e7394c161",
     "packages/application/web_vitrina_group_blocks.py": "2a6c4a42a815b00fc448140b5ec57b0cc1234a8bfb813ee68b73754b8f336992",
-    "packages/application/web_vitrina_history_live_adapter.py": "5fcd989e4b8b810aa074e2566dfb1144cdee690c71be38c50be2dd742fbef08c"
+    "packages/application/web_vitrina_history_live_adapter.py": "c332c014e27d4ecd97ad2290ab9e678a7d5985e0c68e9c747139158aa6d94bc3"
   }
 }

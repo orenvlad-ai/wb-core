@@ -10,7 +10,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from packages.application import historical_receipt_completion as tail
 from packages.application import ready_publication as ready
@@ -75,6 +75,85 @@ class TailGuardTests(unittest.TestCase):
             self.assertEqual(tail._cycle(self.root,request),cycle)
             with self.assertRaisesRegex(ValueError,'tail_original_history_config_changed'):
                 tail._cycle(self.root,{**request,'source_history_budget_seconds':180})
+
+    def test_operational_marker_uses_bounded_native_atomic_not_hosted_backup_owner(self):
+        from packages.application import fbs_historical_fbo_action as backup
+        from packages.application import root_storage_policy as storage
+        path=tail._path(self.root,'fixture-operational-marker')
+        marker=dict(contract=tail.CONTRACT,owner={'operation_id':'fixture-operational-marker'},request=self.request,phase='submitted')
+        tail._exclusive_private(path,marker)
+        # The old helper is invalid on the actual hosted policy: its owner is
+        # confined to backup/private-evidence/historical-fbs-recovery.
+        with patch.object(backup,'_hosted',return_value=True),patch.object(storage,'_hosted_runtime_marker_present',return_value=True):
+            with self.assertRaisesRegex(storage.RootStoragePolicyError,'bypasses canonical storage registry'):
+                backup._private(path,marker)
+        completion=dict(finance={'full_native_proof':'x'*1_214_175},history_ack={'native':'exact'})
+        completed={**marker,'phase':'complete','completion_fingerprint':tail.fingerprint(completion)}
+        with patch.object(backup,'_hosted',return_value=True),patch.object(storage,'admit_root_write',side_effect=AssertionError('backup owner forbidden')):
+            tail._write_attempt(path,completed)
+        stored=json.loads(path.read_text())
+        self.assertEqual(stored['completion_fingerprint'],tail.fingerprint(completion))
+        self.assertNotIn('completion',stored)
+        self.assertLess(path.stat().st_size,4096)
+        self.assertEqual(path.stat().st_mode&0o777,0o600)
+        before=path.read_bytes()
+        with self.assertRaisesRegex(ValueError,'tail_marker_size_limit'):
+            tail._write_attempt(path,{**completed,'oversized':'x'*tail.MAX_MARKER_BYTES})
+        self.assertEqual(path.read_bytes(),before)
+        boundary={**completed,'padding':''}
+        boundary['padding']='x'*(tail.MAX_MARKER_BYTES-len(tail.canonical(boundary).encode()))
+        with self.assertRaisesRegex(ValueError,'tail_marker_size_limit'):
+            tail._write_attempt(path,boundary)
+        self.assertEqual(path.read_bytes(),before)
+        with self.assertRaisesRegex(ValueError,'tail_marker_identity_changed'):
+            tail._write_attempt(path,{**completed,'request':{'foreign':'request'}})
+        self.assertEqual(path.read_bytes(),before)
+
+    def test_adapter_failure_keeps_small_submitted_operational_checkpoint(self):
+        from packages.application import fbs_historical_fbo_action as backup
+        request={**self.request,'runtime_sha':'fixture'}
+        preview=dict(prestate_sha256=tail.fingerprint({}),candidate_sha256=tail.fingerprint(dict(request=request,snapshot={})))
+        @contextmanager
+        def refuse_admission(*args):
+            raise RuntimeError('fixture admission refusal')
+            yield
+        with patch('packages.application.fbs_accounting_apply.target',return_value=self.root),patch.object(backup,'_runtime',return_value=SimpleNamespace()),patch.object(backup,'_private',side_effect=AssertionError('backup evidence helper forbidden')),patch.object(tail,'_held',return_value=nullcontext({})),patch.object(tail,'_config'),patch.object(tail,'_snapshot',return_value={}),patch.object(tail,'process_generation',return_value='fixture-generation'),patch.object(tail,'_admitted',refuse_admission):
+            with self.assertRaises(AmbiguousSubmit):
+                tail.HistoricalReceiptCompletionAdapter().apply(request,'fixture-failed-tail',preview)
+        path=tail._path(self.root,'fixture-failed-tail')
+        stored=json.loads(path.read_text())
+        self.assertEqual(stored['phase'],'submitted')
+        self.assertEqual(stored['error_phase'],'admission')
+        self.assertEqual(stored['error_type'],'RuntimeError')
+        self.assertLess(path.stat().st_size,tail.MAX_MARKER_BYTES)
+        self.assertTrue(tail._claim_path(self.root,request).exists())
+
+    def test_predecessor_ready_reads_never_enter_schema_bootstrapping_loaders(self):
+        db=self.root/'native.sqlite3'
+        with sqlite3.connect(db) as conn:
+            conn.execute('CREATE TABLE sheet_vitrina_v1_warehouse_functional_active(slot,version_id)')
+            conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_active VALUES(1,'functional')")
+            conn.execute('CREATE TABLE registry_upload_current_state(slot,bundle_version)')
+            conn.execute("INSERT INTO registry_upload_current_state VALUES(1,'bundle')")
+            conn.execute('CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version,as_of_date,snapshot_id,plan_version,refreshed_at)')
+            conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES('bundle','2026-11-02','snapshot','plan','refreshed')")
+        before=db.read_bytes()
+        expected=SimpleNamespace(exists=True,fingerprint='exact-ready-fingerprint',plan_json='{"fixture":"exact"}')
+        runtime=SimpleNamespace(runtime_dir=self.root,db_path=db,
+            load_current_state=Mock(side_effect=AssertionError('RW schema loader forbidden')),
+            load_sheet_vitrina_ready_snapshot=Mock(side_effect=AssertionError('RW schema loader forbidden')),
+            prepare_sheet_vitrina_ready_publication=Mock(return_value=expected))
+        saved=dict(bundle_version='bundle',as_of_date='2026-11-02',snapshot_id='snapshot',plan_version='plan',
+            refreshed_at='refreshed',ready_fingerprint=expected.fingerprint,publication_operation_id='actual-ready',publication_attempt_id='1')
+        source={'daily_raw':'daily','weekly_raw':'weekly'}
+        cycle=dict(final_versions=dict(functional_version='functional',fbs_book='book',daily_projection_digest=ready.digest(tail.canonical([]))),
+            stages=[{}, {}, {'versions':source}, {}, {}, {}, {'versions':dict(closed_receipt_digest=ready.digest(tail.canonical(None)),closed_backfill_dates='[]')},{'versions':saved}])
+        with patch('packages.application.wb_finance_daily.WbFinanceDailyBlock',return_value=SimpleNamespace(build_daily_payload=lambda:{'days':[]})),patch('packages.application.sheet_vitrina_v1_cycle.finance_raw_proof',return_value=source),patch.object(accounting,'load',return_value=({},'book')),patch.object(ready,'publication_status',return_value=dict(state='complete',after_digest=ready.digest(expected.plan_json))),patch('packages.application.sheet_vitrina_v1_closed_backlog.ClosedBacklog.status',return_value=None):
+            self.assertEqual(tail._predecessors(runtime,{'seller_id':'seller'},cycle)['final_ready'],saved)
+            with self.assertRaisesRegex(ValueError,'tail_ready_predecessor_changed'):
+                tail._predecessors(runtime,{'seller_id':'seller'},{**cycle,'stages':[*cycle['stages'][:7],{'versions':{**saved,'snapshot_id':'different'}}]})
+        runtime.load_current_state.assert_not_called();runtime.load_sheet_vitrina_ready_snapshot.assert_not_called()
+        self.assertEqual(db.read_bytes(),before)
 
     def test_wrong_owner_or_changed_marker_is_refused(self):
         owner=dict(contract=tail.CONTRACT,operation=tail.OPERATION,operation_id='fixture-operation',pid=os.getpid(),identity='generation',held={})
@@ -181,6 +260,44 @@ class NativeTailIntegrationTests(unittest.TestCase):
         fixture=TemporaryAllocationFullActionTests('test_actual_finalizer_accepts_only_the_six_closed_history_days')
         fixture.setUp();self.addCleanup(fixture.doCleanups)
         runtime,receipt,_=fixture._published_history_fixture();manifest=receipt.manifest
+        # The genuine rolling14 child also renders dates outside this repair's
+        # seven dated Ready envelopes. Bootstrap the native read schemas there;
+        # absent parameter rows stay absent and never become zero values.
+        from packages.application.calculation_parameters import ensure_calculation_parameters_schema
+        from packages.application.calculation_parameters_v4 import ensure_proxy_v4_schema
+        with closing(_connect(runtime.db_path)) as conn:
+            ensure_calculation_parameters_schema(conn);ensure_proxy_v4_schema(conn);conn.commit()
+        # Supply one coherent native Ready/catalog for the whole rolling14.
+        # Earlier dates are deliberately blank; receipt dates keep their exact
+        # bound book cells. The additive legacy total row is present everywhere
+        # so switching between canonical and legacy dates cannot change rows.
+        from dataclasses import replace
+        from datetime import timedelta
+        from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1TemporalSlot
+        from packages.application.registry_upload_db_backed_runtime import _serialize_sheet_vitrina_plan
+        from packages.business_time import current_business_date_iso
+        today=current_business_date_iso(fixture.now)
+        dates=[(datetime.fromisoformat(today)-timedelta(days=13-offset)).date().isoformat() for offset in range(14)]
+        plan=runtime.load_sheet_vitrina_ready_snapshot(as_of_date=today)
+        sheets=[]
+        for sheet in plan.sheets:
+            if sheet.sheet_name!='DATA_VITRINA':sheets.append(sheet);continue
+            rows=[[row[0],row[1],*[row[sheet.header.index(day)] if day in plan.date_columns else '' for day in dates]] for row in sheet.rows]
+            key='TOTAL|proxy_margin_per_unit_rub_total'
+            if not any(row[1]==key for row in rows):rows.append(['Итого: Средняя маржа на единицу',key,*(['']*14)])
+            sheets.append(replace(sheet,header=[*sheet.header[:2],*dates],rows=rows,row_count=len(rows),column_count=16,write_rect=f'A1:P{len(rows)+1}'))
+        plan=replace(plan,snapshot_id='fixture-coherent-rolling14',date_columns=dates,
+            temporal_slots=[SheetVitrinaV1TemporalSlot(day,day,day) for day in dates],sheets=sheets)
+        state=runtime.load_current_state();expected_ready=runtime.prepare_sheet_vitrina_ready_publication(bundle_version=state.bundle_version,as_of_date=today)
+        encoded=_serialize_sheet_vitrina_plan(plan);book_version=accounting.load(runtime.runtime_dir)[1]
+        stamp=(fixture.now+timedelta(seconds=1)).isoformat()
+        with closing(_connect(runtime.db_path)) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            ready.record_intent(conn,operation_id='fixture-coherent-rolling14',attempt_id='1',kind='ready',expected=expected_ready,
+                inputs={'fixture':'coherent_rolling14_blank_before_receipt'},expected_book=book_version,book_required=False,ready_required=True,created_at=stamp)
+            ready.replace_ready(conn,expected=expected_ready,plan_json=encoded,snapshot_id=plan.snapshot_id,plan_version=plan.plan_version,refreshed_at=stamp)
+            ready.complete_publication(conn,operation_id='fixture-coherent-rolling14',attempt_id='1',book_version=book_version,after_digest=ready.digest(encoded),finished_at=stamp)
+            conn.commit()
         root=runtime.runtime_dir.resolve();candidate=root.parent/'owned-tail-candidate';candidate.mkdir(mode=0o700)
         contract=json.loads((Path(__file__).resolve().parents[1]/'artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json').read_text())
         repo=Path(__file__).resolve().parents[1]
@@ -194,7 +311,8 @@ class NativeTailIntegrationTests(unittest.TestCase):
         barrier._atomic_write_private_json(root/pause.STATE_FILENAME,dict(schema_version=pause.SCHEMA,phase='held',window_id='native-tail-fixture',baseline=baseline,baseline_fingerprint=baseline_fingerprint))
         barrier._atomic_write_private_json(root/barrier.STATE_FILENAME,dict(schema_version=barrier.SCHEMA_VERSION,phase='held',window_id='native-tail-fixture',window_kind='maintenance_pause',hold_confirmed=True,plan_fingerprint=baseline_fingerprint))
         request=dict(publication_operation_id=receipt.operation_id,publication_attempt_id=receipt.attempt_id,window_id='native-tail-fixture',expected_baseline_fingerprint=baseline_fingerprint,
-            expected_book_version=accounting.load(root)[1],original_cycle_id='a'*32)
+            expected_book_version=accounting.load(root)[1],original_cycle_id='a'*32,
+            source_formula_epoch='local-temporary-fbs',formula_epoch=config.formula_epoch)
         cycles=root/'sheet-vitrina-cycles';cycles.mkdir(mode=0o700);cycle=cycles/(request['original_cycle_id']+'.json');cycle.write_text('{"original":"unchanged"}')
         request['original_cycle_sha256']='sha256:'+file_digest(cycle)
         with closing(_connect(runtime.db_path)) as conn:
