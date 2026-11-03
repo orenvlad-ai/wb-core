@@ -11,6 +11,7 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 from types import SimpleNamespace
+from unittest.mock import patch
 from urllib import error, parse as urllib_parse, request as urllib_request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +50,18 @@ def main() -> None:
     probe_nm_id = requested_nm_ids[0]
 
     with TemporaryDirectory(prefix="sheet-vitrina-web-source-current-sync-") as tmp:
+        # The real caller keeps the aggregate Search failure while retaining
+        # the independent Funnel's qualified serving generation for acceptance.
+        from apps.web_source_current_sync_zero_snapshot_smoke import _IndependentSync
+        independent=_IndependentSync(Path(tmp),failures={('web_source_snapshot','collector')})
+        caller=SheetVitrinaV1LivePlanBlock.__new__(SheetVitrinaV1LivePlanBlock)
+        caller.current_web_source_sync=independent
+        with patch('packages.adapters.web_source_current_sync._fetch_json',side_effect=independent.fetch):
+            note=caller._sync_current_web_source_snapshot(independent.day)
+            assert note and 'current_day_web_source_sync_failed=' in note and 'web_source_snapshot_collector_failed' in note
+            assert independent._has_sales_funnel_snapshot(independent.day)
+            assert not independent._has_search_analytics_snapshot(independent.day)
+        assert ('seller_funnel_snapshot',independent.day) in independent.observed_states
         runtime_dir = Path(tmp) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         entrypoint = RegistryUploadHttpEntrypoint(
