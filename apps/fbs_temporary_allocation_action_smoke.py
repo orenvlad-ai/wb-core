@@ -3,7 +3,7 @@
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime,timedelta,timezone
 import hashlib
 from pathlib import Path
 import sqlite3
@@ -35,6 +35,36 @@ class TemporaryAllocationCopyBudgetTests(unittest.TestCase):
             with self.subTest(dimension=dimension):
                 with self.assertRaisesRegex(ValueError,'source_copy_budget:'+dimension+':table=source:rows='):
                     action._check_source_copy_budget(table='source',**values)
+
+
+class TemporaryCompletionClockTests(unittest.TestCase):
+    def test_construction_and_approval_have_separate_exact_bounds(self):
+        observed=datetime(2026,11,2,12,tzinfo=timezone.utc)
+        authority=dict(contract=action.COMPLETION_CONTRACT,observed_at=observed.isoformat(),
+            completed_at=(observed+timedelta(seconds=1800)).isoformat())
+        action._completion_deadline(authority,now=observed+timedelta(seconds=2400))
+        for offset in (2400.000001,1799.999999):
+            with self.assertRaisesRegex(ValueError,'preflight_expired'):
+                action._completion_deadline(authority,now=observed+timedelta(seconds=offset))
+        authority['completed_at']=(observed+timedelta(seconds=1800.000001)).isoformat()
+        with self.assertRaisesRegex(ValueError,'preflight_build_expired'):
+            action._completion_deadline(authority,now=observed+timedelta(seconds=1801))
+        authority.update(observed_at='2026-11-02T18:59:00+00:00',completed_at='2026-11-02T18:59:30+00:00')
+        with self.assertRaisesRegex(ValueError,'business_day_changed'):
+            action._completion_deadline(authority,now=datetime(2026,11,2,19,tzinfo=timezone.utc))
+
+    def test_reviewed_files_are_reread_against_the_frozen_documentary_digests(self):
+        source={'original_document_id':'accepted'};evidence={'evidence_digest':'reviewed'}
+        snapshot=dict(documentary_digest=action.fingerprint(source),evidence_digest='reviewed')
+        authority=dict(documentary_request={'retained_files':{'original':'retained'}})
+        with patch.object(action,'_inputs',return_value=(source,evidence)) as read:
+            action._completion_evidence(authority,snapshot=snapshot);read.assert_called_once_with(authority['documentary_request'])
+        with patch.object(action,'_inputs',return_value=({'original_document_id':'other'},evidence)):
+            with self.assertRaisesRegex(ValueError,'documentary_source_changed'):
+                action._completion_evidence(authority,snapshot=snapshot)
+        with patch.object(action,'_inputs',side_effect=ValueError('retained_source_changed')):
+            with self.assertRaisesRegex(ValueError,'retained_source_changed'):
+                action._completion_evidence(authority,snapshot=snapshot)
 
 
 class TemporaryAllocationNativeTests(unittest.TestCase):
@@ -168,6 +198,9 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         self.version=accounting._save_book(self.root,self.book,expected=None,operation_id='initial-source-book')
         handoffs.load.return_value=(self.book,self.version)
         self.now=datetime.fromisoformat(STAMP.replace('Z','+00:00'))
+        self.wall_clock=patch.object(action,'_utc_now',return_value=self.now);self.wall_clock.start();self.addCleanup(self.wall_clock.stop)
+        # External documentary parsing is owned by its primary-file tests.
+        documentary=patch.object(action,'_completion_evidence');documentary.start();self.addCleanup(documentary.stop)
         days=repair_fixture.DAYS
         with closing(_connect(target)) as conn:
             # Exercise actual current-material publication, not the legacy
@@ -194,7 +227,7 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         directory=action._directory(self.root,'full-local-temporary')
         snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
         with patch.object(action,'_retain',return_value={}):
-            result=action._preflight(self.runtime,request={},operation_id='full-local-temporary',directory=directory,
+            result=action._preflight(self.runtime,request=dict(evidence_manifest_path='fixture',evidence_manifest_sha256='fixture'),operation_id='full-local-temporary',directory=directory,
                 snapshot=snapshot,inputs=self.inputs,now=self.now)
         candidate=result['numeric']['candidate'];self.assertFalse(candidate['candidate_book'].get('publication_error'))
         self.assertEqual(len(candidate['initial_anchors']),3)
@@ -226,6 +259,65 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         self.assertEqual(len(receipt.dates),6)
         return sim,receipt,proof
 
+    def test_completion_revalidates_exact_own_changes_and_rejects_raw_source_drift(self):
+        snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
+        directory=action._directory(self.root,'completion-local-temporary')
+        completed=self.now+timedelta(seconds=650)
+        action._utc_now.return_value=completed
+        with patch.object(action,'_retain',return_value={}):
+            result=action._preflight(self.runtime,request=dict(evidence_manifest_path='fixture',evidence_manifest_sha256='fixture'),
+                operation_id='completion-local-temporary',directory=directory,snapshot=snapshot,inputs=self.inputs,now=self.now)
+        self.assertEqual(result['observed_at'],self.now.isoformat())
+        self.assertEqual(result['completion_authority']['completed_at'],completed.isoformat())
+        recipe=action._make_recipe(self.runtime,snapshot=snapshot,unit=result['unit'],evidence=self.inputs[1],
+            operation_id='completion-local-temporary',created_at=STAMP,numeric=result['numeric'],
+            source_selection_fence=result['subset']['selection_fence'],completion_authority=result['completion_authority'])
+        with warehouse_functional_job_lock(self.root) as owner:
+            binding=action._record_recipe(self.runtime,recipe,owner_token=owner['owner_token'])
+            action._admit_requests(self.runtime,recipe['unit']['inputs'],now=STAMP)
+            with ready.readonly(self.runtime.db_path) as conn:
+                action._validate_completion(self.runtime,authority=recipe['completion_authority'],snapshot=snapshot,
+                    numeric=recipe['numeric'],file_authority=recipe['file_authority'],code_authority=recipe['adapter_code'],recipe=recipe,conn=conn)
+            for table,column,value,where,args,reason in (
+                (action.P+'ready_publications','diagnostics_json','{"foreign":true}', 'operation_id=?',('completion-local-temporary',),'owned_recipe_changed'),
+                (action.docs.REQUESTS_TABLE,'updated_at','changed','request_id=?',(recipe['unit']['ordinary'][0]['request']['request_id'],),'owned_request_changed'),
+                (action.P+'warehouse_wb_snapshots','raw_rows_digest','changed','version_id=?',('saved:2026-10-31',),'source_changed'),
+            ):
+                with closing(_connect(self.runtime.db_path)) as conn:
+                    previous=conn.execute(f'SELECT {column} FROM {table} WHERE {where}',args).fetchone()[0]
+                    conn.execute(f'UPDATE {table} SET {column}=? WHERE {where}',(value,*args));conn.commit()
+                with self.assertRaisesRegex(ValueError,reason):
+                    action._apply_native_unit(self.runtime,recipe,binding=binding,owner_token=owner['owner_token'])
+                with closing(_connect(self.runtime.db_path)) as conn,conn:
+                    conn.execute(f'UPDATE {table} SET {column}=? WHERE {where}',(previous,*args))
+            with patch.object(action,'_utc_now',return_value=completed+timedelta(seconds=601)):
+                with self.assertRaisesRegex(ValueError,'preflight_expired'):
+                    action._apply_native_unit(self.runtime,recipe,binding=binding,owner_token=owner['owner_token'])
+        with ready.readonly(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f"SELECT SUM(quantity) FROM {BALANCES_TABLE} WHERE pool='FBO'").fetchone()[0],5400)
+            self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {OPERATIONS_TABLE} WHERE operation_type='fbs_physical_handoff'").fetchone()[0],0)
+        with patch.object(action,'_utc_now',return_value=self.now+timedelta(seconds=1801)):
+            with self.assertRaisesRegex(ValueError,'preflight_build_expired'):
+                action._complete_preflight(self.runtime,result=result,inputs=self.inputs,operation_id='unused',request={})
+
+    def test_completion_current_official_source_is_fresh_and_generation_exact(self):
+        snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
+        with ready.readonly(self.runtime.db_path) as conn:
+            from packages.application.fbs_snapshot_cost_sources import capture_current
+            expected=capture_current(self.runtime.db_path,now=self.now,include_baseline=False,connection=conn)['quantity_snapshot']
+        day=max(snapshot['source_versions']);numeric={'candidate':{'candidate_book':{'state':{'periods':{day:{'snapshot':expected}}}}}}
+        with ready.readonly(self.runtime.db_path) as conn:
+            stock=action._official_completion_stock(conn,snapshot=snapshot,numeric=numeric,now=self.now)
+        self.assertEqual(stock['generation_id'],expected['id'])
+        changed=deepcopy(numeric);changed['candidate']['candidate_book']['state']['periods'][day]['snapshot']['id']='other-generation'
+        with ready.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(ValueError,'official_generation_changed'):
+                action._official_completion_stock(conn,snapshot=snapshot,numeric=changed,now=self.now)
+            with self.assertRaisesRegex(ValueError,'not_fresh'):
+                action._official_completion_stock(conn,snapshot=snapshot,numeric=numeric,now=self.now+timedelta(minutes=31))
+        with self.assertRaisesRegex(ValueError,'official_source_expired'):
+            action._completion_stock_clock(stock,now=self.now+timedelta(minutes=31))
+
     def test_full_private_preflight_real_T1_material_WB_book_and_Ready(self):
         self._published_history_fixture()
 
@@ -240,7 +332,7 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
         operation='closed-receipts-local-temporary';directory=action._directory(self.root,operation)
         with patch.object(action,'_retain',return_value={}):
-            result=action._preflight(self.runtime,request={},operation_id=operation,directory=directory,
+            result=action._preflight(self.runtime,request=dict(evidence_manifest_path='fixture',evidence_manifest_sha256='fixture'),operation_id=operation,directory=directory,
                 snapshot=snapshot,inputs=self.inputs,now=self.now)
         candidate=result['numeric']['candidate'];proof=candidate['quality_proof']['closed_prefix_repair']
         self.assertEqual(proof['immutable_prefix_digest'],before)
@@ -262,7 +354,7 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         self.assertEqual(set(native['native']),set(receipt.dates));self.assertEqual(len(receipt.dates),7)
         recipe=action._make_recipe(self.runtime,snapshot=snapshot,unit=result['unit'],evidence=self.inputs[1],
             operation_id=operation,created_at=STAMP,numeric=result['numeric'],
-            source_selection_fence=result['subset']['selection_fence'])
+            source_selection_fence=result['subset']['selection_fence'],completion_authority=result['completion_authority'])
         with warehouse_functional_job_lock(self.root) as owner:
             binding=action._record_recipe(self.runtime,recipe,owner_token=owner['owner_token'])
             with closing(_connect(self.runtime.db_path)) as conn,conn:
@@ -382,11 +474,11 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
         directory=action._directory(self.root,'selector-local-temporary')
         with patch.object(action,'_retain',return_value={}):
-            result=action._preflight(self.runtime,request={},operation_id='selector-local-temporary',directory=directory,
+            result=action._preflight(self.runtime,request=dict(evidence_manifest_path='fixture',evidence_manifest_sha256='fixture'),operation_id='selector-local-temporary',directory=directory,
                 snapshot=snapshot,inputs=self.inputs,now=self.now)
         recipe=action._make_recipe(self.runtime,snapshot=snapshot,unit=result['unit'],evidence=self.inputs[1],
             operation_id='selector-local-temporary',created_at=STAMP,numeric=result['numeric'],
-            source_selection_fence=result['subset']['selection_fence'])
+            source_selection_fence=result['subset']['selection_fence'],completion_authority=result['completion_authority'])
         self.assertTrue(recipe['source_selection_fence'])
         with warehouse_functional_job_lock(self.root) as owner:
             unpriced=deepcopy(recipe);unpriced['numeric']['candidate']['initial_anchors']={}
@@ -409,7 +501,7 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
         directory=action._directory(self.root,'foreign-fence-local-temporary')
         with patch.object(action,'_retain',return_value={}):
-            result=action._preflight(self.runtime,request={},operation_id='foreign-fence-local-temporary',directory=directory,
+            result=action._preflight(self.runtime,request=dict(evidence_manifest_path='fixture',evidence_manifest_sha256='fixture'),operation_id='foreign-fence-local-temporary',directory=directory,
                 snapshot=snapshot,inputs=self.inputs,now=self.now)
         # Exercise the recovery boundary with an immutable source proof whose
         # selector and selected native prestate remain unchanged.
@@ -418,7 +510,7 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
                 ('SELECT nomenclature_name FROM sheet_vitrina_v1_nomenclature_items WHERE nm_id=?',(101,))])))
         recipe=action._make_recipe(self.runtime,snapshot=snapshot,unit=result['unit'],evidence=self.inputs[1],
             operation_id='foreign-fence-local-temporary',created_at=STAMP,numeric=result['numeric'],
-            source_selection_fence=result['subset']['selection_fence'])
+            source_selection_fence=result['subset']['selection_fence'],completion_authority=result['completion_authority'])
         with warehouse_functional_job_lock(self.root) as owner:
             binding=action._record_recipe(self.runtime,recipe,owner_token=owner['owner_token'])
             with closing(_connect(self.runtime.db_path)) as conn,conn:
