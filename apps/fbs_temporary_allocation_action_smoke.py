@@ -23,6 +23,29 @@ from packages.application.registry_upload_db_backed_runtime import _connect
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
 
 
+def replay_native_daily_projection(runtime, *, version_id):
+    """Real native daily producer and its normal upsert on disposable rows."""
+    from packages.application import warehouse_functional as wf
+    from packages.application.warehouse_archival_estimate import overlay_opening_cost_rows
+    with ready.readonly(runtime.db_path) as conn:
+        version=dict(conn.execute(f'SELECT * FROM {action.stages.P}functional_versions WHERE version_id=?',(version_id,)).fetchone())
+        snapshot=dict(conn.execute(f'SELECT * FROM {action.stages.P}wb_snapshots WHERE version_id=?',(version_id,)).fetchone())
+        opening=[{**dict(row),'provenance':action.json.loads(row['provenance_json'])}
+            for row in conn.execute(f'SELECT * FROM {action.stages.P}opening_cost_map WHERE cutover_id=?',(wf.FUNCTIONAL_CUTOVER_ID,))]
+        rows=wf.WarehouseFunctionalBlock._build_post_cutover_daily_cost_projection(SimpleNamespace(_load_opening_cost_map=lambda: {}),
+            captured_at=version['created_at'],candidate_lines=[],
+            candidate_snapshot={**snapshot,'items':action.json.loads(snapshot['items_json'])},new_events=[],
+            opening_cost_map=overlay_opening_cost_rows(conn,opening),cutover_mode=False,allow_partial=True,connection=conn)
+    with closing(_connect(runtime.db_path)) as conn,conn:
+        for item in rows:
+            value=dict(cutover_id=wf.FUNCTIONAL_CUTOVER_ID,**{key:item[key] for key in ('as_of_date','nm_id','quantity','wac_rub','capital_rub','quality','fingerprint')},
+                provenance_json=action.canonical(item['provenance']),created_at=version['created_at'])
+            changed=[key for key in value if key not in {'cutover_id','as_of_date','nm_id'}]
+            conn.execute(f'INSERT INTO {action.stages.P}wb_daily_cost({",".join(value)}) VALUES({",".join("?" for _ in value)}) '
+                f'ON CONFLICT(cutover_id,as_of_date,nm_id) DO UPDATE SET {",".join(key+"=excluded."+key for key in changed)}',tuple(value.values()))
+    return rows
+
+
 class TemporaryAllocationCopyBudgetTests(unittest.TestCase):
     def test_measured_source_size_fits_but_each_safety_bound_still_blocks(self):
         action._check_source_copy_budget(table='source',count=50000,size=700*1024**2,elapsed=60)
@@ -207,6 +230,12 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
             # fixture's missing active-version shortcut.
             conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_active SET version_id='saved:2026-11-02'")
             conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_wb_sync_status VALUES(1,?,?,NULL,'saved:2026-11-02',?)",(STAMP,STAMP,STAMP))
+            if self._testMethodName=='test_ordinary_refresh_new_generation_then_history_finance_completes_descendant':
+                # The ordinary native daily owner requires the genuine cutover
+                # baseline; the narrower repair-only fixtures do not consume it.
+                conn.execute(f'INSERT INTO {action.stages.P}functional_cutovers VALUES(?,?,?,?,?,?,?,?,?)',
+                    ('warehouse_functional_cutover_v1','2026-10-26T00:00:00Z','posted',action.fingerprint('native-cutover'),'{}','{}','{}',STAMP,STAMP))
+                conn.execute(f"UPDATE {action.stages.P}functional_versions SET version_kind='functional_cutover' WHERE version_id='saved:2026-10-26'")
             ensure_inventory_history_schema(conn);ready.ensure_publication_schema(conn);conn.commit();action.staging.ensure_staging_schema(conn)
         with closing(_connect(target)) as conn:
             conn.execute('INSERT INTO registry_upload_versions VALUES(?,?,?)',('local-bundle',STAMP,STAMP))
@@ -260,6 +289,13 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         return sim,receipt,proof
 
     def test_completion_revalidates_exact_own_changes_and_rejects_raw_source_drift(self):
+        # Persist a real foreign BLOB before capture. Source hashing must use
+        # the exact ready.pin_queries bytes representation without decoding it.
+        with closing(_connect(self.runtime.db_path)) as conn,conn:
+            ready.record_intent(conn,operation_id='foreign-blob',attempt_id='1',kind='local_blob_source',
+                expected=None,inputs={},expected_book=None,book_required=False,ready_required=False,created_at=STAMP)
+            conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET inputs_json=? WHERE operation_id='foreign-blob'",
+                (b'{"foreign":"original"}',))
         snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
         directory=action._directory(self.root,'completion-local-temporary')
         completed=self.now+timedelta(seconds=650)
@@ -279,6 +315,7 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
                 action._validate_completion(self.runtime,authority=recipe['completion_authority'],snapshot=snapshot,
                     numeric=recipe['numeric'],file_authority=recipe['file_authority'],code_authority=recipe['adapter_code'],recipe=recipe,conn=conn)
             for table,column,value,where,args,reason in (
+                (action.P+'ready_publications','inputs_json',b'{"foreign":"changed"}', 'operation_id=?',('foreign-blob',),'full_source_changed'),
                 (action.P+'ready_publications','diagnostics_json','{"foreign":true}', 'operation_id=?',('completion-local-temporary',),'owned_recipe_changed'),
                 (action.docs.REQUESTS_TABLE,'updated_at','changed','request_id=?',(recipe['unit']['ordinary'][0]['request']['request_id'],),'owned_request_changed'),
                 (action.P+'warehouse_wb_snapshots','raw_rows_digest','changed','version_id=?',('saved:2026-10-31',),'source_changed'),
@@ -426,13 +463,14 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         before=accounting.load(sim.runtime_dir)[1]
         flags=finance.recalculate_stale_cost_weeks()
         flags['accounting_version_unchanged']=before==accounting.load(sim.runtime_dir)[1]
+        flags.update(accounting_version_before=before,accounting_version=before)
         economics=accounting.current_publication_receipt(sim,now=self.now)
         from packages.application.business_data_heavy_admission import heavy_admitted
         with heavy_admitted(sim.runtime_dir,operation='cycle'),warehouse_functional_job_lock(sim.runtime_dir):
             bound=accounting.load(sim.runtime_dir)
             with patch.object(action.accounting,'load',return_value=(bound[0],'later-book-version')):
-                with self.assertRaisesRegex(ValueError,'healthy_published_book_required'):
-                    action.finalize_scope(sim,manifest=manifest,history_ack=ack,finance=flags,economics=economics,now=tomorrow)
+                with self.assertRaisesRegex(ValueError,'original_book_revision_changed'):
+                    action.finalize_scope(sim,manifest=manifest,history_ack=ack,finance=flags,economics=economics,now=self.now)
             target=manifest['targets'][-1]['expected']
             with closing(_connect(sim.db_path)) as conn:
                 saved=conn.execute(f'SELECT plan_json FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',
@@ -469,6 +507,189 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
             stored=action.json.loads(row[1])['temporary_allocation_completion']['history_ack']
             self.assertEqual(set(stored['native']),set(receipt.dates))
             self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {action.lifecycle.RECONCILIATION_TABLE} WHERE state='open'").fetchone()[0],1)
+
+    def test_ordinary_refresh_new_generation_then_history_finance_completes_descendant(self):
+        from packages.application import business_data_heavy_admission as admission
+        from packages.application import registry_upload_db_backed_runtime as db_runtime
+        from packages.application import fbs_accounting_historical_cycle as historical_cycle
+        from packages.application import fbs_accounting_historical_history as historical_history
+        from packages.application import warehouse_functional as wf
+        from packages.application.warehouse_business_projection import publish_functional_version_business_projection
+        from packages.application.wb_fbs_warehouse_registry import REGISTRY_RUNS_TABLE,STOCK_RUNS_TABLE,STOCK_ROWS_TABLE
+        from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter,update_live_history
+        from packages.application.web_vitrina_history_store import HistoryStore
+        from packages import business_time
+        from apps.warehouse_functional_runner import _publish_fbs_snapshot_accounting,_recalculate_downstream_finance_cost
+        sim,receipt,_=self._published_history_fixture();manifest=receipt.manifest
+        later=self.now+timedelta(minutes=1);stamp=later.isoformat().replace('+00:00','Z');day=business_time.current_business_date_iso(later)
+        original=deepcopy(accounting.load(sim.runtime_dir)[0]);old_version=manifest['after_book']
+        middle=deepcopy(original);middle['prepared_at']=(self.now+timedelta(seconds=30)).isoformat()
+        middle_version=accounting._save_book(sim.runtime_dir,middle,expected=old_version,operation_id='local-middle-refresh')
+        with closing(_connect(sim.db_path)) as conn,conn:
+            # Actual new official registry/stock rows, preserving the complete
+            # catalog and facility identities while changing generation/time.
+            old=original['state']['periods'][day]['snapshot']['id']
+            generation=dict(conn.execute(f'SELECT * FROM {REGISTRY_RUNS_TABLE} WHERE run_id=?',(old,)).fetchone())
+            generation.update(run_id='ordinary-official',run_sequence=conn.execute(f'SELECT MAX(run_sequence)+1 FROM {REGISTRY_RUNS_TABLE}').fetchone()[0],
+                started_at=stamp,completed_at=stamp,generation_digest=action.fingerprint('ordinary-generation'))
+            conn.execute(f'INSERT INTO {REGISTRY_RUNS_TABLE}({",".join(generation)}) VALUES({",".join("?" for _ in generation)})',tuple(generation.values()))
+            for stock in conn.execute(f'SELECT * FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=?',(old,)).fetchall():
+                fresh=dict(stock);fresh.update(run_id='ordinary-'+stock['run_id'],registry_run_id='ordinary-official',snapshot_at=stamp,
+                    run_sequence=conn.execute(f'SELECT MAX(run_sequence)+1 FROM {STOCK_RUNS_TABLE}').fetchone()[0])
+                conn.execute(f'INSERT INTO {STOCK_RUNS_TABLE}({",".join(fresh)}) VALUES({",".join("?" for _ in fresh)})',tuple(fresh.values()))
+                for row in conn.execute(f'SELECT * FROM {STOCK_ROWS_TABLE} WHERE run_id=?',(stock['run_id'],)).fetchall():
+                    value=dict(row);value['run_id']=fresh['run_id']
+                    conn.execute(f'INSERT INTO {STOCK_ROWS_TABLE}({",".join(value)}) VALUES({",".join("?" for _ in value)})',tuple(value.values()))
+            edition=manifest['candidate']['editions'][day];new='ordinary-functional-current'
+            version=deepcopy(edition['version']);version.update(version_id=new,version_kind='hourly_wb_sync',created_at=stamp,published_at=stamp,effective_at=stamp,
+                plan_fingerprint=action.fingerprint(new))
+            snapshot=deepcopy(edition['snapshot']);watermark=action.json.loads(version['source_watermarks_json'])
+            watermark['captured_at']=stamp;version['source_watermarks_json']=action.canonical(watermark)
+            snapshot.update(version_id=new,created_at=stamp,snapshot_id=wf._stable_id('wbsnapv',dict(source_snapshot_id=watermark['wb_snapshot']['snapshot_id'],version_id=new)))
+            for table,value in (('functional_versions',version),('wb_snapshots',snapshot)):
+                conn.execute(f'INSERT INTO {action.stages.P}{table}({",".join(value)}) VALUES({",".join("?" for _ in value)})',tuple(value.values()))
+            rows=[]
+            for raw in conn.execute(f'SELECT * FROM {action.stages.P}functional_balances WHERE version_id=?',(edition['version_id'],)).fetchall():
+                value=dict(raw);value['version_id']=new
+                conn.execute(f'INSERT INTO {action.stages.P}functional_balances({",".join(value)}) VALUES({",".join("?" for _ in value)})',tuple(value.values()))
+                value['provenance']=action.json.loads(value.pop('provenance_json'));rows.append(value)
+            conn.execute(f'UPDATE {action.stages.P}functional_active SET version_id=?',(new,))
+            wf._materialize_compact_warehouse_read_models(conn,version_id=new,plan={'lines':rows},created_at=stamp,effective_at=stamp,business_effective_date=day)
+            publish_functional_version_business_projection(conn,published_version_id=new,business_effective_date=day,published_at=stamp,source_revision=action.fingerprint(new))
+            # The normal cycle already has its default dated Ready envelope.
+            # Use a different key from the immutable historical child target.
+            from dataclasses import replace
+            default=business_time.default_business_as_of_date(later)
+            old_ready=conn.execute(f'SELECT * FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',
+                ('local-bundle',day)).fetchone()
+            envelope=db_runtime._deserialize_sheet_vitrina_plan(old_ready['plan_json'])
+            value=dict(old_ready);value.update(as_of_date=default,
+                plan_json=db_runtime._serialize_sheet_vitrina_plan(replace(envelope,as_of_date=default)))
+            # The bounded rehearsal does not consume this registry header;
+            # ordinary Ready's FK-enforcing writer needs its real parent row.
+            conn.execute('INSERT OR IGNORE INTO registry_upload_versions VALUES(?,?,?)',('local-bundle',STAMP,STAMP))
+            conn.execute(f'INSERT INTO {ready.TABLE}({",".join(value)}) VALUES({",".join("?" for _ in value)})',tuple(value.values()))
+        class Clock(datetime):
+            @classmethod
+            def now(cls,tz=None):return later if tz else later.replace(tzinfo=None)
+        original_business_day=business_time.current_business_date_iso
+        replayed=replay_native_daily_projection(sim,version_id=new)
+        self.assertTrue(replayed)
+        old_daily={(row['as_of_date'],row['nm_id']):row for row in manifest['candidate']['daily_wb_costs'] if row['as_of_date']<day}
+        self.assertTrue(any((row['as_of_date'],row['nm_id']) in old_daily and
+            row['fingerprint']!=old_daily[(row['as_of_date'],row['nm_id'])]['fingerprint'] for row in replayed))
+        with patch.object(accounting,'datetime',Clock),patch.object(db_runtime,'datetime',Clock),patch.object(historical_cycle,'datetime',Clock),patch.object(business_time,'current_business_date_iso',side_effect=lambda now=None:original_business_day(now or later)):
+            with warehouse_functional_job_lock(sim.runtime_dir):
+                refreshed=_publish_fbs_snapshot_accounting(sim)
+        current,version=accounting.load(sim.runtime_dir)
+        self.assertEqual(refreshed['status'],'published');self.assertNotEqual(version,old_version)
+        self.assertNotEqual(current['prepared_at'],original['prepared_at'])
+        self.assertEqual(current['state']['periods'][day]['snapshot']['id'],'ordinary-official')
+        self.assertEqual(accounting.load(sim.runtime_dir,version=old_version)[0],original)
+        action._completion_books(sim,manifest=manifest)
+        with ready.readonly(sim.db_path) as conn:
+            action._verify_closed_daily_projection(conn,manifest=manifest,current_book=current)
+        frozen=manifest['candidate']['editions'][min(manifest['candidate']['editions'])]
+        with closing(_connect(sim.db_path)) as conn,conn:
+            conn.execute(f'UPDATE {action.stages.P}wb_snapshots SET raw_rows_json=? WHERE version_id=?',
+                ('[{"foreign":true}]',frozen['version_id']))
+        try:
+            with ready.readonly(sim.db_path) as conn:
+                with self.assertRaisesRegex(ValueError,'original_stage_snapshot_changed'):
+                    action._verify_original_publication(conn,manifest=manifest,current_book=current)
+        finally:
+            with closing(_connect(sim.db_path)) as conn,conn:
+                conn.execute(f'UPDATE {action.stages.P}wb_snapshots SET raw_rows_json=? WHERE version_id=?',
+                    (frozen['snapshot']['raw_rows_json'],frozen['version_id']))
+        selected=next(row for row in manifest['candidate']['daily_wb_costs'] if row['as_of_date']<day)
+        daily_where=(selected['as_of_date'],selected['nm_id'])
+        for column,value,reason in (('quantity','999','closed_daily_money_changed'),
+                                   ('wac_rub','999','closed_daily_money_changed'),
+                                   ('capital_rub','999','closed_daily_money_changed'),
+                                   ('quality','foreign-quality','closed_daily_money_changed'),
+                                   ('created_at','foreign-time','closed_daily_writer_changed'),
+                                   ('fingerprint','foreign-digest','closed_daily_native_replay_changed'),
+                                   ('provenance_json','{}','closed_daily_native_replay_changed')):
+            with closing(_connect(sim.db_path)) as conn,conn:
+                saved=conn.execute(f'SELECT {column} FROM {action.stages.P}wb_daily_cost WHERE as_of_date=? AND nm_id=?',daily_where).fetchone()[0]
+                old_fingerprint=conn.execute(f'SELECT fingerprint FROM {action.stages.P}wb_daily_cost WHERE as_of_date=? AND nm_id=?',daily_where).fetchone()[0]
+                conn.execute(f'UPDATE {action.stages.P}wb_daily_cost SET {column}=? WHERE as_of_date=? AND nm_id=?',(value,*daily_where))
+                if column=='provenance_json':
+                    raw=conn.execute(f'SELECT * FROM {action.stages.P}wb_daily_cost WHERE as_of_date=? AND nm_id=?',daily_where).fetchone()
+                    forged=wf._daily_wb_cost_row(day=raw['as_of_date'],nm_id=raw['nm_id'],quantity=wf._decimal(raw['quantity']),
+                        wac=wf._decimal(raw['wac_rub']),quality=raw['quality'],provenance={})
+                    conn.execute(f'UPDATE {action.stages.P}wb_daily_cost SET fingerprint=? WHERE as_of_date=? AND nm_id=?',(forged['fingerprint'],*daily_where))
+            try:
+                with ready.readonly(sim.db_path) as conn:
+                    with self.assertRaisesRegex(ValueError,reason):action._verify_closed_daily_projection(conn,manifest=manifest,current_book=current)
+            finally:
+                with closing(_connect(sim.db_path)) as conn,conn:
+                    conn.execute(f'UPDATE {action.stages.P}wb_daily_cost SET {column}=?,fingerprint=? WHERE as_of_date=? AND nm_id=?',(saved,old_fingerprint,*daily_where))
+        # Even a valid current hash cannot inherit through a corrupt middle.
+        with sqlite3.connect(accounting.path(sim.runtime_dir)) as ledger:
+            payload=ledger.execute('SELECT payload FROM accounting_revisions WHERE version=?',(middle_version,)).fetchone()[0]
+            damaged=action.json.loads(payload);damaged['prepared_at']='corrupt-middle'
+            ledger.execute('UPDATE accounting_revisions SET payload=? WHERE version=?',(action.canonical(damaged),middle_version))
+        try:
+            with self.assertRaisesRegex(ValueError,'book_corrupt'):action._completion_books(sim,manifest=manifest)
+        finally:
+            with sqlite3.connect(accounting.path(sim.runtime_dir)) as ledger:
+                ledger.execute('UPDATE accounting_revisions SET payload=? WHERE version=?',(payload,middle_version))
+        closed=min(d for d,p in original['state']['periods'].items() if p['status']=='closed')
+        for field in ('quantity','capital_rub'):
+            with self.subTest(closed_operand=field):
+                damaged=deepcopy(current);damaged['wb_days'][closed]['rows'][0][field]='999'
+                accounting._save_book(sim.runtime_dir,damaged,expected=version,operation_id='changed-closed-'+field)
+                try:
+                    with self.assertRaisesRegex(ValueError,'closed_book_prefix_changed'):action._completion_books(sim,manifest=manifest)
+                finally:
+                    with sqlite3.connect(accounting.path(sim.runtime_dir)) as ledger:
+                        ledger.execute('UPDATE accounting_current SET version=? WHERE singleton=1',(version,))
+        with closing(_connect(sim.db_path)) as conn,conn:
+            doc=manifest['plan']['effect_binding']
+            recipe=action._read_recipe(conn,doc);identity=recipe['unit']['ordinary'][0]['plan']['primary_document_id']
+            saved=conn.execute(f'SELECT posted_manifest_sha256 FROM {action.docs.DOCUMENTS_TABLE} WHERE document_id=?',(identity,)).fetchone()[0]
+            triggers=conn.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?",(action.docs.DOCUMENTS_TABLE,)).fetchall()
+            for trigger in triggers:conn.execute(f'DROP TRIGGER "{trigger[0]}"')
+            conn.execute(f'UPDATE {action.docs.DOCUMENTS_TABLE} SET posted_manifest_sha256=? WHERE document_id=?',('changed-native-receipt',identity))
+            for trigger in triggers:conn.execute(trigger[1])
+        try:
+            with ready.readonly(sim.db_path) as conn:
+                with self.assertRaisesRegex(ValueError,'manifest_corrupt'):action._verify_original_publication(conn,manifest=manifest,current_book=current)
+        finally:
+            with closing(_connect(sim.db_path)) as conn,conn:
+                for trigger in triggers:conn.execute(f'DROP TRIGGER "{trigger[0]}"')
+                conn.execute(f'UPDATE {action.docs.DOCUMENTS_TABLE} SET posted_manifest_sha256=? WHERE document_id=?',(saved,identity))
+                for trigger in triggers:conn.execute(trigger[1])
+        receipt=historical_history.pending_receipt(sim).freeze_scope(later);receipt.validate_sources_readonly(now=later)
+        directory=action._directory(self.root,'full-local-temporary')
+        store=HistoryStore(directory/'history')
+        adapter=LiveNativeAdapter(db_path=sim.db_path,runtime_dir=sim.runtime_dir,cache_dir=directory/'descendant-proofs',now=later,
+            date_from='2026-10-27',date_to=day,formula_epoch='local-temporary-fbs')
+        updated=update_live_history(adapter=adapter,runtime=sim,store=store,max_recomputes=31,
+            deadline_monotonic=action.time.monotonic()+45,rolling14=False,group_blocks=True,backfill_dates=list(receipt.dates))
+        self.assertIn(updated['status'],{'published','unchanged'})
+        native=receipt.validate_native_readonly(adapter=adapter,store=store,now=later)
+        ack=dict(manifest_digest=manifest['manifest_digest'],native=native['native'])
+        with closing(_connect(sim.db_path)) as conn,conn:
+            row=conn.execute('SELECT diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(manifest['operation_id'],manifest['attempt_id'])).fetchone()
+            diagnostics=action.json.loads(row[0]);diagnostics['historical_history_ack']=ack
+            conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=? WHERE operation_id=? AND attempt_id=?',(action.canonical(diagnostics),manifest['operation_id'],manifest['attempt_id']))
+        with admission.heavy_admitted(sim.runtime_dir,operation='cycle'),warehouse_functional_job_lock(sim.runtime_dir):
+            finance=_recalculate_downstream_finance_cost(sim,now=later)
+            economics=accounting.current_publication_receipt(sim,now=later)
+            result=action.finalize_scope(sim,manifest=manifest,history_ack=ack,finance=finance,economics=economics,now=later)
+        self.assertEqual(result['status'],'scope_complete');self.assertEqual(result['current_completion_book'],version)
+        self.assertEqual(result['historical_after_book'],old_version)
+        self.assertIsNone(historical_history.pending_receipt(sim))
+        self.assertEqual(accounting.current_publication_receipt(sim,now=later),economics)
+        with ready.readonly(sim.db_path) as conn:
+            parent=conn.execute('SELECT book_version,after_digest,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+                tuple(manifest['plan']['effect_binding'][key] for key in ('operation_id','attempt_id'))).fetchone()
+            self.assertEqual(parent[0],old_version);self.assertEqual(parent[1],ready.digest(manifest['targets'][-1]['after_json']))
+            proof=action.json.loads(parent[2])['temporary_allocation_completion']
+            self.assertEqual(proof['current_completion_book'],version);self.assertEqual(proof['historical_after_book'],old_version)
+            action._verify_original_publication(conn,manifest=manifest,current_book=current)
 
     def test_pre_native_selector_drift_blocks_the_first_monetary_write(self):
         snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)
