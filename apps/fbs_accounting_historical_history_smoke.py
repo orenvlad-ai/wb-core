@@ -132,6 +132,57 @@ class HistoricalHistory(unittest.TestCase):
         with patch.object(history,'MAX_READY_SOURCE_BYTES',limit):
             self.assertEqual(self.receipt.validate_sources_readonly(now=NOW),expected)
 
+    def test_history_receipt_releases_ready_images_and_rechecks_without_decode(self):
+        from unittest.mock import patch
+        import tracemalloc
+        marker='READY-BEFORE-AFTER-MEMORY-TEST-'+'я'*1024**2
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            row=conn.execute("SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id='local-late-publication'").fetchone()
+            manifest=publication.decode_manifest(row[0],kind=publication.CONTRACT)
+            manifest['targets'][0]['before_envelope_json']=marker
+            manifest['targets'][0]['after_json']=marker
+            manifest['manifest_digest']=fingerprint({k:v for k,v in manifest.items() if k not in {'manifest_digest','prepare_seconds'}})
+            conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET inputs_json=? WHERE operation_id='local-late-publication'",(canonical(manifest),))
+        tracemalloc.start()
+        try:
+            receipt=history.HistoricalReceipt(self.runtime,'local-late-publication','1')
+            with patch.object(history,'decode_manifest',side_effect=AssertionError('repeated full receipt decode')):
+                receipt.binding()
+                receipt.validate_sources_readonly(now=NOW)
+            retained,peak=tracemalloc.get_traced_memory()
+            self.assertLess(retained,len(marker.encode()))
+            self.assertNotIn('targets',receipt._history)
+            self.assertFalse(any('manifest' in key for key in vars(receipt)))
+            print(f'history_receipt_small_fixture retained_bytes={retained} peak_bytes={peak}')
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(receipt.manifest,manifest)
+        detached=receipt.manifest;detached['manifest_digest']='changed-by-caller'
+        self.assertEqual(receipt.manifest,manifest)
+
+    def test_native_source_and_ready_selection_share_one_read_snapshot(self):
+        from unittest.mock import patch
+        native=self.receipt._validate_typed_source
+        selected=history._selected_ready_sources
+        seen={}
+        def source(conn):
+            native(conn)
+            self.assertTrue(conn.in_transaction)
+            seen['conn']=conn
+            seen['before']=conn.execute(f'SELECT plan_json FROM {ready.TABLE} WHERE as_of_date=?',('2026-09-10',)).fetchone()[0]
+            changed=json.loads(seen['before']);changed['metadata']['concurrent_refresh']='new image'
+            with closing(sqlite3.connect(self.db)) as writer,writer:
+                writer.execute(f'UPDATE {ready.TABLE} SET plan_json=? WHERE as_of_date=?',(canonical(changed),'2026-09-10'))
+        def choose(conn,**kwargs):
+            self.assertIs(conn,seen['conn'])
+            self.assertTrue(conn.in_transaction)
+            self.assertEqual(conn.execute(f'SELECT plan_json FROM {ready.TABLE} WHERE as_of_date=?',('2026-09-10',)).fetchone()[0],seen['before'])
+            return selected(conn,**kwargs)
+        with patch.object(self.receipt,'_validate_typed_source',side_effect=source),patch.object(history,'_selected_ready_sources',side_effect=choose):
+            before=self.receipt.validate_sources_readonly(now=NOW)
+        after=self.receipt.validate_sources_readonly(now=NOW)
+        self.assertNotEqual(before['dated']['2026-09-09']['ready_digest'],after['dated']['2026-09-09']['ready_digest'])
+
     def test_history_validation_rejects_selected_oversized_ready_in_bytes(self):
         from unittest.mock import patch
         with closing(sqlite3.connect(self.db)) as conn,conn:
@@ -384,19 +435,71 @@ class HistoricalHistory(unittest.TestCase):
 
 
 class HistoricalReceiptLimits(unittest.TestCase):
+    @staticmethod
+    def minimal_manifest():
+        manifest=dict(contract=publication.TEMPORARY_CONTRACT,after_book='book',authority={},
+            plan={'scope':{'dates':['2026-10-26','2026-10-27'],'date_to':'2026-10-27'}},
+            candidate={'candidate_book':{field:{} for field in ('wb_days','retained_days','shared_days','presentations')}},
+            source_confirmation={},operator_confirmation={},targets=[{'after_json':'padding-ABC'}])
+        manifest['manifest_digest']=fingerprint(manifest)
+        return manifest
+
+    def test_streamed_digest_preserves_canonical_json_and_bounds_string_chunks(self):
+        from unittest.mock import patch
+        value={'z':[-0.0,True,None,1,1.0,1e-300], 'я':'雪😀\\\"\n\t\x00'*20000}
+        expected=fingerprint(value)
+        escape=json.encoder.encode_basestring
+        sizes=[]
+        def bounded(text):
+            sizes.append(len(text));self.assertLessEqual(len(text),history._CHUNK)
+            return escape(text)
+        with patch.object(json.encoder,'encode_basestring',side_effect=bounded):
+            self.assertEqual(history._stream_fingerprint(value),expected)
+        self.assertGreater(len(sizes),2)
+
+    def test_exact_stored_byte_pin_rejects_blob_and_header_changes_without_decode(self):
+        from unittest.mock import patch
+        with TemporaryDirectory() as temporary:
+            root=Path(temporary);db=root/'pin.sqlite3';manifest=self.minimal_manifest();encoded=canonical(manifest)
+            with closing(sqlite3.connect(db)) as conn,conn:
+                conn.execute('CREATE TABLE sheet_vitrina_v1_ready_publications(operation_id,attempt_id,kind,state,inputs_json,book_version,diagnostics_json)')
+                conn.execute("INSERT INTO sheet_vitrina_v1_ready_publications VALUES('op','1',?,'complete',?,'book','{}')",(manifest['contract'],encoded))
+            runtime=SimpleNamespace(db_path=db,runtime_dir=root)
+            receipt=history.HistoricalReceipt(runtime,'op','1')
+            with patch.object(history,'decode_manifest',side_effect=AssertionError('pinned receipt decoded again')):
+                baseline=receipt.binding()
+                with closing(sqlite3.connect(db)) as conn,conn:
+                    conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=?',(canonical({'fresh':'diagnostics'}),))
+                self.assertEqual(receipt.binding(),baseline)
+                self.assertEqual(receipt._read_history()[1],{'fresh':'diagnostics'})
+                with closing(sqlite3.connect(db)) as conn,conn:
+                    with conn.blobopen('sheet_vitrina_v1_ready_publications','inputs_json',1) as blob:
+                        offset=encoded.encode().index(b'padding-ABC');blob.seek(offset);blob.write(b'padding-XYZ')
+                with self.assertRaisesRegex(ValueError,'receipt_changed'):receipt.binding()
+                with closing(sqlite3.connect(db)) as conn,conn:
+                    conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET inputs_json=?',(encoded,))
+                self.assertEqual(receipt.binding(),baseline)
+                for column,value in [('book_version','other'),('kind',publication.FBO_CONTRACT),('state','prepared'),('rowid',2)]:
+                    with closing(sqlite3.connect(db)) as conn,conn:
+                        old=conn.execute('SELECT '+column+' FROM sheet_vitrina_v1_ready_publications').fetchone()[0]
+                        conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET '+column+'=?',(value,))
+                    with self.subTest(column=column),self.assertRaises(ValueError):receipt.binding()
+                    with closing(sqlite3.connect(db)) as conn,conn:
+                        conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET '+column+'=?',(old,))
+                receipt._history['scope']['dates'].append('2026-10-28')
+                with self.assertRaisesRegex(ValueError,'receipt_changed'):receipt.binding()
+
     def test_ack_uses_native_tuple_connection_and_checks_kind_before_decode(self):
         from unittest.mock import patch
         with TemporaryDirectory() as temporary:
             root=Path(temporary);db=root/'ack.sqlite3'
-            manifest={'contract':publication.TEMPORARY_CONTRACT}
-            manifest['manifest_digest']=fingerprint(manifest)
+            manifest=self.minimal_manifest()
             encoded=canonical(manifest);native={'2026-10-26':{'proof':'verified-supervisor'}}
             with closing(sqlite3.connect(db)) as conn,conn:
-                conn.execute('CREATE TABLE sheet_vitrina_v1_ready_publications(operation_id,attempt_id,kind,state,inputs_json,diagnostics_json)')
-                conn.execute("INSERT INTO sheet_vitrina_v1_ready_publications VALUES('op','1',?,'complete',?,'{}')",(manifest['contract'],encoded))
-            receipt=history.HistoricalReceipt.__new__(history.HistoricalReceipt)
-            receipt.runtime=SimpleNamespace(db_path=db,runtime_dir=root)
-            receipt.operation_id='op';receipt.attempt_id='1';receipt.manifest=manifest;receipt.dates=tuple(native)
+                conn.execute('CREATE TABLE sheet_vitrina_v1_ready_publications(operation_id,attempt_id,kind,state,inputs_json,book_version,diagnostics_json)')
+                conn.execute("INSERT INTO sheet_vitrina_v1_ready_publications VALUES('op','1',?,'complete',?,'book','{}')",(manifest['contract'],encoded))
+            receipt=history.HistoricalReceipt(SimpleNamespace(db_path=db,runtime_dir=root),'op','1')
+            receipt.dates=tuple(native)
             with patch('packages.application.owned_history_native_ack.consume_historical_history_ack',return_value=native):
                 receipt._acknowledge_verified_native({'native':'verified-by-supervisor'})
                 with closing(sqlite3.connect(db)) as conn,conn:
@@ -437,6 +540,7 @@ class HistoricalReceiptLimits(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError,'size_limit'):receipt._read()
                 conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET kind=?',(publication.CONTRACT,))
                 with patch.object(publication,'MAX_BYTES',size):
+                    del receipt._stored  # Independent initial native-kind validation.
                     with self.assertRaisesRegex(ValueError,'kind_changed'):receipt._read()
 
 
