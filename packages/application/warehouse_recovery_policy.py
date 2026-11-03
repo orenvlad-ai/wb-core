@@ -173,6 +173,9 @@ def _policy(
 
 
 OPERATION_POLICIES: Mapping[str, OperationPolicy] = {
+    "fbs_scoped_lifecycle_recovery": _policy(
+        "fbs_scoped_lifecycle_recovery", RecoveryTier.T2, "warehouse_domain"
+    ),
     "supplier_document_confirmation": _policy(
         "supplier_document_confirmation", RecoveryTier.T1, "document", "shipment"
     ),

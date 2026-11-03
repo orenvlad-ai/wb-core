@@ -168,6 +168,39 @@
     }
   },
   "groups": {
+    "fbs_scoped_lifecycle_production": {
+        "patterns": [
+          "packages/application/warehouse_reviewed_sync_apply.py",
+          "apps/warehouse_reviewed_sync_apply_smoke.py",
+          "packages/application/fbs_scoped_lifecycle_production.py",
+          "packages/application/fbs_historical_fbo_scoped_recovery.py",
+          "packages/application/fbs_historical_fbo_dependencies.py",
+          "apps/fbs_scoped_lifecycle_production_smoke.py",
+          "apps/fbs_historical_fbo_scoped_recovery_smoke.py",
+          "apps/fbs_historical_fbo_dependencies_smoke.py",
+          "apps/warehouse_ready_binding_cache_smoke.py"
+        ],
+        "commands": [
+          ["python3", "apps/warehouse_reviewed_sync_apply_smoke.py"],
+          [
+            "python3",
+            "apps/fbs_scoped_lifecycle_production_smoke.py"
+          ],
+          [
+            "python3",
+            "apps/fbs_historical_fbo_scoped_recovery_smoke.py"
+          ],
+          [
+            "python3",
+            "apps/fbs_historical_fbo_dependencies_smoke.py"
+          ],
+          [
+            "python3",
+            "apps/warehouse_ready_binding_cache_smoke.py"
+          ]
+        ],
+        "pip": []
+      },
     "supplier_independent_view": {
       "patterns": ["apps/supplier_view*.py", "packages/application/supplier_view.py", "packages/adapters/supplier_view_http.py", "packages/adapters/templates/sheet_vitrina_v1_supplier.html", "artifacts/registry_upload_http_entrypoint/systemd/wb-core-supplier-view.service"],
       "commands": [["python3", "apps/supplier_view_smoke.py"], ["python3", "apps/supplier_view_ui_smoke.py"]],

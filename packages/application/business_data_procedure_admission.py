@@ -46,14 +46,20 @@ def business_write_is_blocked(runtime_dir: Path) -> bool:
 class AdmissionLease:
     """One independent open-file description; transferable to a worker thread."""
 
-    def __init__(self, runtime_dir: Path, *, independent: bool = False, _held_history_completion: bool = False) -> None:
+    def __init__(self, runtime_dir: Path, *, independent: bool = False, _held_history_completion: bool = False, _held_fbs_recovery: bool = False) -> None:
         self.runtime_dir = Path(runtime_dir).resolve()
         self.pid = os.getpid()
         self.fd: int | None = None
         held_binding = None
+        held_validator = None
         if _held_history_completion:
             from packages.application.historical_receipt_completion import require_held_completion
+            held_validator = require_held_completion
             held_binding = require_held_completion(self.runtime_dir)
+        elif _held_fbs_recovery:
+            from packages.application.fbs_scoped_lifecycle_production import require_held_scoped_recovery
+            held_validator = require_held_scoped_recovery
+            held_binding = require_held_scoped_recovery(self.runtime_dir)
         elif business_write_is_blocked(self.runtime_dir):
             raise MaintenanceAdmissionBlocked("skipped_maintenance")
         inherited_authority = already_admitted(self.runtime_dir)
@@ -70,7 +76,7 @@ class AdmissionLease:
                 raise MaintenanceAdmissionBlocked("admission_lock_not_private")
             fcntl.flock(fd, fcntl.LOCK_SH)
             if held_binding is not None:
-                if require_held_completion(self.runtime_dir) != held_binding:
+                if held_validator(self.runtime_dir) != held_binding:
                     raise MaintenanceAdmissionBlocked("history_completion_hold_changed")
             elif not inherited_authority and bool(barrier_status(self.runtime_dir)["active"]):
                 raise MaintenanceAdmissionBlocked("skipped_maintenance")
@@ -83,6 +89,11 @@ class AdmissionLease:
     def held_historical_receipt_completion(cls, runtime_dir: Path):
         """Only the registered exact held-tail scope can obtain this real SH."""
         return cls(runtime_dir, independent=True, _held_history_completion=True)
+
+    @classmethod
+    def held_scoped_fbs_recovery(cls, runtime_dir: Path):
+        """Only the registered held FBS owner may enter this independent lease."""
+        return cls(runtime_dir, independent=True, _held_fbs_recovery=True)
 
     def close(self) -> None:
         if self.fd is not None:
