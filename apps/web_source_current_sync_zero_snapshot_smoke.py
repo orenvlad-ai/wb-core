@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime,timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
@@ -9,6 +10,8 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 import threading
+import unittest
+from unittest.mock import patch
 from urllib import parse as urllib_parse
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,8 +19,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.web_source_current_sync import (  # noqa: E402
+    BUSINESS_TIMEZONE,
+    ClosedDaySourceState,
     ShellBackedWebSourceCurrentSync,
     WebSourceCurrentSyncConfig,
+    qualified_serving_state,
 )
 
 TARGET_DATE = "2026-04-19"
@@ -33,7 +39,130 @@ class _NoopSessionSync(ShellBackedWebSourceCurrentSync):
         return
 
 
+class _IndependentSync(ShellBackedWebSourceCurrentSync):
+    """Disposable source/serving generations; no collector or network runs."""
+    def __init__(self,root,*,failures=(),ready=(),probe_failure=None,session_error=None,no_materialization=()):
+        self.ready=set(ready);self.failures=set(failures);self.calls=[];self.session_calls=0
+        self.probe_failure=probe_failure;self.probes={};self.session_error=session_error
+        self.no_materialization=set(no_materialization)
+        self.now=datetime.now(timezone.utc);self.day=self.now.astimezone(BUSINESS_TIMEZONE).date().isoformat()
+        super().__init__(WebSourceCurrentSyncConfig('force',root/'bot',root/'ai','http://fixture.invalid',30,'',''),
+            closed_day_source_state_loader=self.source_state)
+
+    def payload(self,key):
+        if key not in self.ready:return None
+        if key=='seller_funnel_snapshot':
+            return dict(date=self.day,items=[dict(nm_id=101,name='Fixture',vendor_code='fixture',view_count=10,open_card_count=5,ctr=50)])
+        return dict(date_from=self.day,date_to=self.day,items=[dict(nm_id=101,views_current=10,ctr_current=50,orders_current=2,position_avg=1)])
+
+    def fetch(self,url):
+        key='seller_funnel_snapshot' if '/sales-funnel/' in url else 'web_source_snapshot'
+        self.probes[key]=self.probes.get(key,0)+1
+        if self.probe_failure==(key,self.probes[key]):raise RuntimeError('serving_probe_failed')
+        return self.payload(key)
+
+    def source_state(self,key,day):
+        payload=self.payload(key)
+        if payload is None:return None
+        item=payload['items'][0];stamp=self.now.isoformat()
+        raw={**item,'fetched_at':stamp}
+        if key=='seller_funnel_snapshot':raw['snapshot_date']=day
+        else:raw.update(date_from=day,date_to=day,raw_json='{"reviewed":true}')
+        serving={**raw,'handoff_synced_at':stamp,'source_fetched_at':stamp}
+        state=qualified_serving_state(key,day,[raw],[serving])
+        return ClosedDaySourceState(key,day,**state)
+
+    def _ensure_seller_portal_session_ready(self):
+        self.session_calls+=1
+        if self.session_error:raise RuntimeError(self.session_error)
+
+    def _run(self,command,**kwargs):
+        if '--source-key' in command:
+            key=command[command.index('--source-key')+1];stage='collector'
+        else:
+            key='web_source_snapshot' if command[command.index('--only')+1]=='search-analytics' else 'seller_funnel_snapshot'
+            stage='handoff'
+        self.calls.append((key,stage))
+        if (key,stage) in self.failures:raise RuntimeError(key+'_'+stage+'_failed')
+        if stage=='handoff' and key not in self.no_materialization:self.ready.add(key)
+
+
+class IndependentCurrentSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=TemporaryDirectory(prefix='independent-current-sources-');self.addCleanup(self.tmp.cleanup)
+
+    def sync(self,**kwargs):return _IndependentSync(Path(self.tmp.name),**kwargs)
+
+    def call(self,sync):
+        with patch('packages.adapters.web_source_current_sync._fetch_json',side_effect=sync.fetch):
+            sync.ensure_snapshot(sync.day)
+
+    def test_search_failure_still_hands_off_qualified_funnel(self):
+        sync=self.sync(failures={('web_source_snapshot','collector')})
+        with patch('packages.adapters.web_source_current_sync._fetch_json',side_effect=sync.fetch):
+            with self.assertRaisesRegex(RuntimeError,'web_source_snapshot_collector_failed'):
+                sync.ensure_snapshot(sync.day)
+            self.assertTrue(sync._has_sales_funnel_snapshot(sync.day))
+            self.assertFalse(sync._has_search_analytics_snapshot(sync.day))
+        self.assertEqual(sync.calls,[('web_source_snapshot','collector'),('seller_funnel_snapshot','collector'),('seller_funnel_snapshot','handoff')])
+        self.assertIn(('seller_funnel_snapshot',sync.day),sync.observed_states)
+        self.assertNotIn(('web_source_snapshot',sync.day),sync.observed_states)
+        self.assertEqual(sync.session_calls,1)
+
+    def test_search_handoff_failure_does_not_suppress_funnel(self):
+        sync=self.sync(failures={('web_source_snapshot','handoff')})
+        with self.assertRaisesRegex(RuntimeError,'web_source_snapshot_handoff_failed'):self.call(sync)
+        self.assertIn(('seller_funnel_snapshot','handoff'),sync.calls)
+        self.assertIn(('seller_funnel_snapshot',sync.day),sync.observed_states)
+
+    def test_funnel_collector_and_handoff_failures_are_explicit(self):
+        for stage in ('collector','handoff'):
+            sync=self.sync(failures={('seller_funnel_snapshot',stage)})
+            with self.subTest(stage=stage),self.assertRaisesRegex(RuntimeError,'seller_funnel_snapshot_'+stage+'_failed'):self.call(sync)
+            self.assertIn(('web_source_snapshot',sync.day),sync.observed_states)
+            self.assertNotIn(('seller_funnel_snapshot',sync.day),sync.observed_states)
+            if stage=='collector':self.assertNotIn(('seller_funnel_snapshot','handoff'),sync.calls)
+
+    def test_both_failures_are_aggregated_without_success(self):
+        sync=self.sync(failures={(key,'collector') for key in ('web_source_snapshot','seller_funnel_snapshot')})
+        with self.assertRaises(RuntimeError) as raised:self.call(sync)
+        self.assertIn('web_source_snapshot_collector_failed',str(raised.exception))
+        self.assertIn('seller_funnel_snapshot_collector_failed',str(raised.exception))
+        self.assertEqual(len(sync.calls),2);self.assertFalse(sync.observed_states)
+
+    def test_already_ready_sources_do_not_collect_or_probe_session(self):
+        sync=self.sync(ready={'web_source_snapshot','seller_funnel_snapshot'});self.call(sync)
+        self.assertEqual(sync.calls,[]);self.assertEqual(sync.session_calls,0)
+        self.assertEqual(len(sync.observed_states),2)
+
+    def test_ready_funnel_is_preserved_without_duplicate_collection(self):
+        sync=self.sync(ready={'seller_funnel_snapshot'},failures={('web_source_snapshot','collector')})
+        with self.assertRaisesRegex(RuntimeError,'web_source_snapshot_collector_failed'):self.call(sync)
+        self.assertEqual(sync.calls,[('web_source_snapshot','collector')])
+        self.assertIn(('seller_funnel_snapshot',sync.day),sync.observed_states)
+
+    def test_shared_session_failure_gates_both_sources(self):
+        sync=self.sync(session_error='seller_portal_wrong_supplier')
+        with self.assertRaisesRegex(RuntimeError,'seller_portal_wrong_supplier'):self.call(sync)
+        self.assertEqual(sync.calls,[]);self.assertEqual(sync.session_calls,1)
+
+    def test_successful_process_without_serving_generation_is_not_success(self):
+        sync=self.sync(no_materialization={'seller_funnel_snapshot'})
+        with self.assertRaisesRegex(RuntimeError,'missing exact-date materialization=sales_funnel'):self.call(sync)
+        self.assertNotIn(('seller_funnel_snapshot',sync.day),sync.observed_states)
+
+    def test_initial_and_final_search_probe_failures_leave_funnel_independent(self):
+        for attempt in (1,2):
+            sync=self.sync(probe_failure=('web_source_snapshot',attempt))
+            with self.subTest(attempt=attempt),self.assertRaisesRegex(RuntimeError,'snapshot probe failed'):self.call(sync)
+            self.assertIn(('seller_funnel_snapshot','handoff'),sync.calls)
+            self.assertIn(('seller_funnel_snapshot',sync.day),sync.observed_states)
+            if attempt==1:self.assertNotIn(('web_source_snapshot','collector'),sync.calls)
+
+
 def main() -> None:
+    result=unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(IndependentCurrentSourceTests))
+    if not result.wasSuccessful():raise AssertionError('independent current-source regressions failed')
     with TemporaryDirectory(prefix="web-source-current-sync-zero-") as tmp:
         tmp_path = Path(tmp)
         state_path = tmp_path / "state.json"

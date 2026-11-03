@@ -152,69 +152,47 @@ class ShellBackedWebSourceCurrentSync:
         if not self._is_enabled():
             return
 
-        search_ready = self._has_search_analytics_snapshot(snapshot_date)
-        seller_ready = self._has_sales_funnel_snapshot(snapshot_date)
-        if search_ready and seller_ready:
+        sources = (
+            ("search_analytics", self._has_search_analytics_snapshot, self._materialize_search_analytics),
+            ("sales_funnel", self._has_sales_funnel_snapshot, self._materialize_sales_funnel),
+        )
+        ready = {}
+        failures = []
+        for name, probe, _ in sources:
+            try:
+                ready[name] = probe(snapshot_date)
+            except Exception as exc:
+                # An unavailable serving probe is unknown, not permission to
+                # overwrite that source. Its sibling may still be collected.
+                ready[name] = None
+                failures.append(f"{name} initial snapshot probe failed: {exc}")
+        if all(ready.values()):
             return
+        # Session/account authority is shared. A failure here gates both sources.
         self._ensure_seller_portal_session_ready()
 
-        bot_python = self.config.wb_web_bot_dir / "venv" / "bin" / "python"
-        ai_python = self.config.wb_ai_dir / "venv" / "bin" / "python"
-        bot_env = _build_env(self.config.wb_web_bot_dir / ".env")
-        ai_env = _build_env(self.config.wb_ai_dir / ".env")
+        for name, _, materialize in sources:
+            if ready[name] is False:
+                try:
+                    materialize(snapshot_date)
+                except Exception as exc:
+                    # Never hand off a failed collector's old raw generation;
+                    # the independent sibling still owns its own attempt.
+                    failures.append(f"{name} materialization failed: {exc}")
 
-        if not search_ready:
-            self._run(
-                self._collector_command("web_source_snapshot", snapshot_date),
-                cwd=self.config.wb_web_bot_dir,
-                env=bot_env,
-                label=f"search_analytics current-day sync {snapshot_date}",
-            )
-            self._run(
-                [
-                    str(ai_python),
-                    "run_web_source_handoff.py",
-                    "--only",
-                    "search-analytics",
-                    "--search-analytics-date-to",
-                    snapshot_date,
-                ],
-                cwd=self.config.wb_ai_dir,
-                env=ai_env,
-                label=f"search_analytics handoff {snapshot_date}",
-            )
-
-        if not seller_ready:
-            self._run(
-                self._collector_command("seller_funnel_snapshot", snapshot_date),
-                cwd=self.config.wb_web_bot_dir,
-                env=bot_env,
-                label=f"sales_funnel current-day sync {snapshot_date}",
-            )
-            self._run(
-                [
-                    str(ai_python),
-                    "run_web_source_handoff.py",
-                    "--only",
-                    "sales-funnel",
-                    "--sales-funnel-date",
-                    snapshot_date,
-                ],
-                cwd=self.config.wb_ai_dir,
-                env=ai_env,
-                label=f"sales_funnel handoff {snapshot_date}",
-            )
-
-        missing: list[str] = []
-        if not self._has_search_analytics_snapshot(snapshot_date):
-            missing.append("search_analytics")
-        if not self._has_sales_funnel_snapshot(snapshot_date):
-            missing.append("sales_funnel")
-        if missing:
-            raise RuntimeError(
-                "current-day web-source sync finished without exact-date materialization for "
-                f"{','.join(missing)} on {snapshot_date}"
-            )
+        missing = []
+        for name, probe, _ in sources:
+            try:
+                if not probe(snapshot_date):
+                    missing.append(name)
+            except Exception as exc:
+                missing.append(name)
+                failures.append(f"{name} final snapshot probe failed: {exc}")
+        if failures or missing:
+            detail = "; ".join(failures)
+            if missing:
+                detail += ("; " if detail else "") + "missing exact-date materialization=" + ",".join(missing)
+            raise RuntimeError(f"current-day web-source sync incomplete on {snapshot_date}: {detail}")
 
     def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> ClosedDaySourceState:
         if not self._is_enabled():
