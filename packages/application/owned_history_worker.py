@@ -440,6 +440,7 @@ class _OwnedHistoryWorker:
             if time.monotonic() >= deadline:
                 _kill_reap(process)
                 return {"status": "outcome_unknown", "invocation": invocation,
+                        "transport_reason": "history_transport_timeout",
                         "readback": terminal_readback(config.candidate_root, invocation, anchor)}
             cap.update(child_pid=process.pid, child_generation=process_generation(process.pid))
             parent.settimeout(max(0.001, deadline - time.monotonic()))
@@ -452,13 +453,22 @@ class _OwnedHistoryWorker:
                 if (process.returncode != 0 or not isinstance(response, dict)
                         or response.get("invocation") != invocation or response.get("contract") != CONTRACT):
                     raise HistoryDelegationError("history_child_terminal_unproven")
-            except (OSError, ValueError, subprocess.TimeoutExpired, HistoryDelegationError):
+            except (OSError, ValueError, subprocess.TimeoutExpired, HistoryDelegationError) as exc:
+                transport_reason = "history_transport_outcome_unknown"
+                if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+                    transport_reason = "history_transport_timeout"
+                elif isinstance(exc, HistoryDelegationError):
+                    if exc.code == "history_capability_channel_closed":
+                        transport_reason = "history_transport_channel_closed"
+                    elif exc.code == "history_child_terminal_unproven":
+                        transport_reason = "history_transport_terminal_unproven"
                 _kill_reap(process)
                 response = None
             self._check()
             observed = terminal_readback(config.candidate_root, invocation, anchor)
             if response is None:
-                return {"status": "outcome_unknown", "invocation": invocation, "readback": observed}
+                return {"status": "outcome_unknown", "invocation": invocation,
+                        "transport_reason": transport_reason, "readback": observed}
             return {"status": "complete", "invocation": invocation, "result": response["result"], "readback": observed}
         finally:
             if process is not None:

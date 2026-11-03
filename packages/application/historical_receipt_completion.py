@@ -167,7 +167,13 @@ def _config(request):
     require(source['formula_epoch']==request['source_formula_epoch'] and target['formula_epoch']==request['formula_epoch'],
             'tail_formula_transition_changed')
     require(target['candidate_root']==request['candidate_root'],'tail_candidate_root_changed')
-    config=CycleHistoryConfig(Path(request['candidate_root']),Path(request['runtime_contract']),request['formula_epoch'])
+    # _cycle verifies these exact limits against the retained source-cycle
+    # fingerprint. Do not silently replace its 240-second budget with the
+    # dataclass's 180-second default while continuing the same source scope.
+    config=CycleHistoryConfig(Path(request['candidate_root']),Path(request['runtime_contract']),request['formula_epoch'],
+        budget_seconds=request.get('source_history_budget_seconds',180),
+        max_recomputes=request.get('source_history_max_recomputes',31))
+    config.fingerprint()  # Enforce native bounds before storage/worker admission.
     # Native deployed-code/runtime contract gate, same as owned History.
     from apps.web_vitrina_history_candidate_build import runtime_storage_admission
     runtime_storage_admission(config.candidate_root,config.runtime_contract,config.formula_epoch)

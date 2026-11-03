@@ -124,6 +124,23 @@ class DiagnosticsTests(unittest.TestCase):
             worker.complete(NOW)
         self.assertEqual(calls, ["capture"])
 
+    def test_transport_causes_survive_without_authorizing_retry(self):
+        from packages.application.owned_history_worker_capability import history_result_error
+        for reason in ('history_transport_timeout','history_transport_channel_closed',
+                       'history_transport_terminal_unproven'):
+            with self.subTest(reason=reason):
+                worker,calls=self.worker(('capture',{'status':'outcome_unknown','transport_reason':reason}))
+                with self.assertRaises(HistoryDelegationError) as caught:
+                    worker.complete(NOW)
+                self.assertEqual(caught.exception.diagnostic()['reason_code'],reason)
+                self.assertEqual(caught.exception.diagnostic()['outcome'],'outcome_unknown')
+                self.assertEqual(calls,['capture'])
+                with self.assertRaises(HistoryDelegationError):worker.complete(NOW)
+                self.assertEqual(calls,['capture'])
+        error=history_result_error('history_completion_capture_unproven',
+            {'status':'outcome_unknown','transport_reason':SECRET},mode='capture')
+        self.assertNotIn(SECRET,json.dumps(error.diagnostic()))
+
     def test_unknown_portion_no_progress_stops_after_exact_verify(self):
         worker, calls = self.worker(("portion", {"status": "outcome_unknown", "readback": {}}))
         with self.assertRaisesRegex(HistoryDelegationError, "no_dated_progress") as caught:

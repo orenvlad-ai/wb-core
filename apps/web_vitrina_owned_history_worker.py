@@ -47,6 +47,7 @@ def _bound(cap):
 
 
 def execute(cap):
+    started = time.monotonic()
     # Bootstrap has authenticated inherited kernel capability before these
     # imports/constructors. No ContextVar lease or source producer is installed.
     from packages.business_time import current_business_date_iso
@@ -66,6 +67,9 @@ def execute(cap):
     if (contract["candidate_root"] != cap["candidate_root"] or contract["formula_epoch"] != cap["formula_epoch"]
             or not 0 < cap["inner_seconds"] <= 240 or not 1 <= cap["max_recomputes"] <= 31):
         raise HistoryDelegationError("history_worker_contract_changed")
+    # The parent's hard deadline includes source validation. Count that work
+    # here too, rather than granting a fresh budget after expensive preparation.
+    deadline = started + cap["inner_seconds"]
     now = datetime.fromisoformat(cap["now"])
     if now.tzinfo is None:
         raise HistoryDelegationError("history_worker_clock_invalid")
@@ -138,7 +142,8 @@ def execute(cap):
     # Canonical contiguous source context. Only rolling_scope may be written;
     # intervening archive dates are read without enrollment or re-evaluation.
     store = HistoryStore(root / "history")
-    deadline = time.monotonic() + cap["inner_seconds"]
+    if time.monotonic() >= deadline:
+        raise HistoryDelegationError("history_worker_preparation_deadline")
     if cap["mode"] == "capture":
         if anchor is not None:
             raise HistoryDelegationError("history_capture_must_not_accept_anchor")
