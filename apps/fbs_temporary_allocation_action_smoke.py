@@ -23,6 +23,29 @@ from packages.application.registry_upload_db_backed_runtime import _connect
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
 
 
+def replay_native_daily_projection(runtime, *, version_id):
+    """Real native daily producer and its normal upsert on disposable rows."""
+    from packages.application import warehouse_functional as wf
+    from packages.application.warehouse_archival_estimate import overlay_opening_cost_rows
+    with ready.readonly(runtime.db_path) as conn:
+        version=dict(conn.execute(f'SELECT * FROM {action.stages.P}functional_versions WHERE version_id=?',(version_id,)).fetchone())
+        snapshot=dict(conn.execute(f'SELECT * FROM {action.stages.P}wb_snapshots WHERE version_id=?',(version_id,)).fetchone())
+        opening=[{**dict(row),'provenance':action.json.loads(row['provenance_json'])}
+            for row in conn.execute(f'SELECT * FROM {action.stages.P}opening_cost_map WHERE cutover_id=?',(wf.FUNCTIONAL_CUTOVER_ID,))]
+        rows=wf.WarehouseFunctionalBlock._build_post_cutover_daily_cost_projection(SimpleNamespace(_load_opening_cost_map=lambda: {}),
+            captured_at=version['created_at'],candidate_lines=[],
+            candidate_snapshot={**snapshot,'items':action.json.loads(snapshot['items_json'])},new_events=[],
+            opening_cost_map=overlay_opening_cost_rows(conn,opening),cutover_mode=False,allow_partial=True,connection=conn)
+    with closing(_connect(runtime.db_path)) as conn,conn:
+        for item in rows:
+            value=dict(cutover_id=wf.FUNCTIONAL_CUTOVER_ID,**{key:item[key] for key in ('as_of_date','nm_id','quantity','wac_rub','capital_rub','quality','fingerprint')},
+                provenance_json=action.canonical(item['provenance']),created_at=version['created_at'])
+            changed=[key for key in value if key not in {'cutover_id','as_of_date','nm_id'}]
+            conn.execute(f'INSERT INTO {action.stages.P}wb_daily_cost({",".join(value)}) VALUES({",".join("?" for _ in value)}) '
+                f'ON CONFLICT(cutover_id,as_of_date,nm_id) DO UPDATE SET {",".join(key+"=excluded."+key for key in changed)}',tuple(value.values()))
+    return rows
+
+
 class TemporaryAllocationCopyBudgetTests(unittest.TestCase):
     def test_measured_source_size_fits_but_each_safety_bound_still_blocks(self):
         action._check_source_copy_budget(table='source',count=50000,size=700*1024**2,elapsed=60)
@@ -207,6 +230,12 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
             # fixture's missing active-version shortcut.
             conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_active SET version_id='saved:2026-11-02'")
             conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_wb_sync_status VALUES(1,?,?,NULL,'saved:2026-11-02',?)",(STAMP,STAMP,STAMP))
+            if self._testMethodName=='test_ordinary_refresh_new_generation_then_history_finance_completes_descendant':
+                # The ordinary native daily owner requires the genuine cutover
+                # baseline; the narrower repair-only fixtures do not consume it.
+                conn.execute(f'INSERT INTO {action.stages.P}functional_cutovers VALUES(?,?,?,?,?,?,?,?,?)',
+                    ('warehouse_functional_cutover_v1','2026-10-26T00:00:00Z','posted',action.fingerprint('native-cutover'),'{}','{}','{}',STAMP,STAMP))
+                conn.execute(f"UPDATE {action.stages.P}functional_versions SET version_kind='functional_cutover' WHERE version_id='saved:2026-10-26'")
             ensure_inventory_history_schema(conn);ready.ensure_publication_schema(conn);conn.commit();action.staging.ensure_staging_schema(conn)
         with closing(_connect(target)) as conn:
             conn.execute('INSERT INTO registry_upload_versions VALUES(?,?,?)',('local-bundle',STAMP,STAMP))
@@ -544,6 +573,11 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
             @classmethod
             def now(cls,tz=None):return later if tz else later.replace(tzinfo=None)
         original_business_day=business_time.current_business_date_iso
+        replayed=replay_native_daily_projection(sim,version_id=new)
+        self.assertTrue(replayed)
+        old_daily={(row['as_of_date'],row['nm_id']):row for row in manifest['candidate']['daily_wb_costs'] if row['as_of_date']<day}
+        self.assertTrue(any((row['as_of_date'],row['nm_id']) in old_daily and
+            row['fingerprint']!=old_daily[(row['as_of_date'],row['nm_id'])]['fingerprint'] for row in replayed))
         with patch.object(accounting,'datetime',Clock),patch.object(db_runtime,'datetime',Clock),patch.object(historical_cycle,'datetime',Clock),patch.object(business_time,'current_business_date_iso',side_effect=lambda now=None:original_business_day(now or later)):
             with warehouse_functional_job_lock(sim.runtime_dir):
                 refreshed=_publish_fbs_snapshot_accounting(sim)
@@ -553,6 +587,44 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
         self.assertEqual(current['state']['periods'][day]['snapshot']['id'],'ordinary-official')
         self.assertEqual(accounting.load(sim.runtime_dir,version=old_version)[0],original)
         action._completion_books(sim,manifest=manifest)
+        with ready.readonly(sim.db_path) as conn:
+            action._verify_closed_daily_projection(conn,manifest=manifest,current_book=current)
+        frozen=manifest['candidate']['editions'][min(manifest['candidate']['editions'])]
+        with closing(_connect(sim.db_path)) as conn,conn:
+            conn.execute(f'UPDATE {action.stages.P}wb_snapshots SET raw_rows_json=? WHERE version_id=?',
+                ('[{"foreign":true}]',frozen['version_id']))
+        try:
+            with ready.readonly(sim.db_path) as conn:
+                with self.assertRaisesRegex(ValueError,'original_stage_snapshot_changed'):
+                    action._verify_original_publication(conn,manifest=manifest,current_book=current)
+        finally:
+            with closing(_connect(sim.db_path)) as conn,conn:
+                conn.execute(f'UPDATE {action.stages.P}wb_snapshots SET raw_rows_json=? WHERE version_id=?',
+                    (frozen['snapshot']['raw_rows_json'],frozen['version_id']))
+        selected=next(row for row in manifest['candidate']['daily_wb_costs'] if row['as_of_date']<day)
+        daily_where=(selected['as_of_date'],selected['nm_id'])
+        for column,value,reason in (('quantity','999','closed_daily_money_changed'),
+                                   ('wac_rub','999','closed_daily_money_changed'),
+                                   ('capital_rub','999','closed_daily_money_changed'),
+                                   ('quality','foreign-quality','closed_daily_money_changed'),
+                                   ('created_at','foreign-time','closed_daily_writer_changed'),
+                                   ('fingerprint','foreign-digest','closed_daily_native_replay_changed'),
+                                   ('provenance_json','{}','closed_daily_native_replay_changed')):
+            with closing(_connect(sim.db_path)) as conn,conn:
+                saved=conn.execute(f'SELECT {column} FROM {action.stages.P}wb_daily_cost WHERE as_of_date=? AND nm_id=?',daily_where).fetchone()[0]
+                old_fingerprint=conn.execute(f'SELECT fingerprint FROM {action.stages.P}wb_daily_cost WHERE as_of_date=? AND nm_id=?',daily_where).fetchone()[0]
+                conn.execute(f'UPDATE {action.stages.P}wb_daily_cost SET {column}=? WHERE as_of_date=? AND nm_id=?',(value,*daily_where))
+                if column=='provenance_json':
+                    raw=conn.execute(f'SELECT * FROM {action.stages.P}wb_daily_cost WHERE as_of_date=? AND nm_id=?',daily_where).fetchone()
+                    forged=wf._daily_wb_cost_row(day=raw['as_of_date'],nm_id=raw['nm_id'],quantity=wf._decimal(raw['quantity']),
+                        wac=wf._decimal(raw['wac_rub']),quality=raw['quality'],provenance={})
+                    conn.execute(f'UPDATE {action.stages.P}wb_daily_cost SET fingerprint=? WHERE as_of_date=? AND nm_id=?',(forged['fingerprint'],*daily_where))
+            try:
+                with ready.readonly(sim.db_path) as conn:
+                    with self.assertRaisesRegex(ValueError,reason):action._verify_closed_daily_projection(conn,manifest=manifest,current_book=current)
+            finally:
+                with closing(_connect(sim.db_path)) as conn,conn:
+                    conn.execute(f'UPDATE {action.stages.P}wb_daily_cost SET {column}=?,fingerprint=? WHERE as_of_date=? AND nm_id=?',(saved,old_fingerprint,*daily_where))
         # Even a valid current hash cannot inherit through a corrupt middle.
         with sqlite3.connect(accounting.path(sim.runtime_dir)) as ledger:
             payload=ledger.execute('SELECT payload FROM accounting_revisions WHERE version=?',(middle_version,)).fetchone()[0]
@@ -583,7 +655,7 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
             for trigger in triggers:conn.execute(trigger[1])
         try:
             with ready.readonly(sim.db_path) as conn:
-                with self.assertRaisesRegex(ValueError,'manifest_corrupt'):action._verify_original_publication(conn,manifest=manifest)
+                with self.assertRaisesRegex(ValueError,'manifest_corrupt'):action._verify_original_publication(conn,manifest=manifest,current_book=current)
         finally:
             with closing(_connect(sim.db_path)) as conn,conn:
                 for trigger in triggers:conn.execute(f'DROP TRIGGER "{trigger[0]}"')
@@ -617,7 +689,7 @@ class TemporaryAllocationFullActionTests(unittest.TestCase):
             self.assertEqual(parent[0],old_version);self.assertEqual(parent[1],ready.digest(manifest['targets'][-1]['after_json']))
             proof=action.json.loads(parent[2])['temporary_allocation_completion']
             self.assertEqual(proof['current_completion_book'],version);self.assertEqual(proof['historical_after_book'],old_version)
-            action._verify_original_publication(conn,manifest=manifest)
+            action._verify_original_publication(conn,manifest=manifest,current_book=current)
 
     def test_pre_native_selector_drift_blocks_the_first_monetary_write(self):
         snapshot=action._snapshot(self.runtime,self.inputs,now=self.now)

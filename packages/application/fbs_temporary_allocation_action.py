@@ -700,7 +700,55 @@ def _completion_books(runtime, *, manifest):
         descendant_revision_count=len(chain), closed_prefix_digest=fingerprint(prefix))
 
 
-def _verify_original_publication(conn, *, manifest):
+def _verify_closed_daily_projection(conn, *, manifest, current_book):
+    """Freeze closed money; admit only original or native-replayed metadata."""
+    from decimal import Decimal, localcontext
+    from packages.application import warehouse_functional as wf
+    from packages.application.warehouse_archival_estimate import overlay_opening_cost_rows
+    from types import SimpleNamespace
+    wanted=[item for item in manifest['candidate']['daily_wb_costs']
+        if item['as_of_date']<manifest['plan']['scope']['date_to']]
+    if not wanted:return
+    current_day=max(current_book['wb_days']);version_id=current_book['wb_days'][current_day]['version_id']
+    version=conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',(version_id,)).fetchone()
+    require(version and version['status']=='good' and version['business_effective_date']==current_day,'daily_current_native_source_missing')
+    original_time=manifest['candidate']['editions'][min(manifest['candidate']['editions'])]['version']['created_at']
+    pending=[]
+    for item in wanted:
+        row=conn.execute(f'SELECT * FROM {stages.P}wb_daily_cost WHERE cutover_id=? AND as_of_date=? AND nm_id=?',
+            (wf.FUNCTIONAL_CUTOVER_ID,item['as_of_date'],item['nm_id'])).fetchone()
+        require(row and all(Decimal(row[key])==Decimal(item[key]) for key in ('quantity','wac_rub','capital_rub'))
+            and row['quality']==item['quality'],'closed_daily_money_changed')
+        require(row['created_at'] in {original_time,version['created_at']},'closed_daily_writer_changed')
+        if row['fingerprint']!=item['fingerprint'] or json.loads(row['provenance_json'])!=item['provenance']:
+            require(row['created_at']==version['created_at'],'closed_daily_writer_changed')
+            pending.append((item,dict(row)))
+    if not pending:return
+    snapshot=conn.execute(f'SELECT * FROM {stages.P}wb_snapshots WHERE version_id=?',(version_id,)).fetchone()
+    require(snapshot and snapshot['snapshot_date']==current_day,'daily_current_native_source_missing')
+    opening=[{**dict(row),'provenance':json.loads(row['provenance_json'])}
+        for row in conn.execute(f'SELECT * FROM {stages.P}opening_cost_map WHERE cutover_id=?',(wf.FUNCTIONAL_CUTOVER_ID,))]
+    opening=overlay_opening_cost_rows(conn,opening)
+    def empty_pinned_seeds():
+        require(not opening,'daily_opening_source_changed')
+        return {}
+    with localcontext() as context:
+        context.prec=28  # Match the actual warehouse daily replay owner.
+        # Empty pinned opening rows mean no seeds, not a reason to open an
+        # unpinned second connection through the native fallback loader.
+        owner=SimpleNamespace(_load_opening_cost_map=empty_pinned_seeds)
+        replay=wf.WarehouseFunctionalBlock._build_post_cutover_daily_cost_projection(owner,
+            captured_at=version['created_at'],candidate_lines=[],
+            candidate_snapshot={**dict(snapshot),'items':json.loads(snapshot['items_json'])},new_events=[],
+            opening_cost_map=opening,cutover_mode=False,allow_partial=True,connection=conn)
+    by_key={(row['as_of_date'],row['nm_id']):row for row in replay}
+    for item,row in pending:
+        expected=by_key.get((item['as_of_date'],item['nm_id']))
+        require(expected and all(row[key]==expected[key] for key in ('quantity','wac_rub','capital_rub','quality','fingerprint'))
+            and json.loads(row['provenance_json'])==expected['provenance'],'closed_daily_native_replay_changed')
+
+
+def _verify_original_publication(conn, *, manifest, current_book):
     """Read the original immutable child and stage editions, never old Ready."""
     from packages.application.fbs_accounting_historical_publication import decode_manifest
     from decimal import Decimal, localcontext
@@ -719,6 +767,9 @@ def _verify_original_publication(conn, *, manifest):
         actual = conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',
             (edition['version_id'],)).fetchone()
         require(actual and dict(actual) == edition['version'], 'original_stage_version_changed')
+        snapshot=conn.execute(f'SELECT * FROM {stages.P}wb_snapshots WHERE version_id=?',
+            (edition['version_id'],)).fetchone()
+        require(snapshot and dict(snapshot)==edition['snapshot'],'original_stage_snapshot_changed')
         balances = stages._version_balances(conn, version_id=edition['version_id'])
         require(balances == edition['balances'], 'original_stage_balances_changed')
         models = conn.execute(f'SELECT warehouse_key,payload_json FROM {stages.P}functional_read_models WHERE version_id=?',
@@ -745,16 +796,9 @@ def _verify_original_publication(conn, *, manifest):
             actual = [dict(row) for row in conn.execute(f'SELECT * FROM {stages.P}{table} WHERE version_id=?',
                 (edition['version_id'],))]
             require(sorted(actual, key=canonical) == sorted(expected, key=canonical), 'original_stage_companions_changed')
-    # wb_daily_cost is an unversioned projection: ordinary refresh owns the
-    # current suffix. Only the original closed prefix remains this receipt's.
-    for item in manifest['candidate']['daily_wb_costs']:
-        if item['as_of_date'] >= manifest['plan']['scope']['date_to']:
-            continue
-        from packages.application.warehouse_functional import FUNCTIONAL_CUTOVER_ID
-        row = conn.execute(f'SELECT * FROM {stages.P}wb_daily_cost WHERE cutover_id=? AND as_of_date=? AND nm_id=?',
-            (FUNCTIONAL_CUTOVER_ID, item['as_of_date'], item['nm_id'])).fetchone()
-        require(row and all(row[key] == item[key] for key in ('quantity', 'wac_rub', 'capital_rub', 'quality', 'fingerprint'))
-            and json.loads(row['provenance_json']) == item['provenance'], 'closed_daily_cost_changed')
+    # The normal warehouse replays this unversioned projection across closed
+    # dates too. Immutable book/stages above never follow its new metadata.
+    _verify_closed_daily_projection(conn,manifest=manifest,current_book=current_book)
 
 
 def _history_ack_dates(scope,*,now):
@@ -767,6 +811,7 @@ def finalize_scope(runtime,*,manifest,history_ack,finance,economics,now):
     require(require_heavy_owner(runtime.runtime_dir).operation=='cycle','owned_cycle_required')
     require_warehouse_job_owner(runtime.runtime_dir)
     publication._verify(manifest)
+    require(manifest['adapter_code_authority']==_code(),'publication_adapter_code_changed')
     from packages.application.fbs_accounting_historical_history import HistoricalReceipt
     closed_dates=_history_ack_dates(manifest['plan']['scope'],now=now)
     require(history_ack and history_ack.get('manifest_digest')==manifest['manifest_digest']
@@ -785,7 +830,7 @@ def finalize_scope(runtime,*,manifest,history_ack,finance,economics,now):
         require(receipt.manifest==manifest and set(receipt.dates)==closed_dates,'historical_receipt_changed')
         receipt.validate_sources_readonly(now=now)
         with ready.readonly(runtime.db_path) as conn:
-            _verify_original_publication(conn,manifest=manifest)
+            _verify_original_publication(conn,manifest=manifest,current_book=book)
         with owned_sqlite.connection(runtime.db_path,phase_name='temporary_completion_connection') as conn:
             conn.row_factory=sqlite3.Row
             with owned_sqlite.transaction(conn,db_path=runtime.db_path,phase_name='temporary_completion'):
