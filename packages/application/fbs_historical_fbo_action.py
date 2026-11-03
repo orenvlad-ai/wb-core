@@ -192,7 +192,9 @@ def capture_native_sources(conn, *, book, scope, opening_date, physical, restore
     fbs=deepcopy(opening['rows'][facility+':'+str(scope['reallocation']['nm_id'])])
     fence=json.loads(canonical(ready.pin_queries(conn,queries)))
     result=dict(contract=CAPTURE_CONTRACT,book_version=fingerprint(book),native_query_fence_digest=fingerprint(fence),
-        opening=dict(business_date=opening_date,period_digest=opening.get('period_digest') or opening.get('id'),
+        # Daily closed periods have no stored ID; bind their complete native
+        # content without changing the immutable accounting book.
+        opening=dict(business_date=opening_date,period_digest=opening.get('period_digest') or opening.get('id') or fingerprint(opening),
             source_digest=opening['source_digest'],document_manifest=known,fbo_rows=fbo,fbs_reallocation_row=fbs),
         native_cost_document_coverage=dict(complete=True,date_from=start,date_to=last,documents=[],requests=[],query_fence_digest=fingerprint(fence)),
         known_document_manifest=known,protected_source_fingerprints={**actual,'native_document_set':fingerprint(actual)},
