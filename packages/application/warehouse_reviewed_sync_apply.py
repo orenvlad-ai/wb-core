@@ -64,7 +64,13 @@ def committed(conn, plan):
     snapshot = conn.execute(
         f"SELECT snapshot_id,snapshot_date FROM {P}wb_snapshots WHERE version_id=?",
         (version["version_id"],)).fetchone()
-    require(snapshot is not None and snapshot["snapshot_id"] == plan["wb_snapshot"]["snapshot_id"]
+    # Native publication gives each version its own snapshot alias; the plan
+    # retains the official source snapshot identity.
+    expected_snapshot_id = native._stable_id("wbsnapv", {
+        "source_snapshot_id": plan["wb_snapshot"]["snapshot_id"],
+        "version_id": version["version_id"],
+    })
+    require(snapshot is not None and snapshot["snapshot_id"] == expected_snapshot_id
             and snapshot["snapshot_date"] == plan["effective_date"], "committed_snapshot_conflict")
     return version
 

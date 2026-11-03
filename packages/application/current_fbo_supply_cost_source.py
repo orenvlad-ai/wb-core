@@ -53,6 +53,35 @@ def capture_documents(conn):
     return result
 
 
+def capture_warehouse_closures(conn):
+    """Verified current FF closeout is already covered by official WB stock.
+
+    It cannot become a newly discovered historical WB acceptance/cost layer.
+    Revisions of these exact sources require explicit review, not silent
+    retrospective valuation of an approved current-cost estimate.
+    """
+    closures=[]
+    for doc in capture_documents(conn):
+        data=doc['cost_document'];domain=data['domain'];supply=domain['supply_id']
+        candidates=list(conn.execute('SELECT * FROM sheet_vitrina_v1_wb_supplies WHERE supply_id=? OR wb_supply_id=? OR cache_key=?',
+            (supply,supply,'supply:'+supply)))
+        owner.require(len(candidates)==1,'current_warehouse_close_source_missing_or_ambiguous')
+        record=owner._wb_supply_record_from_row(candidates[0]);normalized=record['normalized']
+        _,source_id,source_key=owner.ledger._wb_supply_debit_identity(record=record,normalized=normalized)
+        revision=owner.ledger._wb_supply_revision(record,normalized)
+        expected={line['source_revision'] for line in data['lines']}
+        owner.require(source_id==supply and source_key==domain['source_key'] and expected=={revision},
+            'current_warehouse_close_source_revision_changed')
+        from packages.application.wb_supply_box_correction import load_active_box_correction
+        owner.require(load_active_box_correction(conn,supply) is None,'current_warehouse_close_box_correction_requires_review')
+        closures.append(dict(supply_id=supply,source_revision=revision,source_key=source_key,
+            business_date=doc['business_date'],operation_id=doc['operation_id'],
+            receipt_fingerprint=doc['fingerprint'],plan_digest=doc['current_fbo_native']['plan_digest'],
+            wb_policy='already_covered_by_official_stock_no_retrospective_acceptance'))
+    owner.require(len({r['supply_id'] for r in closures})==len(closures),'current_warehouse_close_duplicate_supply')
+    return closures
+
+
 def apply_opening_dispatches(nodes, active, node, key):
     """Consume only this day's pinned current boundary before later documents.
 

@@ -6565,7 +6565,7 @@ class WarehouseFunctionalBlock:
         transitional_unmatched: list[dict[str, Any]] = []
         new_events: list[dict[str, Any]] = []
         accepted_event_totals = self._accepted_event_totals()
-        for raw in capture["wb_supplies"]:
+        for raw in _wb_supplies_for_current_replay(capture):
             record = _normalized_wb_record(raw)
             supply_id = str(record.get("supply_id") or "")
             revision = _supply_revision(raw)
@@ -8182,6 +8182,13 @@ def _source_rows(
         key: [dict(row) for row in conn.execute(sql).fetchall()]
         for key, sql in queries.items()
     }
+    if "sheet_vitrina_v1_ff_pool_current_supply_close_receipts" in tables:
+        from packages.application.current_fbo_supply_cost_source import capture_warehouse_closures
+        closures=capture_warehouse_closures(conn)
+        if closures:
+            # Included unchanged by _guarded_local_sources in capture/apply CAS.
+            # Absent/empty receipt tables preserve legacy source digests.
+            result["current_fbo_warehouse_closures"]=closures
     result["ff_operations"] = sorted(
         result["ff_operations"],
         key=_ff_operation_replay_sort_key,
@@ -8506,6 +8513,15 @@ def _coherent_historical_wb_quantity_evidence(
                 }
             )
     return result
+
+
+def _wb_supplies_for_current_replay(capture):
+    # Only verified, source-revision-bound current closeout receipts grant this
+    # exception. Their native FF debit remains in the fold; WB stock/cost was
+    # already observed and must not acquire historical acceptance layers.
+    closed={row['supply_id'] for row in capture.get('current_fbo_warehouse_closures') or []}
+    return [row for row in capture['wb_supplies']
+            if str(_normalized_wb_record(row).get('supply_id') or '') not in closed]
 
 
 def _functional_local_source_view(sources: Mapping[str, Any]) -> dict[str, Any]:

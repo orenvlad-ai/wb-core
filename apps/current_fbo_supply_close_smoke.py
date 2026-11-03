@@ -122,6 +122,30 @@ class CurrentFboTests(unittest.TestCase):
         self.assertFalse(pruned['publication_retained'])
         self.assertEqual(self.adapter.apply(self.request,self.operation,preview)['disposition'],'already_applied')
 
+    def test_current_close_does_not_replay_historical_wb_acceptance(self):
+        from packages.application.current_fbo_supply_cost_source import capture_warehouse_closures
+        from packages.application.warehouse_functional import _wb_supplies_for_current_replay, _guarded_local_sources
+        preview=self.adapter.preview(self.request,self.operation)
+        self.adapter.apply(self.request,self.operation,preview)
+        with self.connection() as conn:
+            conn.execute('BEGIN')
+            closures=capture_warehouse_closures(conn)
+            self.assertEqual({r['supply_id'] for r in closures},{'1','2','3'})
+            sources=core.rows(conn,'sheet_vitrina_v1_wb_supplies')
+            ordinary=dict(sources[0],supply_id='future',cache_key='supply:future',
+                normalized_row_json=json.dumps(dict(supply_id='future',cache_key='supply:future',status_id=5)))
+            capture=dict(wb_supplies=[*sources,ordinary],current_fbo_warehouse_closures=closures)
+            self.assertEqual(_wb_supplies_for_current_replay(capture),[ordinary])
+            self.assertEqual(_wb_supplies_for_current_replay(dict(wb_supplies=[*sources,ordinary])),[*sources,ordinary])
+            self.assertEqual(_guarded_local_sources(capture)['current_fbo_warehouse_closures'],closures)
+            # Immutable receipts remain valid, but new physical/source evidence
+            # cannot silently reuse a current estimate as historical WB cost.
+            conn.execute("UPDATE sheet_vitrina_v1_wb_supplies SET raw_goods_json=? WHERE supply_id='1'",
+                (json.dumps([dict(nmID=101,quantity=3)]),))
+            with self.assertRaisesRegex(ValueError,'current_warehouse_close_source_revision_changed'):
+                capture_warehouse_closures(conn)
+            conn.rollback()
+
     def test_fault_after_second_pool_rolls_back_every_business_effect(self):
         preview=self.adapter.preview(self.request,self.operation);before=self.snapshot()
         real=core.apply_owned
