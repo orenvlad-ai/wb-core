@@ -52,6 +52,9 @@ EFFECT_CONTRACT = 'fbs_temporary_allocation_effect_intent_v1'
 # 512 MiB. This private-copy budget does not change publication/apply limits.
 MAX_BYTES = 1024 * 1024**2
 MAX_ROWS = 100000
+MAX_PREFLIGHT_BUILD_SECONDS = 1800
+MAX_COMPLETION_AGE_SECONDS = 600
+COMPLETION_CONTRACT = 'temporary_fbs_verified_completion_v1'
 P = 'sheet_vitrina_v1_'
 
 
@@ -498,6 +501,8 @@ def _record_recipe(runtime,recipe,*,owner_token):
                     stages.check_query_fence(conn,recipe['source_selection_fence'])
                     require('foreign_source_fence' in candidate,'foreign_source_fence_required')
                     stages.check_query_fence(conn,candidate['foreign_source_fence'])
+                    _validate_completion(runtime,authority=recipe.get('completion_authority',{}),snapshot=recipe['snapshot'],
+                        numeric=recipe['numeric'],file_authority=recipe['file_authority'],code_authority=recipe['adapter_code'],recipe=recipe,conn=conn)
                 if existing:
                     require(_read_recipe(conn,binding)==recipe,'saved_recipe_changed')
                     if not _verify_unit(conn,recipe['unit']):stages.check_query_fence(conn,recipe['snapshot'].get('selector_fence',[]))
@@ -543,6 +548,9 @@ def _apply_native_unit(runtime,recipe,*,binding,owner_token,fault=None):
                 guard=handoffs._capture_guard(conn,nms=[(snap['facility_id'],nm) for nm in snap['nm_ids']],
                     order_ids=[row['order']['order_id'] for row in recipe['evidence']['orders']])
                 require(guard==snap['native_guard'],'native_prestate_changed')
+                if not recipe.get('simulation_only'):
+                    _validate_completion(runtime,authority=recipe.get('completion_authority',{}),snapshot=recipe['snapshot'],
+                        numeric=recipe['numeric'],file_authority=recipe['file_authority'],code_authority=recipe['adapter_code'],recipe=recipe,conn=conn)
                 _append_ordinary(conn,unit['ordinary'][0],recovery_id=recovery_ids[0],now=stamp)
                 if fault:fault('after_allocation')
                 fresh=handoffs.prepare_historical_handoffs(conn,runtime_dir=runtime.runtime_dir,evidence=recipe['evidence'],
@@ -694,12 +702,13 @@ def finalize_scope(runtime,*,manifest,history_ack,finance,economics,now):
                 quality_proof=manifest['candidate']['quality_proof'],operator_receipts_completed=False)
 
 
-def _make_recipe(runtime,*,snapshot,unit,evidence,operation_id,created_at,numeric,source_selection_fence=()):
+def _make_recipe(runtime,*,snapshot,unit,evidence,operation_id,created_at,numeric,source_selection_fence=(),completion_authority=None):
     recipe=dict(contract=EFFECT_CONTRACT,operation_id=operation_id,attempt_id='1',owner_generation='temporary-fbs:'+operation_id,
         authority=ready.capture_authority(runtime.runtime_dir),file_authority=staging._file_authority(runtime.runtime_dir,runtime.db_path),
         adapter_code=_code(),expected_book=snapshot['book_version'],expected=snapshot['ready_expected'],snapshot=snapshot,
         unit=unit,evidence=evidence,created_at=created_at,publication_operation_id=operation_id+':publication',numeric=numeric,
         simulation_only=numeric is None,source_selection_fence=source_selection_fence)
+    if completion_authority is not None:recipe['completion_authority']=completion_authority
     recipe=json.loads(canonical(recipe));recipe['recipe_digest']=fingerprint(recipe)
     publication._json_size(recipe,publication.MAX_BYTES,'temporary_allocation_effect_recipe_size_limit')
     return recipe
@@ -724,6 +733,153 @@ def _pipeline(runtime,*,recipe,binding,owner_token,now,fault=None):
     require(_numeric(manifest)==recipe['numeric'],'approved_full_preflight_changed')
     publication.publish(manifest,runtime_dir=runtime.runtime_dir)
     return manifest
+
+
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def _completion_deadline(authority, *, now):
+    require(authority.get('contract')==COMPLETION_CONTRACT,'completion_authority_required')
+    observed=datetime.fromisoformat(authority['observed_at'])
+    completed=datetime.fromisoformat(authority['completed_at'])
+    require(observed.utcoffset() is not None and completed.utcoffset() is not None
+        and 0<=(completed-observed).total_seconds()<=MAX_PREFLIGHT_BUILD_SECONDS,'preflight_build_expired')
+    require(0<=(now-completed).total_seconds()<=MAX_COMPLETION_AGE_SECONDS,'preflight_expired')
+    from packages.business_time import current_business_date_iso
+    require(current_business_date_iso(now)==current_business_date_iso(observed),'preflight_business_day_changed')
+
+
+def _official_completion_stock(conn, *, snapshot, numeric, now):
+    from packages.application.fbs_current_snapshot_policy import resolve_current_snapshot_policy
+    from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
+    from packages.business_time import current_business_date_iso
+    day=max(snapshot['source_versions'])
+    require(current_business_date_iso(now)==day,'preflight_business_day_changed')
+    require(asdict(resolve_current_snapshot_policy(connection=conn))==snapshot['freshness_policy'],
+        'completion_freshness_policy_changed')
+    stock=read_complete_official_fbs_stock(conn,universe=None,day=day,now=now)
+    actual=dict(date=stock['date'],captured_at=stock['captured_at'],id=stock['generation_id'],
+        digest=stock['generation_digest'],complete=True,
+        rows=[dict(nm_id=int(nm),facility_id=str(facility),quantity=int(quantity))
+            for nm,sku in sorted(stock['skus'].items()) for facility,quantity in sorted(sku['facilities'].items())],
+        source=stock['source'],facility_evidence=stock['facility_evidence'])
+    expected=numeric['candidate']['candidate_book']['state']['periods'][day]['snapshot']
+    require(actual==expected,'completion_official_generation_changed')
+    return stock
+
+
+def _completion_stock_clock(stock, *, now):
+    from packages.application.wb_fbs_warehouse_registry import _freshness
+    from packages.business_time import current_business_date_iso
+    require(current_business_date_iso(now)==stock['date'],'preflight_business_day_changed')
+    require(all(_freshness(value['captured_at'],now.isoformat(),
+        max_age_seconds=stock['freshness_max_age_seconds'])=='fresh'
+        for value in stock['facility_evidence'].values()),'completion_official_source_expired')
+
+
+def _normalized_completion_fence(conn, *, authority, recipe=None):
+    """Undo only verified own intent/request INSERTs in the source comparison."""
+    expected=authority['full_query_fence'];normal={}
+    for table in ('ready_publications','ff_pool_document_requests','ready_input_revisions'):
+        normal[P+table]=f'SELECT rowid __source_rowid__,* FROM "{P+table}" WHERE 1 ORDER BY rowid'
+    # Prove the precise revision increment instead of exempting revision rows.
+    trigger=conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='historical_stage_request_insert'").fetchone()
+    require(trigger is not None and trigger[0]==authority['request_insert_trigger'],'completion_request_trigger_changed')
+    requests={p['request']['request_id']:p['request'] for p in (recipe['unit']['ordinary'] if recipe else [])}
+    inserted=0
+    for identity,wanted in requests.items():
+        row=conn.execute(f'SELECT * FROM {docs.REQUESTS_TABLE} WHERE request_id=?',(identity,)).fetchone()
+        if row is not None:
+            require(dict(row)==wanted,'completion_owned_request_changed');inserted+=1
+    require(inserted in (0,2),'completion_owned_request_partial')
+    own_parent=False
+    if recipe:
+        row=conn.execute(f'SELECT * FROM {P}ready_publications WHERE operation_id=? AND attempt_id=?',
+            (recipe['operation_id'],recipe['attempt_id'])).fetchone()
+        if row:
+            expected_ready=ready.ExpectedReady(**recipe['expected'])
+            exact=dict(operation_id=recipe['operation_id'],attempt_id=recipe['attempt_id'],kind=EFFECT_CONTRACT,
+                bundle_version=expected_ready.bundle_version,as_of_date=expected_ready.as_of_date,
+                expected_digest=expected_ready.fingerprint,inputs_json=canonical(recipe),expected_book=recipe['expected_book'],
+                book_operation_id='temporary-fbs-effects:'+recipe['recipe_digest'][7:],book_required=1,ready_required=1,
+                state='prepared',book_version=None,after_digest=None,created_at=recipe['created_at'],finished_at=None,diagnostics_json='{}')
+            require(dict(row)==exact,'completion_owned_recipe_changed')
+            require(_read_recipe(conn,{k:recipe[k] for k in ('operation_id','attempt_id','recipe_digest')})==recipe,
+                'completion_owned_recipe_changed')
+            own_parent=True
+    for sql,args,digest in expected:
+        if sql not in normal.values():
+            stages.check_query_fence(conn,[(sql,args,digest)]);continue
+        hashed=hashlib.sha256()
+        for raw in conn.execute(sql,args):
+            row=dict(raw)
+            if sql==normal[P+'ready_publications'] and own_parent and row['operation_id']==recipe['operation_id'] and row['attempt_id']==recipe['attempt_id']:
+                continue
+            if sql==normal[docs.REQUESTS_TABLE] and row['request_id'] in requests:
+                continue
+            if sql==normal[ready.REVISIONS] and row['source_table']==docs.REQUESTS_TABLE:
+                row['revision']-=inserted
+            hashed.update(canonical(list(row.values())).encode());hashed.update(b'\n')
+        require('sha256:'+hashed.hexdigest()==digest,'completion_full_source_changed')
+
+
+def _completion_evidence(authority, *, snapshot):
+    source,evidence=_inputs(authority['documentary_request'])
+    require(fingerprint(source)==snapshot['documentary_digest'] and evidence['evidence_digest']==snapshot['evidence_digest'],
+        'completion_documentary_source_changed')
+
+
+def _validate_completion(runtime, *, authority, snapshot, numeric, file_authority, code_authority, recipe=None, conn=None):
+    _completion_deadline(authority,now=_utc_now())
+    require(code_authority==_code(),'preflight_code_changed')
+    _completion_evidence(authority,snapshot=snapshot)
+    require(staging._file_authority(runtime.runtime_dir,runtime.db_path)==file_authority,'preflight_file_replaced')
+    require(accounting.load(runtime.runtime_dir)[1]==snapshot['book_version'],'completion_book_changed')
+    if conn is None:
+        with ready.readonly(runtime.db_path) as source:
+            _normalized_completion_fence(source,authority=authority,recipe=recipe)
+            stock=_official_completion_stock(source,snapshot=snapshot,numeric=numeric,now=_utc_now())
+    else:
+        _normalized_completion_fence(conn,authority=authority,recipe=recipe)
+        # A new proven RO connection supplies canonical opened-file authority;
+        # the writer connection itself must never widen freshness admission.
+        with ready.readonly(runtime.db_path) as source:
+            stock=_official_completion_stock(source,snapshot=snapshot,numeric=numeric,now=_utc_now())
+    checked=_utc_now()
+    _completion_stock_clock(stock,now=checked)
+    _completion_deadline(authority,now=checked)
+
+
+def _complete_preflight(runtime, *, result, inputs, operation_id, request):
+    observed=datetime.fromisoformat(result['observed_at'])
+    started=_utc_now()
+    require(0<=(started-observed).total_seconds()<=MAX_PREFLIGHT_BUILD_SECONDS,'preflight_build_expired')
+    require(_snapshot(runtime,inputs,now=observed)==result['snapshot'],'preflight_source_changed')
+    require(result['code_authority']==_code(),'preflight_code_changed')
+    require(staging._file_authority(runtime.runtime_dir,runtime.db_path)==result['file_authority'],'preflight_file_replaced')
+    with ready.readonly(runtime.db_path) as source:
+        stages.check_query_fence(source,result['subset']['query_fence'])
+        ids=[value['request']['request_id'] for value in result['unit']['ordinary']]
+        require(len(set(ids))==2 and not any(source.execute(f'SELECT 1 FROM {docs.REQUESTS_TABLE} WHERE request_id=?',(identity,)).fetchone() for identity in ids),
+            'completion_owned_request_preexists')
+        require(source.execute(f'SELECT 1 FROM {P}ready_publications WHERE operation_id=?',(operation_id,)).fetchone() is None,
+            'completion_owned_recipe_preexists')
+        staging._schema_ready(source)
+        trigger=source.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='historical_stage_request_insert'").fetchone()[0]
+        stock=_official_completion_stock(source,snapshot=result['snapshot'],numeric=result['numeric'],now=_utc_now())
+    completed=_utc_now()
+    _completion_stock_clock(stock,now=completed)
+    authority=dict(contract=COMPLETION_CONTRACT,observed_at=result['observed_at'],completed_at=completed.isoformat(),
+        full_query_fence=result['subset']['query_fence'],request_insert_trigger=trigger,
+        documentary_request={**{key:request[key] for key in ('evidence_manifest_path','evidence_manifest_sha256')},
+            'retained_files':result['retained_files']})
+    _completion_evidence(authority,snapshot=result['snapshot'])
+    # Evidence readback belongs to completion, rather than consuming its age.
+    completed=_utc_now();authority['completed_at']=completed.isoformat()
+    _completion_stock_clock(stock,now=completed)
+    _completion_deadline(authority,now=completed)
+    return authority
 
 
 def _preflight(runtime,*,request,operation_id,directory,snapshot,inputs,now):
@@ -757,6 +913,7 @@ def _preflight(runtime,*,request,operation_id,directory,snapshot,inputs,now):
         file_authority=staging._file_authority(runtime.runtime_dir,runtime.db_path),
         backup_book=original_book,backup_sources=dict(path=str(directory/'sources.before.sqlite3'),scope='bounded exact native/book/Ready operands; not a full database restore'),
         documentary_digest=fingerprint(inputs[0]))
+    result['completion_authority']=_complete_preflight(runtime,result=result,inputs=inputs,operation_id=operation_id,request=request)
     result['digest']=fingerprint(result);shared._private(directory/'preflight.json',result)
     return result
 
@@ -786,8 +943,8 @@ class TemporaryAllocationAction:
                 now=datetime.now(timezone.utc)
                 snapshot=_snapshot(runtime,inputs,now=now)
                 preflight=_preflight(runtime,request=request,operation_id=operation_id,directory=directory,snapshot=snapshot,inputs=inputs,now=now)
-            require(0<=(datetime.now(timezone.utc)-now).total_seconds()<=600,'preflight_expired')
-            require(staging._file_authority(root,runtime.db_path)==preflight['file_authority'],'preflight_file_replaced')
+            _validate_completion(runtime,authority=preflight['completion_authority'],snapshot=preflight['snapshot'],
+                numeric=preflight['numeric'],file_authority=preflight['file_authority'],code_authority=preflight['code_authority'])
             require(_snapshot(runtime,inputs,now=now)==preflight['snapshot'],'preflight_source_changed')
             with ready.readonly(runtime.db_path) as conn:stages.check_query_fence(conn,preflight['subset']['query_fence'])
         return dict(operation_id=operation_id,target=str(runtime.db_path),scope=dict(action=RESTORE,physical_handoffs=32,
@@ -814,7 +971,7 @@ class TemporaryAllocationAction:
                 with ready.readonly(runtime.db_path) as conn:stages.check_query_fence(conn,preflight['subset']['query_fence'])
                 recipe=_make_recipe(runtime,snapshot=preflight['snapshot'],unit=preflight['unit'],evidence=inputs[1],operation_id=operation_id,
                     created_at=preflight['unit']['native_plan']['posted_at'],numeric=preflight['numeric'],
-                    source_selection_fence=preflight['subset']['selection_fence'])
+                    source_selection_fence=preflight['subset']['selection_fence'],completion_authority=preflight['completion_authority'])
                 saved=dict(request={**deepcopy(request),'retained_files':preflight['retained_files']},recipe=recipe,
                     binding={k:recipe[k] for k in ('operation_id','attempt_id','recipe_digest')},backup=dict(book=preflight['backup_book'],sources=preflight['backup_sources']))
                 shared._private(directory/'attempt.json',saved)
