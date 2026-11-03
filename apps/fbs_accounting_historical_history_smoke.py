@@ -383,4 +383,36 @@ class HistoricalHistory(unittest.TestCase):
             self.assertEqual(waited,['history_ack','completion_receipt'] if with_delete_readers else [])
 
 
+class HistoricalReceiptLimits(unittest.TestCase):
+    def test_native_kind_and_real_utf8_bytes_gate_history_before_parse(self):
+        from contextlib import nullcontext
+        from unittest.mock import patch
+        with closing(sqlite3.connect(':memory:')) as conn:
+            conn.row_factory=sqlite3.Row
+            conn.execute('CREATE TABLE sheet_vitrina_v1_ready_publications(operation_id,attempt_id,kind,state,inputs_json,book_version,diagnostics_json)')
+            manifest={'contract':publication.TEMPORARY_CONTRACT,'after_book':'book','padding':'я'*200}
+            manifest['manifest_digest']=fingerprint(manifest)
+            encoded=canonical(manifest);size=len(encoded.encode())
+            conn.execute("INSERT INTO sheet_vitrina_v1_ready_publications VALUES('op','1',?,'complete',?,'book','{}')",(manifest['contract'],encoded))
+            receipt=history.HistoricalReceipt.__new__(history.HistoricalReceipt)
+            receipt.runtime=SimpleNamespace(db_path='fixture');receipt.operation_id='op';receipt.attempt_id='1'
+            with patch.object(history.ready,'readonly',side_effect=lambda _:nullcontext(conn)), \
+                 patch.object(publication,'TEMPORARY_MAX_BYTES',size),patch.object(publication,'MAX_BYTES',size-1):
+                self.assertEqual(receipt._read(),(manifest,{}))
+                conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET inputs_json=inputs_json||' '")
+                with patch.object(history,'decode_manifest',side_effect=AssertionError('oversize body loaded')):
+                    with self.assertRaisesRegex(ValueError,'size_limit'):receipt._read()
+                # Even a forged native length observation cannot replace the
+                # decoder's independent count of actual UTF-8 input bytes.
+                conn.create_function('length',1,lambda _:0)
+                with patch.object(publication.json,'loads',side_effect=AssertionError('oversize parsed')):
+                    with self.assertRaisesRegex(ValueError,'size_limit'):receipt._read()
+                conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET inputs_json=?,kind=?',(encoded,publication.FBO_CONTRACT))
+                with patch.object(publication.json,'loads',side_effect=AssertionError('wrong kind parsed')):
+                    with self.assertRaisesRegex(ValueError,'size_limit'):receipt._read()
+                conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET kind=?',(publication.CONTRACT,))
+                with patch.object(publication,'MAX_BYTES',size):
+                    with self.assertRaisesRegex(ValueError,'kind_changed'):receipt._read()
+
+
 if __name__=='__main__':unittest.main()

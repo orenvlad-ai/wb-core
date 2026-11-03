@@ -417,9 +417,10 @@ def finalize_scope(runtime, *, manifest, history_ack, finance, economics, now):
             import sqlite3
             conn.row_factory=sqlite3.Row
             validate_source_receipt(conn,manifest=manifest)
-            row=conn.execute('SELECT inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND state=\'complete\'',
+            row=conn.execute('SELECT kind,inputs_json,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND state=\'complete\'',
                              (manifest['operation_id'],manifest['attempt_id'])).fetchone()
-            stages.require(row and publication.expand_manifest(json.loads(row['inputs_json']))==manifest,
+            stages.require(row and row['kind']==CONTRACT
+                           and publication.decode_manifest(row['inputs_json'],kind=row['kind'])==manifest,
                            'historical_fbo_completion_publication_changed')
             diagnostics=json.loads(row['diagnostics_json'])
             stages.require(diagnostics.get('historical_history_ack')==history_ack,'historical_fbo_completion_ack_changed')

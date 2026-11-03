@@ -708,4 +708,56 @@ class ReadySelectionBudget(unittest.TestCase):
         self.assertEqual(selected['2026-09-10'],('fixture-v1','2026-09-10'))
 
 
+class PublicationLimits(unittest.TestCase):
+    def test_only_exact_temporary_contract_has_measured_publication_limits(self):
+        self.assertEqual(publication.publication_limits(publication.TEMPORARY_CONTRACT),(384*1024**2,640*1024**2))
+        for contract in (publication.CONTRACT,publication.FBO_CONTRACT):
+            self.assertEqual(publication.publication_limits(contract),(160*1024**2,320*1024**2))
+        for contract in (None,True,[],{},'unknown'):
+            with self.subTest(contract=contract),self.assertRaisesRegex(ValueError,'contract_invalid'):
+                publication.expand_manifest({'contract':contract})
+
+    def test_raw_utf8_boundary_precedes_parse_and_kind_cannot_select_a_wider_budget(self):
+        manifest={'contract':publication.TEMPORARY_CONTRACT,'padding':'я'*200}
+        encoded=canonical(manifest);size=len(encoded.encode())
+        with patch.object(publication,'TEMPORARY_MAX_BYTES',size),patch.object(publication,'MAX_BYTES',size-1):
+            self.assertEqual(publication.decode_manifest(encoded,kind=manifest['contract']),manifest)
+            with patch.object(publication.json,'loads',side_effect=AssertionError('oversize parsed')):
+                for raw,kind in ((encoded+' ',manifest['contract']),(encoded,publication.FBO_CONTRACT)):
+                    with self.subTest(kind=kind),self.assertRaisesRegex(ValueError,'size_limit'):
+                        publication.decode_manifest(raw,kind=kind)
+            with self.assertRaisesRegex(ValueError,'kind_changed'):
+                publication.decode_manifest(canonical({'contract':publication.FBO_CONTRACT}),kind=manifest['contract'])
+        class ForgedLength(str):
+            def __len__(self):return 0
+        with self.assertRaisesRegex(ValueError,'size_limit'):
+            publication.decode_manifest(ForgedLength(encoded),kind=manifest['contract'])
+
+    def test_encoded_stored_and_expanded_boundaries_preserve_fixed_reference_rules(self):
+        base={key:{} for key in publication.BOOK_DAY_FIELDS};base['marker']='retained'
+        manifest={'contract':publication.TEMPORARY_CONTRACT,'plan':{'candidate_book':base},
+                  'candidate':{'candidate_book':base},'targets':[]}
+        stored=publication.compact_manifest(manifest);encoded=canonical(stored)
+        size=len(encoded.encode())
+        expanded=size+publication._json_size(base,publication.MAX_EXPANDED_BYTES,'test')
+        with patch.object(publication,'TEMPORARY_MAX_BYTES',size),patch.object(publication,'TEMPORARY_MAX_EXPANDED_BYTES',expanded):
+            self.assertEqual(publication.decode_manifest(encoded,kind=manifest['contract']),manifest)
+            with patch.object(publication,'TEMPORARY_MAX_BYTES',size-1):
+                with self.assertRaisesRegex(ValueError,'size_limit'):publication.expand_manifest(stored)
+                with self.assertRaisesRegex(ValueError,'size_limit'):publication.compact_manifest(manifest)
+            with patch.object(publication,'TEMPORARY_MAX_EXPANDED_BYTES',expanded-1):
+                with self.assertRaisesRegex(ValueError,'expanded_size_limit'):publication.expand_manifest(stored)
+        for contract in (publication.CONTRACT,publication.FBO_CONTRACT):
+            generic={**stored,'contract':contract}
+            with patch.object(publication,'MAX_BYTES',len(canonical(generic).encode())-1):
+                with self.assertRaisesRegex(ValueError,'size_limit'):publication.expand_manifest(generic)
+        for encoding in ('unknown',True):
+            with self.assertRaisesRegex(ValueError,'encoding_unknown'):
+                publication.expand_manifest({**stored,'storage_encoding':encoding})
+        # Legacy logical objects are bounded before publish hashes them too.
+        raw_size=publication._json_size(manifest,publication.MAX_EXPANDED_BYTES,'test')
+        with patch.object(publication,'TEMPORARY_MAX_EXPANDED_BYTES',raw_size-1):
+            with self.assertRaisesRegex(ValueError,'expanded_size_limit'):publication.expand_manifest(manifest)
+
+
 if __name__=="__main__":unittest.main()
