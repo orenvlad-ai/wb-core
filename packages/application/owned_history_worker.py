@@ -178,8 +178,11 @@ class _OwnedHistoryWorker:
                 or require_heavy_owner(self.runtime.runtime_dir).operation != self.operation
                 or source_binding(self.runtime.runtime_dir) != self._source_binding
                 or file_digest(self.config.runtime_contract) != self._contract_digest
-                or api_jobs_admission(self.runtime.runtime_dir, cycle_owner=self.cycle_owner) != "idle"):
+                or api_jobs_admission(self.runtime.runtime_dir, cycle_owner=self.cycle_owner if self.operation == "cycle" else None) != "idle"):
             raise HistoryDelegationError("history_parent_owner_changed")
+        if self.operation == "historical_receipt_completion":
+            from packages.application.historical_receipt_completion import check_live_owner
+            check_live_owner(self.runtime.runtime_dir, self.cycle_owner)
 
     def capture(self, now: datetime):
         self._check()
@@ -218,7 +221,9 @@ class _OwnedHistoryWorker:
             raise HistoryDelegationError("history_multiple_source_authorities")
         today = current_business_date_iso(now)
         first = (datetime.fromisoformat(today) - timedelta(days=13)).date().isoformat()
-        if self.operation == "cycle":
+        if self.operation in {"cycle", "historical_receipt_completion"}:
+            if self.operation == "historical_receipt_completion" and (historical_receipt is None or closed_receipt is not None or policy_receipt is not None or supplier_receipt is not None):
+                raise HistoryDelegationError("historical_history_receipt_context_changed")
             if source_range is not None or (historical_receipt is None and policy_receipt is None and supplier_receipt is None and len(backfill_dates) > 2) or any(day >= (datetime.fromisoformat(today) - timedelta(days=1)).date().isoformat() for day in backfill_dates):
                 raise HistoryDelegationError("history_cycle_backfill_scope_invalid")
             for day in backfill_dates:
@@ -242,7 +247,7 @@ class _OwnedHistoryWorker:
             self._closed_binding = {"digest": closed_receipt_digest(closed_receipt.status()), "dates": list(closed_receipt.publication_dates())}
         if historical_receipt is not None:
             from packages.application.fbs_accounting_historical_history import HistoricalReceipt
-            if type(historical_receipt) is not HistoricalReceipt or historical_receipt.runtime is not self.runtime or self.operation!='cycle':
+            if type(historical_receipt) is not HistoricalReceipt or historical_receipt.runtime is not self.runtime or self.operation not in {'cycle','historical_receipt_completion'}:
                 raise HistoryDelegationError('historical_history_receipt_context_changed')
             historical_dates=historical_receipt.publication_dates()
             old_dates=tuple(day for day in historical_dates if day < (datetime.fromisoformat(today)-timedelta(days=1)).date().isoformat())
@@ -484,6 +489,13 @@ def owned_history_worker(*, runtime, config, cycle_owner):
 
 
 @contextmanager
+def historical_receipt_history_worker(*, runtime, config, owner):
+    """Exact published receipt under the registered held-maintenance tail owner."""
+    with _history_worker(runtime=runtime, config=config, cycle_owner=owner, operation="historical_receipt_completion") as worker:
+        yield worker
+
+
+@contextmanager
 def standalone_history_worker(*, runtime, config):
     """Ordinary canonical parent must already own history SH/heavy."""
     with _history_worker(runtime=runtime, config=config, cycle_owner=None, operation="history") as worker:
@@ -504,10 +516,13 @@ def _history_worker(*, runtime, config, cycle_owner, operation):
             or owner._maintenance.fd is None or root != root.resolve() or root.is_relative_to(source)
             or not 0 < config.budget_seconds <= 240 or not 1 <= config.max_recomputes <= 31):
         raise HistoryDelegationError("history_parent_contract_invalid")
-    if (api_jobs_admission(source, cycle_owner=cycle_owner) != "idle" or systemd_admission() != "idle"
+    if (api_jobs_admission(source, cycle_owner=cycle_owner if operation == "cycle" else None) != "idle" or systemd_admission() != "idle"
             or lock_admission(source / ".wb-finance-daily-worker.lock") != "idle"
             or warehouse_functional_job_is_busy(source)):
         raise HistoryDelegationError("history_parent_admission_busy_or_unknown")
+    if operation == "historical_receipt_completion":
+        from packages.application.historical_receipt_completion import check_live_owner
+        check_live_owner(source, cycle_owner)
     runtime_storage_admission(root, config.runtime_contract, config.formula_epoch)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptors = []

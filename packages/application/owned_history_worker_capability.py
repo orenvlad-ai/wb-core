@@ -438,6 +438,11 @@ def child_bootstrap(fd):
                 != {"pid": parent_pid, "identity": cap["parent_generation"]}
                 or read_json(runtime / "finished-snapshot-api-jobs" / ("job-" + owner["job_id"] + ".json"), limit=4096) != owner):
             raise HistoryDelegationError("history_capability_cycle_marker_changed")
+    elif cap.get("owner_kind") == "historical_receipt_completion":
+        from packages.application.historical_receipt_completion import check_live_owner
+        check_live_owner(runtime, owner, parent_pid=parent_pid)
+        if cap.get("historical_receipt") is None or any(cap.get(key) is not None for key in ("closed_receipt", "policy_receipt", "supplier_receipt")):
+            raise HistoryDelegationError("historical_history_receipt_context_changed")
     elif cap.get("owner_kind") != "history" or owner is not None or cap.get("closed_receipt") is not None:
         raise HistoryDelegationError("history_capability_standalone_owner_mismatch")
     return channel, cap
