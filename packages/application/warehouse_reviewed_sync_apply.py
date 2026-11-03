@@ -151,4 +151,3 @@ class WarehouseReviewedSyncAdapter:
                 current_active=bool(active and active[0] == existing["version_id"]),
                 recovery_lifecycle=lifecycle,
                 recovery_pending=lifecycle not in {"retained", "released"})
-
