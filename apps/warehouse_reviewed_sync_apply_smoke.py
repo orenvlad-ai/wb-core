@@ -36,7 +36,13 @@ def main():
         INSERT INTO sheet_vitrina_v1_warehouse_functional_active VALUES(1,'before');
         CREATE TABLE sheet_vitrina_v1_warehouse_functional_versions(
             version_id TEXT,plan_fingerprint TEXT,status TEXT,business_effective_date TEXT);
-        CREATE TABLE sheet_vitrina_v1_warehouse_wb_snapshots(version_id TEXT,snapshot_id TEXT,snapshot_date TEXT);
+        CREATE TABLE sheet_vitrina_v1_warehouse_wb_snapshots(
+            snapshot_id TEXT,version_id TEXT,fetched_at TEXT,snapshot_date TEXT,
+            requested_nm_ids_json TEXT,pagination_complete INTEGER,page_count INTEGER,
+            page_offsets_json TEXT,raw_row_count INTEGER,raw_rows_digest TEXT,
+            raw_rows_json TEXT,items_json TEXT,created_at TEXT);
+        CREATE TABLE sheet_vitrina_v1_warehouse_wb_option_read_models(
+            version_id TEXT,etag TEXT,payload_json TEXT,payload_bytes INTEGER,created_at TEXT);
         CREATE TABLE sheet_vitrina_v1_recovery_operations(operation_kind TEXT,plan_fingerprint TEXT,lifecycle_state TEXT);
         CREATE TABLE immutable_source(value TEXT);
         INSERT INTO immutable_source VALUES('original');
@@ -46,7 +52,10 @@ def main():
         source = {"value": "original"}
         plan = dict(kind="hourly_wb_sync", effective_date=day,
             captured_at=datetime.now(timezone.utc).isoformat(),
-            wb_snapshot=dict(snapshot_id="official", snapshot_date=day),
+            wb_snapshot=dict(snapshot_id="official", snapshot_date=day,
+                fetched_at=datetime.now(timezone.utc).isoformat(), requested_nm_ids=[],
+                pagination_complete=True,page_count=1,page_offsets=[0],raw_row_count=0,
+                raw_rows_digest="sha256:"+action.native._hash([]),raw_rows=[],items=[]),
             base_active_version_id="before",
             local_source_digest="sha256:" + action.native._hash(source),
             wb_supply_source_digest="sha256:" + action.native._hash([]),
@@ -88,8 +97,13 @@ def main():
             assert adapter.readback(request, "sync-test-operation")["state"] == "ambiguous"
             c.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_versions VALUES(?,?,?,?)",
                       ("after", plan["plan_fingerprint"], "good", day))
-            c.execute("INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots VALUES(?,?,?)",
-                      ("after", "official", day))
+            # Exercise the real native persistence transform, rather than
+            # manufacturing a source ID as the stored version snapshot ID.
+            block = object.__new__(action.native.WarehouseFunctionalBlock)
+            block.timestamp_factory = lambda: plan["captured_at"]
+            block._insert_snapshot(c, version_id="after", payload=plan["wb_snapshot"])
+            stored_id = c.execute("SELECT snapshot_id FROM sheet_vitrina_v1_warehouse_wb_snapshots").fetchone()[0]
+            assert stored_id != plan["wb_snapshot"]["snapshot_id"]
             c.commit()
             # A fresh instance after lost response observes the durable native
             # version; it does not submit or require the old active pointer.
@@ -104,7 +118,10 @@ def main():
                 preview = adapter.preview(request, "sync-test-operation")
                 result = adapter.apply(request, "sync-test-operation", preview)
                 assert result["disposition"] == "already_applied"
-            c.execute("UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET snapshot_id='wrong'")
+            c.execute("UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET snapshot_id='official'")
+            c.commit()
+            refused(lambda: adapter.readback(request, "sync-test-operation"), "snapshot_conflict")
+            c.execute("UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET snapshot_id=?,snapshot_date='2000-01-01'", (stored_id,))
             c.commit()
             refused(lambda: adapter.readback(request, "sync-test-operation"), "snapshot_conflict")
         c.close()

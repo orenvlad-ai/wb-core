@@ -127,6 +127,8 @@ def _documents(conn: sqlite3.Connection, *, document_id: str | None = None) -> l
     # contract change, not an operand to import from the old ledger.
     from packages.application.fbs_historical_fbo_sources import capture_historical_fbo_documents
     historical = capture_historical_fbo_documents(conn)
+    from packages.application.current_fbo_supply_cost_source import capture_documents as capture_current_dispatches
+    historical += capture_current_dispatches(conn)
     historical_ids = tuple(d["operation_id"] for d in historical)
     admitted = (" AND m.operation_id NOT IN (" + ",".join("?" for _ in historical_ids) + ")") if historical_ids else ""
     unmapped = conn.execute(
