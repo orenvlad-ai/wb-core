@@ -124,7 +124,7 @@ jobs:
           WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
           WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
         run: >-
-          python3 apps/github_release_runner.py run
+          python3 ci/github_release_runner.py run
           --workflow-run-id "$GATE_RUN_ID"
           --output "$RUNNER_TEMP/release-receipt.json"
 
