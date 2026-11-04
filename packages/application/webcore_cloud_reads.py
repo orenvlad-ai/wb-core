@@ -25,8 +25,10 @@ from packages.contracts.finance_liquidity_cash import FINANCE_CASH_SCHEMA_VERSIO
 
 SCOPE_MAX_INBOX_READ = "webcore.max_inbox.read"
 SCOPE_CASH_READ = "webcore.cash.read"
-CLOUD_READ_SCOPES = frozenset({SCOPE_MAX_INBOX_READ, SCOPE_CASH_READ})
-CLOUD_READ_TOOLS = ("max_inbox_events", "max_inbox_event", "cash_accounts")
+SCOPE_CASH_OPERATIONS_READ = "webcore.cash.operations.read"
+SCOPE_MAX_HISTORY_READ = "webcore.max_history.read"
+CLOUD_READ_SCOPES = frozenset({SCOPE_MAX_INBOX_READ, SCOPE_CASH_READ, SCOPE_CASH_OPERATIONS_READ, SCOPE_MAX_HISTORY_READ})
+CLOUD_READ_TOOLS = ("max_inbox_events", "max_inbox_event", "cash_accounts", "cash_read", "max_messages", "max_message")
 MAX_PAGE_SIZE = 100
 MAX_MESSAGE_TEXT_CHARS = 16_000
 MESSAGE_TEXT_CHUNK_CHARS = 500
@@ -81,9 +83,12 @@ class CashReadConfig:
 
 class WebCoreCloudReads:
     def __init__(self, *, max_inbox: MaxInboxReadConfig | None = None,
-                 cash: CashReadConfig | None = None) -> None:
+                 cash: CashReadConfig | None = None, financial_read: bool = False,
+                 max_api: Any = None) -> None:
         self.max_inbox = max_inbox
         self.cash = cash
+        self.financial_read = financial_read
+        self.max_api = max_api
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> WebCoreCloudReads:
@@ -104,11 +109,16 @@ class WebCoreCloudReads:
             if binding is None:
                 raise ValueError("Cash read requires the existing explicit TEST store binding")
             cash_config = CashReadConfig(Path(env["FINANCE_LIQUIDITY_ACCESS_CONFIG"]), binding)
-        return cls(max_inbox=max_config, cash=cash_config)
+        from packages.application.webcore_cloud_extended_reads import MaxHistoryReader
+        return cls(max_inbox=max_config, cash=cash_config,
+                   financial_read=_enabled(env, "WEBCORE_DATA_MCP_CASH_OPERATIONS_READ_ENABLED"),
+                   max_api=MaxHistoryReader.from_env(env, max_config))
 
     def enabled(self, name: str) -> bool:
         return ((name in {"max_inbox_events", "max_inbox_event"} and self.max_inbox is not None)
-                or (name == "cash_accounts" and self.cash is not None))
+                or (name == "cash_accounts" and self.cash is not None)
+                or (name == "cash_read" and self.cash is not None and self.financial_read)
+                or (name in {"max_messages", "max_message"} and self.max_api is not None))
 
     def call_tool(self, name: str, args: Mapping[str, Any], *,
                   deadline_at: float | None = None,
@@ -116,6 +126,11 @@ class WebCoreCloudReads:
         if not self.enabled(name):
             raise CloudReadError("Cloud read source is not enabled", "source_not_enabled")
         try:
+            if name in {"max_messages", "max_message"}:
+                return self.max_api.call(name, args, deadline_at, cancel_event)
+            if name == "cash_read":
+                from packages.application.webcore_cloud_extended_reads import cash_read
+                return cash_read(self, args, deadline_at, cancel_event)
             if name == "max_inbox_events":
                 return self._max_events(args, deadline_at, cancel_event)
             if name == "max_inbox_event":
