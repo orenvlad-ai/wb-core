@@ -24,7 +24,8 @@ from packages.application.webcore_ops_diagnostics import (
 from packages.application.supplier_shipment_status import apply_derived_supplier_status
 from packages.business_time import current_business_date_iso
 from packages.application.webcore_cloud_reads import (
-    CLOUD_READ_TOOLS,
+    CLOUD_TOOLS,
+    SCOPE_MAX_POSTED_REPLY,
     SCOPE_CASH_READ,
     SCOPE_CASH_OPERATIONS_READ,
     SCOPE_MAX_HISTORY_READ,
@@ -96,7 +97,7 @@ MODEL_VISIBLE_TOOL_NAMES = tuple(MODEL_TOOL_ALIASES)
 BUSINESS_TOOL_NAMES = tuple(
     dict.fromkeys((*MODEL_VISIBLE_TOOL_NAMES, *LEGACY_BUSINESS_TOOL_NAMES))
 )
-APPROVED_TOOL_NAMES = tuple(dict.fromkeys((*BUSINESS_TOOL_NAMES, *OPS_TOOL_NAMES, *CLOUD_READ_TOOLS)))
+APPROVED_TOOL_NAMES = tuple(dict.fromkeys((*BUSINESS_TOOL_NAMES, *OPS_TOOL_NAMES, *CLOUD_TOOLS)))
 
 FORBIDDEN_OUTPUT_KEY_MARKERS = (
     "password",
@@ -200,9 +201,9 @@ class WebCoreDataMcpGateway:
     def list_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
         for definition in _tool_definitions():
-            if definition.name in CLOUD_READ_TOOLS and not self.cloud_reads.enabled(definition.name):
+            if definition.name in CLOUD_TOOLS and not self.cloud_reads.enabled(definition.name):
                 continue
-            if definition.name in {"max_inbox_events", "max_inbox_event", "max_messages", "max_message"}:
+            if definition.name in {"max_inbox_events", "max_inbox_event", "max_messages", "max_message", "max_posted_reply"}:
                 definition.input_schema["properties"]["chat_id"]["enum"] = sorted(self.cloud_reads.max_inbox.chat_ids)
             security_schemes = [{"type": "oauth2", "scopes": [definition.scope]}]
             tools.append(
@@ -213,10 +214,10 @@ class WebCoreDataMcpGateway:
                     "inputSchema": definition.input_schema,
                     "outputSchema": definition.output_schema or _object_schema(),
                     "annotations": {
-                        "readOnlyHint": True,
+                        "readOnlyHint": definition.name != "max_posted_reply",
                         "destructiveHint": False,
                         "idempotentHint": True,
-                        "openWorldHint": False,
+                        "openWorldHint": definition.name == "max_posted_reply",
                     },
                     "securitySchemes": security_schemes,
                     "_meta": {"securitySchemes": security_schemes},
@@ -352,7 +353,7 @@ class WebCoreDataMcpGateway:
     def _call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         requested_name = name
         name = MODEL_TOOL_ALIASES.get(name, name)
-        if name in CLOUD_READ_TOOLS:
+        if name in CLOUD_TOOLS:
             try:
                 return self.cloud_reads.call_tool(
                     name, args,
@@ -2992,6 +2993,19 @@ class WebCoreDataMcpGateway:
 
 def _tool_definitions() -> list[ToolDefinition]:
     return [
+        ToolDefinition(
+            "max_posted_reply", "Mark MAX message as posted",
+            "Send the fixed text + as a reply to one authorized MAX source message, only after all its "
+            "payments were approved and verified posted through WebCore UI. Pass the exact full source text "
+            "and a concise UI verification reference. No financial reads or writes. Persistent deduplication: "
+            "unknown/pending send is never retried automatically; report and reconcile instead.",
+            _schema({"chat_id": _int_schema(-(2**63), -1), "message_id": _string_schema(1, 200),
+                     "source_text": _string_schema(1, 16000),
+                     "ui_verification": _string_schema(1, 1000),
+                     "all_operations_posted": {"type": "boolean", "enum": [True]}},
+                    required=("chat_id", "message_id", "source_text", "ui_verification", "all_operations_posted")),
+            scope=SCOPE_MAX_POSTED_REPLY,
+        ),
         ToolDefinition(
             "cash_read", "Cash records and balances",
             "Read authorized TEST cash balances, posted/draft/reversed documents, exact document ledger, "

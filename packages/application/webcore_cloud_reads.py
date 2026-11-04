@@ -23,12 +23,15 @@ from packages.adapters.finance_liquidity_access import (
 )
 from packages.contracts.finance_liquidity_cash import FINANCE_CASH_SCHEMA_VERSION
 
+SCOPE_MAX_POSTED_REPLY = "webcore.max_posted_reply.write"
 SCOPE_MAX_INBOX_READ = "webcore.max_inbox.read"
 SCOPE_CASH_READ = "webcore.cash.read"
 SCOPE_CASH_OPERATIONS_READ = "webcore.cash.operations.read"
 SCOPE_MAX_HISTORY_READ = "webcore.max_history.read"
 CLOUD_READ_SCOPES = frozenset({SCOPE_MAX_INBOX_READ, SCOPE_CASH_READ, SCOPE_CASH_OPERATIONS_READ, SCOPE_MAX_HISTORY_READ})
+CLOUD_OAUTH_SCOPES = CLOUD_READ_SCOPES | {SCOPE_MAX_POSTED_REPLY}
 CLOUD_READ_TOOLS = ("max_inbox_events", "max_inbox_event", "cash_accounts", "cash_read", "max_messages", "max_message")
+CLOUD_TOOLS = (*CLOUD_READ_TOOLS, "max_posted_reply")
 MAX_PAGE_SIZE = 100
 MAX_MESSAGE_TEXT_CHARS = 16_000
 MESSAGE_TEXT_CHUNK_CHARS = 500
@@ -84,11 +87,12 @@ class CashReadConfig:
 class WebCoreCloudReads:
     def __init__(self, *, max_inbox: MaxInboxReadConfig | None = None,
                  cash: CashReadConfig | None = None, financial_read: bool = False,
-                 max_api: Any = None) -> None:
+                 max_api: Any = None, max_reply: Any = None) -> None:
         self.max_inbox = max_inbox
         self.cash = cash
         self.financial_read = financial_read
         self.max_api = max_api
+        self.max_reply = max_reply
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> WebCoreCloudReads:
@@ -110,12 +114,15 @@ class WebCoreCloudReads:
                 raise ValueError("Cash read requires the existing explicit TEST store binding")
             cash_config = CashReadConfig(Path(env["FINANCE_LIQUIDITY_ACCESS_CONFIG"]), binding)
         from packages.application.webcore_cloud_extended_reads import MaxHistoryReader
+        from packages.application.webcore_max_posted_reply import MaxPostedReply
+        api = MaxHistoryReader.from_env(env, max_config)
         return cls(max_inbox=max_config, cash=cash_config,
                    financial_read=_enabled(env, "WEBCORE_DATA_MCP_CASH_OPERATIONS_READ_ENABLED"),
-                   max_api=MaxHistoryReader.from_env(env, max_config))
+                   max_api=api, max_reply=MaxPostedReply.from_env(env, api))
 
     def enabled(self, name: str) -> bool:
-        return ((name in {"max_inbox_events", "max_inbox_event"} and self.max_inbox is not None)
+        return ((name == "max_posted_reply" and self.max_reply is not None)
+                or (name in {"max_inbox_events", "max_inbox_event"} and self.max_inbox is not None)
                 or (name == "cash_accounts" and self.cash is not None)
                 or (name == "cash_read" and self.cash is not None and self.financial_read)
                 or (name in {"max_messages", "max_message"} and self.max_api is not None))
@@ -126,6 +133,8 @@ class WebCoreCloudReads:
         if not self.enabled(name):
             raise CloudReadError("Cloud read source is not enabled", "source_not_enabled")
         try:
+            if name == "max_posted_reply":
+                return self.max_reply.call(args, deadline_at, cancel_event)
             if name in {"max_messages", "max_message"}:
                 return self.max_api.call(name, args, deadline_at, cancel_event)
             if name == "cash_read":
