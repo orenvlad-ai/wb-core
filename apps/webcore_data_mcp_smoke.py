@@ -650,6 +650,13 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
             },
         )
         analytics_only_headers = {"Authorization": f"Bearer {analytics_only_token_payload.get('access_token')}"}
+        analytics_tools = _post_json(
+            f"{base_url}{DEFAULT_MCP_PATH}",
+            {"jsonrpc": "2.0", "id": 15, "method": "tools/list"},
+            headers=analytics_only_headers,
+        )["result"]["tools"]
+        if any(tool["securitySchemes"][0]["scopes"] != [SCOPE_ANALYTICS_READ] for tool in analytics_tools):
+            raise AssertionError("tools/list must filter tools to the authenticated OAuth grant")
         insufficient_ops_call = _post_json(
             f"{base_url}{DEFAULT_MCP_PATH}",
             {
