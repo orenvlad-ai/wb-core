@@ -621,7 +621,11 @@ def _tool_result(
     result_bytes: int,
 ) -> dict[str, Any]:
     return {
+        # MCP CallToolResult requires content even when structuredContent carries
+        # the complete result. Keep the payload single-copy for cloud clients.
+        "content": [],
         "structuredContent": result,
+        "isError": False,
         "_meta": {
             "requestId": request_id,
             "serverDurationMs": duration_ms,
