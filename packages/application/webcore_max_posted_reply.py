@@ -15,6 +15,7 @@ import ssl
 import stat
 import time
 from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPSHandler
 
 from packages.application.webcore_cloud_reads import CloudReadError, _arguments, _enabled, _fixed_path
@@ -54,12 +55,37 @@ class MaxPostedReply:
             raise CloudReadError('Reply journal must be private')
         conn = sqlite3.connect(self.path, timeout=2)
         conn.execute('CREATE TABLE IF NOT EXISTS replies (chat_id INTEGER, source_id TEXT, source_digest TEXT, evidence TEXT, state TEXT, reply_id TEXT, PRIMARY KEY(chat_id,source_id))')
+        conn.execute('CREATE TABLE IF NOT EXISTS reply_diagnostics (chat_id INTEGER, source_id TEXT, phase TEXT, error_code TEXT, http_status INTEGER, updated_at REAL, PRIMARY KEY(chat_id,source_id))')
         conn.commit()
         try:
             with conn:
                 yield conn
         finally:
             conn.close()
+
+    def _record(self, chat, mid, phase, error_code='', http_status=None):
+        # Persist only controlled metadata: never exception text, tokens or response bodies.
+        with self._connect() as conn:
+            conn.execute('INSERT OR REPLACE INTO reply_diagnostics VALUES (?,?,?,?,?,?)',
+                         (chat, mid, phase, error_code, http_status, time.time()))
+
+    @staticmethod
+    def _error_code(exc):
+        for _ in range(3):
+            if isinstance(exc, CloudReadError) and exc.__cause__ is not None:
+                exc = exc.__cause__
+            else:
+                break
+        if isinstance(exc, HTTPError):
+            return 'upstream_http_error', exc.code
+        cause = exc.reason if isinstance(exc, URLError) else exc
+        if isinstance(cause, TimeoutError):
+            return 'upstream_timeout', None
+        if isinstance(cause, ssl.SSLError):
+            return 'upstream_tls_error', None
+        if isinstance(exc, URLError):
+            return 'upstream_transport_error', None
+        return 'reply_verification_failed', None
 
     def _post(self, chat, mid, deadline, cancel_event=None):
         info = self.api.token_path.lstat()
@@ -75,7 +101,7 @@ class MaxPostedReply:
         req = Request('https://platform-api2.max.ru/messages?' + urlencode({'chat_id': chat}),
                       data=json.dumps({'text': '+', 'link': {'type': 'reply', 'mid': mid}, 'notify': False}).encode(),
                       headers={'Authorization': token, 'Content-Type': 'application/json'}, method='POST')
-        timeout = min(8.0, max(0.1, deadline-time.monotonic())) if deadline else 8.0
+        timeout = min(20.0, max(0.1, deadline-time.monotonic()-10.0)) if deadline else 20.0
         if (cancel_event and cancel_event.is_set()) or (deadline is not None and time.monotonic() >= deadline):
             raise CloudReadError('Cancelled before network submission', 'deadline_exceeded')
         with build_opener(_NoRedirect(), HTTPSHandler(context=context)).open(req, timeout=timeout) as response:
@@ -110,6 +136,19 @@ class MaxPostedReply:
             existing = conn.execute('SELECT source_digest,state,reply_id FROM replies WHERE chat_id=? AND source_id=?', (chat,mid)).fetchone()
         if existing:
             state = existing[1] if existing[0] == digest else 'source_changed'
+            # A repeated call may verify a known reply, but must never repeat POST.
+            if state in {'unknown', 'pending'} and existing[2]:
+                try:
+                    messages = self.api._get({'message_ids': existing[2]}, deadline)
+                    if (len(messages) == 1 and messages[0].get('body', {}).get('mid') == existing[2]
+                            and self._matches(messages[0], chat, mid)):
+                        with self._connect() as conn:
+                            conn.execute("UPDATE replies SET state='sent' WHERE chat_id=? AND source_id=? AND state IN ('unknown','pending') AND reply_id=?",
+                                         (chat, mid, existing[2]))
+                        state = 'sent'
+                        self._record(chat, mid, 'verified')
+                except Exception as exc:
+                    self._record(chat, mid, 'readback', *self._error_code(exc))
             return {'status': state, 'reply_message_id': existing[2], 'sent_now': False,
                     'retry_allowed': False, 'financial_verification': 'operator_ui_attestation'}
         source = self.api.call('max_message', {'chat_id': chat, 'message_id': mid}, deadline, cancel_event)['rows']
@@ -119,6 +158,8 @@ class MaxPostedReply:
             raise CloudReadError('Source missing, changed or incomplete; recheck UI mapping', 'source_changed')
         if (cancel_event and cancel_event.is_set()) or (deadline is not None and time.monotonic() >= deadline):
             raise CloudReadError('Cancelled before submission', 'deadline_exceeded')
+        if deadline is not None and deadline - time.monotonic() < 30.0:
+            raise CloudReadError('Insufficient time for send and readback; nothing submitted', 'deadline_exceeded')
         with self._connect() as conn:
             claimed = conn.execute('INSERT OR IGNORE INTO replies VALUES (?,?,?,?,?,NULL)',
                                    (chat,mid,digest,args['ui_verification'],'pending')).rowcount
@@ -126,7 +167,9 @@ class MaxPostedReply:
             return {'status': 'pending', 'sent_now': False, 'retry_allowed': False}
         # No exception after this durable claim may cause an automatic resend.
         reply_id = None
+        phase = 'submit'
         try:
+            self._record(chat, mid, phase)
             result = self._post(chat, mid, deadline, cancel_event)
             message = result.get('message', {})
             reply_id = message.get('body', {}).get('mid')
@@ -134,12 +177,16 @@ class MaxPostedReply:
                 raise ValueError('Missing reply identity')
             with self._connect() as conn:
                 conn.execute('UPDATE replies SET reply_id=? WHERE chat_id=? AND source_id=?', (reply_id,chat,mid))
+            phase = 'readback'
+            self._record(chat, mid, phase)
             messages = self.api._get({'message_ids': reply_id}, deadline)
             if len(messages) != 1 or messages[0].get('body', {}).get('mid') != reply_id or not self._matches(messages[0],chat,mid):
                 raise ValueError('Reply readback not verified')
             state = 'sent'
-        except Exception:
+            self._record(chat, mid, 'verified')
+        except Exception as exc:
             state = 'unknown'
+            self._record(chat, mid, phase, *self._error_code(exc))
         with self._connect() as conn:
             conn.execute('UPDATE replies SET state=? WHERE chat_id=? AND source_id=?', (state,chat,mid))
         return {'status': state, 'reply_message_id': reply_id, 'sent_now': state == 'sent',

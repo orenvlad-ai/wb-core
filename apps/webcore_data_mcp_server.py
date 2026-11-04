@@ -117,6 +117,7 @@ class WebCoreDataMcpServerConfig:
         tool_deadline_seconds: float = DEFAULT_TOOL_DEADLINE_SECONDS,
         max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES,
         oauth_refresh_store_path: Path | None = None,
+        max_reply_deadline_seconds: float = 40.0,
     ) -> None:
         self.host = host
         self.port = port
@@ -147,6 +148,7 @@ class WebCoreDataMcpServerConfig:
         self.tool_deadline_seconds = max(0.05, float(tool_deadline_seconds))
         self.max_tool_result_bytes = max(1024, int(max_tool_result_bytes))
         self.oauth_refresh_store_path = oauth_refresh_store_path
+        self.max_reply_deadline_seconds = max(0.05, min(120.0, float(max_reply_deadline_seconds)))
 
     @property
     def oauth_enabled(self) -> bool:
@@ -298,6 +300,9 @@ def load_config_from_env() -> WebCoreDataMcpServerConfig:
         tool_deadline_seconds=tool_deadline_seconds,
         max_tool_result_bytes=max_tool_result_bytes,
         oauth_refresh_store_path=oauth_refresh_store_path,
+        max_reply_deadline_seconds=_parse_bounded_float(
+            os.environ.get("WEBCORE_DATA_MCP_MAX_REPLY_DEADLINE_SECONDS"), 40.0,
+            "WEBCORE_DATA_MCP_MAX_REPLY_DEADLINE_SECONDS", minimum=0.05, maximum=120.0),
     )
 
 
@@ -525,7 +530,10 @@ def _handle_json_rpc(
             arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
             correlation_id = secrets.token_hex(12)
             started = time.monotonic()
-            deadline_at = started + config.tool_deadline_seconds
+            # A reply includes source GET, one POST and verification GET.
+            tool_budget = (config.max_reply_deadline_seconds if name == "max_posted_reply"
+                           else config.tool_deadline_seconds)
+            deadline_at = started + tool_budget
             cancel_event = threading.Event()
             future = tool_executor.submit(
                 lambda: gateway.call_tool(
@@ -555,7 +563,7 @@ def _handle_json_rpc(
                     data={"code": "tool_capacity_exhausted", "request_id": correlation_id},
                 )
             try:
-                result = future.result(timeout=config.tool_deadline_seconds)
+                result = future.result(timeout=tool_budget)
             except FutureTimeoutError:
                 cancel_event.set()
                 duration_ms = int((time.monotonic() - started) * 1000)
