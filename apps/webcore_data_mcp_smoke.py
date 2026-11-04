@@ -510,8 +510,8 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
         )
         if call.get("result", {}).get("structuredContent", {}).get("status") != "ok":
             raise AssertionError(f"tool call failed: {call}")
-        if call.get("result", {}).get("content"):
-            raise AssertionError(f"business result must not duplicate JSON in content: {call}")
+        if call["result"].get("content") != [] or call["result"].get("isError") is not False:
+            raise AssertionError("MCP CallToolResult must include content=[] and isError=false")
         code = _oauth_authorize_code(
             base_url,
             owner_password=owner_password,
@@ -603,6 +603,8 @@ def _assert_http_server(db_path: Path, audit_log_path: Path) -> None:
         )
         if oauth_call.get("result", {}).get("structuredContent", {}).get("status") != "ok":
             raise AssertionError(f"OAuth tool call failed: {oauth_call}")
+        if oauth_call["result"].get("content") != [] or oauth_call["result"].get("isError") is not False:
+            raise AssertionError("OAuth CallToolResult must include content=[] and isError=false")
         oauth_metric_call = _post_json(
             f"{base_url}{DEFAULT_MCP_PATH}",
             {
