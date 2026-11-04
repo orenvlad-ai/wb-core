@@ -32,6 +32,24 @@ def main() -> int:
         "probe public contour",
     ]
 
+    routes = hosted.load_public_route_manifest(hosted.DEFAULT_PUBLIC_ROUTE_ALLOWLIST_FILE)
+    max_route = next(route for route in routes["routes"] if route["name"] == "max_webhook")
+    assert max_route == {
+        "name": "max_webhook", "match": "exact", "path": "/v1/max/webhook",
+        "methods": ["POST"], "proxy_pass_url": "http://127.0.0.1:8783",
+    }
+    rendered = hosted.render_nginx_public_route_block(routes, proxy_pass_url="http://127.0.0.1:8765")
+    max_block = rendered.split("location = /v1/max/webhook {", 1)[1].split("\n    }", 1)[0]
+    for directive in (
+        "proxy_pass http://127.0.0.1:8783;", "client_max_body_size 1m;",
+        "proxy_read_timeout 25s;", "proxy_send_timeout 10s;", "client_body_timeout 10s;",
+        "proxy_request_buffering on;", "access_log off;",
+        "if ($request_method != POST) { return 405; }",
+    ):
+        assert directive in max_block
+    assert "error_log /dev/null" not in max_block
+    assert "client_max_body_size 32m;" in rendered
+
     parser = hosted.build_arg_parser()
     assert parser.parse_args(["print-plan"]).command == "print-plan"
     assert parser.parse_args(["deploy", "--dry-run"]).dry_run is True

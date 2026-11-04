@@ -7,6 +7,13 @@
   "proxy_send_timeout": "180s",
   "routes": [
     {
+      "name": "max_webhook",
+      "match": "exact",
+      "path": "/v1/max/webhook",
+      "methods": ["POST"],
+      "proxy_pass_url": "http://127.0.0.1:8783"
+    },
+    {
       "name": "supplier_view_page",
       "match": "exact",
       "path": "/sheet-vitrina-v1/supplier-view",
