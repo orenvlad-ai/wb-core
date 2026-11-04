@@ -124,7 +124,7 @@ def without_openpyxl(name, *args, **kwargs):
 builtins.__import__ = without_openpyxl
 
 from apps.production_apply_adapters import ADAPTERS
-expected = {
+expected = {"change_registry_external_v1",
     "current_fbo_supply_close_v1",
     "fbs_scoped_lifecycle_recovery_v1",
     "warehouse_reviewed_sync_v1",

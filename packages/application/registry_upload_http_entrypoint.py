@@ -2535,6 +2535,37 @@ class RegistryUploadHttpEntrypoint:
             job_id=job_id,
         )
 
+    def handle_change_registry_external_request(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        from apps.production_apply_launcher import execute, validate_operation
+        from packages.application.change_registry_external import ExternalRegistryAdapter
+        import socket
+        if self.change_registry_read_surface is None or not actor:
+            raise ValueError("Change Registry seller scope is not configured")
+        action = str(payload.get("action") or "preview")
+        try:
+            operation = validate_operation(str(payload.get("operation_id") or ""))
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
+        request = {
+            "runtime_dir": str(self.runtime.runtime_dir), "hostname": socket.gethostname(),
+            "seller_id": self.change_registry_read_surface.seller_id,
+            "account_scope": self.change_registry_read_surface.account_scope,
+            "actor": actor, "records": payload.get("records"),
+        }
+        adapter = ExternalRegistryAdapter()
+        try:
+            if action == "preview":
+                return adapter.preview(request, operation)
+            return execute(action=action, adapter_name="change_registry_external_v1", operation_id=operation,
+                request=request, expected_prestate=str(payload.get("expected_prestate") or ""),
+                expected_candidate=str(payload.get("expected_candidate") or ""))
+        except RuntimeError as exc:
+            from apps.production_apply_contract import AdapterError
+            from apps.production_apply_launcher import ApplyError
+            if isinstance(exc, (AdapterError, ApplyError)):
+                raise ValueError(str(exc)) from exc
+            raise
+
     def handle_change_registry_annotation_request(
         self, payload: Mapping[str, Any], *, actor: str
     ) -> dict[str, Any]:
