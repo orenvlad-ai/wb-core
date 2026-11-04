@@ -412,12 +412,15 @@ def rename_diff_check():
 def cleaner_command_checks():
     script='apps/search_cluster_cleaner_browser_smoke.py'
     exists=lambda _,path:(select_checks.ROOT/path).is_file()
-    for path in (script,'packages/adapters/search_cluster_cleaner_wb.py','packages/adapters/templates/sheet_vitrina_v1_keyword_cleaner.js'):
+    for path in (script,'packages/adapters/search_cluster_cleaner_wb.py','packages/adapters/templates/sheet_vitrina_v1_keyword_cleaner.js',
+                 'apps/search_cluster_cleaner_self_service_worker.py','apps/search_cluster_cleaner_idle_smoke.py'):
         plan=build_plan_from_paths(pull_request=72,base=BASE,head=HEAD,paths=[path],file_exists=exists)
         verify_plan(plan)
         browser=[c for c in plan['commands'] if len(c)>1 and c[1]==script]
         assert browser==[['python3',script,'--output','/tmp/wbc-cleaner-browser-ci']],plan
         assert 'playwright==1.58.0' in plan['pip']
+        assert 'openpyxl==3.1.5' in plan['pip']
+        assert plan['commands'].count(['python3','apps/search_cluster_cleaner_idle_smoke.py'])==1,plan
         assert not any(len(c)>1 and c[1].endswith('_browser_smoke.py') and c[1]!=script for c in plan['commands']),plan
 
 
