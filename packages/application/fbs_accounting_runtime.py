@@ -353,8 +353,13 @@ def refresh(runtime_dir, *, ready_runtime=None):
         expected_ready = ready_runtime.prepare_sheet_vitrina_ready_publication(
             bundle_version=current.bundle_version, as_of_date=default_business_as_of_date(plan_now))
         from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
-        if expected_ready.exists:
-            plan = _deserialize_sheet_vitrina_plan(expected_ready.plan_json)
+        previous = (_deserialize_sheet_vitrina_plan(expected_ready.plan_json) if expected_ready.exists
+                    else ready_runtime.load_sheet_vitrina_ready_snapshot())
+        forward_policy = (previous.metadata.get('wb_forward_ready') if previous is not None else None)
+        needs_forward_current = (forward_policy is not None
+            and current_business_date_iso(plan_now) not in previous.date_columns)
+        if expected_ready.exists and not needs_forward_current:
+            plan = previous
         else:
             # The hourly warehouse owner can reach a new day before the full
             # Vitrina refresh. Use its existing dated builder with local capital
@@ -363,11 +368,17 @@ def refresh(runtime_dir, *, ready_runtime=None):
                 SheetVitrinaV1LivePlanBlock, bind_local_derive_publication,
             )
             from packages.application.sheet_vitrina_v1_own_product_capital import OWN_PRODUCT_CAPITAL_SOURCE_KEY
+            if forward_policy is not None and expected_ready.as_of_date < forward_policy['request']['day']:
+                raise ValueError('forward_ready_builder_before_cutoff')
             plan = SheetVitrinaV1LivePlanBlock(ready_runtime, now_factory=lambda: plan_now).build_plan(
                 as_of_date=expected_ready.as_of_date, source_keys=(OWN_PRODUCT_CAPITAL_SOURCE_KEY,))
             current, expected_ready = bind_local_derive_publication(ready_runtime, plan, current, expected_ready)
-            previous = ready_runtime.load_sheet_vitrina_ready_snapshot()
-            plan = _retain_ready_history(plan, previous, business_date=current_business_date_iso(plan_now))
+            if previous is not None:
+                plan = _retain_ready_history(plan, previous, business_date=current_business_date_iso(plan_now))
+            if forward_policy is not None:
+                # Only the admitted request is continued. The Ready owner rebuilds
+                # its proof against the persisted event and saved Ready manifest.
+                plan = replace(plan, metadata={**plan.metadata, 'wb_forward_ready': forward_policy})
             build_inputs = plan.metadata["publication_inputs"]
     try:
         # ``prepare`` timestamps its capture after pinning the source snapshot.

@@ -434,6 +434,7 @@ class RegistryUploadDbBackedRuntime:
         build_inputs=None,
         _prepared_book=None,
         _retained_closed_replay=False,
+        forward_admission=None,
     ) -> SheetVitrinaV1RefreshResult:
         _validate_timestamp(refreshed_at, field_name="refreshed_at")
         from packages.application.web_vitrina_official_fbs import (
@@ -477,6 +478,15 @@ class RegistryUploadDbBackedRuntime:
                 raise ReadyPublicationConflict('closed_retained_book_write_forbidden')
             from packages.application.sheet_vitrina_v1_closed_ready_repair import validate_retained_candidate
             validate_retained_candidate(plan, expected, business_date=publication_date, runtime=self)
+        forward_policy = forward_admission if forward_admission is not None else plan.metadata.get('wb_forward_ready')
+        if forward_policy is not None and not forward_policy.get('request'):
+            raise ReadyPublicationConflict('forward_ready_request_required')
+        forward_request = (forward_policy or {}).get('request')
+        if forward_request is not None and _retained_closed_replay:
+            raise ReadyPublicationConflict("forward_ready_retained_replay_forbidden")
+        from packages.application import wb_forward_ready
+        original_forward_plan = plan
+        forward_cutoff = forward_request['day'] if forward_request is not None else None
         book, expected_book = load(self.runtime_dir) if _prepared_book is None else _prepared_book
         from packages.application.fbs_accounting_degraded import (
             current_degraded_accounting, materialize_degraded_accounting, reconcile_recovered_accounting,
@@ -504,6 +514,16 @@ class RegistryUploadDbBackedRuntime:
             if _prepared_book is not None:
                 check_pinned_authority(conn, book["publication_authority"])
                 check_material(conn, book["publication_inputs"])
+            if forward_request is not None:
+                if degraded is not None:
+                    raise ReadyPublicationConflict("forward_ready_degraded_accounting_forbidden")
+                if forward_admission is None:
+                    forward_admission = wb_forward_ready.prepare_forward_ready_admission(conn,
+                        request=forward_request, plan=plan, expected=expected, publication_date=publication_date)
+                else:
+                    wb_forward_ready.validate_admission(conn, admission=forward_admission,
+                        plan=plan, expected=expected, publication_date=publication_date)
+                plan = wb_forward_ready.forward_view(plan, forward_cutoff)
             if degraded is None and not _retained_closed_replay:
                 plan = reconcile_recovered_accounting(plan, book=book)
             if not _retained_closed_replay:
@@ -526,9 +546,11 @@ class RegistryUploadDbBackedRuntime:
                                    ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
                 plan = recalculate_current_envelope(plan, business_date=publication_date,
                     parameters=dated_parameters(conn, publication_date) if estimate.get('available') or active_inventory is not None else None)
-                plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
-                    parameters=dated_parameters(conn, yesterday_date(publication_date)))
-                if EFFECTIVE_DATE <= plan.as_of_date < yesterday_date(publication_date):
+                if forward_cutoff is None or yesterday_date(publication_date) >= forward_cutoff:
+                    plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
+                        parameters=dated_parameters(conn, yesterday_date(publication_date)))
+                if (EFFECTIVE_DATE <= plan.as_of_date < yesterday_date(publication_date)
+                        and (forward_cutoff is None or plan.as_of_date >= forward_cutoff)):
                     dated_proxy = recalculate_dated_proxy(
                         asdict(plan),
                         day=plan.as_of_date,
@@ -569,6 +591,9 @@ class RegistryUploadDbBackedRuntime:
                     now=publication_now, connection=conn, quantity_only=True,
                 )
                 plan = materialize_current_official_fbs_estimate(plan, estimate=quantity)
+            if forward_admission is not None:
+                plan = wb_forward_ready.restore_frozen(plan, original=original_forward_plan,
+                    admission=forward_admission)
             rollover = [] if _retained_closed_replay else ready_rollover.prepare(
                 conn, plan=plan, expected=expected,
                 default_date=default_business_as_of_date(publication_now), degraded=degraded)
@@ -584,7 +609,9 @@ class RegistryUploadDbBackedRuntime:
                     "bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date,
                     "plan_json": _serialize_sheet_vitrina_plan(plan)})
                 from packages.application.sheet_vitrina_v1_inventory_history import prepare_inventory_history_from_ready_plan
-                inventory_history = prepare_inventory_history_from_ready_plan(conn, plan=plan,
+                history_plan = (wb_forward_ready.forward_view(plan, forward_cutoff)
+                    if forward_admission is not None else plan)
+                inventory_history = prepare_inventory_history_from_ready_plan(conn, plan=history_plan,
                     bundle_version=current_state.bundle_version, refreshed_at=refreshed_at,
                     generation_identity=current_state.bundle_version, runtime_dir=self.runtime_dir, prepared_book=book,
                     ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
@@ -598,6 +625,8 @@ class RegistryUploadDbBackedRuntime:
             conn.execute("BEGIN IMMEDIATE")
             check_expected(conn, expected)
             ready_rollover.check(conn, rollover)
+            if forward_admission is not None:
+                wb_forward_ready.check_admission(conn, forward_admission)
             check_material(conn, material_inputs)
             check_build_inputs(conn, build_inputs)
             if capture_history(conn) != history_inputs:
@@ -609,12 +638,15 @@ class RegistryUploadDbBackedRuntime:
                 expected=expected, inputs={"material": material_inputs, "history": history_inputs,
                     "authority": expected.authority,
                     "build": build_inputs, "business_date": publication_date,
-                    "prepared_book": book.get("publication_inputs") if _prepared_book else None}, expected_book=expected_book,
+                    "prepared_book": book.get("publication_inputs") if _prepared_book else None,
+                    **({"forward_admission": forward_admission} if forward_admission is not None else {})}, expected_book=expected_book,
                 book_required=_prepared_book is not None, ready_required=True, created_at=refreshed_at)
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
             check_expected(conn, expected)
             ready_rollover.check(conn, rollover)
+            if forward_admission is not None:
+                wb_forward_ready.check_admission(conn, forward_admission)
             check_material(conn, material_inputs)
             check_build_inputs(conn, build_inputs)
             if capture_history(conn) != history_inputs:
