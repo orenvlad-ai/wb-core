@@ -3339,7 +3339,8 @@ class ChangeRegistryRepository:
                     ORDER BY linked_at,fact_link_id""",
                 (exact_id,),
             ).fetchall()
-            return {"fact": _registry_payload(fact), "links": [_registry_payload(row) for row in links]}
+            from packages.application.change_registry_external import decorate_facts
+            return {"fact": decorate_facts(conn, [_registry_payload(fact)])[0], "links": [_registry_payload(row) for row in links]}
 
     def list_operations(
         self,
@@ -3414,6 +3415,9 @@ class ChangeRegistryRepository:
                     ORDER BY {time_column},{id_column} LIMIT ?""",
                 tuple(params),
             ).fetchall()
+            if table == FACTS_TABLE:
+                from packages.application.change_registry_external import decorate_facts
+                rows = decorate_facts(conn, rows)
         page = rows[:exact_limit]
         next_cursor = ""
         if len(rows) > exact_limit and page:
