@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from ci.fixture_process import checkpoint, fixture_process
 from apps.fbs_snapshot_cost_smoke import capture, document
-from apps.fbs_inventory_presentation_smoke import retained
+from apps.fbs_inventory_presentation_smoke import retained, row as contract_row
 from apps.shared_sku_cost_smoke import wb
 from packages.application import fbs_accounting_runtime as book
 from packages.application import registry_upload_db_backed_runtime as dbmod
@@ -69,6 +69,24 @@ def make_book(root, *, quantity="1000", opening=False, now=NOW, typed=False):
     with patch.object(book, "capture_current", return_value=image), \
          patch.object(book, "capture_wb_component", return_value=component), \
          patch.object(book, "capture_retained_stages", return_value=retained(component)):
+        return book.prepare(root, now=now, opening=opening)
+
+
+def make_management_book(root, *, now=NOW, opening=False, with_correction=True):
+    from apps.fbs_document_cost_smoke import capture as cost_capture, management_correction
+    day = current_business_date_iso(now)
+    stamp = now.isoformat().replace('+00:00', 'Z')
+    basis = [('A', nm, 100, '100') for nm in range(1, 5)]
+    correction = management_correction(DAY)
+    image = cost_capture(day, docs=[] if opening or not with_correction else [correction], rows=basis, fbo=basis)
+    image['captured_at'] = image['quantity_snapshot']['captured_at'] = stamp
+    image['source_digest'] = fingerprint({k: v for k, v in image.items() if k != 'source_digest'})
+    component = wb(day)
+    component['rows'] = [{**component['rows'][0], 'nm_id': nm} for nm in range(1, 5)]
+    component['source_digest'] = fingerprint({k: v for k, v in component.items() if k != 'source_digest'})
+    with patch.object(book, 'capture_current', return_value=image), \
+         patch.object(book, 'capture_wb_component', return_value=component), \
+         patch.object(book, 'capture_retained_stages', return_value=retained(component)):
         return book.prepare(root, now=now, opening=opening)
 
 
@@ -139,6 +157,60 @@ class PublicationTests(unittest.TestCase):
 
     def expected(self):
         return self.runtime.prepare_sheet_vitrina_ready_publication(bundle_version=self.current.bundle_version, as_of_date=OUTER)
+
+    def test_management_acceptance_actual_ready_preserves_frozen_history_and_next_day(self):
+        from packages.application import web_vitrina_management_history as economics
+        initial, expected = make_management_book(self.root, opening=True, now=datetime(2026, 9, 7, 14, tzinfo=timezone.utc))
+        book.save(self.root, initial, expected=expected, operation_id='management-opening')
+        ordinary, expected = make_management_book(self.root, with_correction=False)
+        book.save(self.root, ordinary, expected=expected, operation_id='management-before-correction')
+        save(self.runtime, make_plan())
+        previous = self.runtime.load_sheet_vitrina_ready_snapshot(OUTER)
+        accepted, expected = make_management_book(self.root)
+        book.save(self.root, accepted, expected=expected, operation_id='management-correction')
+        self.assertEqual(book.management_cost_history_cutoff(accepted, business_date=DAY), DAY)
+        with patch.object(economics, 'recalculate_yesterday_envelope', side_effect=AssertionError('frozen economics invoked')):
+            save(self.runtime, make_plan())
+        current = self.runtime.load_sheet_vitrina_ready_snapshot(OUTER)
+        def dated(plan, day):
+            sheet = next(s for s in plan.sheets if s.sheet_name == 'DATA_VITRINA')
+            return {r[1]: r[sheet.header.index(day)] for r in sheet.rows}
+        prior_values = dated(previous, OUTER)
+        self.assertEqual({k: dated(current, OUTER)[k] for k in prior_values}, prior_values)
+        self.assertTrue(all(value == '' for key, value in dated(current, OUTER).items() if key not in prior_values))
+        prior_cells = previous.metadata.get('server_cell_presentation', {})
+        current_cells = current.metadata['server_cell_presentation']
+        self.assertEqual({k: v[OUTER] for k, v in current_cells.items() if OUTER in v},
+                         {k: v[OUTER] for k, v in prior_cells.items() if OUTER in v})
+        self.assertEqual(current.metadata['fbs_accounting_bindings'][OUTER], previous.metadata['fbs_accounting_bindings'][OUTER])
+        cell = current_cells['SKU:1|own_capital_FF_capital_rub'][DAY]
+        self.assertFalse(cell['candidate_only'])
+        self.assertEqual(cell['quality_label'], 'Стоимость принята для управленческого учёта с ' + DAY)
+        self.assertEqual(cell['quality_state'], 'preliminary')
+        active = book.load_inventory(self.root, now=NOW)
+        active_row = replace(contract_row('own_capital_FF_capital_rub'), values_by_date={DAY: 999})
+        self.assertEqual(active.apply_rows([active_row], business_date=DAY)[0].presentation_by_date[DAY]['quality_label'], cell['quality_label'])
+        stale = book.load_inventory(self.root, now=NOW.replace(hour=20))
+        self.assertEqual(stale.payload()['quality'], 'unavailable')
+        self.assertNotIn('management_cost_acceptance', stale.warehouse_detail()['balances'][0])
+
+        tomorrow = datetime(2026, 9, 9, 14, tzinfo=timezone.utc)
+        following, expected = make_management_book(self.root, now=tomorrow)
+        book.save(self.root, following, expected=expected, operation_id='management-next-day')
+        # New target has no Ready row: the donor is pinned from the same bundle.
+        next_plan = make_plan(DAY, '2026-09-09')
+        next_plan = replace(next_plan, date_columns=[OUTER, DAY, '2026-09-09'], metadata=deepcopy(current.metadata),
+            temporal_slots=[SheetVitrinaV1TemporalSlot('frozen', 'frozen', OUTER), *next_plan.temporal_slots], sheets=[
+            replace(s, header=[*s.header[:2], OUTER, *s.header[2:]], column_count=5, write_rect='A1:E5', clear_range='A:E',
+                rows=[[*r[:2], 999, *r[2:]] for r in s.rows]) if s.sheet_name == 'DATA_VITRINA' else s for s in next_plan.sheets])
+        with patch.object(economics, 'recalculate_yesterday_envelope', wraps=economics.recalculate_yesterday_envelope) as recalc:
+            save(self.runtime, next_plan, now=tomorrow)
+        self.assertEqual(recalc.call_count, 1)  # The accepted day itself remains ordinary economics.
+        saved = self.runtime.load_sheet_vitrina_ready_snapshot(DAY)
+        self.assertEqual({k: dated(saved, OUTER)[k] for k in prior_values}, prior_values)
+        self.assertEqual(saved.metadata['fbs_accounting_bindings'][OUTER], previous.metadata['fbs_accounting_bindings'][OUTER])
+        self.assertIn('management_cost_acceptance', saved.metadata['server_cell_presentation']['SKU:1|own_capital_FF_capital_rub']['2026-09-09'])
+        self.assertEqual(self.runtime.load_sheet_vitrina_ready_snapshot(OUTER), current)
 
     def test_historical_touch_keeps_latest_date_and_current_book_publication(self):
         self._check_historical_touch(datetime(2026, 9, 12, 14, tzinfo=timezone.utc))

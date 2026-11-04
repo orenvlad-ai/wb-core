@@ -27,6 +27,12 @@ ZERO = Decimal(0)
 EXPLANATION = ("FBS — доступное количество из официального снимка WB; FBO — документальный остаток. "
                "Резерв и полный физический остаток FBS по этому снимку неизвестны. "
                "Себестоимость рассчитана по снимкам, поступлениям и расходам; оценка предварительная.")
+ACCEPTED_COST_METRICS = {COST, "own_capital_FF_capital_rub", "own_capital_FF_unit_cost_rub",
+                         "own_total_product_capital_rub", "own_avg_product_cost_rub"}
+
+
+def acceptance_label(evidence):
+    return "Стоимость принята для управленческого учёта с " + evidence["cutoff_date"]
 
 
 def number(value):
@@ -178,6 +184,7 @@ class FbsInventorySnapshot:
         if snapshot_rows != {(str(r["nm_id"]), r["facility_id"]): str(r["quantity"]) for r in view["rows"].values()}:
             raise ValueError("cost_quantity_snapshot_mismatch")
         blocked = bool(view.get("pending_documents")) or view["quality"] == "incomplete"
+        acceptances = view.get("management_cost_acceptances", {})
         sku_rows = {}
         with localcontext() as ctx:
             ctx.prec = 50
@@ -219,6 +226,11 @@ class FbsInventorySnapshot:
                     "identity": deepcopy(stage_row.get("identity", {})),
                     "shared_cost": deepcopy(shared["rows"][nm]), "wb_physical": text(number(physical)),
                     "stock_total": text(total([number(physical), number(operands(fbs)["quantity"])]))}
+                covered = [e for e in acceptances.values()
+                           if int(nm) in e['supplier_scope_nm_ids'] and e['cutoff_date'] <= day]
+                if covered and not blocked and stages['FF']['capital_rub'] is not None:
+                    sku_rows[nm]['management_cost_acceptance'] = deepcopy(max(
+                        covered, key=lambda e: (e['cutoff_date'], e['document_id'])))
             totals = {"stages": {s: operands(r["stages"][s] for r in sku_rows.values()) for s in OWN_PRODUCT_CAPITAL_STAGES},
                 "total": operands(r["total"] for r in sku_rows.values()),
                 "fbs": operands((r["fbs"] for r in sku_rows.values()), blocked=blocked),
@@ -244,14 +256,20 @@ class FbsInventorySnapshot:
     def payload(self):
         return json.loads(self._json)
 
-    def presentation(self, value, *, data=None):
+    def presentation(self, value, *, data=None, nm=None, metric_key=None):
         data = data or self.payload()
-        return {"source": SOURCE, "candidate_only": True, "source_as_of_date": data["date"],
+        result = {"source": SOURCE, "candidate_only": True, "source_as_of_date": data["date"],
             "source_version_id": data["version_id"], "source_generation_id": data["quantity_snapshot"]["id"],
             "captured_at": data["quantity_snapshot"]["captured_at"], "quality_state": "preliminary",
             "state": "unconfirmed" if value is not None else "unavailable", "tone": "warning",
             "quality_label": "Предварительная оценка", "management_value": text(number(value)) or "",
             "reason": EXPLANATION if value is not None else "Оценка недоступна: нет согласованных данных. " + EXPLANATION}
+        accepted = data['rows'].get(str(nm), {}).get('management_cost_acceptance')
+        if accepted and value is not None and metric_key in ACCEPTED_COST_METRICS:
+            result.update(quality_label=acceptance_label(accepted), management_cost_acceptance=deepcopy(accepted))
+            result['reason'] = (acceptance_label(accepted) + ". Распределение общей поправки приближённое по SKU; "
+                "прошлая прибыль и история сохранены. " + EXPLANATION)
+        return result
 
     def metrics(self, nm=None):
         return self._metrics(self.payload(), nm)
@@ -307,7 +325,7 @@ class FbsInventorySnapshot:
                 result.append(row)
                 continue
             value = metric[row.metric_key]
-            cell = self.presentation(value, data=data)
+            cell = self.presentation(value, data=data, nm=nm, metric_key=row.metric_key)
             result.append(replace(row, values_by_date={**row.values_by_date, business_date: float(value) if value is not None else ""},
                 presentation_by_date={**row.presentation_by_date, business_date: cell}))
         return result
@@ -330,6 +348,14 @@ class FbsInventorySnapshot:
                     "cost_source": "Принятая начальная себестоимость" if data["cost_status"] == "baseline" else "Средневзвешенная: начальная стоимость, поступления и расходы дня",
                     "quantity_contribution": ff["quantity"], "capital_contribution_rub": ff["capital_rub"],
                     "confirmation_status": "Предварительная оценка"}]}, "warning": "Предварительная оценка"})
+            accepted = item.get('management_cost_acceptance')
+            if accepted:
+                rows[-1]['management_cost_acceptance'] = deepcopy(accepted)
+                rows[-1]['warning'] += ". " + acceptance_label(accepted)
+                rows[-1]['human_evidence']['items'].append({
+                    'document': accepted['document_id'], 'date': accepted['cutoff_date'],
+                    'cost_source': accepted['business_decision'], 'confirmation_status': acceptance_label(accepted),
+                    'quantity_source': 'Доступный FBS; документальный FBO. Полный физический FBS неизвестен.'})
         ff = data["totals"]["stages"]["FF"]
         warehouse = {"warehouse_key": "ff", "warehouse_name": "Склад FF", "sku_count": len(rows),
             "total_quantity": ff["quantity"], "total_capital_rub": ff["capital_rub"], "average_unit_cost_rub": ff["wac_rub"],
