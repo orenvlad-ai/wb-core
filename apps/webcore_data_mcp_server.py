@@ -118,6 +118,7 @@ class WebCoreDataMcpServerConfig:
         max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES,
         oauth_refresh_store_path: Path | None = None,
         max_reply_deadline_seconds: float = 40.0,
+        max_history_deadline_seconds: float = 40.0,
     ) -> None:
         self.host = host
         self.port = port
@@ -149,6 +150,7 @@ class WebCoreDataMcpServerConfig:
         self.max_tool_result_bytes = max(1024, int(max_tool_result_bytes))
         self.oauth_refresh_store_path = oauth_refresh_store_path
         self.max_reply_deadline_seconds = max(0.05, min(120.0, float(max_reply_deadline_seconds)))
+        self.max_history_deadline_seconds = max(0.05, min(120.0, float(max_history_deadline_seconds)))
 
     @property
     def oauth_enabled(self) -> bool:
@@ -300,6 +302,9 @@ def load_config_from_env() -> WebCoreDataMcpServerConfig:
         tool_deadline_seconds=tool_deadline_seconds,
         max_tool_result_bytes=max_tool_result_bytes,
         oauth_refresh_store_path=oauth_refresh_store_path,
+        max_history_deadline_seconds=_parse_bounded_float(
+            os.environ.get("WEBCORE_DATA_MCP_MAX_HISTORY_DEADLINE_SECONDS"), 40.0,
+            "WEBCORE_DATA_MCP_MAX_HISTORY_DEADLINE_SECONDS", minimum=0.05, maximum=120.0),
         max_reply_deadline_seconds=_parse_bounded_float(
             os.environ.get("WEBCORE_DATA_MCP_MAX_REPLY_DEADLINE_SECONDS"), 40.0,
             "WEBCORE_DATA_MCP_MAX_REPLY_DEADLINE_SECONDS", minimum=0.05, maximum=120.0),
@@ -532,6 +537,7 @@ def _handle_json_rpc(
             started = time.monotonic()
             # A reply includes source GET, one POST and verification GET.
             tool_budget = (config.max_reply_deadline_seconds if name == "max_posted_reply"
+                           else config.max_history_deadline_seconds if name in {"max_messages", "max_message"}
                            else config.tool_deadline_seconds)
             deadline_at = started + tool_budget
             cancel_event = threading.Event()

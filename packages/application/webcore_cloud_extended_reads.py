@@ -144,7 +144,7 @@ class MaxHistoryReader:
         if self.ca_path:
             _fixed_path(self.ca_path)
             context.load_verify_locations(cafile=str(self.ca_path))
-        timeout = min(8.0, max(0.1, deadline_at-time.monotonic())) if deadline_at is not None else 8.0
+        timeout = min(20.0, max(0.1, deadline_at-time.monotonic())) if deadline_at is not None else 20.0
         req = Request("https://platform-api2.max.ru/messages?"+urlencode(params), headers={"Authorization":token,"Accept":"application/json"})
         try:
             with build_opener(_NoRedirect(), HTTPSHandler(context=context)).open(req, timeout=timeout) as response:
