@@ -214,7 +214,25 @@ claim для повторной отправки. После изменения 
 только текста недостаточно. При сверке ранее сохранённого ответа источник
 также читается заново; новый POST при этом не выполняется.
 
-MAX history reads (`max_messages`, `max_message`) have a separate bounded 40-second tool budget, configurable with `WEBCORE_DATA_MCP_MAX_HISTORY_DEADLINE_SECONDS` (0.05–120 seconds). MAX GET socket timeout is 20 seconds, capped by remaining tool time. Other tool deadlines and reply deduplication are unchanged. A history timeout is not evidence of an empty history; repeat read-only retrieval before deciding payment chronology.
+MAX history reads (`max_messages`, `max_message`) have a separate bounded
+40-second tool budget, configurable with
+`WEBCORE_DATA_MCP_MAX_HISTORY_DEADLINE_SECONDS` (0.05–120 seconds). MAX GET socket
+timeout is 20 seconds, capped by remaining tool time. Only GET may make one
+additional attempt after a timeout/transport failure or HTTP 429/5xx, sharing the
+original deadline and waiting 0.25 seconds (up to one second when Retry-After
+requires it). A longer or unsupported Retry-After suppresses retry.
+Cancellation/expiry prevents another request. Authentication/other 4xx,
+redirects, TLS errors and invalid JSON/message lists fail immediately.
+
+Sanitized logs record open/read/decode phase, controlled error code, HTTP status
+and attempt; they never include exception strings, tokens or response bodies.
+Error codes such as `max_get_open_timeout` and `max_get_open_http_503` also reach
+the MCP audit. This does not guarantee upstream availability; persistent failure
+still stops the queue. POST is never retried. Source reads that consume the reply
+reserve still fail before claim rather than sending without enough time for
+readback. Other tool deadlines and reply deduplication are unchanged. A history
+timeout is not evidence of an empty history; repeat read-only retrieval before
+deciding payment chronology.
 
 ## Произвольный текст WBC Cloud bot
 
