@@ -91,6 +91,7 @@ def main():
         else:raise AssertionError('conflicting identity accepted')
         negative=forward.make_event(request_id='negative',day='2026-10-11',nm_id=200,opening_quantity='3',opening_wac='195',old_supplier_unit='120',new_supplier_unit='110',source_evidence={'fixture':True},anchor=original)
         assert negative['capital_rub']=='-30.00'
+        forward.validate_event(negative,day='2026-10-11',nm_id=200,opening_quantity='3.000',opening_wac='195.000',anchor=original)
     print('forward WB synthetic native publication, next day, idempotency, old rows: PASS')
 
 if __name__=='__main__':main()

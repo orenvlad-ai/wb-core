@@ -29,6 +29,7 @@ def number(value):
 def make_event(*, request_id, day, nm_id, opening_quantity, opening_wac,
                old_supplier_unit, new_supplier_unit, source_evidence, anchor):
     from packages.application.wb_initial_fbs_cost import valid_anchor
+    from packages.application.warehouse_functional import _text as canonical_number
     if not request_id or not source_evidence or not valid_anchor(anchor):
         raise ValueError('forward_valuation_evidence_missing')
     qty, wac = number(opening_quantity), number(opening_wac)
@@ -41,8 +42,8 @@ def make_event(*, request_id, day, nm_id, opening_quantity, opening_wac,
     if qty*wac + capital <= 0:
         raise ValueError('forward_valuation_nonpositive_capital')
     proof = dict(policy=POLICY, quality=QUALITY, request_id=request_id,
-        business_date=day, nm_id=nm_id, opening_quantity=str(qty), opening_wac_rub=str(wac),
-        old_supplier_unit_rub=str(old), new_supplier_unit_rub=str(new),
+        business_date=day, nm_id=nm_id, opening_quantity=canonical_number(qty), opening_wac_rub=canonical_number(wac),
+        old_supplier_unit_rub=canonical_number(old), new_supplier_unit_rub=canonical_number(new),
         capital_delta_rub=str(capital), source_evidence=source_evidence,
         initial_anchor_digest=anchor['proof_digest'], expenses_complete=False,
         proves_physical_movement=False, certified=False,
