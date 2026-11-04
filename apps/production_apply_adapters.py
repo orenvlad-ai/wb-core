@@ -18,6 +18,18 @@ class Adapter(Protocol):
 
 
 _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
+    "current_fbo_supply_close_v1": (
+        "packages.application.current_fbo_supply_close_apply", "CurrentFboSupplyCloseAdapter",
+    ),
+    "fbs_scoped_lifecycle_recovery_v1": (
+        "packages.application.fbs_scoped_lifecycle_production", "FbsScopedLifecycleProductionAdapter",
+    ),
+    "warehouse_reviewed_sync_v1": (
+        "packages.application.warehouse_reviewed_sync_apply", "WarehouseReviewedSyncAdapter",
+    ),
+    "historical_receipt_completion_v1": (
+        "packages.application.historical_receipt_completion", "HistoricalReceiptCompletionAdapter",
+    ),
     "warehouse_hourly_rollback_reconciliation_v1": (
         "apps.warehouse_hourly_rollback_reconciliation", "WarehouseHourlyRollbackReconciliationAdapter",
     ),

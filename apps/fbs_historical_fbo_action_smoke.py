@@ -110,6 +110,34 @@ class ActionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'subset_'+reason+'_budget'):
                 action._check_source_copy_budget(table='fixture',**kwargs)
 
+    def test_native_closed_opening_without_stored_id_is_bound_and_dispatchable(self):
+        from apps.fbs_historical_fbo_gap_smoke import cap
+        from packages.application.fbs_snapshot_cost import initialize_candidate,evaluate_candidate,close_candidate_period
+        state=initialize_candidate(cap('2026-10-14'))
+        state['baseline']['document_cost_state']['fbo_rows']=deepcopy(self.capture['opening']['fbo_rows'])
+        state['baseline']['id']=fingerprint({k:v for k,v in state['baseline'].items() if k!='id'})
+        state=evaluate_candidate(state,cap('2026-10-15'))
+        state=close_candidate_period(state,'2026-10-15',today='2026-10-16')
+        book={**self.book,'state':state};before=deepcopy(book)
+        opening=state['periods']['2026-10-15']
+        self.assertNotIn('period_digest',opening);self.assertNotIn('id',opening)
+        inputs=action._inputs(self.request)
+        def capture():
+            with action.ready.readonly(self.runtime.db_path) as conn:
+                return action.capture_native_sources(conn,book=book,scope=self.scope,
+                    opening_date='2026-10-15',physical=inputs[1],restored=inputs[2])
+        result=capture()
+        self.assertEqual(result['opening']['period_digest'],fingerprint(opening))
+        self.assertEqual(action.prepare_historical_fbo_dispatch_plan(result,self.scope)['status'],'prepared_unconnected')
+        self.assertEqual(book,before)
+        # Even metadata outside the selected opening rows belongs to authority.
+        opening['diagnostics'].append({'reason':'synthetic changed metadata'})
+        self.assertNotEqual(capture()['opening']['period_digest'],result['opening']['period_digest'])
+        opening['status']='open'
+        with self.assertRaisesRegex(ValueError,'closed_opening_required'):capture()
+        opening['status']='closed';opening['snapshot']['date']='2026-10-16'
+        with self.assertRaisesRegex(ValueError,'closed_opening_required'):capture()
+
     def test_unknown_action_rejected_before_target_and_money(self):
         with patch.object(adapter_module,'target',side_effect=AssertionError('target not allowed')):
             for method in ('preview','readback'):

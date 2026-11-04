@@ -108,8 +108,29 @@ def check_publication_projection(root):
         conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET bundle_version=? WHERE operation_id='ordinary'", (first_key[0],))
         conn.execute("DELETE FROM sheet_vitrina_v1_ready_publications WHERE operation_id='ordinary'")
         assert {day for day, proof in snapshot()[1].items() if proof != baseline[day]} == affected
+        remaining = snapshot()[1]
+        conn.execute("""INSERT INTO sheet_vitrina_v1_ready_publications
+            (operation_id,attempt_id,kind,bundle_version,as_of_date,expected_digest,
+             inputs_json,book_required,ready_required,state,book_version,after_digest,created_at,finished_at)
+            VALUES('temporary-child','1','fbs_temporary_allocation_publication_v1',?,?,'expected',
+                '{}',1,1,'complete','child-book','child-digest','created','same-clock')""",first_key)
+        child_baseline = snapshot()[1]
+        assert {day for day in remaining if remaining[day] != child_baseline[day]} == affected
+        conn.execute("""INSERT INTO sheet_vitrina_v1_ready_publications
+            (operation_id,attempt_id,kind,bundle_version,as_of_date,expected_digest,
+             inputs_json,book_required,ready_required,state,book_version,after_digest,created_at,finished_at)
+            VALUES('temporary-parent','1','fbs_temporary_allocation_effect_intent_v1',?,?,'expected',
+                '{}',1,1,'prepared','child-book','child-digest','created','same-clock')""",first_key)
+        assert snapshot()[1] == child_baseline
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET state='complete' WHERE operation_id='temporary-parent'")
+        assert snapshot()[1] == child_baseline
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET inputs_json='{\"finalized\":true}',diagnostics_json='{\"complete\":true}' WHERE operation_id='temporary-parent'")
+        assert snapshot()[1] == child_baseline
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET after_digest='changed-child' WHERE operation_id='temporary-child'")
+        assert {day for day, proof in snapshot()[1].items() if proof != child_baseline[day]} == affected
         return {"days": len(bindings), "unique_groups": 2, "stats": measured,
-                "fresh_consumed_mutation_delete_redate": True, "retention_inputs": True}
+                "fresh_consumed_mutation_delete_redate": True, "retention_inputs": True,
+                "metadata_parent_excluded_real_child_strict": True}
 
 
 def check_dated_slice_progress(root):

@@ -125,6 +125,10 @@ builtins.__import__ = without_openpyxl
 
 from apps.production_apply_adapters import ADAPTERS
 expected = {
+    "current_fbo_supply_close_v1",
+    "fbs_scoped_lifecycle_recovery_v1",
+    "warehouse_reviewed_sync_v1",
+    "historical_receipt_completion_v1",
     "supplier_shared_customs_allocation_v1",
     "finance_absence_publication_v1", "fbs_quantity_publication_v1",
     "wb_autoanswers_recovery_v1",

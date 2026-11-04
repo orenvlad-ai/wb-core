@@ -159,3 +159,19 @@ identity. Blind resend запрещён; после deadline неопредел�
 service недоступен, durable latch и transport journal остаются до его штатного
 возврата; правило двух часов всё равно проверяется заново. Окно с выключенным
 owner, пауза без пропущенного слота и обычное чтение не создают новую потребность.
+
+
+Узкое продолжение formula-resume после восстановленного таймера также допускает
+только явно перечисленные Complaints Due Tick, Health Candidate и Health
+Confirmation из проверенного installed base `678f6130fc6d3f86ee9a29562f29dc5284f468e3`.
+Каждый переход static/failed → static/inactive требует самостоятельного точного
+native proof: исходный enabled/active таймер, canonical argv/source hashes,
+успешная terminal identity и ровно четыре journal-события с guarded
+`skipped_maintenance`. Для health отсутствие terminal health receipt отдельно
+подтверждает, что выполнение не дошло до эффектов; общий catch не скрывает
+запущенную работу. Несколько доказательств сохраняются вместе и повторно
+проверяются на смену ранней invocation. Closure Retry не включён в исключение.
+Используется тот же original operation/window/plan/baseline и полный изолированный
+candidate с четырьмя разрешёнными путями из runbook formula-resume; installed app,
+policy, baseline и business stores не переписываются. Это восстановление прежних
+таймеров под прежним barrier, не допуск отдельного цикла или произвольного writer.

@@ -228,7 +228,7 @@ def consume_historical_history_ack(proof, runtime_dir, receipt_digest, dates):
     owner._check()
     if (owner.pid!=os.getpid() or owner.thread is not threading.current_thread() or owner._process is not None
             or owner._historical_proof is not proof or owner.runtime.runtime_dir.resolve()!=Path(runtime_dir).resolve()
-            or require_heavy_owner(runtime_dir).operation!='cycle' or proof.receipt_digest!=receipt_digest
+            or require_heavy_owner(runtime_dir).operation not in {'cycle','historical_receipt_completion'} or proof.receipt_digest!=receipt_digest
             or proof.dates!=tuple(dates) or source_stamp(runtime_dir,owner.runtime.db_path)!=proof.source_stamp
             or read_json(Path(owner.config.candidate_root)/'history'/'CURRENT.json',limit=4096)!=proof.current):
         raise HistoryDelegationError('historical_history_ack_owner_or_target_changed')

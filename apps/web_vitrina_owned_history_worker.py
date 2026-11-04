@@ -31,7 +31,13 @@ def _bound(cap):
         if proof != lock_proof(item["fd"], proof["path"], mode=proof["mode"], parent_pid=cap["parent_pid"]):
             raise HistoryDelegationError("history_worker_lock_changed")
     job = cap["cycle_owner"]
-    if job is not None:
+    if cap.get("owner_kind") == "historical_receipt_completion":
+        from packages.application.historical_receipt_completion import check_live_owner
+        from packages.application.web_vitrina_snapshot_admission import api_jobs_admission
+        check_live_owner(runtime, job, parent_pid=cap["parent_pid"])
+        if api_jobs_admission(runtime) != "idle":
+            raise HistoryDelegationError("history_worker_standalone_admission_changed")
+    elif job is not None:
         if read_json(runtime / "finished-snapshot-api-jobs" / ("job-" + job["job_id"] + ".json"), limit=4096) != job:
             raise HistoryDelegationError("history_worker_job_changed")
     else:
@@ -82,7 +88,7 @@ def execute(cap):
         from packages.application.fbs_accounting_historical_history import HistoricalReceipt
         binding=cap['historical_receipt']
         historical=HistoricalReceipt(runtime,binding['operation_id'],binding['attempt_id']).freeze_scope(now)
-        if cap.get('owner_kind')!='cycle' or historical.binding()!=binding:
+        if cap.get('owner_kind') not in {'cycle','historical_receipt_completion'} or historical.binding()!=binding:
             raise HistoryDelegationError('historical_history_worker_binding_changed')
         historical.validate_sources_readonly(now=now)
         old_dates={day for day in binding['dates'] if day < (datetime.fromisoformat(today)-timedelta(days=1)).date().isoformat()}
@@ -111,7 +117,7 @@ def execute(cap):
         closed_dates=set((cap.get('closed_receipt') or {}).get('dates',[]))
         if backfill_dates!=sorted(selected|closed_dates) or len(closed_dates)>2:
             raise HistoryDelegationError('supplier_history_worker_scope_changed')
-    if cap.get("owner_kind", "cycle") == "cycle" and ((historical is None and policy is None and supplier is None and len(backfill_dates) > 2)
+    if cap.get("owner_kind", "cycle") in {"cycle","historical_receipt_completion"} and ((historical is None and policy is None and supplier is None and len(backfill_dates) > 2)
             or source_dates != dates_between(min((first, *backfill_dates)), today)):
         raise HistoryDelegationError("history_worker_cycle_date_scope_invalid")
 

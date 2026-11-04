@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from apps.fbs_document_cost_smoke import capture, overhead, china
+from apps import current_fbo_supply_cost_source_smoke as current_fixture
 from packages.application.fbs_snapshot_cost import initialize_candidate, evaluate_candidate
 from packages.application import fbs_overhead_presentation as display
 
@@ -73,6 +74,71 @@ class OverheadViewTests(unittest.TestCase):
         self.assertEqual(a['allocation_status'],'unavailable')
         a=self.view().resolve({**self.summary,'facility_id':'B'},day=self.day,document_id='fee1')
         self.assertEqual(a['allocation_status'],'unavailable')
+
+    def test_actual_current_dispatch_allocation_without_pool_subtotal_is_read_only(self):
+        native = current_fixture.CurrentCostTests()
+        native.setUp()
+        state = native.evaluate()
+        allocation = state['periods'][self.day]['document_valuation']['allocations'][0]
+        self.assertEqual(allocation['policy'], 'native_posted_current_fbo_allocation_v1')
+        self.assertIn('dispatch_boundary', allocation)
+        self.assertNotIn('pool_amounts_kopecks', allocation)
+        self.assertEqual(allocation['total_kopecks'], 23412205)
+        self.book['state'] = state
+        before = deepcopy(self.book)
+        result = self.view().resolve({'facility_id':'A','scope':'FBO','amount_rub':'234122.05'},
+                                     day=self.day, document_id='current-fee')
+        self.assertEqual(result['allocation_status'], 'published', result)
+        self.assertEqual(result['pool_allocations_rub'], {'FBO':'234122.05'})
+        self.assertEqual(sum(Decimal(line['expense_rub']) for line in result['lines']), Decimal('234122.05'))
+        self.assertEqual(self.book, before)
+
+    def test_both_pool_subtotals_derive_without_changing_existing_format(self):
+        document = overhead('both-fee', amount='1000', scope='both')
+        self.book['state'] = evaluate_candidate(self.initial, capture(self.day, [document], rows=self.basis))
+        summary = {**self.summary, 'scope':'both'}
+        expected = self.view().resolve(summary, day=self.day, document_id='both-fee')
+        self.assertEqual(expected['allocation_status'], 'published', expected)
+        self.assertEqual(expected['pool_allocations_rub'], {'FBO':'200', 'FBS':'800'})
+        allocation = self.book['state']['periods'][self.day]['document_valuation']['allocations'][0]
+        del allocation['pool_amounts_kopecks']
+        before = deepcopy(self.book)
+        self.assertEqual(self.view().resolve(summary, day=self.day, document_id='both-fee'), expected)
+        self.assertEqual(self.book, before)
+
+    def test_explicit_pool_subtotal_mismatch_is_unavailable(self):
+        allocation = self.book['state']['periods'][self.day]['document_valuation']['allocations'][0]
+        allocation['pool_amounts_kopecks'] = {'FBS':99999}
+        result = self.view().resolve(self.summary, day=self.day, document_id='fee1')
+        self.assertEqual(result['allocation_status'], 'unavailable')
+        self.assertEqual(result['allocation_reason'], 'accounting_allocation_pool_money_mismatch')
+
+    def test_explicit_zero_pool_subtotal_is_preserved_but_other_scope_is_rejected(self):
+        allocation = self.book['state']['periods'][self.day]['document_valuation']['allocations'][0]
+        allocation['pool_amounts_kopecks']['FBO'] = 0
+        result = self.view().resolve({**self.summary, 'scope':'both'}, day=self.day, document_id='fee1')
+        self.assertEqual(result['allocation_status'], 'published', result)
+        self.assertEqual(result['pool_allocations_rub'], {'FBS':'1000', 'FBO':'0'})
+        result = self.view().resolve(self.summary, day=self.day, document_id='fee1')
+        self.assertEqual(result['allocation_reason'], 'accounting_allocation_pool_money_mismatch')
+
+    def test_missing_subtotal_preserves_document_money_and_scope_guards(self):
+        original = deepcopy(self.book)
+        cases = (
+            ('document_fingerprint', 'changed', 'accounting_allocation_document_mismatch'),
+            ('total_kopecks', 99999, 'accounting_allocation_money_mismatch'),
+            ('amounts_kopecks', {'B:FBS:1':100000}, 'accounting_allocation_scope_mismatch'),
+            ('amounts_kopecks', {'A:FBO:1':100000}, 'accounting_allocation_scope_mismatch'),
+        )
+        for field, value, reason in cases:
+            with self.subTest(field=field, value=value):
+                self.book = deepcopy(original)
+                allocation = self.book['state']['periods'][self.day]['document_valuation']['allocations'][0]
+                del allocation['pool_amounts_kopecks']
+                allocation[field] = value
+                result = self.view().resolve(self.summary, day=self.day, document_id='fee1')
+                self.assertEqual(result['allocation_status'], 'unavailable', result)
+                self.assertEqual(result['allocation_reason'], reason)
 
 
 if __name__ == '__main__':

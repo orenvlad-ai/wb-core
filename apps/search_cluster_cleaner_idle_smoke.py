@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from apps import search_cluster_cleaner_self_service_worker as worker
+from packages.application.business_data_write_barrier import acquire_barrier, confirm_barrier_hold, release_barrier, barrier_status
 
 
 class Store:
@@ -66,6 +67,90 @@ def next_due_floor_regressions():
                         assert wake.changed()
             finally:
                 store.connection.close()
+
+
+def maintenance_read_quiescence_regressions():
+    plan='sha256:'+'a'*64
+    window='cleaner-read-quiescence'
+    def acquire(runtime):
+        acquire_barrier(runtime,window_id=window,window_kind='maintenance_pause',plan_fingerprint=plan,
+                        approval_reference='fixture-approved',actor='fixture',reason='local read quiescence test')
+    for ready in (False,True):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);runtime=root/'state';runtime.mkdir();admission=root/'admission';admission.mkdir()
+            store=Store();calls=[];reads=[];polls=[]
+            before='\n'.join(store.connection.iterdump())
+            original_read=store.read
+            @contextmanager
+            def read():
+                assert not barrier_status(runtime)['active'],'queue read while maintenance held'
+                reads.append('store')
+                with original_read() as connection:yield connection
+            store.read=read
+            cleaner=SimpleNamespace(store=store,key='seller:scope')
+            def observed(name,result=None):
+                def call():
+                    assert not barrier_status(runtime)['active'],name
+                    calls.append(name);return result
+                return call
+            child=SimpleNamespace(pending_jobs=observed('jobs',[]),
+                release_terminal_unsent_scans=observed('release'),tick=observed('manual'))
+            batch=SimpleNamespace(pending_batches=observed('batches',[]),
+                waiting_only=observed('waiting',False),tick=observed('batch'))
+            daily=SimpleNamespace(tick=observed('daily'),reconcile_finished=observed('reconcile'),
+                observe_deployment_blocked=observed('armed'))
+            acquire(runtime)
+            def sleep(_seconds):
+                polls.append(True)
+                if len(polls)<=2:
+                    health=json.loads((admission/'self-service-worker-health.json').read_text())
+                    assert health['state']==('maintenance' if ready else 'armed'),health
+                    assert health['reason']=='MaintenanceAdmissionBlocked',health
+                    assert not calls and not reads,(calls,reads)
+                    assert '\n'.join(store.connection.iterdump())==before
+                    if len(polls)==1:
+                        confirm_barrier_hold(runtime,window_id=window,plan_fingerprint=plan,
+                            maintenance_state=dict(schema_version='business_data_maintenance_pause_v1',phase='held',
+                                                   hold_readback=dict(quiet=True)))
+                    else:
+                        release_barrier(runtime,window_id=window,plan_fingerprint=plan,actor='fixture',
+                            reason='local exact release',restore_readback=dict(status='restored',exact_prior_state_restored=True))
+                else:raise KeyboardInterrupt
+            try:
+                with (patch.object(worker,'ROOT',root),patch.object(worker,'_load_env_file'),
+                      patch.object(worker,'deployment_ready',return_value=ready),
+                      patch.object(worker.CleanerWeb,'from_env',return_value=SimpleNamespace(require_service=lambda:cleaner,generation='current')),
+                      patch.object(worker,'LocalStageEAdapter'),patch.object(worker,'ManualCleanerCoordinator',return_value=child),
+                      patch.object(worker,'BatchCleanerCoordinator',return_value=batch),
+                      patch.object(worker,'DailyCleanerScheduler',return_value=daily),
+                      patch.object(worker.time,'sleep',side_effect=sleep)):
+                    try:worker.run(runtime_dir=runtime,env_file=root/'env',admission_dir=admission)
+                    except KeyboardInterrupt:pass
+                assert calls and reads,(calls,reads)
+                assert ('daily' if ready else 'armed') in calls,calls
+                assert '\n'.join(store.connection.iterdump())==before
+            finally:store.connection.close()
+
+    # The early metadata check does not replace real admission: activate the
+    # barrier after that check and prove the ready body is still never entered.
+    with tempfile.TemporaryDirectory() as raw:
+        root=Path(raw);runtime=root/'state';runtime.mkdir();admission=root/'admission';admission.mkdir()
+        cleaner=SimpleNamespace(key='seller:scope')
+        def raced_sequence():acquire(runtime);return 0
+        wake=SimpleNamespace(event_sequence=raced_sequence,environment_version=lambda:())
+        with (patch.object(worker,'_load_env_file'),patch.object(worker,'deployment_ready',return_value=True),
+              patch.object(worker.CleanerWeb,'from_env',return_value=SimpleNamespace(require_service=lambda:cleaner,generation='current')),
+              patch.object(worker,'LocalStageEAdapter'),patch.object(worker,'ManualCleanerCoordinator') as coordinator,
+              patch.object(worker,'BatchCleanerCoordinator') as batches,patch.object(worker,'DailyCleanerScheduler'),
+              patch.object(worker,'IdleWake',return_value=wake),patch.object(worker,'ready_cycle') as body,
+              patch.object(worker.time,'sleep',side_effect=KeyboardInterrupt)):
+            batches.return_value.waiting_only.return_value=False
+            try:worker.run(runtime_dir=runtime,env_file=root/'env',admission_dir=admission)
+            except KeyboardInterrupt:pass
+            body.assert_not_called()
+            coordinator.return_value.release_terminal_unsent_scans.assert_not_called()
+            health=json.loads((admission/'self-service-worker-health.json').read_text())
+            assert health['state']=='maintenance' and health['reason']=='MaintenanceAdmissionBlocked',health
 
 
 def main():
@@ -141,6 +226,7 @@ def main():
         assert not worker.ready_cycle(child,batch,daily)
         store.connection.close()
     next_due_floor_regressions()
+    maintenance_read_quiescence_regressions()
     print('search cluster cleaner idle smoke: ok')
 
 

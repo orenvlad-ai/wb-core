@@ -1,6 +1,11 @@
 {
   "schema": "wb-core.check-map/v1",
   "command_dependencies": {
+    "fbs_overhead_presentation_imports": {
+      "scripts": ["apps/fbs_overhead_presentation_smoke.py"],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "historical_fbo_documents": {"scripts": ["apps/fbs_historical_fbo_action_smoke.py", "apps/fbs_historical_fbo_publication_smoke.py", "apps/fbs_historical_fbo_ready_smoke.py", "apps/sheet_vitrina_v1_fulfillment_services_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"]},
     "fbs_native_attachment_imports": {"scripts": ["apps/fbs_historical_fbo_native_smoke.py", "apps/fbs_temporary_allocation_action_smoke.py", "apps/fbs_temporary_allocation_repair_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "operator_supplier_bounded_imports": {"scripts": ["apps/historical_dated_inputs_smoke.py", "apps/operator_supplier_release_scope_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]},
@@ -168,6 +173,49 @@
     }
   },
   "groups": {
+    "fbs_overhead_presentation": {
+      "patterns": ["packages/application/fbs_overhead_presentation.py", "apps/fbs_overhead_presentation_smoke.py"],
+      "commands": [["python3", "apps/fbs_overhead_presentation_smoke.py"]],
+      "pip": []
+    },
+    "current_fbo_supply_close": {
+      "patterns": ["packages/application/current_fbo_supply_close.py", "packages/application/current_fbo_supply_close_apply.py", "packages/application/current_fbo_supply_cost_source.py", "apps/current_fbo_supply_close_smoke.py", "apps/current_fbo_supply_cost_source_smoke.py"],
+      "commands": [["python3", "apps/current_fbo_supply_close_smoke.py"], ["python3", "apps/current_fbo_supply_cost_source_smoke.py"]],
+      "pip": []
+    },
+    "fbs_scoped_lifecycle_production": {
+        "patterns": [
+          "packages/application/warehouse_reviewed_sync_apply.py",
+          "apps/warehouse_reviewed_sync_apply_smoke.py",
+          "packages/application/fbs_scoped_lifecycle_production.py",
+          "packages/application/fbs_historical_fbo_scoped_recovery.py",
+          "packages/application/fbs_historical_fbo_dependencies.py",
+          "apps/fbs_scoped_lifecycle_production_smoke.py",
+          "apps/fbs_historical_fbo_scoped_recovery_smoke.py",
+          "apps/fbs_historical_fbo_dependencies_smoke.py",
+          "apps/warehouse_ready_binding_cache_smoke.py"
+        ],
+        "commands": [
+          ["python3", "apps/warehouse_reviewed_sync_apply_smoke.py"],
+          [
+            "python3",
+            "apps/fbs_scoped_lifecycle_production_smoke.py"
+          ],
+          [
+            "python3",
+            "apps/fbs_historical_fbo_scoped_recovery_smoke.py"
+          ],
+          [
+            "python3",
+            "apps/fbs_historical_fbo_dependencies_smoke.py"
+          ],
+          [
+            "python3",
+            "apps/warehouse_ready_binding_cache_smoke.py"
+          ]
+        ],
+        "pip": []
+      },
     "supplier_independent_view": {
       "patterns": ["apps/supplier_view*.py", "packages/application/supplier_view.py", "packages/adapters/supplier_view_http.py", "packages/adapters/templates/sheet_vitrina_v1_supplier.html", "artifacts/registry_upload_http_entrypoint/systemd/wb-core-supplier-view.service"],
       "commands": [["python3", "apps/supplier_view_smoke.py"], ["python3", "apps/supplier_view_ui_smoke.py"]],
@@ -416,6 +464,7 @@
         ["python3", "apps/search_cluster_cleaner_sidecar_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_release_probe_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_daily_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_idle_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_browser_smoke.py", "--output", "/tmp/wbc-cleaner-browser-ci"]
       ]
     },
@@ -709,12 +758,15 @@
         "packages/application/registry_upload_db_backed_runtime.py",
         "packages/application/registry_upload_http_entrypoint.py",
         "packages/application/fbs_accounting_runtime.py",
-        "apps/web_vitrina_management_history.py"
+        "apps/web_vitrina_management_history.py",
+        "packages/application/management_accounting_reconciliation.py",
+        "apps/management_accounting_reconciliation_smoke.py"
       ],
       "commands": [
         ["python3", "apps/web_vitrina_catalog_economics_smoke.py"],
         ["python3", "apps/web_vitrina_daily_pool_smoke.py"],
-        ["python3", "apps/web_vitrina_management_history_smoke.py"]
+        ["python3", "apps/web_vitrina_management_history_smoke.py"],
+        ["python3", "apps/management_accounting_reconciliation_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5"]
     },
@@ -1272,6 +1324,18 @@
       ],
       "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     },
+    "historical_publication_retirement": {
+      "patterns": [
+        "packages/application/historical_publication_retirement.py",
+        "packages/application/fbs_accounting_apply.py",
+        "packages/application/fbs_accounting_historical_history.py",
+        "packages/application/fbs_temporary_allocation_action.py",
+        "packages/application/fbs_historical_fbo_action.py",
+        "apps/historical_publication_retirement_smoke.py"
+      ],
+      "commands": [["python3", "apps/historical_publication_retirement_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "warehouse": {
       "patterns": [
         "apps/*warehouse*.py",
@@ -1287,6 +1351,8 @@
     },
     "web_vitrina_history_activation": {
       "patterns": [
+        "packages/application/historical_publication_retirement.py",
+        "packages/application/historical_receipt_completion.py",
         "packages/application/web_vitrina_official_fbs.py",
         "packages/application/official_fbs_stock_read.py",
         "packages/application/official_wb_physical_read.py",
@@ -1311,6 +1377,7 @@
         "packages/application/inventory_cost_blend.py",
         "packages/application/vitrina_economics.py",
         "packages/application/web_vitrina_management_history.py",
+        "packages/application/vitrina_last_known_cost.py",
         "packages/application/ff_pool_fbs_lifecycle.py",
         "packages/application/sheet_vitrina_v1_buyout_percent.py",
         "packages/application/sheet_vitrina_v1_breakglass_last_good.py",

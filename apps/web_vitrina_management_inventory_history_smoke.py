@@ -250,6 +250,35 @@ class ManagementInventoryTests(unittest.TestCase):
             conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?', (json.dumps(row), DAY))
         self.assertNotIn(DAY, self.read()['dates'])
 
+    def test_metadata_parent_never_owns_or_certifies_ready_even_at_capture_clock(self):
+        baseline=self.read()['dates'][DAY]
+        actual_owner=baseline['accepted_publication']['publication_operation_id']
+        parent='000-temporary-effect-parent'
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn,conn:
+            raw=conn.execute('SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?',
+                (self.state.bundle_version,DAY)).fetchone()[0]
+            record_intent(conn,operation_id=parent,attempt_id='1',kind='fbs_temporary_allocation_effect_intent_v1',
+                expected=ExpectedReady(self.state.bundle_version,DAY,None),inputs={'recipe':'metadata-only'},
+                expected_book=self.version,book_required=True,ready_required=True,created_at=CAPTURED)
+            complete_publication(conn,operation_id=parent,attempt_id='1',book_version=self.version,
+                after_digest=digest(raw),finished_at=CAPTURED)
+        # Same bundle/date/book/capture clock and an earlier sorting ID cannot
+        # replace the actual child publisher with a metadata-only parent.
+        self.assertEqual(self.read()['dates'][DAY],baseline)
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn,conn:
+            conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET state='prepared' WHERE operation_id=?",(actual_owner,))
+        self.assertNotIn(DAY,self.read()['dates'])
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn,conn:
+            conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET state='complete' WHERE operation_id=?",(actual_owner,))
+            changed=json.loads(raw);changed['metadata']['unreceipted_structural_change']=True
+            changed_raw=json.dumps(changed)
+            conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE bundle_version=? AND as_of_date=?',
+                (changed_raw,self.state.bundle_version,DAY))
+            # The real child still certifies the original bytes; the parent
+            # must not certify different current Ready bytes on its behalf.
+            conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET after_digest=? WHERE operation_id=?',(digest(changed_raw),parent))
+        self.assertNotIn(DAY,self.read()['dates'])
+
     def test_5_missing_zero_partial_are_distinct(self):
         self.assertEqual(self.read()['dates'][DAY]['scopes'][f'SKU:{self.nms[1]}']['wb']['state'], 'exact_zero')
         book = deepcopy(self.book)

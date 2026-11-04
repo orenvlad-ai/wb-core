@@ -26,6 +26,7 @@ from packages.application.search_cluster_cleaner_self_service import LocalStageE
 from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator
 from packages.application.search_cluster_cleaner_daily import DailyCleanerScheduler
 from packages.application.search_cluster_cleaner_daily import ZONE
+from packages.application.business_data_procedure_admission import business_write_is_blocked
 
 
 def deployment_ready() -> bool:
@@ -166,6 +167,15 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
         idle=False
         while True:
             try:
+                # Queue readers can retain the operational SQLite read lock.
+                # During maintenance poll only the native barrier/deploy files;
+                # the inner admission still fences a pause racing this check.
+                if business_write_is_blocked(runtime_dir):
+                    report_health(admission_dir,'maintenance' if deployment_ready() else 'armed',
+                                  'MaintenanceAdmissionBlocked')
+                    idle=False
+                    time.sleep(poll_seconds)
+                    continue
                 if idle and not wake.changed():
                     report_health(admission_dir,'ready' if deployment_ready() else 'armed')
                     time.sleep(poll_seconds)

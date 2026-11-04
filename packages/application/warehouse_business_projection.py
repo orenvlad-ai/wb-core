@@ -9,6 +9,8 @@ unrelated Vitrina metrics are never written here.
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -16,7 +18,162 @@ import hashlib
 import json
 import sqlite3
 import time
+import uuid
 from typing import Any, Callable, Iterable, Mapping, Sequence
+
+_READY_BINDING_CACHE = ContextVar("warehouse_ready_binding_cache", default=None)
+
+
+def _normalized_trigger(sql):
+    return ''.join(str(sql).lower().split()).replace('ifnotexists', '')
+
+
+def _ready_revision_authority(conn):
+    """Require the existing source owner's complete Ready revision triggers."""
+    table = "sheet_vitrina_v1_ready_snapshots"
+    expected = {}
+    for event in ("INSERT", "UPDATE", "DELETE"):
+        row = "old" if event == "DELETE" else "new"
+        when = " WHEN " + " OR ".join(f"old.{column} IS NOT new.{column}" for column in (
+            "bundle_version", "as_of_date", "plan_json", "snapshot_id", "plan_version", "refreshed_at", "activated_at")) if event == "UPDATE" else ""
+        name = "ready_history_" + event.lower()
+        expected[name] = (f"CREATE TRIGGER {name} AFTER {event} ON {table}{when} BEGIN "
+            f"INSERT INTO sheet_vitrina_v1_ready_revisions VALUES({row}.bundle_version,{row}.as_of_date,1) "
+            "ON CONFLICT(bundle_version,as_of_date) DO UPDATE SET revision=revision+1; END")
+    actual = {r[0]: r[1] for r in conn.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('ready_history_insert','ready_history_update','ready_history_delete')")}
+    return all(name in actual and _normalized_trigger(actual[name]) == _normalized_trigger(sql)
+        for name, sql in expected.items())
+
+
+class _ReadyBindingCache:
+    def __init__(self, conn):
+        self.conn = conn
+        self.serial = 0
+        self.key = None
+        self.bindings = None
+        self.disabled = False
+        self.names = {}
+        self.function = "ready_binding_invalidate_" + uuid.uuid4().hex
+        self.stats = dict(ready_loads=0, ready_plan_parses=0, cache_hits=0,
+            invalidations=0, bypasses=0, disabled_reason="")
+
+    def invalidate(self):
+        # Python state is intentionally not transactional: a Ready mutation
+        # followed by ROLLBACK TO cannot reuse the old revision counter value.
+        self.serial += 1
+        return 0
+
+    def disable(self, reason):
+        self.disabled = True
+        self.key = self.bindings = None
+        self.stats["disabled_reason"] = reason
+
+    def install(self):
+        if self.conn.execute("PRAGMA query_only").fetchone()[0] or not _ready_revision_authority(self.conn):
+            self.disable("ready_revision_authority_unavailable")
+            return
+        self.conn.create_function(self.function, 0, self.invalidate)
+        for event in ("INSERT", "UPDATE", "DELETE"):
+            name = self.function + "_" + event.lower()
+            sql = (f'CREATE TEMP TRIGGER "{name}" AFTER {event} ON main."sheet_vitrina_v1_ready_snapshots" '
+                f'BEGIN SELECT "{self.function}"(); END')
+            self.conn.execute(sql)
+            self.names[name] = sql
+
+    def load(self):
+        if self.disabled or not self.conn.in_transaction:
+            self.disable(self.stats["disabled_reason"] or "owner_transaction_ended")
+            return None
+        actual = {r[0]: r[1] for r in self.conn.execute("SELECT name,sql FROM sqlite_temp_master WHERE type='trigger'")}
+        # Full rollback, including rollback to a savepoint preceding this
+        # context, removes its TEMP triggers. Never revive that cache context.
+        if (not self.names or any(name not in actual or _normalized_trigger(actual[name]).replace('temptrigger','trigger') != _normalized_trigger(sql).replace('temptrigger','trigger') for name, sql in self.names.items())
+                or not _ready_revision_authority(self.conn)):
+            self.disable("ready_revision_authority_changed")
+            return None
+        from packages.application.ready_publication import capture_history
+        try:
+            revisions = capture_history(self.conn)
+        except sqlite3.OperationalError:
+            self.disable("ready_revision_authority_unavailable")
+            return None
+        key = (self.serial, self.conn.execute("PRAGMA data_version").fetchone()[0],
+            self.conn.execute("PRAGMA schema_version").fetchone()[0],
+            self.conn.execute("PRAGMA temp.schema_version").fetchone()[0], _fingerprint(revisions))
+        if self.bindings is not None and key == self.key:
+            self.stats["cache_hits"] += 1
+            return self.bindings
+        if self.bindings is not None:
+            self.stats["invalidations"] += 1
+            self.disable("ready_inputs_changed")
+            return None
+        self.bindings, count = _load_ready_binding_maps(self.conn)
+        self.key = key
+        self.stats["ready_loads"] += 1
+        self.stats["ready_plan_parses"] += count
+        return self.bindings
+
+    def close(self):
+        self.disabled = True
+        self.key = self.bindings = None
+        for name in self.names:
+            try:
+                self.conn.execute(f'DROP TRIGGER IF EXISTS temp."{name}"')
+            except sqlite3.OperationalError:
+                pass
+        if self.names:
+            self.conn.create_function(self.function, 0, None)
+
+
+@contextmanager
+def ready_binding_cache(conn):
+    """Cache only immutable Ready bindings in the caller's transaction.
+
+    The caller owns transaction boundaries and must exit this context before
+    COMMIT/ROLLBACK. No savepoint stack, domain data, projection result, or
+    reconciliation counts are changed/cached here. Source revision authority,
+    connection identity, external data version and non-transactional TEMP
+    invalidation protect reuse, including nested savepoint rollback/ABA.
+    Missing authority disables caching and retains the ordinary exact reader.
+    """
+    if not conn.in_transaction:
+        raise ValueError("ready_binding_cache_owner_transaction_required")
+    cache = _ReadyBindingCache(conn)
+    token = _READY_BINDING_CACHE.set(cache)
+    try:
+        cache.install()
+        yield cache.stats
+    finally:
+        _READY_BINDING_CACHE.reset(token)
+        cache.close()
+
+
+def _load_ready_binding_maps(conn, ready_candidate=None):
+    exact, fallback = {}, {}
+    ready_rows = [dict(row) for row in conn.execute(
+        "SELECT bundle_version,as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots "
+        "ORDER BY as_of_date DESC,bundle_version DESC").fetchall()]
+    if ready_candidate is not None:
+        key = (ready_candidate["bundle_version"], ready_candidate["as_of_date"])
+        ready_rows = [row for row in ready_rows if (row["bundle_version"], row["as_of_date"]) != key]
+        ready_rows.append(dict(ready_candidate))
+        ready_rows.sort(key=lambda row: (row["as_of_date"], row["bundle_version"]), reverse=True)
+    for row in ready_rows:
+        metadata = dict(_loads(row["plan_json"], {}).get("metadata") or {})
+        coverage = metadata.get("warehouse_history_coverage") or {}
+        if not isinstance(coverage, Mapping):
+            continue
+        for selected_date, raw_entry in coverage.items():
+            selected_date = str(selected_date)
+            entry = raw_entry or {}
+            if not isinstance(entry, Mapping):
+                continue
+            version_id = str(entry.get("functional_version_id") or "")
+            if version_id:
+                fallback.setdefault(selected_date, version_id)
+                if str(row["as_of_date"]) == selected_date:
+                    exact.setdefault(selected_date, version_id)
+    return (exact, fallback), len(ready_rows)
 
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
@@ -3397,35 +3554,13 @@ def reconcile_warehouse_business_projection(
     ready_exact_bindings: dict[str, str] = {}
     ready_fallback_bindings: dict[str, str] = {}
     if "sheet_vitrina_v1_ready_snapshots" in tables and normalized_dates:
-        selected_dates = set(normalized_dates)
-        ready_rows = [dict(row) for row in conn.execute(
-            "SELECT bundle_version,as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots "
-            "ORDER BY as_of_date DESC,bundle_version DESC"
-        ).fetchall()]
-        if ready_candidate is not None:
-            key = (ready_candidate["bundle_version"], ready_candidate["as_of_date"])
-            ready_rows = [row for row in ready_rows if (row["bundle_version"], row["as_of_date"]) != key]
-            ready_rows.append(dict(ready_candidate))
-            ready_rows.sort(key=lambda row: (row["as_of_date"], row["bundle_version"]), reverse=True)
-        for ready_row in ready_rows:
-            ready_date = str(ready_row["as_of_date"])
-            metadata = dict(_loads(ready_row["plan_json"], {}).get("metadata") or {})
-            coverage = metadata.get("warehouse_history_coverage") or {}
-            if not isinstance(coverage, Mapping):
-                continue
-            for selected_date, raw_entry in coverage.items():
-                selected_date = str(selected_date)
-                if selected_date not in selected_dates:
-                    continue
-                entry = raw_entry or {}
-                if not isinstance(entry, Mapping):
-                    continue
-                version_id = str(entry.get("functional_version_id") or "")
-                if not version_id:
-                    continue
-                ready_fallback_bindings.setdefault(selected_date, version_id)
-                if ready_date == selected_date:
-                    ready_exact_bindings.setdefault(selected_date, version_id)
+        cache = _READY_BINDING_CACHE.get()
+        maps = cache.load() if cache is not None and cache.conn is conn and ready_candidate is None else None
+        if maps is None:
+            if cache is not None:
+                cache.stats["bypasses"] += 1
+            maps, _ = _load_ready_binding_maps(conn, ready_candidate)
+        ready_exact_bindings, ready_fallback_bindings = maps
 
     version_rows: Sequence[sqlite3.Row] = []
     if normalized_dates:

@@ -23,9 +23,12 @@ def target(request):
 class FbsAccountingAdapter:
     def preview(self, request, operation_id):
         action=request.get('action','activate')
-        if action not in {'activate','pause','restore_historical_fbo','recover_historical_fbo','restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
+        if action not in {'activate','pause','restore_historical_fbo','recover_historical_fbo','restore_temporary_fbs_allocation','recover_temporary_fbs_allocation','retire_historical_publication_unconfirmed'}:
             raise ValueError('fbs_accounting_unknown_action')
         root = target(request)
+        if action == 'retire_historical_publication_unconfirmed':
+            from packages.application.historical_publication_retirement import HistoricalPublicationRetirementAction
+            return HistoricalPublicationRetirementAction().preview(request,operation_id,root=root)
         if action in {'restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
             from packages.application.fbs_temporary_allocation_action import TemporaryAllocationAction
             return TemporaryAllocationAction().preview(request,operation_id,root=root)
@@ -62,9 +65,12 @@ class FbsAccountingAdapter:
 
     def apply(self, request, operation_id, preview):
         action=request.get('action','activate')
-        if action not in {'activate','pause','restore_historical_fbo','recover_historical_fbo','restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
+        if action not in {'activate','pause','restore_historical_fbo','recover_historical_fbo','restore_temporary_fbs_allocation','recover_temporary_fbs_allocation','retire_historical_publication_unconfirmed'}:
             raise ValueError('fbs_accounting_unknown_action')
         root = target(request)
+        if action == 'retire_historical_publication_unconfirmed':
+            from packages.application.historical_publication_retirement import HistoricalPublicationRetirementAction
+            return HistoricalPublicationRetirementAction().apply(request,operation_id,preview,root=root)
         if action in {'restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
             from packages.application.fbs_temporary_allocation_action import TemporaryAllocationAction
             return TemporaryAllocationAction().apply(request,operation_id,preview,root=root)
@@ -79,9 +85,12 @@ class FbsAccountingAdapter:
 
     def readback(self, request, operation_id):
         action=request.get('action','activate')
-        if action not in {'activate','pause','restore_historical_fbo','recover_historical_fbo','restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
+        if action not in {'activate','pause','restore_historical_fbo','recover_historical_fbo','restore_temporary_fbs_allocation','recover_temporary_fbs_allocation','retire_historical_publication_unconfirmed'}:
             raise ValueError('fbs_accounting_unknown_action')
         root = target(request)
+        if action == 'retire_historical_publication_unconfirmed':
+            from packages.application.historical_publication_retirement import HistoricalPublicationRetirementAction
+            return HistoricalPublicationRetirementAction().readback(request,operation_id,root=root)
         if action in {'restore_temporary_fbs_allocation','recover_temporary_fbs_allocation'}:
             from packages.application.fbs_temporary_allocation_action import TemporaryAllocationAction
             return TemporaryAllocationAction().readback(request,operation_id,root=root)
