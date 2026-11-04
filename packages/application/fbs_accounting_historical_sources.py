@@ -372,6 +372,12 @@ def capture_confirmed_cohort(conn, *, db_path, book, now):
         auxiliary.extend(v["document_id"] for v in posted["documents"] if v["document_id"] != identity)
         confirmations[request_id] = dict(source_json=confirmed[0], source_digest=confirmed[1], actor=confirmed[2], accepted_at=confirmed[3])
     current = sorted(i for i, d in new.items() if d["business_date"] == capture["business_date"])
-    capture = augment_native_requests(conn, capture, document_ids=[*receipts, *auxiliary, *current])
+    # Request/posted-document authority belongs to the selected late-receipt
+    # contour only. Ordinary current capture also contains independently owned
+    # typed sources (for example current FBO dispatch receipts), which have no
+    # ff_pool_documents row. Keep those sources intact for ordinary accounting
+    # when no confirmed late receipt actually selects historical publication.
+    if receipts:
+        capture = augment_native_requests(conn, capture, document_ids=[*receipts, *auxiliary, *current])
     return {"capture": capture, "receipt_document_ids": receipts, "auxiliary_document_ids": sorted(auxiliary),
             "current_document_ids": current, "confirmed_requests": confirmations}

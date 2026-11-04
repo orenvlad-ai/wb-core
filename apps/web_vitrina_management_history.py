@@ -5,7 +5,7 @@ original plan images and source snapshot are saved before the transaction.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import json
@@ -60,6 +60,9 @@ class WebVitrinaManagementHistoryAdapter:
         return runtime, db
 
     def build(self, request: dict[str, Any], operation_id: str, conn: Any) -> dict[str, Any]:
+        if request.get('reconcile_recovered_accounting') is True:
+            from packages.application.management_accounting_reconciliation import build
+            return build(request,operation_id,conn)
         source = request["source"]
         days = sorted(set(request["dates"]))
         last_known = request.get('last_known_as_of') is True
@@ -178,7 +181,10 @@ class WebVitrinaManagementHistoryAdapter:
         runtime, db = self.target(request)
         backup = runtime / 'evidence' / (operation_id + '.before.json')
         if backup.exists():
-            candidate = json.loads(backup.read_text())['candidate']
+            saved = json.loads(backup.read_text())
+            if saved.get('request_sha256') is not None and saved['request_sha256']!=digest(request):
+                raise ValueError('accounting-recovery-operation-request-changed')
+            candidate = saved['candidate']
         else:
             with readonly(db) as conn:
                 candidate = self.build(request, operation_id, conn)
@@ -189,9 +195,31 @@ class WebVitrinaManagementHistoryAdapter:
             "recovery": {"kind": "exact-ready-plan-before-images", "path": str(runtime / "evidence" / (operation_id + ".before.json"))},
             "candidate": candidate}
 
+    def recovery_admission(self, request, runtime):
+        if request.get('reconcile_recovered_accounting') is not True:return nullcontext()
+        from packages.application.business_data_heavy_admission import heavy_admitted
+        return heavy_admitted(runtime,operation='accounting_ready_reconcile')
+
+    def recovery_book_lock(self, request, runtime):
+        if request.get('reconcile_recovered_accounting') is not True:return nullcontext()
+        from packages.application.fbs_accounting_runtime import writer_lock
+        return writer_lock(runtime)
+
     def apply(self, request: dict[str, Any], operation_id: str, preview: dict[str, Any]) -> dict[str, Any]:
+        if request.get('reconcile_recovered_accounting') is not True:
+            return self._apply(request,operation_id,preview)
+        try:
+            return self._apply(request,operation_id,preview)
+        except BaseException:
+            runtime,_=self.target(request)
+            if request.get('reconcile_recovered_accounting') is True and (runtime/'evidence'/(operation_id+'.before.json')).exists():
+                from apps.production_apply_contract import AmbiguousSubmit
+                raise AmbiguousSubmit('accounting-recovery-same-operation-readback-required') from None
+            raise
+
+    def _apply(self, request: dict[str, Any], operation_id: str, preview: dict[str, Any]) -> dict[str, Any]:
         runtime, db = self.target(request)
-        with warehouse_functional_job_lock(runtime, blocking=False), warehouse_sync_lock(runtime, blocking=False):
+        with self.recovery_admission(request,runtime), warehouse_functional_job_lock(runtime, blocking=False), warehouse_sync_lock(runtime, blocking=False), self.recovery_book_lock(request,runtime):
             with sqlite3.connect(db, timeout=30) as conn:
                 conn.row_factory = sqlite3.Row
                 conn.execute("BEGIN IMMEDIATE")
@@ -206,14 +234,20 @@ class WebVitrinaManagementHistoryAdapter:
                 backup = evidence / (operation_id + ".before.json")
                 before = {"operation_id": operation_id, "target": str(db), "runtime_sha": request["runtime_sha"],
                     "candidate_sha256": preview["candidate_sha256"], "candidate": candidate, "source": request["source"]}
+                if request.get('reconcile_recovered_accounting') is True:
+                    before['request_sha256']=digest(request)
                 if backup.exists():
                     raise ValueError("operation-already-attempted-use-readback")
                 private_json(backup, before)
+                if request.get('reconcile_recovered_accounting') is True:
+                    directory=os.open(evidence,os.O_RDONLY)
+                    try:os.fsync(directory)
+                    finally:os.close(directory)
                 if digest(json.loads(backup.read_text())) != digest(before):
                     raise ValueError("backup-verification-failed")
                 for update in candidate["updates"]:
                     before_row = next(r for r in candidate["before_images"] if r["bundle_version"] == update["bundle_version"] and r["as_of_date"] == update["as_of_date"])
-                    count = replace_ready(conn, expected=ExpectedReady(update["bundle_version"],update["as_of_date"],before_row["plan_json"]), plan_json=update["after_plan_json"]).rowcount
+                    count = replace_ready(conn, expected=ExpectedReady(update["bundle_version"],update["as_of_date"],before_row["plan_json"],candidate.get('authority')), plan_json=update["after_plan_json"]).rowcount
                     if count != 1:
                         raise ValueError("snapshot-cas-failed")
                 conn.commit()
@@ -224,7 +258,14 @@ class WebVitrinaManagementHistoryAdapter:
         backup = runtime / "evidence" / (operation_id + ".before.json")
         if not backup.exists():
             return {"operation_id": operation_id, "state": "not_submitted"}
-        candidate = json.loads(backup.read_text())["candidate"]
+        saved=json.loads(backup.read_text())
+        if saved.get('request_sha256') is not None and saved['request_sha256']!=digest(request):
+            raise ValueError('accounting-recovery-operation-request-changed')
+        candidate = saved['candidate']
+        if candidate.get('mode') == 'closed_accounting_ready_reconciliation_v1':
+            from packages.application.management_accounting_reconciliation import readback
+            with readonly(db) as conn:
+                return {**readback(conn,candidate,operation_id),'recovery_reference':str(backup)}
         exact, bad = 0, []
         with readonly(db) as conn:
             for update in candidate["updates"]:
@@ -253,13 +294,20 @@ class WebVitrinaManagementHistoryAdapter:
     def rollback(self, request: dict[str, Any], operation_id: str) -> dict[str, Any]:
         """Exact before-image recovery; refuses any post-apply snapshot drift."""
         runtime, db = self.target(request)
-        candidate = json.loads((runtime / 'evidence' / (operation_id + '.before.json')).read_text())['candidate']
-        with warehouse_functional_job_lock(runtime, blocking=False), warehouse_sync_lock(runtime, blocking=False):
+        saved=json.loads((runtime / 'evidence' / (operation_id + '.before.json')).read_text())
+        if saved.get('request_sha256') is not None and saved['request_sha256']!=digest(request):
+            raise ValueError('accounting-recovery-operation-request-changed')
+        candidate=saved['candidate']
+        with self.recovery_admission(request,runtime), warehouse_functional_job_lock(runtime, blocking=False), warehouse_sync_lock(runtime, blocking=False), self.recovery_book_lock(request,runtime):
             with sqlite3.connect(db, timeout=30) as conn:
                 conn.execute('BEGIN IMMEDIATE')
                 self.target(request)
+                if candidate.get('mode')=='closed_accounting_ready_reconciliation_v1':
+                    from packages.application.management_accounting_reconciliation import readback
+                    conn.row_factory=sqlite3.Row
+                    if readback(conn,candidate,operation_id)['state']!='applied':raise ValueError('rollback-cas-drift')
                 for update, before in zip(candidate['updates'], candidate['before_images']):
-                    count = replace_ready(conn, expected=ExpectedReady(update['bundle_version'],update['as_of_date'],update['after_plan_json']), plan_json=before['plan_json']).rowcount
+                    count = replace_ready(conn, expected=ExpectedReady(update['bundle_version'],update['as_of_date'],update['after_plan_json'],candidate.get('authority')), plan_json=before['plan_json']).rowcount
                     if count != 1: raise ValueError('rollback-cas-drift')
                 conn.commit()
         return {'operation_id':operation_id, 'restored_snapshots':len(candidate['updates'])}
