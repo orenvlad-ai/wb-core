@@ -114,3 +114,23 @@ test("wrong-model No Frame complaint keeps existing return route, and old line h
     assert.ok(!payload.instructions.includes(NOFRAME_GAP_POLICY));
   })});
 });
+
+test("approved real reviews explain cases without invented coverage expectations", async () => {
+  const examples = [
+    ["Стекло не по размеру, по краям с каждой стороны остается большой зазор, куда будет забиваться пыль. Разочарование от стекла. Устанавливали на телефон iPhone 17pro", "negative", true],
+    ["Не доходит до краев экрана, а так нормальное стекло", "mixed", false],
+    ["Стекло меньше экрана", "negative", false],
+    ["Хорошее стекло, но не доходит до края экрана", "mixed", false]
+  ];
+  for (const [text, mode, empathy] of examples) {
+    const s = scenario(text); s.classification.review_mode = mode;
+    const result = await runJob(s.raw, {roleRunner: markedRunner(s)});
+    assert.equal(result.model_calls_this_run, 1);
+    assert.equal(result.result.route, "public_only");
+    assert.match(result.result.final_reply, /совместимости с чехлами/);
+    assert.match(result.result.final_reply, /бортика/);
+    assert.match(result.result.final_reply, /No Frame \(без рамок\)/);
+    assert.doesNotMatch(result.result.final_reply, /ожидали|покрытием до самых кра/);
+    assert.equal(result.result.final_reply.includes("могло вас расстроить"), empathy);
+  }
+});
