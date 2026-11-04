@@ -74,7 +74,8 @@ class FormulaResumeTests(unittest.TestCase):
         (self.runtime / pause.POLICY_FILENAME).chmod(0o600)
         self.systemd = FileSystemd()
         self.proc = self.root / 'proc'; self.proc.mkdir()
-        guarded_buyer = self._testMethodName.startswith('test_guarded_buyer')
+        guarded_known = self._testMethodName.startswith('test_guarded_known')
+        guarded_buyer = guarded_known or self._testMethodName.startswith('test_guarded_buyer')
         if guarded_buyer:
             boot = self.proc / 'sys/kernel/random/boot_id'; boot.parent.mkdir(parents=True)
             boot.write_text('11111111-2222-3333-4444-555555555555\n')
@@ -83,8 +84,10 @@ class FormulaResumeTests(unittest.TestCase):
                 path.write_bytes((ROOT / relative).read_bytes())
             native_read = formula._buyer_native_read
             def read_native(command):
-                if command == ['/usr/bin/systemctl', 'show', formula.BUYER_UNIT, '--property=InvocationID', '--no-pager']:
-                    return self.systemd._run(['show', formula.BUYER_UNIT, '--property=InvocationID']).stdout.encode()
+                if (len(command) == 5 and command[:2] == ['/usr/bin/systemctl', 'show']
+                        and command[2] in {formula.BUYER_UNIT, *formula.GUARDED_SERVICE_SPECS}
+                        and command[3:] == ['--property=InvocationID', '--no-pager']):
+                    return ('InvocationID=' + self.systemd.states[command[2]]['properties']['InvocationID'] + '\n').encode()
                 return native_read(command)
             self.addCleanup(patch.stopall)
             patch.object(formula, '_buyer_native_read', side_effect=read_native).start()
@@ -146,6 +149,22 @@ class FormulaResumeTests(unittest.TestCase):
         self.systemd.states[WAREHOUSE_TIMER].update(is_enabled='enabled',is_active='active')
         if guarded_buyer:
             self.systemd.states[formula.BUYER_UNIT.replace('.service', '.timer')].update(is_enabled='enabled', is_active='active')
+        if guarded_known:
+            for unit, (relative, expected, description, arguments) in formula.GUARDED_SERVICE_SPECS.items():
+                source = self.app / relative; source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes((ROOT / relative).read_bytes())
+                self.assertEqual(formula._hash(source.read_bytes()), expected)
+                data = (ROOT / ('artifacts/registry_upload_http_entrypoint/systemd/' + unit)).read_bytes().replace(
+                    b'/opt/wb-core-runtime/app', str(self.app).encode()).replace(
+                    b'/opt/wb-core-runtime/state', str(self.runtime).encode())
+                (self.app / ('artifacts/registry_upload_http_entrypoint/systemd/' + unit)).write_bytes(data)
+                (self.units / unit).write_bytes(data)
+                value = self.systemd.states[unit]
+                value.update(is_enabled='static', is_active='failed')
+                command = '/usr/bin/python3 ' + str(source) + ' ' + arguments.format(runtime=self.runtime)
+                value['properties'].update(Result='exit-code', ExecMainCode='1', ExecMainStatus='1',
+                    ExecStart='{ path=/usr/bin/python3 ; argv[]=' + command + ' ; ignore_errors=no ; ' + RESET_TAIL + ' }')
+                self.systemd.states[unit.replace('.service', '.timer')].update(is_enabled='enabled', is_active='active')
         self.options = dict(systemd=self.systemd,activity_reader=self.activity,proc_root=self.proc)
         self.pause_options = dict(**self.options,window_id='formula-pause-001',actor='test',reason='synthetic deploy')
         self.addCleanup(patch.stopall)
@@ -230,6 +249,118 @@ class FormulaResumeTests(unittest.TestCase):
 
     def buyer_journal_bytes(self, events):
         return ('\n'.join(json.dumps(v) for v in events) + '\n').encode()
+
+    def known_guarded_fixture(self):
+        plan, buyer = self.guarded_buyer_fixture()
+        events = {formula.BUYER_UNIT: buyer}
+        template = self.systemd.states[formula.BUYER_UNIT]['properties']
+        for index, (unit, spec) in enumerate(formula.GUARDED_SERVICE_SPECS.items(), 1):
+            timer = unit.replace('.service', '.timer')
+            self.systemd._run(['enable', timer]); self.systemd._run(['start', timer])
+            props = self.systemd.states[unit]['properties']
+            for key in ('ActiveState','SubState','MainPID','Result','ExecMainCode','ExecMainStatus','ExecMainStartTimestamp'):
+                props[key] = template[key]
+            props['InvocationID'] = str(index) * 32
+            tail = template['ExecStart'].split(' ; start_time=', 1)[1].replace('pid=2668333', 'pid=' + str(2668333+index))
+            props['ExecStart'] = props['ExecStart'].split(' ; start_time=', 1)[0] + ' ; start_time=' + tail
+            self.systemd.states[unit]['is_active'] = 'inactive'
+            self.systemd.states[timer]['properties']['LastTriggerUSec'] = template['ExecMainStartTimestamp']
+            current = deepcopy(buyer)
+            for event in current:
+                event['MESSAGE'] = event['MESSAGE'].replace(formula.BUYER_UNIT, unit).replace(
+                    'WB Core account-scoped buyer price observations', spec[2])
+                if event['_PID'] != '1':
+                    event.update(_PID=str(2668333+index), _SYSTEMD_UNIT=unit, _SYSTEMD_INVOCATION_ID=str(index)*32)
+                else:event['UNIT'] = unit
+            events[unit] = current
+        return plan, events
+
+    @contextmanager
+    def known_journals(self, events):
+        with patch.object(formula, '_buyer_journal', side_effect=lambda *a:self.buyer_journal_bytes(events[formula.BUYER_UNIT])), \
+                patch.object(formula, '_service_journal', side_effect=lambda unit,*a:self.buyer_journal_bytes(events[unit])):
+            yield
+
+    def test_guarded_known_three_services_and_buyer_preserve_all_proofs(self):
+        plan, events = self.known_guarded_fixture()
+        with self.known_journals(events):
+            receipt = self.apply(plan)
+        self.assertEqual(set(receipt['guarded_service_completions']),set(events))
+        for unit, proof in receipt['guarded_service_completions'].items():
+            self.assertEqual(proof['journal_events'],events[unit])
+            self.assertFalse(proof['original_service_pair_restored'])
+            self.assertEqual(proof['original_pair'],['static','failed'])
+            self.assertEqual(proof['observed_pair'],['static','inactive'])
+        self.assertEqual(formula.load(self.runtime,OP)['plan'],plan)
+        self.assertEqual(pause.load_state(self.runtime)['baseline'],self.baseline)
+        calls=list(self.systemd.calls)
+        self.assertEqual(self.apply(plan),receipt)
+        self.assertEqual(self.systemd.calls,calls)
+
+    def test_guarded_known_wrong_source_command_timer_and_journal_refuse(self):
+        plan, events = self.known_guarded_fixture()
+        before=deepcopy(formula.load(self.runtime,OP));calls=list(self.systemd.calls)
+        with self.known_journals(events):
+            for unit, spec in formula.GUARDED_SERVICE_SPECS.items():
+                props=self.systemd.states[unit]['properties'];raw=props['ExecStart']
+                props['ExecStart']=raw.replace('/usr/bin/python3 ', '/usr/bin/python3 --foreign ',1)
+                with self.assertRaises(RuntimeError):formula._observe(self.runtime,plan,**self.options)
+                props['ExecStart']=raw
+                source=self.app/spec[0];raw_source=source.read_bytes();source.write_bytes(raw_source+b'\n# drift')
+                with self.assertRaisesRegex(RuntimeError,'admission source'):formula._observe(self.runtime,plan,**self.options)
+                source.write_bytes(raw_source)
+                timer=self.systemd.states[unit.replace('.service','.timer')]
+                timer['is_active']='inactive'
+                with self.assertRaises(RuntimeError):formula._observe(self.runtime,plan,**self.options)
+                timer['is_active']='active'
+                for key,value in (('_SYSTEMD_INVOCATION_ID','f'*32),('_PID','999'),('MESSAGE','{"status":"success"}')):
+                    prior=events[unit][1][key];events[unit][1][key]=value
+                    with self.assertRaises(RuntimeError):formula._observe(self.runtime,plan,**self.options)
+                    events[unit][1][key]=prior
+        self.assertEqual(formula.load(self.runtime,OP),before);self.assertEqual(self.systemd.calls,calls)
+
+    def test_guarded_known_foreign_closure_and_prepared_never_bypass(self):
+        plan,events=self.known_guarded_fixture()
+        with self.known_journals(events):
+            state=formula.load(self.runtime,OP);state['phase']='prepared';formula._save(self.runtime,state,'fixture')
+            with self.assertRaisesRegex(RuntimeError,'original restoring authority'):formula._observe(self.runtime,plan,**self.options)
+            state['phase']='restoring';formula._save(self.runtime,state,'fixture')
+            unit='wb-core-sheet-vitrina-closure-retry.service'
+            self.systemd.states[unit]['is_active']='failed'
+            with self.assertRaisesRegex(RuntimeError,'held service enabled/activity differs'):formula._observe(self.runtime,plan,**self.options)
+            with self.assertRaisesRegex(RuntimeError,'not approved'):
+                formula._guarded_service_completion(self.runtime,plan,pause.load_state(self.runtime),{},**self.options,unit=unit)
+
+    def test_guarded_known_health_body_failure_cannot_masquerade_as_guard_skip(self):
+        from apps import sheet_vitrina_v1_health_tick as health
+        from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+        evaluation=dict(business_date='2026-11-04',fingerprint='fixture')
+        for phase in ('candidate','confirmation'):
+            output=io.StringIO()
+            with patch.object(health,'evaluate_web_vitrina_health',return_value=evaluation), \
+                    patch.object(health,'mark_web_vitrina_health_cycle_incomplete',return_value=evaluation), \
+                    patch.object(health,'_run_confirmation_recovery',side_effect=MaintenanceAdmissionBlocked('skipped_maintenance')), \
+                    patch.object(health,'persist_web_vitrina_health_evaluation',side_effect=MaintenanceAdmissionBlocked('skipped_maintenance')), \
+                    redirect_stdout(output):
+                result=health._execute_health_tick(runtime=object(),base_url='fixture',cookie='fixture',
+                    args=SimpleNamespace(phase=phase,dry_run=False,timeout_seconds=10),
+                    post_json=Mock(side_effect=MaintenanceAdmissionBlocked('skipped_maintenance')))
+            self.assertEqual(result,1)
+            terminal=json.loads(output.getvalue())
+            self.assertEqual(terminal['contract'],health.HEALTH_TICK_RECEIPT_CONTRACT)
+            self.assertEqual(terminal['event'],'terminal')
+            self.assertNotEqual(terminal['status'],'skipped_maintenance')
+
+    def test_guarded_known_multiple_proofs_reject_earlier_invocation_drift(self):
+        plan,events=self.known_guarded_fixture()
+        buyer_props=self.systemd.states[formula.BUYER_UNIT]['properties']
+        def changed(unit,*args):
+            if unit==next(reversed(formula.GUARDED_SERVICE_SPECS)):
+                buyer_props['InvocationID']='f'*32
+            return self.buyer_journal_bytes(events[unit])
+        with self.known_journals(events), patch.object(formula,'_service_journal',side_effect=changed):
+            with self.assertRaisesRegex(RuntimeError,'changed during another proof'):
+                formula._observe(self.runtime,plan,**self.options)
 
     def test_guarded_buyer_native_guard_before_main_and_same_plan_resume(self):
         plan, events = self.guarded_buyer_fixture()
