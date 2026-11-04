@@ -354,4 +354,7 @@ def restore_revision_rows(rows, *, runtime, plan, inventory_history, business_da
         snapshot=ActiveInventorySnapshot.__new__(ActiveInventorySnapshot)
         object.__setattr__(snapshot,'_json',canonical(payload))
         rows=snapshot.apply_rows(rows,business_date=day)
+        from packages.application.vitrina_last_known_cost import restore_revision_cost_estimates
+        rows=restore_revision_cost_estimates(rows,plan=plan,book=book,day=day,business_date=business_date,
+            bundle_version=binding['ready_target']['bundle_version'])
     return rows
