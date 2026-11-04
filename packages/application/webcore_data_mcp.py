@@ -26,6 +26,7 @@ from packages.business_time import current_business_date_iso
 from packages.application.webcore_cloud_reads import (
     CLOUD_TOOLS,
     SCOPE_MAX_POSTED_REPLY,
+    SCOPE_MAX_MESSAGE_SEND,
     SCOPE_CASH_READ,
     SCOPE_CASH_OPERATIONS_READ,
     SCOPE_MAX_HISTORY_READ,
@@ -203,8 +204,10 @@ class WebCoreDataMcpGateway:
         for definition in _tool_definitions():
             if definition.name in CLOUD_TOOLS and not self.cloud_reads.enabled(definition.name):
                 continue
-            if definition.name in {"max_inbox_events", "max_inbox_event", "max_messages", "max_message", "max_posted_reply"}:
-                definition.input_schema["properties"]["chat_id"]["enum"] = sorted(self.cloud_reads.max_inbox.chat_ids)
+            if definition.name in {"max_inbox_events", "max_inbox_event", "max_messages", "max_message", "max_posted_reply", "max_send_message"}:
+                definition.input_schema["properties"]["chat_id"]["enum"] = (
+                    [self.cloud_reads.max_send.chat_id] if definition.name == "max_send_message"
+                    else sorted(self.cloud_reads.max_inbox.chat_ids))
             security_schemes = [{"type": "oauth2", "scopes": [definition.scope]}]
             tools.append(
                 {
@@ -214,10 +217,10 @@ class WebCoreDataMcpGateway:
                     "inputSchema": definition.input_schema,
                     "outputSchema": definition.output_schema or _object_schema(),
                     "annotations": {
-                        "readOnlyHint": definition.name != "max_posted_reply",
+                        "readOnlyHint": definition.name not in {"max_posted_reply", "max_send_message"},
                         "destructiveHint": False,
                         "idempotentHint": True,
-                        "openWorldHint": definition.name == "max_posted_reply",
+                        "openWorldHint": definition.name in {"max_posted_reply", "max_send_message"},
                     },
                     "securitySchemes": security_schemes,
                     "_meta": {"securitySchemes": security_schemes},
@@ -2993,6 +2996,19 @@ class WebCoreDataMcpGateway:
 
 def _tool_definitions() -> list[ToolDefinition]:
     return [
+        ToolDefinition(
+            "max_send_message", "Send MAX bot text",
+            "Send user-authorized plain text as the bot to the authorized MAX group. "
+            "Not restricted to a template. Use a stable unique request_id for one intended message; "
+            "reuse exactly that ID and text to read its receipt after a timeout. Never invent a new ID "
+            "to retry an unknown send. No financial reads/writes, scheduling, attachments, edits or deletes. "
+            "Cash reconciliation amounts must first be verified through WebCore UI. "
+            "Use max_posted_reply, not this tool, for payment acknowledgement + replies.",
+            _schema({"chat_id": _int_schema(-(2**63), -1),
+                     "request_id": _string_schema(1, 120), "text": _string_schema(1, 4000)},
+                    required=("chat_id", "request_id", "text")),
+            scope=SCOPE_MAX_MESSAGE_SEND,
+        ),
         ToolDefinition(
             "max_posted_reply", "Mark MAX message as posted",
             "Send the fixed text + as a reply to one authorized MAX source message, only after all its "

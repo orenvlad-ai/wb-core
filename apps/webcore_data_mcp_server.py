@@ -506,7 +506,7 @@ def _handle_json_rpc(
                         "sku_search, supplier_shipments, wb_supplies, or supply_artifacts directly for matching user "
                         "requests; no data-map or resolver preflight is required. Detail tools consume stable ids from "
                         "list results. All data is persisted/cache-only and bounded. Ops tools require webcore.ops.read. "
-                        "No financial writes, arbitrary SQL/filesystem/shell or secrets. Separately granted max_posted_reply sends only + to an authorized MAX source after UI verification."
+                        "No financial writes, arbitrary SQL/filesystem/shell or secrets. Separately granted max_posted_reply sends only + after UI verification; max_send_message sends user-authorized bot text to the configured MAX group."
                     ),
                 },
             )
@@ -536,7 +536,7 @@ def _handle_json_rpc(
             correlation_id = secrets.token_hex(12)
             started = time.monotonic()
             # A reply includes source GET, one POST and verification GET.
-            tool_budget = (config.max_reply_deadline_seconds if name == "max_posted_reply"
+            tool_budget = (config.max_reply_deadline_seconds if name in {"max_posted_reply", "max_send_message"}
                            else config.max_history_deadline_seconds if name in {"max_messages", "max_message"}
                            else config.tool_deadline_seconds)
             deadline_at = started + tool_budget

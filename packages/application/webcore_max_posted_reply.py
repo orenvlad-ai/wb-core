@@ -88,6 +88,9 @@ class MaxPostedReply:
         return 'reply_verification_failed', None
 
     def _post(self, chat, mid, deadline, cancel_event=None):
+        return self._send_payload(chat, {'text': '+', 'link': {'type': 'reply', 'mid': mid}, 'notify': False}, deadline, cancel_event)
+
+    def _send_payload(self, chat, payload, deadline, cancel_event=None):
         info = self.api.token_path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 8192:
             raise CloudReadError('MAX credential unavailable')
@@ -99,7 +102,7 @@ class MaxPostedReply:
             _fixed_path(self.api.ca_path)
             context.load_verify_locations(cafile=str(self.api.ca_path))
         req = Request('https://platform-api2.max.ru/messages?' + urlencode({'chat_id': chat}),
-                      data=json.dumps({'text': '+', 'link': {'type': 'reply', 'mid': mid}, 'notify': False}).encode(),
+                      data=json.dumps(payload).encode(),
                       headers={'Authorization': token, 'Content-Type': 'application/json'}, method='POST')
         timeout = min(20.0, max(0.1, deadline-time.monotonic()-10.0)) if deadline else 20.0
         if (cancel_event and cancel_event.is_set()) or (deadline is not None and time.monotonic() >= deadline):
