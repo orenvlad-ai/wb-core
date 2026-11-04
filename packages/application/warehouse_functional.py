@@ -20,6 +20,7 @@ import sqlite3
 from typing import Any, Callable, Iterable, Mapping
 
 from packages.business_time import business_date_from_timestamp
+from packages.application import wb_forward_valuation as forward_valuation
 from packages.application.calculation_parameters import CalculationParametersBlock
 from packages.application.canonical_cost_engine import CanonicalCostEngine
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -144,6 +145,10 @@ WAREHOUSE_QUALITY_PRESENTATIONS: Mapping[str, tuple[str, str]] = {
     "facility_pool_exact_projection": (
         "Точный остаток facility × pool",
         "Количество и капитал FF равны точной сумме текущих остатков FBS/FBO по географическим складам.",
+    ),
+    "wb_forward_supplier_component_estimate": (
+        "Предварительная оценка с обновлёнными расходами поставщика",
+        "Стоимость текущего остатка скорректирована с указанной даты. Полнота расходов и историческая привязка движений не подтверждены.",
     ),
     "snapshot_fbs_wb_initial_provisional": (
         "Предварительная оценка по принятой стоимости FBS",
@@ -4540,6 +4545,9 @@ class WarehouseFunctionalBlock:
             ensure_warehouse_business_projection_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             try:
+                forward_valuation.revalidate_plan(conn, normalized)
+                forward_floor = forward_valuation.protected_history_floor(conn,
+                    normalized.get("historical_wb_cost_projection") or [], normalized.get("new_events") or [])
                 duplicate = conn.execute(
                     "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_versions WHERE plan_fingerprint=?",
                     (fingerprint,),
@@ -4708,12 +4716,15 @@ class WarehouseFunctionalBlock:
                         raise WarehouseFunctionalError(
                             "unexpected historical correction rows in emergency plan"
                         )
+                    exclusion = "".join(" AND NOT (nm_id=? AND as_of_date<?)" for _ in forward_floor)
+                    protected_parameters = [v for nm, floor in sorted(forward_floor.items()) for v in (nm, floor)]
                     conn.execute(
-                        """DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost
-                           WHERE cutover_id=? AND as_of_date>=?""",
-                        (FUNCTIONAL_CUTOVER_ID, cutover_date),
+                        "DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost WHERE cutover_id=? AND as_of_date>=?" + exclusion,
+                        (FUNCTIONAL_CUTOVER_ID, cutover_date, *protected_parameters),
                     )
                 for item in normalized.get("historical_wb_cost_projection") or []:
+                    if str(item.get("as_of_date") or "") < forward_floor.get(int(item["nm_id"]), ""):
+                        continue
                     if cutover_date and str(item.get("as_of_date") or "")[:10] < cutover_date:
                         continue
                     conn.execute(
@@ -4835,6 +4846,12 @@ class WarehouseFunctionalBlock:
                         ),
                     )
                 for event in normalized.get("new_events") or []:
+                    if event.get("event_type") == forward_valuation.EVENT:
+                        existing_event = conn.execute("SELECT * FROM sheet_vitrina_v1_warehouse_functional_events WHERE event_id=?", (event["event_id"],)).fetchone()
+                        if existing_event:
+                            checked = dict(existing_event)
+                            checked["provenance"] = _loads(checked.pop("provenance_json"), {})
+                            forward_valuation.check_identity(checked, event)
                     conn.execute(
                         """INSERT OR IGNORE INTO sheet_vitrina_v1_warehouse_functional_events(
                                event_id,version_id,event_type,source_id,source_fingerprint,
@@ -7264,10 +7281,10 @@ class WarehouseFunctionalBlock:
                 (FUNCTIONAL_CUTOVER_ID, STAGE_WB),
             ).fetchall()
             persisted_events = conn.execute(
-                """SELECT event_id,business_date,nm_id,quantity,capital_rub,source_id,
+                """SELECT event_id,event_type,business_date,nm_id,quantity,capital_rub,source_id,
                           source_fingerprint,provenance_json
                    FROM sheet_vitrina_v1_warehouse_functional_events
-                   WHERE event_type='wb_final_acceptance'
+                   WHERE event_type IN ('wb_final_acceptance','wb_forward_valuation')
                    ORDER BY business_date,created_at,event_id"""
             ).fetchall()
         if cutover is None or cutover_version is None:
@@ -7342,11 +7359,13 @@ class WarehouseFunctionalBlock:
 
         events_by_day: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
         seen_event_ids: set[str] = set()
+        persisted_by_id = {}
         for row in persisted_events:
             item = dict(row)
             item["provenance"] = _loads(item.pop("provenance_json"), {})
             event_id = str(item.get("event_id") or "")
             seen_event_ids.add(event_id)
+            persisted_by_id[event_id] = item
             day = str(item.get("business_date") or "")[:10]
             if not cutover_date <= day <= current_date:
                 raise WarehouseFunctionalError(
@@ -7357,6 +7376,8 @@ class WarehouseFunctionalBlock:
             item = dict(raw)
             event_id = str(item.get("event_id") or "")
             if event_id in seen_event_ids:
+                if item.get("event_type") == forward_valuation.EVENT:
+                    forward_valuation.check_identity(persisted_by_id[event_id], item)
                 continue
             seen_event_ids.add(event_id)
             day = str(item.get("business_date") or "")[:10]
@@ -7397,6 +7418,7 @@ class WarehouseFunctionalBlock:
         }
         result: list[dict[str, Any]] = []
         historical_uncertainty: dict[int, dict[str, Any]] = {}
+        forward_proofs = {}
         carried_dates: list[str] = []
         for day in _date_range(cutover_date, current_date):
             snapshot = snapshots_by_day.get(day)
@@ -7409,6 +7431,14 @@ class WarehouseFunctionalBlock:
                 prior_qty = previous_quantity.get(nm_id, ZERO)
                 prior_wac = previous_wac.get(nm_id)
                 event_rows = event_groups.get(nm_id, [])
+                valuation_rows = [e for e in event_rows if e.get("event_type") == forward_valuation.EVENT]
+                if len(valuation_rows) > 1 or (valuation_rows and nm_id in forward_proofs):
+                    raise WarehouseFunctionalError("duplicate forward valuation for WB stock")
+                if valuation_rows:
+                    forward_proofs[nm_id] = forward_valuation.validate_event(
+                        valuation_rows[0], day=day, nm_id=nm_id,
+                        opening_quantity=prior_qty, opening_wac=prior_wac, anchor=anchors.get(nm_id))
+                receipt_rows = [e for e in event_rows if e.get("event_type") != forward_valuation.EVENT]
                 if snapshot is None and nm_id in historical_uncertainty:
                     historical_uncertainty[nm_id]["missing_quantity_dates"] = sorted(set(historical_uncertainty[nm_id]["missing_quantity_dates"]) | {day})
                 historical = [e for e in event_rows if (e.get("provenance") or {}).get("historical_native_plan_digest")]
@@ -7471,6 +7501,8 @@ class WarehouseFunctionalBlock:
                     if day == current_date
                     else "periodic_snapshot_wac_closed"
                 )
+                if nm_id in forward_proofs:
+                    quality = forward_valuation.QUALITY
                 uncertainty = historical_uncertainty.get(nm_id)
                 if uncertainty and (uncertainty["missing_quantity_dates"] or uncertainty["missing_cost_components"]):
                     quality = "periodic_snapshot_wac_provisional"
@@ -7483,14 +7515,16 @@ class WarehouseFunctionalBlock:
                         quality=quality,
                         provenance={
                             **({"initial_valuation_anchor": anchor} if anchor else {}),
+                            **({"forward_valuation": forward_proofs[nm_id]} if nm_id in forward_proofs else {}),
                             **({"historical_fbo_quality": {k:list(v) for k,v in uncertainty.items()}} if uncertainty else {}),
                             "source": "versioned_functional_wb_daily_replay",
                             "snapshot_id": str((snapshot or {}).get("snapshot_id") or "carried_last_good"),
                             "snapshot_version_id": str((snapshot or {}).get("version_id") or "carried_last_good"),
                             "previous_snapshot_quantity": _text(prior_qty),
-                            "accepted_quantity_delta": _text(quantity_delta),
-                            "accepted_capital_delta_rub": _text(capital_delta),
-                            "accepted_event_ids": [str(item.get("event_id") or "") for item in event_rows],
+                            "accepted_quantity_delta": _text(sum((_decimal(e.get("quantity")) for e in receipt_rows), ZERO)),
+                            "accepted_capital_delta_rub": _text(sum((_decimal(e.get("capital_rub")) for e in receipt_rows), ZERO)),
+                            "accepted_event_ids": [str(item.get("event_id") or "") for item in receipt_rows],
+                            "forward_valuation_event_ids": [str(e["event_id"]) for e in valuation_rows],
                             "opening_cost": seed_meta.get(nm_id, {}),
                             "last_valid_wac_retained": quantity == ZERO,
                             "snapshot_carried_forward": snapshot is None,
@@ -9031,8 +9065,14 @@ def _wb_valuation_report(lines: Iterable[WarehouseLine]) -> dict[str, Any]:
                     "in_way_to_client": _text(line.wb_in_way_to_client),
                     "in_way_from_client": _text(line.wb_in_way_from_client)}})
         elif anchor := _initial_valuation_anchor(line.provenance):
+            updated = (line.provenance.get("daily_wac_replay") or {}).get("forward_valuation")
+            if updated and (updated.get("initial_anchor_digest") != anchor["proof_digest"]
+                or updated.get("proof_digest") != forward_valuation.digest({k:v for k,v in updated.items() if k != "proof_digest"})):
+                raise WarehouseFunctionalError("invalid forward valuation presentation proof")
             provisional.append({"nm_id": line.nm_id, "quantity": _text(line.quantity),
-                "quality": anchor["quality"], "proof_digest": anchor["proof_digest"],
+                "quality": forward_valuation.QUALITY if updated else anchor["quality"],
+                "proof_digest": updated["proof_digest"] if updated else anchor["proof_digest"],
+                **({"effective_date": updated["business_date"], "initial_anchor_digest": anchor["proof_digest"]} if updated else {}),
                 "book_version": anchor["book_version"], "proves_physical_movement": False})
     return {"status": "partial" if missing else "complete", "missing": missing, "provisional": provisional}
 
@@ -9584,7 +9624,7 @@ def _replace_current_wb_costs(
                     "daily_wac_replay": dict(daily.get("provenance") or {}),
                     "daily_wac_fingerprint": str(daily.get("fingerprint") or ""),
                 },
-                certified=line.certified,
+                certified=False if (daily.get("provenance") or {}).get("forward_valuation") else line.certified,
                 wb_quantity=line.wb_quantity,
                 wb_in_way_to_client=line.wb_in_way_to_client,
                 wb_in_way_from_client=line.wb_in_way_from_client,
