@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 import json
 import threading
 import time
+import copy
 from urllib.error import HTTPError
 from concurrent.futures import ThreadPoolExecutor
 import unittest
@@ -136,6 +137,44 @@ class ReplyTests(CloudReadTests):
                           'tools/call',name='max_posted_reply',arguments=self.args)
         self.assertNotIn('error', result)
         self.assertEqual(self.reply._post.call_count, 1)
+
+    def test_live_source_corroborates_signed_group_reply_link(self):
+        seq = 117399484548871240
+        source = f'mid.{(-100) & ((1 << 64)-1):016x}{seq:016x}'
+        linked = f'mid.{100:016x}{seq:016x}'
+        self.args['message_id'] = source
+        row = dict(message_id=source,chat_id=-100,sequence=seq,
+                   message_text_complete=True,message_text_chunks=['payment'],
+                   sender={'user_id':99,'is_bot':False})
+        self.api.call.return_value = {'rows':[row]}
+        message = self.api._get.return_value[0]
+        message['link'] = dict(type='reply',chat_id=100,sender={'user_id':99},
+                               message={'mid':linked,'seq':seq,'text':'payment'})
+        self.assertFalse(self.reply._matches(message,-100,source))
+        self.assertTrue(self.reply._matches(message,-100,source,row))
+        self.assertEqual(self.reply.call(self.args)['status'],'sent')
+        for path,value in [
+            (('recipient','chat_id'),-101),
+            (('link','chat_id'),101),
+            (('link','sender','user_id'),98),
+            (('link','message','seq'),seq+1),
+            (('link','message','text'),'changed'),
+            (('link','message','mid'),f'mid.{101:016x}{seq:016x}')]:
+            bad=copy.deepcopy(message);node=bad
+            for key in path[:-1]:node=node[key]
+            node[path[-1]]=value
+            self.assertFalse(self.reply._matches(bad,-100,source,row),path)
+        self.assertFalse(self.reply._matches(message,-100,source,{**row,'message_text_complete':False}))
+        with self.reply._connect() as conn:conn.execute("UPDATE replies SET state='unknown'")
+        self.assertEqual(self.reply.call(self.args)['status'],'sent')
+        self.assertEqual(self.reply._post.call_count,1)
+        with self.reply._connect() as conn:conn.execute("UPDATE replies SET state='unknown'")
+        row['message_text_chunks']=['edited']
+        message['link']['message']['text']='edited'
+        self.assertEqual(self.reply.call(self.args)['status'],'source_changed')
+        self.assertEqual(self.reply._post.call_count,1)
+        with self.reply._connect() as conn:
+            self.assertEqual(conn.execute('SELECT state FROM replies').fetchone()[0],'unknown')
 
     def test_refuse_partial_changed_and_foreign(self):
         for change in [dict(all_operations_posted=False),dict(chat_id=-200),dict(source_text='changed'),dict(text='arbitrary')]:

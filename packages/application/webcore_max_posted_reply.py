@@ -111,13 +111,33 @@ class MaxPostedReply:
         return json.loads(raw)
 
     @staticmethod
-    def _matches(message, chat, source):
-        return (isinstance(message, dict)
+    def _matches(message, chat, source, source_row=None):
+        if not (isinstance(message, dict)
                 and message.get('recipient', {}).get('chat_id') == chat
                 and message.get('sender', {}).get('is_bot') is True
                 and message.get('body', {}).get('text') == '+'
-                and message.get('link', {}).get('type') == 'reply'
-                and message.get('link', {}).get('message', {}).get('mid') == source)
+                and message.get('link', {}).get('type') == 'reply'):
+            return False
+        link = message['link']
+        body = link.get('message', {})
+        if body.get('mid') == source:
+            return True
+        # MAX reply links can encode the positive group magnitude whereas GET
+        # returns its signed group ID. Do not compare suffixes alone: corroborate
+        # both complete IDs with the live source's group, seq, sender and text.
+        if not source_row or source_row.get('message_id') != source or source_row.get('chat_id') != chat:
+            return False
+        seq = source_row.get('sequence')
+        sender = source_row.get('sender', {}).get('user_id')
+        return (type(seq) is int and 0 <= seq < 2**64
+                and type(sender) is int
+                and source == f'mid.{chat & ((1 << 64)-1):016x}{seq:016x}'
+                and body.get('mid') == f'mid.{abs(chat):016x}{seq:016x}'
+                and link.get('chat_id') == abs(chat)
+                and body.get('seq') == seq
+                and link.get('sender', {}).get('user_id') == sender
+                and source_row.get('message_text_complete') is True
+                and body.get('text') == ''.join(source_row.get('message_text_chunks', [])))
 
     def call(self, args, deadline=None, cancel_event=None):
         _arguments(args, {'chat_id', 'message_id', 'source_text', 'ui_verification', 'all_operations_posted'})
@@ -140,8 +160,14 @@ class MaxPostedReply:
             if state in {'unknown', 'pending'} and existing[2]:
                 try:
                     messages = self.api._get({'message_ids': existing[2]}, deadline)
-                    if (len(messages) == 1 and messages[0].get('body', {}).get('mid') == existing[2]
-                            and self._matches(messages[0], chat, mid)):
+                    source_rows = self.api.call('max_message', {'chat_id': chat, 'message_id': mid}, deadline, cancel_event)['rows']
+                    source_row = source_rows[0] if len(source_rows) == 1 else None
+                    if (not source_row or not source_row.get('message_text_complete')
+                            or source_row.get('sender', {}).get('is_bot')
+                            or ''.join(source_row.get('message_text_chunks', [])) != args['source_text']):
+                        state = 'source_changed'
+                    elif (len(messages) == 1 and messages[0].get('body', {}).get('mid') == existing[2]
+                            and self._matches(messages[0], chat, mid, source_row)):
                         with self._connect() as conn:
                             conn.execute("UPDATE replies SET state='sent' WHERE chat_id=? AND source_id=? AND state IN ('unknown','pending') AND reply_id=?",
                                          (chat, mid, existing[2]))
@@ -180,7 +206,7 @@ class MaxPostedReply:
             phase = 'readback'
             self._record(chat, mid, phase)
             messages = self.api._get({'message_ids': reply_id}, deadline)
-            if len(messages) != 1 or messages[0].get('body', {}).get('mid') != reply_id or not self._matches(messages[0],chat,mid):
+            if len(messages) != 1 or messages[0].get('body', {}).get('mid') != reply_id or not self._matches(messages[0],chat,mid,source[0]):
                 raise ValueError('Reply readback not verified')
             state = 'sent'
             self._record(chat, mid, 'verified')
