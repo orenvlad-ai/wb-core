@@ -5,6 +5,7 @@ the auxiliary FBO book and in-transit references start at the accepted baseline
 and subsequently advance from immutable documents only.
 """
 from copy import deepcopy
+from datetime import date
 from decimal import Decimal, localcontext
 import hashlib
 import json
@@ -203,6 +204,55 @@ def correction_operands(data):
             raise ValueError('correction_signed_operand_mismatch')
         result.append((line,int(q),value))
     return result
+
+
+def management_cost_acceptance(evidence, movements, *, business_date):
+    """Bound the optional forward management decision to its exact correction.
+
+    This is an aggregate supplier-component allocation, never certification of
+    complete expenses or literal supplier cost per SKU. No historical rewrite
+    or WB valuation authority is conferred by this evidence.
+    """
+    if not isinstance(evidence, dict):
+        raise ValueError('management_cost_acceptance_invalid')
+    cutoff = evidence.get('cutoff_date')
+    if date.fromisoformat(str(cutoff)).isoformat() != cutoff or cutoff != business_date:
+        raise ValueError('management_cost_acceptance_cutoff_mismatch')
+    scope = evidence.get('supplier_scope_nm_ids')
+    affected = evidence.get('affected_current_fbo')
+    refs = evidence.get('source_refs')
+    if (evidence.get('contract') != 'management_cost_acceptance_v1'
+            or not isinstance(scope, list) or len(scope) != 34
+            or any(type(nm) is not int or nm <= 0 for nm in scope) or len(set(scope)) != 34
+            or not isinstance(affected, list) or len(affected) != 4
+            or any(not isinstance(row, dict) for row in affected)
+            or not isinstance(refs, list) or not refs or any(not isinstance(ref, str) or not ref.strip() for ref in refs)
+            or not isinstance(evidence.get('business_decision'), str) or not evidence['business_decision'].strip()):
+        raise ValueError('management_cost_acceptance_scope_invalid')
+    def effects(rows):
+        result = {}
+        for row in rows:
+            nm = row.get('nm_id')
+            value = number(row['capital_delta_rub'], signed=True)
+            if (type(nm) is not int or nm not in scope or row.get('pool') != 'FBO'
+                    or number(row['quantity_delta'], signed=True) != 0 or value == 0
+                    or value * 100 != (value * 100).to_integral_value()):
+                raise ValueError('management_cost_acceptance_effect_invalid')
+            k = location(row)
+            if k in result:
+                raise ValueError('management_cost_acceptance_effect_duplicate')
+            result[k] = value
+        return result
+    actual, declared = effects(movements), effects(affected)
+    amount = number(evidence.get('total_supplier_component_delta_rub'), signed=True)
+    if (actual != declared or len(actual) != 4 or len({row['nm_id'] for row in affected}) != 4
+            or amount == 0 or sum(actual.values(), ZERO) != amount):
+        raise ValueError('management_cost_acceptance_total_or_effect_mismatch')
+    return {**{k: deepcopy(evidence[k]) for k in ('contract', 'cutoff_date',
+                'total_supplier_component_delta_rub', 'affected_current_fbo', 'source_refs', 'business_decision')},
+            'supplier_scope_nm_ids': sorted(scope),
+            'sku_cost_accuracy': 'aggregate_allocation', 'prior_profit_history': 'unchanged',
+            'fbs_quantity_basis': 'available_only'}
 
 
 def _solve(nodes, links):
@@ -428,6 +478,14 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
         elif kind=='correction':
             for line,q,value in correction_operands(data):
                 effect(doc,location(line),'adjustment',q,value,{'policy':'explicit_signed_document_adjustment'})
+            if 'management_cost_acceptance' in data.get('domain', {}):
+                accepted = management_cost_acceptance(data['domain']['management_cost_acceptance'],
+                    data['movements'], business_date=doc['business_date'])
+                if (data.get('contract') != 'ff_pool_posted_cost_document_v1'
+                        or not data.get('posted_manifest_sha256')):
+                    raise ValueError('management_cost_acceptance_posted_evidence_required')
+                auxiliary.setdefault('management_cost_acceptances', {})[doc['document_id']] = {
+                    **accepted, **source(doc), 'posted_manifest_sha256': data['posted_manifest_sha256']}
         else:
             # Preserve explicit unsupported FBS handling. Never silently skip
             # an auxiliary FBO mutation that could later feed a FBS transfer.

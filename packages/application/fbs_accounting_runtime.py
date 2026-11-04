@@ -341,6 +341,87 @@ def _retain_ready_history(plan, previous, *, business_date):
     return replace(plan, sheets=sheets, metadata=metadata)
 
 
+def management_cost_history_cutoff(book, *, business_date):
+    """Only a fingerprint-bound consumed correction can freeze prior Ready cells."""
+    if not book or not book.get('active'):
+        return None
+    periods = book['state']['periods']
+    eligible = [day for day in periods if day <= business_date]
+    if not eligible:
+        return None
+    accepted = periods[max(eligible)]['document_cost_state'].get('management_cost_acceptances', {})
+    from packages.application.fbs_document_cost import management_cost_acceptance
+    cutoffs = []
+    for identity, evidence in accepted.items():
+        cutoff = evidence['cutoff_date']
+        management_cost_acceptance(evidence, evidence['affected_current_fbo'], business_date=cutoff)
+        consumed = periods.get(cutoff, {}).get('applied_documents', {}).get(identity)
+        observed = book['state']['observed_documents'].get(identity, {})
+        if (cutoff > business_date or evidence.get('document_id') != identity
+                or consumed != evidence.get('document_fingerprint')
+                or observed.get('fingerprint') != consumed or observed.get('business_date') != cutoff
+                or not re.fullmatch(r'sha256:[a-f0-9]{64}', evidence.get('posted_manifest_sha256', ''))):
+            raise ValueError('management_cost_history_consumption_mismatch')
+        cutoffs.append(cutoff)
+    return min(cutoffs) if cutoffs else None
+
+
+def retain_management_cost_history(conn, *, plan, expected, cutoff):
+    """Restore exact saved pre-cutoff columns; return their CAS-pinned donor."""
+    dates = {day for day in plan.date_columns if day < cutoff}
+    if not dates:
+        return plan, None
+    from packages.application.ready_publication import capture_expected, ReadyPublicationConflict, TABLE
+    from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+    donor = expected if expected.exists else None
+    if donor is None:
+        row = conn.execute(f'''SELECT as_of_date FROM {TABLE} WHERE bundle_version=?
+            AND NOT EXISTS (SELECT 1 FROM json_each(?) wanted WHERE wanted.value NOT IN
+                (SELECT value FROM json_each(plan_json,'$.date_columns')))
+            ORDER BY as_of_date DESC,refreshed_at DESC LIMIT 1''',
+            (expected.bundle_version, json.dumps(sorted(dates)))).fetchone()
+        if row is None:
+            raise ReadyPublicationConflict('management_cost_history_donor_missing')
+        donor = capture_expected(conn, bundle_version=expected.bundle_version, as_of_date=row[0], authority=expected.authority)
+    previous = _deserialize_sheet_vitrina_plan(donor.plan_json)
+    if not dates <= set(previous.date_columns):
+        raise ReadyPublicationConflict('management_cost_history_donor_dates_missing')
+    result = _retain_ready_history(plan, previous, business_date=cutoff)
+    prior_data = next(sheet for sheet in previous.sheets if sheet.sheet_name == 'DATA_VITRINA')
+    prior_keys = {str(row[1]) for row in prior_data.rows}
+    for sheet in result.sheets:
+        if sheet.sheet_name == 'DATA_VITRINA':
+            for row in sheet.rows:
+                if str(row[1]) not in prior_keys:
+                    for day in dates:
+                        row[sheet.header.index(day)] = ''
+    metadata = deepcopy(result.metadata)
+    cells = metadata.setdefault('server_cell_presentation', {})
+    for identity in list(cells):
+        for day in dates:
+            cells[identity].pop(day, None)
+        if not cells[identity]:
+            del cells[identity]
+    for identity, values in previous.metadata.get('server_cell_presentation', {}).items():
+        for day in dates & set(values):
+            cells.setdefault(identity, {})[day] = deepcopy(values[day])
+    for field in ('fbs_accounting_bindings', 'fbs_accounting_targets'):
+        target = metadata.setdefault(field, {})
+        source = previous.metadata.get(field, {})
+        for day in dates:
+            target.pop(day, None)
+            if day in source:
+                target[day] = deepcopy(source[day])
+    for day in dates:
+        binding = metadata.get('fbs_accounting_bindings', {}).get(day, {})
+        if binding.get('ready_target'):
+            metadata.setdefault('fbs_accounting_targets', {}).setdefault(day, deepcopy(binding['ready_target']))
+    from packages.application.ready_publication import digest
+    metadata['management_cost_history'] = {'cutoff_date': cutoff, 'donor': {
+        'bundle_version': donor.bundle_version, 'as_of_date': donor.as_of_date, 'digest': digest(donor.plan_json)}}
+    return replace(result, metadata=metadata), donor
+
+
 def refresh(runtime_dir, *, ready_runtime=None):
     prior, prior_version = load(runtime_dir)
     if prior is None or not prior["active"]:
@@ -509,8 +590,8 @@ class ActiveInventorySnapshot(FbsInventorySnapshot):
     def payload(self):
         return published(super().payload())
 
-    def presentation(self, value, *, data=None):
-        return published(super().presentation(value, data=data))
+    def presentation(self, value, *, data=None, nm=None, metric_key=None):
+        return published(super().presentation(value, data=data, nm=nm, metric_key=metric_key))
 
     def warehouse_detail(self):
         result = published(super().warehouse_detail())
@@ -564,7 +645,8 @@ def inventory_from_book(book, *, now=None, runtime_dir=None):
         payload["quality"] = "unavailable"
         def mask(value):
             if isinstance(value, dict):
-                return {k: None if k in {"quantity", "capital_rub", "wac_rub", "unit_cost_rub", "wb_physical", "stock_total"} else mask(v) for k, v in value.items()}
+                return {k: None if k in {"quantity", "capital_rub", "wac_rub", "unit_cost_rub", "wb_physical", "stock_total"} else mask(v)
+                        for k, v in value.items() if k != 'management_cost_acceptance'}
             if isinstance(value, list):
                 return [mask(v) for v in value]
             return value
@@ -611,12 +693,12 @@ def materialize(plan, *, runtime_dir, now=None, book=_UNSET, book_version=None, 
         for nm in [None, *payload["rows"]]:
             scope = "TOTAL" if nm is None else "SKU:" + nm
             for key, value in snapshot._metrics(data, nm).items():
-                cells.setdefault(scope + "|" + key, {})[day] = snapshot.presentation(value, data=data)
+                cells.setdefault(scope + "|" + key, {})[day] = snapshot.presentation(value, data=data, nm=nm, metric_key=key)
     if current_day in plan.date_columns and current_day not in book["presentations"]:
         for nm in [None, *current_data["rows"]]:
             scope = "TOTAL" if nm is None else "SKU:" + nm
             for key, value in current._metrics(current_data, nm).items():
-                cells.setdefault(scope + "|" + key, {})[current_day] = current.presentation(value, data=current_data)
+                cells.setdefault(scope + "|" + key, {})[current_day] = current.presentation(value, data=current_data, nm=nm, metric_key=key)
     sheets = []
     for sheet in plan.sheets:
         if sheet.sheet_name != "DATA_VITRINA":

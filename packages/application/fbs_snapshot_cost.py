@@ -513,6 +513,8 @@ def candidate_period_view(state: dict, day: str) -> dict:
         # not add legacy FBO expenses on top of the new FBS share.
         result["fbo_component"] = {"rows": deepcopy(fbo), "quantity": _text(fbo_q),
                                    "capital_rub": _text(fbo_capital), "policy": document_cost_state["policy"]}
+        if document_cost_state.get("management_cost_acceptances"):
+            result["management_cost_acceptances"] = deepcopy(document_cost_state["management_cost_acceptances"])
     return result
 
 

@@ -80,7 +80,63 @@ def row(state, key="A:1", day="2026-09-08"):
     return state["periods"][day]["rows"][key]
 
 
+def management_correction(day="2026-09-08"):
+    movements = [dict(line_no=nm, facility_id='A', pool='FBO', nm_id=nm,
+                      quantity_delta=0, capital_delta_rub='10') for nm in range(1, 5)]
+    evidence = dict(contract='management_cost_acceptance_v1', cutoff_date=day,
+        supplier_scope_nm_ids=list(range(1, 35)), total_supplier_component_delta_rub='40',
+        affected_current_fbo=deepcopy(movements), source_refs=['sha256:' + 'a' * 64],
+        business_decision='Общая поправка по 34 SKU распределена на 4 текущих SKU FBO; '
+            'точность по SKU приближённая, прошлая прибыль и история сохранены.')
+    lines = []
+    for movement in movements:
+        item = line(pool='FBO', nm=movement['nm_id'], q=0, role='correction', capital='10')
+        item.update(line_no=movement['line_no'], metadata_json='{"signed_quantity_delta":0,"signed_capital_rub":"10"}')
+        lines.append(item)
+    result = doc('accepted-adjustment', 'correction', day=day, lines=lines,
+        domain=dict(target_document_id='original', management_cost_acceptance=evidence))
+    result['cost_document'].update(movements=movements, contract='ff_pool_posted_cost_document_v1',
+                                   posted_manifest_sha256='sha256:' + 'b' * 64)
+    result['fingerprint'] = fingerprint(result)
+    return result
+
+
 class DocumentCostTests(unittest.TestCase):
+    def test_management_acceptance_only_after_consumption_carries_without_history_rewrite(self):
+        basis = [('A', nm, 100, '100') for nm in range(1, 5)]
+        initial = initialize_candidate(capture(rows=basis, fbo=basis))
+        original = deepcopy(initial)
+        correction = management_correction()
+        applied = evaluate_candidate(initial, capture('2026-09-08', [correction], rows=basis))
+        self.assertNotIn('management_cost_acceptances', candidate_period_view(applied, '2026-09-07'))
+        self.assertEqual(initial, original)
+        self.assertEqual(applied['baseline'], initial['baseline'])
+        self.assertEqual(applied['periods']['2026-09-08']['rows'],
+            evaluate_candidate(initial, capture('2026-09-08', rows=basis))['periods']['2026-09-08']['rows'])
+        accepted = candidate_period_view(applied, '2026-09-08')['management_cost_acceptances']
+        self.assertEqual(accepted[correction['document_id']]['sku_cost_accuracy'], 'aggregate_allocation')
+        self.assertEqual(evaluate_candidate(applied, capture('2026-09-08', [correction], rows=basis)), applied)
+        closed = close_candidate_period(applied, '2026-09-08', today='2026-09-09')
+        following = evaluate_candidate(closed, capture('2026-09-09', [correction], rows=basis))
+        self.assertEqual(candidate_period_view(following, '2026-09-09')['management_cost_acceptances'], accepted)
+        self.assertEqual(following['periods']['2026-09-08'], closed['periods']['2026-09-08'])
+        self.assertEqual(Decimal(candidate_period_view(following, '2026-09-09')['fbo_component']['capital_rub']), Decimal('40040'))
+        reversal = doc('reverse-adjustment', 'storno', domain={'target_document_id': correction['document_id']})
+        reverted = evaluate_candidate(initial, capture('2026-09-08', [correction, reversal], rows=basis))
+        self.assertNotIn('management_cost_acceptances', candidate_period_view(reverted, '2026-09-08'))
+
+    def test_management_acceptance_rejects_unbound_effect_and_draft_evidence(self):
+        basis = [('A', nm, 100, '100') for nm in range(1, 5)]
+        initial = initialize_candidate(capture(rows=basis, fbo=basis))
+        correction = management_correction()
+        correction['cost_document']['domain']['management_cost_acceptance']['total_supplier_component_delta_rub'] = '41'
+        with self.assertRaisesRegex(ValueError, 'management_cost_acceptance_total_or_effect_mismatch'):
+            evaluate_candidate(initial, capture('2026-09-08', [correction], rows=basis))
+        correction = management_correction()
+        del correction['cost_document']['posted_manifest_sha256']
+        with self.assertRaisesRegex(ValueError, 'management_cost_acceptance_posted_evidence_required'):
+            evaluate_candidate(initial, capture('2026-09-08', [correction], rows=basis))
+
     def test_old_candidate_is_not_relabelled_as_new_policy(self):
         old=initialize_candidate(capture())
         old.update(schema="fbs_snapshot_cost_candidate_v1",policy="fbs_periodic_snapshot_fixed_opening_wac_v1")
