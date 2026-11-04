@@ -102,6 +102,46 @@ class HistoricalHistory(unittest.TestCase):
         self.assertEqual(self.keeper.execute('SELECT total_changes()').fetchone()[0],before)
         self.assertEqual(accounting.load(self.runtime.runtime_dir,version=self.fixture.before)[0],self.fixture.book)
 
+    def test_native_stage_restore_keeps_exact_priority_and_missing_unapproved_cost(self):
+        from dataclasses import replace
+        from apps.fbs_inventory_presentation_smoke import row
+        from packages.application.web_vitrina_management_history import SOURCE
+        day, source_day = '2026-09-09', '2026-09-08'
+        book, version = accounting.load(self.runtime.runtime_dir)
+        text = self.keeper.execute(f'SELECT plan_json FROM {ready.TABLE} WHERE as_of_date=?',
+                                   ('2026-09-10',)).fetchone()[0]
+        payload = json.loads(text)
+        prior = book['shared_days'][source_day]
+        estimate = {'source': SOURCE, 'quality_state': 'management_estimate', 'target_date': day,
+                    'operation_id': 'LOCAL applied estimate', 'source_snapshot_id': 'last-known-cost:fixture',
+                    'source_bundle_version': 'fixture-v1', 'source_as_of_date': source_day,
+                    'management_value': prior['rows']['1']['unit_cost_rub'],
+                    'source_day_version_id': prior['version_id'], 'source_digest': prior['rows']['1']['source_digest'],
+                    'source_book_blob_digest': fingerprint(prior),
+                    'evidence': {'selection_method': 'latest_same_sku_closed_resolved_on_or_before_target'}}
+        payload['metadata'].setdefault('server_cell_presentation', {}).setdefault('SKU:1|our_wb_unit_cost_rub', {})[day] = estimate
+        # The same provenance cannot be transferred to a different SKU.
+        payload['metadata']['server_cell_presentation'].setdefault('SKU:2|our_wb_unit_cost_rub', {})[day] = estimate
+        payload['metadata']['fbs_accounting_bindings'] = {day: payload['metadata']['fbs_accounting_bindings'][day]}
+        plan = _deserialize_sheet_vitrina_plan(canonical(payload))
+        rows = [replace(row('our_wb_unit_cost_rub'), values_by_date={day: 180}, presentation_by_date={day: estimate}),
+                replace(row('our_wb_unit_cost_rub', nm=2), values_by_date={day: 180}, presentation_by_date={day: estimate}),
+                replace(row('proxy_profit_3_rub', nm=2), values_by_date={day: 217.78})]
+        capture = self.keeper.execute('SELECT capture_id FROM sheet_vitrina_v1_inventory_history_captures '
+            'WHERE business_date=? ORDER BY capture_sequence DESC LIMIT 1', (day,)).fetchone()[0]
+        inventory = {'dates': {day: {'capture_id': capture, 'accepted_publication': 'local-late-publication'}}}
+        self.assertIn(day, book['historical_revision']['native_stage_editions'])
+        actual = history.restore_revision_rows(rows, runtime=self.runtime, plan=plan,
+                                              inventory_history=inventory, business_date='2026-09-10')
+        self.assertEqual(actual[0].values_by_date[day], 180)
+        self.assertEqual(actual[0].presentation_by_date[day]['source'], 'fbs_snapshot_inventory_presentation_v1')
+        self.assertEqual(actual[1].values_by_date[day], '')
+        self.assertEqual(actual[1].presentation_by_date[day]['state'], 'unavailable')
+        self.assertEqual(actual[2], rows[2])
+        self.assertEqual(accounting.load(self.runtime.runtime_dir), (book, version))
+        self.assertEqual(self.keeper.execute(f'SELECT plan_json FROM {ready.TABLE} WHERE as_of_date=?',
+                                            ('2026-09-10',)).fetchone()[0], text)
+
     def test_no_current_book_only_ack_and_no_forged_supervisor_proof(self):
         with self.assertRaises((ValueError,TypeError,KeyError)):self.receipt.validate_native_readonly(adapter=self.adapter(),store=self.store,now=NOW)
         with self.assertRaisesRegex(Exception,'not_supervised'):consume_historical_history_ack({},self.runtime.runtime_dir,self.receipt.manifest['manifest_digest'],self.receipt.dates)

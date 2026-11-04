@@ -209,5 +209,83 @@ class LastKnownCostTests(unittest.TestCase):
         self.assertEqual(result["remaining"][0]["reason"], "no_prior_or_same_closed_resolved_cost")
 
 
+class RevisionCostEstimateTests(unittest.TestCase):
+    """Real native inventory application followed by the narrow cost fallback."""
+    def setUp(self):
+        from types import SimpleNamespace
+        from apps.fbs_inventory_presentation_smoke import DAY, row, snapshot
+        from apps.shared_sku_cost_smoke import fbs, wb
+        self.day = DAY
+        source_day = '2026-09-06'
+        period = shared_day(source_day, {'1': ('resolved', '12.5')})
+        source = {'source_kind': 'last_known_as_of', 'dates': [DAY], 'snapshot_id': 'last-known-cost:test',
+                  'bundle_version': 'b', 'costs_by_date': {DAY: {'SKU:1|our_wb_unit_cost_rub': {
+                      'source_as_of_date': source_day, 'management_value': '12.5',
+                      'source_day_version_id': period['version_id'],
+                      'source_digest': period['rows']['1']['source_digest'],
+                      'source_book_blob_digest': fingerprint(period)}}}}
+        plan = {'metadata': {}, 'sheets': [{'sheet_name': 'DATA_VITRINA', 'header': ['label', 'key', DAY],
+                                          'rows': [['cost', 'SKU:1|our_wb_unit_cost_rub', '']]}]}
+        projected = project_costs(plan, dates=[DAY], source=source, operation_id='applied-test')['plan']
+        self.plan = SimpleNamespace(bundle_version='b', metadata=projected['metadata'])
+        self.cell = self.plan.metadata['server_cell_presentation']['SKU:1|our_wb_unit_cost_rub'][DAY]
+        self.book = {'effective_date': '2026-09-01', 'shared_days': {source_day: period},
+                     'historical_revision': {'native_stage_editions': {DAY: 'edition'}}}
+        self.rows = [row('our_wb_unit_cost_rub', 12.5), row('proxy_profit_3_rub', 217.78),
+                     row('own_capital_FF_qty'), row('total_our_wb_unit_cost_rub', nm=None)]
+        self.native = snapshot(fbs(quantity='0', fbo_quantity='0'), wb(q='0', capital='0'))
+        self.exact_native = snapshot()
+
+    def restore(self, rows, *, today='2026-09-08'):
+        from packages.application.vitrina_last_known_cost import restore_revision_cost_estimates
+        return restore_revision_cost_estimates(rows, plan=self.plan, book=self.book,
+                                              day=self.day, business_date=today, bundle_version='b')
+
+    def test_missing_native_cost_keeps_applied_estimate_without_other_numeric_changes(self):
+        from packages.application.web_vitrina_management_history import restore_rows
+        before = canonical({'book': self.book, 'metadata': self.plan.metadata})
+        applied = restore_rows(self.rows, presentation=self.plan.metadata['server_cell_presentation'])
+        native = self.native.apply_rows(applied, business_date=self.day)
+        self.assertEqual(native[0].values_by_date[self.day], '')  # Original ordering regression.
+        restored = self.restore(native)
+        self.assertEqual(restored[0].values_by_date[self.day], 12.5)
+        self.assertEqual(restored[0].presentation_by_date[self.day], self.cell)
+        self.assertEqual(restored[0].values_by_date['2026-09-06'], 987)
+        self.assertEqual(restored[1:], native[1:])  # Profit, quantities, TOTAL and added capital rows.
+        self.assertEqual(canonical({'book': self.book, 'metadata': self.plan.metadata}), before)
+
+    def test_numeric_native_cost_including_zero_has_priority(self):
+        from dataclasses import replace
+        native = self.exact_native.apply_rows(self.rows, business_date=self.day)
+        self.assertEqual(native[0].values_by_date[self.day], 175)
+        self.assertEqual(self.restore(native), native)
+        zero = [replace(native[0], values_by_date={self.day: 0}), *native[1:]]
+        self.assertEqual(self.restore(zero), zero)
+
+    def test_unapproved_or_mismatched_source_remains_missing(self):
+        native = self.native.apply_rows(self.rows, business_date=self.day)
+        for field, value in [('source', 'unapproved'), ('operation_id', ''), ('quality_state', 'exact'),
+                             ('source_snapshot_id', 'other:test'), ('source_bundle_version', 'other'),
+                             ('source_day_version_id', 'bad'), ('source_digest', 'bad'),
+                             ('source_book_blob_digest', 'bad'), ('management_value', '99'),
+                             ('management_value', '0'), ('target_date', '2026-09-08'),
+                             ('source_as_of_date', '2026-09-08'), ('evidence', {})]:
+            with self.subTest(field=field, value=value):
+                original = deepcopy(self.cell)
+                self.cell[field] = value
+                self.assertEqual(self.restore(native), native)
+                self.cell.clear(); self.cell.update(original)
+        self.book['publication_error'] = {'invalid_from_date': self.day}
+        self.assertEqual(self.restore(native), native)
+        self.book.pop('publication_error')
+        self.book['effective_date'] = self.day
+        self.assertEqual(self.restore(native), native)
+
+    def test_current_and_future_days_are_excluded(self):
+        native = self.native.apply_rows(self.rows, business_date=self.day)
+        self.assertEqual(self.restore(native, today=self.day), native)
+        self.assertEqual(self.restore(native, today='2026-09-06'), native)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1366,6 +1366,7 @@
         "packages/application/inventory_cost_blend.py",
         "packages/application/vitrina_economics.py",
         "packages/application/web_vitrina_management_history.py",
+        "packages/application/vitrina_last_known_cost.py",
         "packages/application/ff_pool_fbs_lifecycle.py",
         "packages/application/sheet_vitrina_v1_buyout_percent.py",
         "packages/application/sheet_vitrina_v1_breakglass_last_good.py",
