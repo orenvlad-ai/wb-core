@@ -3,7 +3,8 @@
 
 The runner never merges or copies code. One exact predependency failure may
 restore only missing locked npm modules; it never repeats OS/Python/browser
-installation. Its storage tail never restarts services; one exact b9 case resumes the canonical
+installation. One exact buyer-Chrome initial reserve refusal may skip the already
+verified installed browser and reuse the unchanged dependency closure. Its storage tail never restarts services; one exact b9 case resumes the canonical
 post-dependency activation stages only after strict receipt, prestate, and
 phase evidence.  Recovery code may be newer only when intervening commits are
 classified repo-only by the current trusted check map.
@@ -151,6 +152,33 @@ PREDEPENDENCY_PROFILES = {
 }
 
 
+BUYER_CHROME_RELEASE_RUN_ID = 41820909577
+BUYER_CHROME_PROFILE = {
+    "receipt": {
+        "pull_request": 1570, "gate_run_id": 41814633119,
+        "base_sha": "78cad7d088fd5377c8fbb1c7cd5ad1ccb04a6880",
+        "head_sha": "321b6ea8b1f0eeb1081a3cc9e57fb91924075409",
+        "merge_sha": "a057f334f5e25d6f63bf256a53f017d3b13b3f65",
+        "operation_id": "release-v3-0a5490564fc9a849623c43976fe9ebbe",
+    },
+    "previous_run_id": 41810395795,
+    "previous_receipt": {
+        "pull_request": 1555, "gate_run_id": 41810214857,
+        "base_sha": "a8271777021e04dbb0159c83602396440c78e84b",
+        "head_sha": "e4aea06e40c8f12ee270de3e32ebf5353f4e1f69",
+        "merge_sha": "78cad7d088fd5377c8fbb1c7cd5ad1ccb04a6880",
+        "deployed_sha": "78cad7d088fd5377c8fbb1c7cd5ad1ccb04a6880",
+        "operation_id": "release-v3-0921fcf8ae1f590224ad534d909b21e2",
+    },
+    "previous_event": "workflow_dispatch",
+    "previous_run_head": "a8271777021e04dbb0159c83602396440c78e84b",
+    "first_storage_line": 1231, "final_storage_line": 1263,
+    "buyer_deploy_line": 1239, "buyer_guard_line": 149,
+    "autoanswers_timer_state": "disabled", "unit_transitions": {},
+}
+PREDEPENDENCY_PROFILES[BUYER_CHROME_RELEASE_RUN_ID] = BUYER_CHROME_PROFILE
+
+
 def _predependency_profile(release_run_id=PREDEPENDENCY_RELEASE_RUN_ID):
     if release_run_id not in PREDEPENDENCY_PROFILES:
         raise RecoveryError("predependency-release-not-reviewed")
@@ -192,6 +220,7 @@ def _sqlite_activation_profile(release_run_id: int) -> Mapping[str, Any]:
 class RecoveryCase(str, Enum):
     STORAGE_TAIL = "storage-tail"
     PREDEPENDENCY_STORAGE = "exact-predependency-storage-tail"
+    BUYER_CHROME_RESERVE = "exact-installed-buyer-chrome-reserve-tail"
     SELECTIVE_B9_ACTIVATION = "normal-b9-activation-tail"
     REGISTRY_PRECHECK_ACTIVATION = "normal-registry-precheck-activation-tail"
     WORKER_HEALTH_PRECHECK_ACTIVATION = "normal-worker-health-precheck-activation-tail"
@@ -199,6 +228,8 @@ class RecoveryCase(str, Enum):
 
 
 def recovery_case(release_run_id: int) -> RecoveryCase:
+    if release_run_id == BUYER_CHROME_RELEASE_RUN_ID:
+        return RecoveryCase.BUYER_CHROME_RESERVE
     if release_run_id in PREDEPENDENCY_PROFILES:
         return RecoveryCase.PREDEPENDENCY_STORAGE
     if release_run_id in SQLITE_ACTIVATION_PROFILES:
@@ -212,9 +243,14 @@ def cleaner_completion_case(case: RecoveryCase, release_run_id: int) -> bool:
     return case is RecoveryCase.STORAGE_TAIL and release_run_id in CLEANER_PROFILES
 
 
+def unchanged_dependency_tail_case(case: RecoveryCase) -> bool:
+    return case in {RecoveryCase.PREDEPENDENCY_STORAGE, RecoveryCase.BUYER_CHROME_RESERVE}
+
+
 def normal_activation_tail_case(case: RecoveryCase) -> bool:
     return case in {
         RecoveryCase.PREDEPENDENCY_STORAGE,
+        RecoveryCase.BUYER_CHROME_RESERVE,
         RecoveryCase.SELECTIVE_B9_ACTIVATION,
         RecoveryCase.REGISTRY_PRECHECK_ACTIVATION,
         RecoveryCase.WORKER_HEALTH_PRECHECK_ACTIVATION,
@@ -392,7 +428,9 @@ def _validate_original_receipt(
         or normalized["merge_sha"] != EXPECTED_SELECTIVE_MERGE_SHA
     ):
         raise RecoveryError("original-receipt-not-exact-selective-b9")
-    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+    if unchanged_dependency_tail_case(case):
+        if (case is RecoveryCase.BUYER_CHROME_RESERVE) != (release_run_id == BUYER_CHROME_RELEASE_RUN_ID):
+            raise RecoveryError("buyer-chrome-receipt-case-mismatch")
         if release_run_id not in PREDEPENDENCY_PROFILES or any(normalized.get(key) != expected for key, expected in _predependency_profile(release_run_id)["receipt"].items()):
             raise RecoveryError("original-receipt-not-exact-predependency-storage")
     if cleaner_completion_case(case, release_run_id):
@@ -407,12 +445,12 @@ def _validate_original_receipt(
     return normalized
 
 
-def _storage_tail_gate_argument_matches(text: str, gate_run_id: int) -> bool:
-    if f'--workflow-run-id "{gate_run_id}"' in text:
+def _storage_tail_gate_argument_matches(text: str, gate_run_id: int, *, runner_path="apps/github_release_runner.py", allow_expanded=True) -> bool:
+    if allow_expanded and f'--workflow-run-id "{gate_run_id}"' in text:
         return True
     # GitHub logs the canonical command before shell expansion. Bind its variable
     # to the single env value in that same immutable step, not elsewhere in output.
-    command = ('python3 apps/github_release_runner.py run --workflow-run-id '
+    command = (f'python3 {runner_path} run --workflow-run-id '
                '"$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"')
     clean = re.sub(r"\x1b\[[0-9;]*m", "", text)
     clean = re.sub(r"(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z ", "", clean)
@@ -457,6 +495,31 @@ def _prove_failed_stage(
             raise RecoveryError("failed-stage-not-exact-cleaner-completion")
         return {"job_name": job_name, "job_log_sha256": digest(raw_log),
                 "stage": "cleaner-before-complete", "exit_status": 1}
+    if case is RecoveryCase.BUYER_CHROME_RESERVE:
+        if release_run_id != BUYER_CHROME_RELEASE_RUN_ID:
+            raise RecoveryError("buyer-chrome-release-not-reviewed")
+        profile = _predependency_profile(release_run_id)
+        required = (
+            f"line {profile['buyer_deploy_line']}, in deploy_current_checkout",
+            'run_stage("dependencies", buyer_chrome_install_command)',
+            f"line {profile['buyer_guard_line']}, in install",
+            'raise RuntimeError("root storage reserve would be breached")',
+            "RuntimeError: root storage reserve would be breached",
+            "python3 apps/wb_buyer_chrome_runtime.py",
+            "returned non-zero exit status 1.",
+        )
+        failures = re.findall(r"(?:subprocess\.)?CalledProcessError:.*?returned non-zero exit status (\d+)", text, re.DOTALL)
+        if (release_run_id != BUYER_CHROME_RELEASE_RUN_ID
+                or gate_run_id != profile['receipt']['gate_run_id']
+                or any(item not in text for item in required)
+                or not _storage_tail_gate_argument_matches(text, gate_run_id, runner_path="ci/github_release_runner.py", allow_expanded=False)
+                or failures != ["1"] or "exit status 255" in text
+                or "root storage reserve changed before copy" in text
+                or 'run_stage("restart", restart_command)' in text
+                or 'run_stage("readback", root_storage_commands["status_artifact_readback"])' in text):
+            raise RecoveryError("failed-stage-not-exact-buyer-chrome-initial-reserve")
+        return {"job_name": job_name, "job_log_sha256": digest(raw_log),
+                "stage": "buyer-chrome-initial-reserve-before-mutation", "exit_status": 1}
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
         profile = _predependency_profile(release_run_id)
         required = (
@@ -1245,6 +1308,16 @@ def _predependency_diff_proof(release_run_id=PREDEPENDENCY_RELEASE_RUN_ID) -> di
             or lines[first].strip() != 'run_stage("dependencies", seller_recovery_os_dependencies_command)'
             or lines[final-1].strip() != 'run_stage("root-storage-status", root_storage_commands["status"])'):
         raise RecoveryError("predependency-exact-source-phase-invalid")
+    if release_run_id == BUYER_CHROME_RELEASE_RUN_ID:
+        if lines[profile['buyer_deploy_line']-1].strip() != 'run_stage("dependencies", buyer_chrome_install_command)':
+            raise RecoveryError("buyer-chrome-exact-source-phase-invalid")
+        browser_source = _git(["show", f"{merge}:apps/wb_buyer_chrome_runtime.py"]).stdout
+        browser_lines = browser_source.splitlines()
+        guard = profile['buyer_guard_line']
+        if (browser_lines[guard-1].strip() != 'raise RuntimeError("root storage reserve would be breached")'
+                or browser_lines[guard-2].strip() != 'if _available(Path("/")) < _root_reserve() + (0 if _verified_package(PACKAGE) else PACKAGE_BYTES):'
+                or browser_lines[guard+2].strip() != 'ROOT.mkdir(mode=0o755, parents=True, exist_ok=True)'):
+            raise RecoveryError("buyer-chrome-exact-initial-guard-invalid")
     protected_prefixes = ("packages/node/", "artifacts/registry_upload_http_entrypoint/systemd/",
                           "artifacts/registry_upload_http_entrypoint/nginx/", "artifacts/finance_liquidity_cash/pilot/")
     protected_direct = set(RUNTIME_GUARD_PATHS) | {"package.json", "package-lock.json", "pyproject.toml", "uv.lock", "requirements.txt", "apps/wb_buyer_chrome_runtime.py"}
@@ -1260,6 +1333,118 @@ def _predependency_diff_proof(release_run_id=PREDEPENDENCY_RELEASE_RUN_ID) -> di
     return {"previous_deployed_sha": previous, "target_merge_sha": merge,
             "paths_sha256": digest(canonical_bytes(paths)), "protected_paths_changed": [],
             "deploy_source_sha256": digest(deploy_source.encode()), "failed_source_line": first, "reviewed_unit_transitions": profile["unit_transitions"]}
+
+
+def _buyer_chrome_native_validator_source() -> str:
+    """Read-only installed closure proof; never calls any browser/profile installer."""
+    return r'''
+def require_buyer_chrome_reserve(policy, filesystem):
+    threshold = int(policy['thresholds_bytes']['normal_available'])
+    # Exact unchanged policy, rather than an exception to its hard reserve.
+    if threshold != 25 * 1024**3 or filesystem.f_bavail * filesystem.f_frsize < threshold:
+        raise RuntimeError('buyer-chrome-normal-root-reserve-unavailable')
+    return threshold
+
+
+def verify_installed_buyer_chrome(app):
+    import hashlib, json, os, pwd, stat, subprocess, tarfile
+    from pathlib import Path, PurePosixPath
+    policy = json.loads((app / 'artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json').read_text())
+    reserve = require_buyer_chrome_reserve(policy, os.statvfs('/'))
+    root = Path('/opt/wb-core-runtime/wb-buyer-chrome')
+    runtime = Path('/dev/shm/wb-buyer-chrome-154.0.8037.57-1')
+    package = root / 'google-chrome-stable_154.0.8037.57-1_amd64.deb'
+    sandbox = root / 'chrome-sandbox'
+    expected = '66c0645f6a19871bab2844b8537c11a0db2e7d3bea8ef85a1c7cb52a54e65a3e'
+    def file_hash(path):
+        value = hashlib.sha256()
+        with path.open('rb') as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b''): value.update(block)
+        return value.hexdigest()
+    for directory in (root, runtime):
+        if directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid != 0 or stat.S_IMODE(directory.stat().st_mode) != 0o755:
+            raise RuntimeError('buyer-chrome-runtime-directory-invalid')
+    if package.is_symlink() or not package.is_file() or package.stat().st_uid != 0 or package.stat().st_mode & 0o022 or package.stat().st_size != 142114088 or file_hash(package) != expected:
+        raise RuntimeError('buyer-chrome-installed-package-invalid')
+    identity = subprocess.run(['dpkg-deb', '--field', str(package), 'Package', 'Version'], check=True, text=True, capture_output=True).stdout
+    if dict(line.split(': ', 1) for line in identity.splitlines() if ': ' in line) != {'Package': 'google-chrome-stable', 'Version': '154.0.8037.57-1'}:
+        raise RuntimeError('buyer-chrome-installed-package-identity-invalid')
+    if sandbox.is_symlink() or not sandbox.is_file() or sandbox.stat().st_uid != 0 or sandbox.stat().st_gid != 0 or stat.S_IMODE(sandbox.stat().st_mode) != 0o4755:
+        raise RuntimeError('buyer-chrome-installed-sandbox-invalid')
+    marker = runtime / '.package-sha256'
+    if marker.is_symlink() or marker.read_text(encoding='ascii') != expected:
+        raise RuntimeError('buyer-chrome-runtime-marker-invalid')
+    # Stream the verified deb's payload without extracting or creating files.
+    # Every packaged regular file is checked, including the external sandbox.
+    inventory = []
+    with subprocess.Popen(['dpkg-deb', '--fsys-tarfile', str(package)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+        with tarfile.open(fileobj=process.stdout, mode='r|') as archive:
+            for member in archive:
+                rel = PurePosixPath(member.name)
+                if rel.is_absolute() or '..' in rel.parts:
+                    raise RuntimeError('buyer-chrome-package-path-invalid')
+                path = runtime.joinpath(*rel.parts)
+                if member.name.lstrip('./') == 'opt/google/chrome/chrome-sandbox':
+                    if not path.is_symlink() or os.readlink(path) != str(sandbox):
+                        raise RuntimeError('buyer-chrome-runtime-sandbox-link-invalid')
+                    path = sandbox
+                if member.isfile():
+                    if path.is_symlink() or not path.is_file() or path.stat().st_size != member.size or path.stat().st_uid != 0 or path.stat().st_mode & 0o022:
+                        raise RuntimeError('buyer-chrome-runtime-file-invalid')
+                    payload = archive.extractfile(member)
+                    value = hashlib.sha256()
+                    for block in iter(lambda: payload.read(1024 * 1024), b''): value.update(block)
+                    sha = value.hexdigest()
+                    if file_hash(path) != sha:
+                        raise RuntimeError('buyer-chrome-runtime-file-checksum-invalid')
+                    inventory.append((str(rel), sha))
+                elif member.isdir():
+                    if path.is_symlink() or not path.is_dir() or path.stat().st_uid != 0 or path.stat().st_mode & 0o022:
+                        raise RuntimeError('buyer-chrome-runtime-directory-invalid')
+                elif member.issym():
+                    if not path.is_symlink() or os.readlink(path) != member.linkname:
+                        raise RuntimeError('buyer-chrome-runtime-link-invalid')
+                elif member.islnk():
+                    target = PurePosixPath(member.linkname)
+                    if target.is_absolute() or '..' in target.parts or path.is_symlink() or not os.path.samefile(path, runtime.joinpath(*target.parts)):
+                        raise RuntimeError('buyer-chrome-runtime-hardlink-invalid')
+                else:
+                    raise RuntimeError('buyer-chrome-package-entry-unsupported')
+        if process.wait(timeout=15) != 0:
+            raise RuntimeError('buyer-chrome-package-payload-unavailable')
+    chrome = runtime / 'opt/google/chrome/chrome'
+    if not os.access(chrome, os.X_OK) or not inventory or 'not found' in subprocess.run(['ldd', str(chrome)], check=True, text=True, capture_output=True).stdout:
+        raise RuntimeError('buyer-chrome-runtime-executable-invalid')
+    user = pwd.getpwnam('wbchab')
+    if user.pw_uid == 0 or user.pw_shell != '/usr/sbin/nologin' or user.pw_dir != '/nonexistent':
+        raise RuntimeError('buyer-chrome-private-user-invalid')
+    private = []
+    for directory in (Path('/opt/wb-core-runtime/wb_buyer_chrome_profile'), Path('/opt/wb-core-runtime/wb_buyer_chrome_auth_state')):
+        if directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid != user.pw_uid or directory.stat().st_gid != user.pw_gid or stat.S_IMODE(directory.stat().st_mode) != 0o700:
+            raise RuntimeError('buyer-chrome-private-directory-invalid')
+        for parent, directories, files in os.walk(directory, followlinks=False):
+            for name in directories + files:
+                if os.lstat(Path(parent) / name).st_uid not in {0, user.pw_uid}:
+                    raise RuntimeError('buyer-chrome-private-entry-owner-invalid')
+        private.append({'path': str(directory), 'uid': directory.stat().st_uid, 'mode': 0o700})
+    for process in Path('/proc').iterdir():
+        try:
+            if process.name.isdigit() and process.stat().st_uid == user.pw_uid:
+                raise RuntimeError('buyer-chrome-private-runner-active')
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    for unit in ('wbc0081-chrome-pipe.service', 'wbc0081-chrome-restart.service', 'wbc0081-chrome-ab.service'):
+        result = subprocess.run(['systemctl', 'show', unit, '--property=LoadState,ActiveState'], text=True, capture_output=True)
+        values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        if (values.get('ActiveState') not in {'inactive', 'failed'}
+                or values.get('LoadState') not in {'loaded', 'not-found'}
+                or result.returncode != 0 and values.get('LoadState') != 'not-found'):
+            raise RuntimeError('buyer-chrome-pilot-not-idle')
+    require_buyer_chrome_reserve(policy, os.statvfs('/'))
+    return {'package_sha256': expected, 'runtime_inventory_sha256': hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest(),
+            'sandbox_uid': 0, 'sandbox_mode': 0o4755, 'private': private,
+            'normal_root_reserve_bytes': reserve, 'root_device': os.stat('/').st_dev, 'runner_idle': True}
+'''
 
 
 def _predependency_live_contract_script(target: Any, *, merge=PREDEPENDENCY_PROFILE["merge_sha"], require_complete=False) -> str:
@@ -1315,6 +1500,17 @@ if quiet.get('quiet') is not True or quiet['controls']!=state['baseline']['contr
 versions['held_owner']={{key:owner[key] for key in ('operation_id','expected_sha','window_id','baseline_fingerprint')}}
 versions['held_owner']['quiet']=True
 """
+    if merge == BUYER_CHROME_PROFILE['receipt']['merge_sha']:
+        policy_rel = "artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json"
+        chrome_rel = "apps/wb_buyer_chrome_runtime.py"
+        expected_blobs = {path: _git(["rev-parse", f"{merge}:{path}"]).stdout.strip()
+                          for path in (policy_rel, chrome_rel)}
+        extra += "\n" + _buyer_chrome_native_validator_source() + "\n"
+        extra += f"""
+for rel, expected_blob in {expected_blobs!r}.items():
+    if h(Path(e['target']) / rel) != expected_blob: raise SystemExit(54)
+versions['installed_buyer_chrome'] = verify_installed_buyer_chrome(Path(e['target']))
+"""
     # Keep one final JSON object; SSH version probes never execute application
     # code or package installers and disclose no credentials/process secrets.
     marker = 'print(json.dumps('
@@ -1331,7 +1527,7 @@ def collect_prestate(target: Any, merge: str, *, require_incomplete: bool, case:
         raise RecoveryError("target-marker-not-complete")
     if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:
         state["selective_live_contract"] = _run_remote_json(target, _selective_live_contract_script(target))
-    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+    if unchanged_dependency_tail_case(case):
         if target.target_id != "wb_core_eu_hosted_runtime_active":
             raise RecoveryError("predependency-target-not-exact")
         state["predependency_live_contract"] = _run_remote_json(target, _predependency_live_contract_script(target, merge=merge, require_complete=not require_incomplete))
@@ -1545,7 +1741,7 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion": completion,
         "completion_input": completion_script,
     }
-    if (case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE} or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id)):
+    if ((case is RecoveryCase.SQLITE_ACTIVATION or unchanged_dependency_tail_case(case)) or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id)):
         expected_merge = BACKUP_CAPACITY_MERGE_SHA if backup_capacity_case(case, release_run_id) else _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILES[release_run_id]["merge_sha"] if cleaner_completion_case(case, release_run_id) else _predependency_profile(release_run_id)["receipt"]["merge_sha"]
         if target.target_id != "wb_core_eu_hosted_runtime_active" or runtime_dir != "/opt/wb-core-runtime/state" or merge != expected_merge:
             raise RecoveryError("sqlite-activation-target-contract-invalid")
@@ -1558,7 +1754,21 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
             raise RecoveryError("cleaner-completion-release-not-exact")
         # The original log proves successful skipped activation. Never replay it.
         del commands["activation"]
-    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+    if case is RecoveryCase.BUYER_CHROME_RESERVE:
+        policy_rel = "artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json"
+        policy_blob = _git(["rev-parse", f"{merge}:{policy_rel}"]).stdout.strip()
+        reserve_script = f"""import json,os,subprocess
+from pathlib import Path
+policy=Path({str(Path(target.target_dir) / policy_rel)!r})
+actual=subprocess.run(['git','hash-object',str(policy)],check=True,text=True,capture_output=True).stdout.strip()
+if actual!={policy_blob!r}: raise SystemExit(54)
+threshold=int(json.loads(policy.read_text())['thresholds_bytes']['normal_available'])
+fs=os.statvfs('/')
+if threshold!=25*1024**3 or fs.f_bavail*fs.f_frsize<threshold: raise SystemExit(55)
+print(json.dumps({{'normal_root_reserve_bytes':threshold,'root_device':os.stat('/').st_dev}}))
+"""
+        commands['buyer_root_reserve'] = hosted._remote_shell_command(target, 'python3 -c ' + shlex.quote(reserve_script))
+    if unchanged_dependency_tail_case(case):
         commands["root_storage_status"] = hosted._build_root_storage_policy_commands(target)["status"]
         commands["npm_dependencies"] = hosted._build_autoanswers_node_dependencies_command(target)
     if normal_activation_tail_case(case):
@@ -1652,6 +1862,8 @@ def _predependency_previous_release_proof(client: release.GitHub, release_run_id
     profile = _predependency_profile(release_run_id)
     previous_run = profile["previous_run_id"]
     previous = profile["previous_receipt"]
+    if not isinstance(previous, Mapping) or not isinstance(previous_run, int):
+        raise RecoveryError("predependency-previous-release-not-reviewed")
     run = client.get(f"/actions/runs/{previous_run}")
     if (run.get("name"), run.get("path"), run.get("event"), run.get("run_attempt"), run.get("status"), run.get("conclusion"), run.get("head_sha")) != (
         RELEASE_WORKFLOW, RELEASE_WORKFLOW_PATH, profile["previous_event"], 1, "completed", "success", profile["previous_run_head"]
@@ -1816,8 +2028,8 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         "failure": evidence["failure"],
         "recovery_case": case.value,
         "activation_failure_proof": activation_failure_proof,
-        "predependency_previous_release": _predependency_previous_release_proof(client, release_run_id) if case is RecoveryCase.PREDEPENDENCY_STORAGE else None,
-        "predependency_diff": _predependency_diff_proof(release_run_id) if case is RecoveryCase.PREDEPENDENCY_STORAGE else None,
+        "predependency_previous_release": _predependency_previous_release_proof(client, release_run_id) if unchanged_dependency_tail_case(case) else None,
+        "predependency_diff": _predependency_diff_proof(release_run_id) if unchanged_dependency_tail_case(case) else None,
         "selective_b9_diff": _selective_b9_diff_proof() if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "selective_previous_recovery": _selective_previous_recovery_proof(client) if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "prestate": prestate,
@@ -1825,7 +2037,7 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         "stages": (["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "cleaner-before-complete-probe", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if case is RecoveryCase.SQLITE_ACTIVATION else ["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if not normal_activation_tail_case(case) else ["auth-preflight", "root-storage-status", "systemd-barrier-preflight", "autoanswers-prepare-deploy", "systemd-install", "daemon-reload", "nginx", "registry-http-restart", "systemd-reconcile", "root-storage-readback", "managed-service-status", "auth-readback", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"]),
         "forbidden_stages": (["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"] if not normal_activation_tail_case(case) else ["merge", "rsync", "chown", "dependency-install"]),
     }
-    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+    if unchanged_dependency_tail_case(case):
         result["stages"].insert(0, "root-storage-status-refresh")
         if not prestate["predependency_live_contract"]["dependency_versions"]["npm_modules"]["installed"]:
             result["stages"].insert(result["stages"].index("autoanswers-prepare-deploy"), "locked-npm-dependencies-once-and-readback")
@@ -1833,8 +2045,10 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         result["stages"].insert(result["stages"].index("deployment-metadata-cas-complete"), "cleaner-before-complete-probe")
     result['existing_started_owner'] = (
         collect_existing_started_owner(target, result['source'])
-        if case is RecoveryCase.STORAGE_TAIL else None
+        if case in {RecoveryCase.STORAGE_TAIL, RecoveryCase.BUYER_CHROME_RESERVE} else None
     )
+    if case is RecoveryCase.BUYER_CHROME_RESERVE and result["existing_started_owner"] is None:
+        raise RecoveryError("buyer-chrome-started-owner-required")
     if cleaner_completion_case(case, release_run_id):
         if result["existing_started_owner"] is None:
             raise RecoveryError("cleaner-completion-started-owner-required")
@@ -2021,6 +2235,12 @@ def apply_recovery(
     )
     def protected(command):
         return _protect_deploy_command(target, preview['source'], command)
+    def buyer_reserve():
+        if case is RecoveryCase.BUYER_CHROME_RESERVE:
+            return [_must_succeed('buyer-chrome-normal-root-reserve', commands['buyer_root_reserve'])]
+        return []
+    # Read-only capacity proof precedes even recovery-start of the held owner.
+    initial_reserve = buyer_reserve()
     # These stages precede the durable runtime mutation claim. The exact
     # predependency case refreshes only the derived storage status artifact. A
     # stale artifact or failed service/auth check must not consume the identity.
@@ -2028,10 +2248,10 @@ def apply_recovery(
     # status artifact, activation and stdin completion CAS. A missing old helper
     # refuses recovery-start before any of those mutations.
     started_owner = preview.get('existing_started_owner')
-    if cleaner_completion_case(case, release_run_id) and started_owner is None:
+    if (cleaner_completion_case(case, release_run_id) or case is RecoveryCase.BUYER_CHROME_RESERVE) and started_owner is None:
         raise RecoveryError("cleaner-completion-started-owner-required")
     if started_owner is not None:
-        if case is not RecoveryCase.STORAGE_TAIL:
+        if case not in {RecoveryCase.STORAGE_TAIL, RecoveryCase.BUYER_CHROME_RESERVE}:
             raise RecoveryError('existing-started-owner-case-invalid')
         current_owner = collect_existing_started_owner(target, preview['source'])
         if canonical_bytes(current_owner) != canonical_bytes(started_owner):
@@ -2039,7 +2259,9 @@ def apply_recovery(
         stages = _resume_started_deploy_protection(target, preview['source'])
     else:
         stages = _claim_deploy_protection(target, preview['source'])
-    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+    stages = initial_reserve + stages
+    if unchanged_dependency_tail_case(case):
+        stages.extend(buyer_reserve())
         stages.append(_must_succeed("root-storage-status-refresh", protected(commands["root_storage_status"])))
     if backup_capacity_case(case, release_run_id):
         if started_owner is None:
@@ -2052,7 +2274,7 @@ def apply_recovery(
         _must_succeed("auth", commands["auth"]),
     ])
 
-    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+    if unchanged_dependency_tail_case(case):
         stages.append(_must_succeed("systemd-barrier-preflight", commands["normal_activation_tail"]["barrier"]))
 
     claim = {
@@ -2091,15 +2313,16 @@ def apply_recovery(
             if canonical_bytes(current_proof) != canonical_bytes(preview.get("activation_failure_proof")):
                 raise RecoveryError("sqlite-activation-failure-proof-drift-after-claim")
         if normal_activation_tail_case(case):
-            if case is RecoveryCase.PREDEPENDENCY_STORAGE and canonical_bytes(_predependency_diff_proof(int(preview["release_run_id"]))) != canonical_bytes(preview["predependency_diff"]):
+            if unchanged_dependency_tail_case(case) and canonical_bytes(_predependency_diff_proof(int(preview["release_run_id"]))) != canonical_bytes(preview["predependency_diff"]):
                 raise RecoveryError("predependency-dependency-proof-drift-after-claim")
             if case is RecoveryCase.SELECTIVE_B9_ACTIVATION and canonical_bytes(
                 _selective_b9_diff_proof()
             ) != canonical_bytes(preview["selective_b9_diff"]):
                 raise RecoveryError("normal-tail-diff-drift-after-claim")
-            if case is RecoveryCase.PREDEPENDENCY_STORAGE and not fresh["predependency_live_contract"]["dependency_versions"]["npm_modules"]["installed"]:
+            if unchanged_dependency_tail_case(case) and not fresh["predependency_live_contract"]["dependency_versions"]["npm_modules"]["installed"]:
                 phase = "00-locked-npm-dependencies"
                 _publish_once(client, pr, _phase_marker(operation, "before-" + phase), {"schema": RECOVERY_SCHEMA, "state": "before", "operation_id": operation, "phase": phase, "preview_fingerprint": expected_fingerprint})
+                stages.extend(buyer_reserve())
                 stages.append(_must_succeed("locked-npm-dependencies", protected(commands["npm_dependencies"])))
                 installed = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=True, case=case)
                 # The only admitted state change is the previously absent locked
@@ -2121,12 +2344,13 @@ def apply_recovery(
                 if _matching_comments(client, pr, marker):
                     raise RecoveryError("normal-tail-phase-already-recorded")
                 _publish_once(client, pr, marker, {"schema": RECOVERY_SCHEMA, "state": "before", "operation_id": operation, "phase": phase_id, "preview_fingerprint": expected_fingerprint})
+                stages.extend(buyer_reserve())
                 command = protected(command)
                 stages.append(_bounded_status_readback(command) if phase == "managed-service-status" else _must_succeed(phase, command))
                 _publish_once(client, pr, _phase_marker(operation, "after-" + phase_id), {"schema": RECOVERY_SCHEMA, "state": "after", "operation_id": operation, "phase": phase_id, "preview_fingerprint": expected_fingerprint})
             restarted = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=True, case=case)
             unchanged = json.loads(json.dumps(fresh)); after = json.loads(json.dumps(restarted))
-            if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+            if unchanged_dependency_tail_case(case):
                 for path, transition in _predependency_profile(release_run_id)["unit_transitions"].items():
                     unit = Path(path).name
                     before_blobs = unchanged["predependency_live_contract"]["installed_unit_blob_hashes"]
@@ -2149,6 +2373,7 @@ def apply_recovery(
                 raise RecoveryError("existing-activation-proof-drift")
             stages.append({"stage": "existing-activation-readback", "stdout_sha256": digest(canonical_bytes(proof))})
         else:
+            stages.extend(buyer_reserve())
             activation = _run_stage(protected(commands["activation"]))
             if activation.returncode != 0:
                 readback = _run_stage(commands["activation_readback"])
@@ -2157,7 +2382,8 @@ def apply_recovery(
                 stages.append({"stage": "activation-readback", "stdout_sha256": digest(readback.stdout.encode())})
             else:
                 stages.append({"stage": "activation", "stdout_sha256": digest(activation.stdout.encode())})
-        if (case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE} or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id)):
+        if ((case is RecoveryCase.SQLITE_ACTIVATION or unchanged_dependency_tail_case(case)) or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id)):
+            stages.extend(buyer_reserve())
             stages.append(_must_succeed("cleaner-before-complete-probe", protected(commands["cleaner_precomplete_probe"])))
         before_completion = collect_prestate(
             target, preview["source"]["merge_sha"], require_incomplete=True, case=case
@@ -2169,6 +2395,7 @@ def apply_recovery(
             raise RecoveryError("trusted-main-drift-before-completion")
         if backup_capacity_case(case, release_run_id):
             stages.append(recheck_backup_capacity_proof(target, preview))
+        stages.extend(buyer_reserve())
         completion = _run_stage(protected(commands["completion"]), input_text=commands["completion_input"])
         if completion.returncode != 0:
             # Never repeat the CAS write.  Accept only an exact complete target
