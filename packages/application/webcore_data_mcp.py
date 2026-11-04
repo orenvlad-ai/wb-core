@@ -26,6 +26,8 @@ from packages.business_time import current_business_date_iso
 from packages.application.webcore_cloud_reads import (
     CLOUD_READ_TOOLS,
     SCOPE_CASH_READ,
+    SCOPE_CASH_OPERATIONS_READ,
+    SCOPE_MAX_HISTORY_READ,
     SCOPE_MAX_INBOX_READ,
     CloudReadError,
     WebCoreCloudReads,
@@ -200,7 +202,7 @@ class WebCoreDataMcpGateway:
         for definition in _tool_definitions():
             if definition.name in CLOUD_READ_TOOLS and not self.cloud_reads.enabled(definition.name):
                 continue
-            if definition.name in {"max_inbox_events", "max_inbox_event"}:
+            if definition.name in {"max_inbox_events", "max_inbox_event", "max_messages", "max_message"}:
                 definition.input_schema["properties"]["chat_id"]["enum"] = sorted(self.cloud_reads.max_inbox.chat_ids)
             security_schemes = [{"type": "oauth2", "scopes": [definition.scope]}]
             tools.append(
@@ -2991,6 +2993,40 @@ class WebCoreDataMcpGateway:
 def _tool_definitions() -> list[ToolDefinition]:
     return [
         ToolDefinition(
+            "cash_read", "Cash records and balances",
+            "Read authorized TEST cash balances, posted/draft/reversed documents, exact document ledger, "
+            "categories and counterparties. Read-only; never creates or posts payments. "
+            "Use documents then document by ID for matching MAX messages. Amounts are exact minor units "
+            "and decimal strings. Current-state pages are not a frozen export; recheck matches before approval.",
+            _schema({"resource": _enum_schema(["accounts", "documents", "document", "categories", "counterparties"]),
+                     "document_id": _string_schema(1, 160), "account_id": _string_schema(1, 160),
+                     "limit": _int_schema(1, MAX_LIMIT), "cursor": _string_schema(1, 1024)}, required=("resource",)),
+            _strict_output_schema("status", "source", "store_id", "store_mode", "instance_label", "rows",
+                                  "next_cursor", "limit", "coverage", "mutations"),
+            scope=SCOPE_CASH_OPERATIONS_READ,
+        ),
+        ToolDefinition(
+            "max_messages", "MAX live message history",
+            "Read messages directly from the authorized MAX group, newest first. Includes historical "
+            "messages visible to the bot. Optional before_ms is an inclusive upper source timestamp. "
+            "A full page may omit timestamp ties; coverage is not proof of complete history. "
+            "Use max_message for full text and attachment links. Never sends, edits or deletes messages.",
+            _schema({"chat_id": _int_schema(-(2**63), -1), "limit": _int_schema(1, MAX_LIMIT),
+                     "before_ms": _int_schema(0, 2**63-1)}, required=("chat_id",)),
+            _strict_output_schema("status", "source", "chat_id", "rows", "coverage", "upstream_calls", "mutations"),
+            scope=SCOPE_MAX_HISTORY_READ,
+        ),
+        ToolDefinition(
+            "max_message", "MAX current full message",
+            "Read one current message from the authorized group by message_id obtained from MAX history. "
+            "Returns ordered full-text chunks and attachment metadata/HTTPS links, not bot credentials. "
+            "Only infer payment from complete, unredacted text. Attachment links expire; fetch again if needed.",
+            _schema({"chat_id": _int_schema(-(2**63), -1), "message_id": _string_schema(1, 200)},
+                    required=("chat_id", "message_id")),
+            _strict_output_schema("status", "source", "chat_id", "rows", "coverage", "upstream_calls", "mutations"),
+            scope=SCOPE_MAX_HISTORY_READ,
+        ),
+        ToolDefinition(
             "max_inbox_events",
             "MAX inbox events",
             "Read bounded persisted events from one explicitly authorized MAX group. Includes separate "
@@ -4481,14 +4517,13 @@ def _artifact_kind_from_text(text: str, explicit: str) -> str:
 
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
-        if "message_text_chunks" in value:
-            # Inspect the entire source text before chunk redaction: a credential
-            # marker may straddle a chunk boundary. Suppression is never complete text.
-            chunks = value["message_text_chunks"]
-            if isinstance(chunks, list) and all(isinstance(chunk, str) for chunk in chunks):
-                if any(marker in "".join(chunks).lower() for marker in SECRET_TEXT_MARKERS):
-                    value = {**value, "message_text_chunks": [], "message_text_redacted": True,
-                             "message_text_complete": False}
+        for field, chunks in list(value.items()):
+            # Credential markers can straddle any exported text chunk boundary.
+            if (str(field).endswith("_chunks") and isinstance(chunks, list)
+                    and all(isinstance(chunk, str) for chunk in chunks)
+                    and any(marker in "".join(chunks).lower() for marker in SECRET_TEXT_MARKERS)):
+                prefix = str(field)[:-7]
+                value = {**value, field: [], prefix + "_redacted": True, prefix + "_complete": False}
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             lowered = str(key).lower()
