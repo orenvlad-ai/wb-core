@@ -746,6 +746,34 @@ def command_dependency_checks():
     print("command dependencies: direct/sibling/group/mixed browser routes and backend isolation OK")
 
 
+def fbs_overhead_presentation_dependency_checks():
+    script = "apps/fbs_overhead_presentation_smoke.py"
+    owner = "packages/application/fbs_overhead_presentation.py"
+    sibling = script.removesuffix("_smoke.py") + ".py"
+    for path in (script, owner, sibling):
+        plan = build_plan_from_paths(pull_request=1568, base=BASE, head=HEAD,
+            paths=[path], file_exists=lambda _, p: p in {script, owner, sibling})
+        verify_plan(plan)
+        assert plan["pip"] == ["openpyxl==3.1.5"], plan
+        assert plan["commands"].count(["python3", script]) == 1, plan
+
+    # This PR is selected by its trusted base map. The CI contract delta
+    # itself selects the already trusted process group's openpyxl prerequisite.
+    trusted, mapping_sha = select_checks.load_map()
+    trusted = deepcopy(trusted)
+    del trusted["command_dependencies"]["fbs_overhead_presentation_imports"]
+    del trusted["groups"]["fbs_overhead_presentation"]
+    with patch.object(select_checks, "load_map", return_value=(trusted, mapping_sha)):
+        plan = build_plan_from_paths(pull_request=1568, base=BASE, head=HEAD,
+            paths=[owner, script, "ci/checks.json", "ci/select_checks_smoke.py"],
+            file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
+    verify_plan(plan)
+    assert plan["pip"] == ["openpyxl==3.1.5"], plan
+    assert "process" in plan["groups"], plan
+    assert plan["commands"].count(["python3", script]) == 1, plan
+    print("FBS overhead presentation: direct/owner/sibling and trusted-base transition prerequisites OK")
+
+
 def fbs_repair_dependency_checks():
     script = "apps/fbs_temporary_allocation_repair_smoke.py"
     sibling_source = script.removesuffix("_smoke.py") + ".py"
@@ -1111,6 +1139,7 @@ def main() -> None:
     command_dependency_checks()
     stock_monitor_dependency_checks()
     payment_pdf_dependency_checks()
+    fbs_overhead_presentation_dependency_checks()
     fbs_repair_dependency_checks()
     ads_dependency_checks()
     buyout_percent_dependency_checks()
