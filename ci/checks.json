@@ -1,6 +1,11 @@
 {
   "schema": "wb-core.check-map/v1",
   "command_dependencies": {
+    "fbs_overhead_presentation_imports": {
+      "scripts": ["apps/fbs_overhead_presentation_smoke.py"],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "historical_fbo_documents": {"scripts": ["apps/fbs_historical_fbo_action_smoke.py", "apps/fbs_historical_fbo_publication_smoke.py", "apps/fbs_historical_fbo_ready_smoke.py", "apps/sheet_vitrina_v1_fulfillment_services_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"]},
     "fbs_native_attachment_imports": {"scripts": ["apps/fbs_historical_fbo_native_smoke.py", "apps/fbs_temporary_allocation_action_smoke.py", "apps/fbs_temporary_allocation_repair_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "operator_supplier_bounded_imports": {"scripts": ["apps/historical_dated_inputs_smoke.py", "apps/operator_supplier_release_scope_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]},
@@ -168,6 +173,11 @@
     }
   },
   "groups": {
+    "fbs_overhead_presentation": {
+      "patterns": ["packages/application/fbs_overhead_presentation.py", "apps/fbs_overhead_presentation_smoke.py"],
+      "commands": [["python3", "apps/fbs_overhead_presentation_smoke.py"]],
+      "pip": []
+    },
     "current_fbo_supply_close": {
       "patterns": ["packages/application/current_fbo_supply_close.py", "packages/application/current_fbo_supply_close_apply.py", "packages/application/current_fbo_supply_cost_source.py", "apps/current_fbo_supply_close_smoke.py", "apps/current_fbo_supply_cost_source_smoke.py"],
       "commands": [["python3", "apps/current_fbo_supply_close_smoke.py"], ["python3", "apps/current_fbo_supply_cost_source_smoke.py"]],

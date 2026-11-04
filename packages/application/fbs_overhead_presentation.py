@@ -71,14 +71,24 @@ class OverheadAccountingView:
                 raise ValueError("accounting_allocation_money_mismatch")
             pools = {"FBS", "FBO"} if summary["scope"] == "both" else {summary["scope"]}
             lines = []
+            pool_amounts = {}
             for key, amount in sorted(amounts.items()):
                 facility, pool, nm = key.split(":")
                 if facility != summary["facility_id"] or pool not in pools:
                     raise ValueError("accounting_allocation_scope_mismatch")
+                pool_amounts[pool] = pool_amounts.get(pool, 0) + amount
                 lines.append({"document_id": document_id if posted else "", "line_no": len(lines) + 1,
                     "line_role": "overhead_allocation", "facility_id": facility, "pool": pool,
                     "nm_id": int(nm), "quantity": weights[key],
                     "capital_rub": str(Decimal(amount) / 100), "expense_rub": str(Decimal(amount) / 100)})
+            # Current FBO dispatch allocations persist exact native line shares
+            # without a redundant pool subtotal. Older allocations retain it.
+            if "pool_amounts_kopecks" in allocation:
+                explicit = allocation["pool_amounts_kopecks"]
+                if (not isinstance(explicit, dict) or any(pool not in pools for pool in explicit)
+                        or any(explicit.get(pool, 0) != pool_amounts.get(pool, 0) for pool in pools)):
+                    raise ValueError("accounting_allocation_pool_money_mismatch")
+                pool_amounts = explicit
             return {**result, "allocation_status": "published" if posted else "preview",
                 "allocation_label": ("Распределение учтено в себестоимости" if posted else
                     "Предварительное распределение; уточняется до закрытия дня"),
@@ -86,7 +96,7 @@ class OverheadAccountingView:
                 "denominator_sku_count": len({line["nm_id"] for line in lines}),
                 "affected_sku_count": len({line["nm_id"] for line in lines if Decimal(line["expense_rub"])}),
                 "allocation_total_rub": str(Decimal(total) / 100),
-                "pool_allocations_rub": {p: str(Decimal(a) / 100) for p, a in allocation["pool_amounts_kopecks"].items()},
+                "pool_allocations_rub": {p: str(Decimal(a) / 100) for p, a in pool_amounts.items()},
                 "lines": lines}
         except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
             return {**result, "allocation_status": "unavailable", "allocation_reason": str(exc),
