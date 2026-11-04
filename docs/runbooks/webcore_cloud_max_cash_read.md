@@ -213,3 +213,5 @@ claim для повторной отправки. После изменения 
 текста по свежему чтению исходного сообщения. Сравнение только хвоста ID или
 только текста недостаточно. При сверке ранее сохранённого ответа источник
 также читается заново; новый POST при этом не выполняется.
+
+MAX history reads (`max_messages`, `max_message`) have a separate bounded 40-second tool budget, configurable with `WEBCORE_DATA_MCP_MAX_HISTORY_DEADLINE_SECONDS` (0.05–120 seconds). MAX GET socket timeout is 20 seconds, capped by remaining tool time. Other tool deadlines and reply deduplication are unchanged. A history timeout is not evidence of an empty history; repeat read-only retrieval before deciding payment chronology.

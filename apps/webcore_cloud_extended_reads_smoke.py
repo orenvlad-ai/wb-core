@@ -1,6 +1,7 @@
 """Read capability boundaries and canonical financial evidence fixtures."""
 from __future__ import annotations
 import hashlib
+import time
 import sys
 from pathlib import Path
 import unittest
@@ -55,6 +56,25 @@ class ExtendedReadTests(CloudReadTests):
         self.assertEqual(result['purpose_chunks'],[])
         self.assertFalse(result['purpose_complete'])
         self.assertNotIn('VERY_PRIVATE_CREDENTIAL',str(result))
+
+    def test_history_has_separate_bounded_deadline(self):
+        self.reads.max_api=MaxHistoryReader(self.root/'secret',None,frozenset({-100}))
+        identity=AuthIdentity('owner',(SCOPE_MAX_HISTORY_READ,),'oauth')
+        self.config.tool_deadline_seconds=0.05
+        self.config.max_history_deadline_seconds=0.4
+        def delayed_get(params, deadline):
+            self.assertGreater(deadline-time.monotonic(),0.2)
+            time.sleep(0.1)
+            return []
+        with patch.object(self.reads.max_api,'_get',side_effect=delayed_get):
+            for name,args in [('max_messages',{'chat_id':-100}),('max_message',{'chat_id':-100,'message_id':'mid.123'})]:
+                result=self.rpc(identity,'tools/call',name=name,arguments=args)
+                self.assertNotIn('error',result)
+        self.config.max_history_deadline_seconds=0.05
+        with patch.object(self.reads.max_api,'_get',side_effect=lambda *args: (time.sleep(0.15) or [])):
+            result=self.rpc(identity,'tools/call',name='max_messages',arguments={'chat_id':-100})
+            self.assertEqual(result['error']['data']['code'],'tool_timeout')
+            time.sleep(0.2)
 
     def test_max_history_group_boundary_and_full_text(self):
         api=MaxHistoryReader(self.root/'secret',None,frozenset({-100}))
