@@ -36,7 +36,7 @@ from packages.application.webcore_data_mcp import (  # noqa: E402
     WebCoreDataMcpGateway,
     tool_required_scope,
 )
-from packages.application.webcore_cloud_reads import CLOUD_READ_SCOPES  # noqa: E402
+from packages.application.webcore_cloud_reads import CLOUD_OAUTH_SCOPES  # noqa: E402
 from packages.application.webcore_oauth_refresh import (  # noqa: E402
     RefreshGrant,
     RefreshStorageError,
@@ -496,7 +496,7 @@ def _handle_json_rpc(
                         "sku_search, supplier_shipments, wb_supplies, or supply_artifacts directly for matching user "
                         "requests; no data-map or resolver preflight is required. Detail tools consume stable ids from "
                         "list results. All data is persisted/cache-only and bounded. Ops tools require webcore.ops.read. "
-                        "No sync, refresh, writes, arbitrary SQL/filesystem/shell, secrets or unbounded payloads."
+                        "No financial writes, arbitrary SQL/filesystem/shell or secrets. Separately granted max_posted_reply sends only + to an authorized MAX source after UI verification."
                     ),
                 },
             )
@@ -506,13 +506,13 @@ def _handle_json_rpc(
             return _json_rpc_result(request_id, {"tools": [
                 tool for tool in gateway.list_tools()
                 if tool_required_scope(tool["name"]) in identity.scopes
-                and (tool_required_scope(tool["name"]) not in CLOUD_READ_SCOPES or identity.auth_type == "oauth")
+                and (tool_required_scope(tool["name"]) not in CLOUD_OAUTH_SCOPES or identity.auth_type == "oauth")
             ]})
         if method == "tools/call":
             name = str(params.get("name") or "")
             required_scope = tool_required_scope(name)
             if (required_scope not in identity.scopes
-                    or (required_scope in CLOUD_READ_SCOPES and identity.auth_type != "oauth")):
+                    or (required_scope in CLOUD_OAUTH_SCOPES and identity.auth_type != "oauth")):
                 return _json_rpc_error(
                     request_id,
                     -32003,
@@ -1128,7 +1128,7 @@ def _validated_scope(raw_scope: str | None, config: WebCoreDataMcpServerConfig) 
 
 
 def _legacy_auth_scopes(config: WebCoreDataMcpServerConfig) -> tuple[str, ...]:
-    return tuple(scope for scope in config.scopes if scope not in CLOUD_READ_SCOPES)
+    return tuple(scope for scope in config.scopes if scope not in CLOUD_OAUTH_SCOPES)
 
 
 def _read_form_request(handler: BaseHTTPRequestHandler) -> dict[str, str]:
