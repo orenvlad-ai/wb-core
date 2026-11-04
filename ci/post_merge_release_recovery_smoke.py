@@ -1662,16 +1662,22 @@ def test_predependency_previous_success_receipt(run=recovery.PREDEPENDENCY_RELEA
         expect_reason('predependency-previous-release-receipt-invalid', lambda: recovery._predependency_previous_release_proof(client,run))
 
 
-def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = False, already_installed: bool = False, unit_transition=False, wrong_unit=False) -> None:
+def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = False, already_installed: bool = False, unit_transition=False, wrong_unit=False, buyer=False, reserve_fail=False, foreign_owner=False) -> None:
     value = preview()
     value['recovery_case'] = recovery.RecoveryCase.PREDEPENDENCY_STORAGE.value
     value['release_run_id'] = 41205730174 if unit_transition else recovery.PREDEPENDENCY_RELEASE_RUN_ID
     value['predependency_diff'] = {'exact': True}
+    if buyer:
+        value['recovery_case'] = recovery.RecoveryCase.BUYER_CHROME_RESERVE.value
+        value['release_run_id'] = recovery.BUYER_CHROME_RELEASE_RUN_ID
+        value['existing_started_owner'] = {'owner': 'exact'}
     missing = {'installed': False, 'versions': None}
     present = {'installed': True, 'versions': '8.17.1 3.0.1'}
     value['prestate']['predependency_live_contract'] = {'dependency_versions': {'npm_modules': present if already_installed else missing, 'system': 'pinned'}}
     commands_value = commands()
     commands_value['root_storage_status'] = ['storage-refresh']
+    if buyer:
+        commands_value['buyer_root_reserve'] = ['native-reserve']
     commands_value['npm_dependencies'] = ['npm-locked']
     commands_value['cleaner_precomplete_probe'] = ['cleaner-probe']
     commands_value['normal_activation_tail'] = {name: [name] for name in ('prepare', 'install', 'daemon_reload', 'nginx', 'restart', 'reconcile', 'barrier', 'storage', 'storage_readback', 'status', 'auth')}
@@ -1691,13 +1697,21 @@ def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = F
     calls = []
     originals = recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant, recovery._predependency_diff_proof
     recovery.build_stage_commands = lambda *_args, **_kwargs: commands_value
-    recovery._run_stage = lambda command, **_kwargs: (calls.append(command[0]) or subprocess.CompletedProcess(command, 255 if fail and command[0] == 'npm-locked' else 0, stdout=command[0], stderr=''))
+    recovery._run_stage = lambda command, **_kwargs: (calls.append(command[0]) or subprocess.CompletedProcess(command, 255 if fail and command[0] == 'npm-locked' else 55 if reserve_fail and command[0] == 'native-reserve' else 0, stdout=command[0], stderr=''))
     recovery.collect_prestate = lambda *_args, **_kwargs: states.pop(0)
     recovery.prove_repo_only_descendant = lambda *_args, **_kwargs: value['runner']
     recovery._predependency_diff_proof = lambda *_args: value['predependency_diff']
     client = CommentsClient()
     try:
-        result = recovery.apply_recovery(client, value, FINGERPRINT, object())
+        with patch.object(recovery, 'collect_existing_started_owner', return_value={'owner': 'foreign'} if foreign_owner else value.get('existing_started_owner')), \
+                patch.object(recovery, '_resume_started_deploy_protection', return_value=[]) as resume:
+            if reserve_fail or foreign_owner:
+                reason = 'buyer-chrome-normal-root-reserve-failed-55' if reserve_fail else 'existing-started-owner-drift-before-stages'
+                expect_reason(reason, lambda: recovery.apply_recovery(client, value, FINGERPRINT, object()))
+                assert calls == (['native-reserve'] if reserve_fail or foreign_owner else [])
+                assert not client.values and not resume.called
+                return
+            result = recovery.apply_recovery(client, value, FINGERPRINT, object())
         assert result['state'] == ('ambiguous' if fail or drift or wrong_unit else 'complete'), result
         assert calls.count('npm-locked') == (0 if already_installed else 1)
         if fail or drift:
@@ -1707,6 +1721,8 @@ def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = F
             assert result['reason']=='normal-tail-unit-transition-not-exact'
         else:
             assert calls.index('prepare') < calls.index('restart') < calls.index('cleaner-probe') < calls.index('completion')
+            if buyer:
+                assert calls.count('native-reserve') >= 17
             if not already_installed:
                 assert calls.index('barrier') < calls.index('npm-locked') < calls.index('prepare')
         previous_calls = list(calls)
@@ -2075,7 +2091,112 @@ def test_backup_capacity_tail_rechecks(*, fail_at=0):
         assert calls == ['status', 'auth', 'activation', 'cleaner-probe', 'completion']
 
 
+def buyer_chrome_log() -> bytes:
+    return b'''##[group]Run python3 ci/github_release_runner.py run --workflow-run-id "$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"
+python3 ci/github_release_runner.py run --workflow-run-id "$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"
+shell: /usr/bin/bash -e {0}
+env:
+  GATE_RUN_ID: 41814633119
+##[endgroup]
+line 1239, in deploy_current_checkout
+run_stage("dependencies", buyer_chrome_install_command)
+line 149, in install
+raise RuntimeError("root storage reserve would be breached")
+RuntimeError: root storage reserve would be breached
+subprocess.CalledProcessError: Command ['ssh', 'python3 apps/wb_buyer_chrome_runtime.py'] returned non-zero exit status 1.
+'''
+
+
+def test_buyer_chrome_exact_initial_reserve() -> None:
+    run = recovery.BUYER_CHROME_RELEASE_RUN_ID
+    case = recovery.RecoveryCase.BUYER_CHROME_RESERVE
+    profile = recovery.BUYER_CHROME_PROFILE['receipt']
+    assert recovery.recovery_case(run) is case
+    prove = lambda raw, run_id=run: recovery._prove_failed_stage(raw, profile['gate_run_id'], 'release', case=case, release_run_id=run_id)
+    raw = buyer_chrome_log()
+    assert prove(raw)['stage'] == 'buyer-chrome-initial-reserve-before-mutation'
+    for bad in (
+        raw.replace(b'1239', b'1240'), raw.replace(b'149', b'175'),
+        raw.replace(b'initial-reserve', b'other'),
+        raw.replace(b'41814633119', b'1'),
+        raw.replace(b'exit status 1.', b'exit status 255.'),
+        raw.replace(b'root storage reserve would be breached', b'root storage reserve changed before copy'),
+        raw + raw, raw + b'run_stage("restart", restart_command)',
+    ):
+        if bad != raw:
+            expect_reason('failed-stage-not-exact-buyer-chrome-initial-reserve', lambda bad=bad: prove(bad))
+    expect_reason('buyer-chrome-release-not-reviewed', lambda: prove(raw, run + 1))
+    expect_reason('failed-stage-not-root-storage-readback-exit3', lambda: recovery._prove_failed_stage(raw, profile['gate_run_id'], 'release'))
+    receipt = {**profile, 'schema': recovery.release.RECEIPT_SCHEMA, 'state': 'blocked', 'reason': 'CalledProcessError', 'release_kind': 'live_runtime', 'deployed_sha': None}
+    assert recovery._validate_original_receipt(receipt, case=case, release_run_id=run)['operation_id'] == profile['operation_id']
+    for key, value in profile.items():
+        wrong = value + 1 if isinstance(value, int) else 'release-v3-wrong' if key == 'operation_id' else M
+        expect_reason('original-receipt-not-exact-predependency-storage', lambda key=key, wrong=wrong: recovery._validate_original_receipt({**receipt, key: wrong}, case=case, release_run_id=run))
+    expect_reason('buyer-chrome-receipt-case-mismatch', lambda: recovery._validate_original_receipt(receipt, case=recovery.RecoveryCase.PREDEPENDENCY_STORAGE, release_run_id=run))
+
+
+def test_buyer_chrome_native_reserve_and_unchanged_closure() -> None:
+    namespace = {}
+    source = recovery._buyer_chrome_native_validator_source()
+    exec(source, namespace)
+    reserve = namespace['require_buyer_chrome_reserve']
+    policy = {'thresholds_bytes': {'normal_available': 25 * 1024**3}}
+    assert reserve(policy, SimpleNamespace(f_bavail=25 * 1024**3, f_frsize=1)) == 25 * 1024**3
+    for available, threshold in ((25 * 1024**3 - 1, 25 * 1024**3), (30 * 1024**3, 16 * 1024**3)):
+        try:
+            reserve({'thresholds_bytes': {'normal_available': threshold}}, SimpleNamespace(f_bavail=available, f_frsize=1))
+        except RuntimeError as exc:
+            assert str(exc) == 'buyer-chrome-normal-root-reserve-unavailable'
+        else:
+            raise AssertionError('native root reserve was bypassed')
+    assert all(forbidden not in source for forbidden in ('mkdir(', 'chmod(', 'chown(', '.unlink(', '.replace(', "'--extract'", 'ensure_runtime(', 'install()'))
+    assert "archive.extractfile(member)" in source and "runtime-file-checksum-invalid" in source
+    assert "private-runner-active" in source and "private-directory-invalid" in source
+    profile = recovery.BUYER_CHROME_PROFILE
+    merge = profile['receipt']['merge_sha']
+    deploy = ['# source'] * 1263
+    deploy[1230] = 'run_stage("root-storage-status", root_storage_commands["status"])'
+    deploy[1231] = 'run_stage("dependencies", seller_recovery_os_dependencies_command)'
+    deploy[1238] = 'run_stage("dependencies", buyer_chrome_install_command)'
+    deploy[1262] = deploy[1230]
+    chrome = (ROOT / 'apps/wb_buyer_chrome_runtime.py').read_text()
+    changed = ['packages/application/change_registry.py']
+    def git(args, **kwargs):
+        if args[0] == 'diff': return _completed(args, stdout='\n'.join(changed))
+        if args[0] == 'show': return _completed(args, stdout=chrome if args[-1].endswith('apps/wb_buyer_chrome_runtime.py') else '\n'.join(deploy))
+        if args[0] == 'ls-tree': return _completed(args)
+        if args[0] == 'rev-parse': return _completed(args, stdout='1' * 40)
+        raise AssertionError(args)
+    with patch.object(recovery, '_git', side_effect=git):
+        result = recovery._predependency_diff_proof(recovery.BUYER_CHROME_RELEASE_RUN_ID)
+        assert result['previous_deployed_sha'] == profile['previous_receipt']['deployed_sha']
+        changed[:] = ['apps/wb_buyer_chrome_runtime.py']
+        expect_reason('predependency-dependency-or-deploy-contract-changed', lambda: recovery._predependency_diff_proof(recovery.BUYER_CHROME_RELEASE_RUN_ID))
+        changed[:] = ['packages/application/change_registry.py']
+        from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+        target = hosted.load_hosted_runtime_target(recovery.TARGET_FILE)
+        script = recovery._predependency_live_contract_script(target, merge=merge)
+        ast.parse(script)
+        assert 'verify_installed_buyer_chrome' in script
+        commands = recovery.build_stage_commands(target, merge, 'f' * 64, 42, case=recovery.RecoveryCase.BUYER_CHROME_RESERVE, release_run_id=recovery.BUYER_CHROME_RELEASE_RUN_ID)
+        assert 'buyer_root_reserve' in commands
+        assert 'npm ci --omit=dev --ignore-scripts --no-audit --no-fund' in commands['npm_dependencies'][-1]
+        forbidden = ('wb_buyer_chrome_runtime.py', 'apt-get', 'pip install', 'rsync', 'chown')
+        assert all(item not in str(commands) for item in forbidden)
+        deploy[1238] = 'pass'
+        expect_reason('buyer-chrome-exact-source-phase-invalid', lambda: recovery._predependency_diff_proof(recovery.BUYER_CHROME_RELEASE_RUN_ID))
+
+
 def legacy_tail_regressions() -> None:
+    test_buyer_chrome_exact_initial_reserve()
+    test_buyer_chrome_native_reserve_and_unchanged_closure()
+    test_predependency_previous_success_receipt(recovery.BUYER_CHROME_RELEASE_RUN_ID)
+    test_predependency_npm_once_then_tail(buyer=True)
+    test_predependency_npm_once_then_tail(buyer=True, already_installed=True)
+    test_predependency_npm_once_then_tail(buyer=True, fail=True)
+    test_predependency_npm_once_then_tail(buyer=True, drift=True)
+    test_predependency_npm_once_then_tail(buyer=True, reserve_fail=True)
+    test_predependency_npm_once_then_tail(buyer=True, foreign_owner=True)
     test_exact_backup_capacity_guards()
     test_backup_capacity_tail_rechecks()
     test_backup_capacity_tail_rechecks(fail_at=2)
