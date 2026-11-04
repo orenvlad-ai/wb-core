@@ -18,6 +18,9 @@ class Adapter(Protocol):
 
 
 _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
+    "change_registry_external_v1": (
+        "packages.application.change_registry_external", "ExternalRegistryAdapter",
+    ),
     "current_fbo_supply_close_v1": (
         "packages.application.current_fbo_supply_close_apply", "CurrentFboSupplyCloseAdapter",
     ),

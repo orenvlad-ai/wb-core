@@ -83,6 +83,35 @@ Recovery не возобновляет бизнес-таймеры: удержи
 maintenance-окно затем завершается штатным formula-resume по его отдельному
 контракту.
 
+Точный выпуск 41820909577 (PR 1570, Gate 41814633119, head
+`321b6ea8b1f0eeb1081a3cc9e57fb91924075409`, merge
+`a057f334f5e25d6f63bf256a53f017d3b13b3f65`, operation
+`release-v3-0a5490564fc9a849623c43976fe9ebbe`) допускает отдельный хвост после
+первого отказа buyer Chrome reserve. Immutable log обязан доказать единственный
+определённый exit 1: deploy line 1239 и `install` line 149, до первого изменения
+Chrome. Отказ перед копированием package или неопределённый SSH исход не подходят.
+Предыдущий успешный выпуск 41810395795 (PR 1555, Gate 41810214857) подтверждает
+фактически установленную версию `78cad7d088fd5377c8fbb1c7cd5ad1ccb04a6880`.
+
+До preview резерв root должен быть восстановлен до неизменённых **25 GiB**.
+Нативное read-only доказательство проверяет точные policy/browser source blobs,
+размер, SHA256 и package identity установленного deb, все packaged runtime files
+и links против его payload без распаковки, sandbox root:root/4755, отдельный UID,
+владение и режимы private profile/state и отсутствие активного Chrome pilot.
+Dependency/deploy/unit contracts должны совпадать с предыдущим successful runtime;
+бизнес-таймеры остаются disabled под исходным held/quiet окном и owner
+`mutation_started`. Недостаток reserve, foreign owner или любой drift блокируют путь.
+
+Recovery сохраняет исходные operation/window/baseline, не повторяет Chrome,
+OS/Python/browser installation, sync, chown или merge. Допускается только уже
+описанное однократное восстановление отсутствующего pinned npm closure после
+проверки lockfiles; сломанный существующий closure блокируется. Затем выполняется
+canonical activation tail, cleaner `before_complete` probe, metadata CAS и final
+readback. Резерв 25 GiB проверяется перед owner recovery-start и перед каждой
+оставшейся mutation phase, включая npm и metadata CAS. Прежний uncertain claim
+остаётся только для readback. Этот профиль не распространяется на другие выпуски;
+exact formula-resume того же окна выполняется отдельно после complete receipt.
+
 Точный выпуск 39635174275 (PR 1486, Gate 39630567883, merge
 `3689f51ede065489120f0d199115bfb309490d9a`) поддерживает продолжение после
 отказа финального cleaner `before_complete` probe с ConnectionRefusedError.

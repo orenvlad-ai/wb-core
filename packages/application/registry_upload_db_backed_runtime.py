@@ -452,6 +452,7 @@ class RegistryUploadDbBackedRuntime:
         publication_date = current_business_date_iso(publication_now)
         from packages.application.fbs_accounting_runtime import (
             load, inventory_from_book, materialize, writer_lock, _save_book, _after_book_commit,
+            management_cost_history_cutoff, retain_management_cost_history,
         )
         from packages.application.fbs_snapshot_cost import fingerprint
         from packages.application.ready_publication import (
@@ -478,6 +479,8 @@ class RegistryUploadDbBackedRuntime:
             from packages.application.sheet_vitrina_v1_closed_ready_repair import validate_retained_candidate
             validate_retained_candidate(plan, expected, business_date=publication_date, runtime=self)
         book, expected_book = load(self.runtime_dir) if _prepared_book is None else _prepared_book
+        management_cutoff = management_cost_history_cutoff(book, business_date=publication_date)
+        management_history_donor = None
         from packages.application.fbs_accounting_degraded import (
             current_degraded_accounting, materialize_degraded_accounting, reconcile_recovered_accounting,
         )
@@ -526,9 +529,11 @@ class RegistryUploadDbBackedRuntime:
                                    ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
                 plan = recalculate_current_envelope(plan, business_date=publication_date,
                     parameters=dated_parameters(conn, publication_date) if estimate.get('available') or active_inventory is not None else None)
-                plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
-                    parameters=dated_parameters(conn, yesterday_date(publication_date)))
-                if EFFECTIVE_DATE <= plan.as_of_date < yesterday_date(publication_date):
+                if management_cutoff is None or yesterday_date(publication_date) >= management_cutoff:
+                    plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
+                        parameters=dated_parameters(conn, yesterday_date(publication_date)))
+                if (EFFECTIVE_DATE <= plan.as_of_date < yesterday_date(publication_date)
+                        and (management_cutoff is None or plan.as_of_date >= management_cutoff)):
                     dated_proxy = recalculate_dated_proxy(
                         asdict(plan),
                         day=plan.as_of_date,
@@ -569,6 +574,9 @@ class RegistryUploadDbBackedRuntime:
                     now=publication_now, connection=conn, quantity_only=True,
                 )
                 plan = materialize_current_official_fbs_estimate(plan, estimate=quantity)
+            if management_cutoff is not None and not _retained_closed_replay:
+                plan, management_history_donor = retain_management_cost_history(
+                    conn, plan=plan, expected=expected, cutoff=management_cutoff)
             rollover = [] if _retained_closed_replay else ready_rollover.prepare(
                 conn, plan=plan, expected=expected,
                 default_date=default_business_as_of_date(publication_now), degraded=degraded)
@@ -597,6 +605,8 @@ class RegistryUploadDbBackedRuntime:
             conn.execute("PRAGMA busy_timeout=0")
             conn.execute("BEGIN IMMEDIATE")
             check_expected(conn, expected)
+            if management_history_donor is not None:
+                check_expected(conn, management_history_donor)
             ready_rollover.check(conn, rollover)
             check_material(conn, material_inputs)
             check_build_inputs(conn, build_inputs)
@@ -614,6 +624,8 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
             check_expected(conn, expected)
+            if management_history_donor is not None:
+                check_expected(conn, management_history_donor)
             ready_rollover.check(conn, rollover)
             check_material(conn, material_inputs)
             check_build_inputs(conn, build_inputs)

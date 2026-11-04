@@ -36,6 +36,13 @@ from packages.application.webcore_data_mcp import (  # noqa: E402
     WebCoreDataMcpGateway,
     tool_required_scope,
 )
+from packages.application.webcore_cloud_reads import CLOUD_OAUTH_SCOPES  # noqa: E402
+from packages.application.webcore_oauth_refresh import (  # noqa: E402
+    RefreshGrant,
+    RefreshStorageError,
+    RefreshTokenError,
+    RefreshTokenStore,
+)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8766
@@ -63,7 +70,7 @@ DEFAULT_MAX_TOOL_WORKERS = 8
 DEFAULT_TOOL_DEADLINE_SECONDS = 12.0
 DEFAULT_MAX_TOOL_RESULT_BYTES = 512 * 1024
 SERVER_NAME = "webcore-data-mcp"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 WEB_AUTH_COOKIE_NAME = "wb_core_web_session"
 _OAUTH_LOGIN_FAILURES: dict[str, list[float]] = {}
 _OAUTH_LOGIN_FAILURES_LOCK = threading.Lock()
@@ -109,6 +116,9 @@ class WebCoreDataMcpServerConfig:
         max_tool_workers: int = DEFAULT_MAX_TOOL_WORKERS,
         tool_deadline_seconds: float = DEFAULT_TOOL_DEADLINE_SECONDS,
         max_tool_result_bytes: int = DEFAULT_MAX_TOOL_RESULT_BYTES,
+        oauth_refresh_store_path: Path | None = None,
+        max_reply_deadline_seconds: float = 40.0,
+        max_history_deadline_seconds: float = 40.0,
     ) -> None:
         self.host = host
         self.port = port
@@ -138,6 +148,9 @@ class WebCoreDataMcpServerConfig:
         self.max_tool_workers = max(2, int(max_tool_workers))
         self.tool_deadline_seconds = max(0.05, float(tool_deadline_seconds))
         self.max_tool_result_bytes = max(1024, int(max_tool_result_bytes))
+        self.oauth_refresh_store_path = oauth_refresh_store_path
+        self.max_reply_deadline_seconds = max(0.05, min(120.0, float(max_reply_deadline_seconds)))
+        self.max_history_deadline_seconds = max(0.05, min(120.0, float(max_history_deadline_seconds)))
 
     @property
     def oauth_enabled(self) -> bool:
@@ -193,6 +206,13 @@ def load_config_from_env() -> WebCoreDataMcpServerConfig:
     if runtime_dir is not None:
         default_code_store_path = runtime_dir / "webcore_data_mcp_oauth_codes.json"
     oauth_code_store_path = _optional_path(os.environ.get("WEBCORE_DATA_MCP_OAUTH_CODE_STORE_PATH")) or default_code_store_path
+    oauth_refresh_store_path = _optional_path(os.environ.get("WEBCORE_DATA_MCP_OAUTH_REFRESH_STORE_PATH"))
+    if oauth_refresh_store_path is not None and (
+        not oauth_refresh_store_path.is_absolute()
+        or oauth_refresh_store_path.resolve() != oauth_refresh_store_path
+        or ".." in oauth_refresh_store_path.parts
+    ):
+        raise ValueError("WEBCORE_DATA_MCP_OAUTH_REFRESH_STORE_PATH requires a canonical absolute path")
     oauth_allowed_redirect_prefixes = tuple(
         _csv(os.environ.get("WEBCORE_DATA_MCP_OAUTH_ALLOWED_REDIRECT_PREFIXES", ""))
         or DEFAULT_OAUTH_ALLOWED_REDIRECT_PREFIXES
@@ -281,6 +301,13 @@ def load_config_from_env() -> WebCoreDataMcpServerConfig:
         max_tool_workers=max_tool_workers,
         tool_deadline_seconds=tool_deadline_seconds,
         max_tool_result_bytes=max_tool_result_bytes,
+        oauth_refresh_store_path=oauth_refresh_store_path,
+        max_history_deadline_seconds=_parse_bounded_float(
+            os.environ.get("WEBCORE_DATA_MCP_MAX_HISTORY_DEADLINE_SECONDS"), 40.0,
+            "WEBCORE_DATA_MCP_MAX_HISTORY_DEADLINE_SECONDS", minimum=0.05, maximum=120.0),
+        max_reply_deadline_seconds=_parse_bounded_float(
+            os.environ.get("WEBCORE_DATA_MCP_MAX_REPLY_DEADLINE_SECONDS"), 40.0,
+            "WEBCORE_DATA_MCP_MAX_REPLY_DEADLINE_SECONDS", minimum=0.05, maximum=120.0),
     )
 
 
@@ -479,18 +506,23 @@ def _handle_json_rpc(
                         "sku_search, supplier_shipments, wb_supplies, or supply_artifacts directly for matching user "
                         "requests; no data-map or resolver preflight is required. Detail tools consume stable ids from "
                         "list results. All data is persisted/cache-only and bounded. Ops tools require webcore.ops.read. "
-                        "No sync, refresh, writes, arbitrary SQL/filesystem/shell, secrets or unbounded payloads."
+                        "No financial writes, arbitrary SQL/filesystem/shell or secrets. Separately granted max_posted_reply sends only + after UI verification; max_send_message sends user-authorized bot text to the configured MAX group."
                     ),
                 },
             )
         if method == "ping":
             return _json_rpc_result(request_id, {})
         if method == "tools/list":
-            return _json_rpc_result(request_id, {"tools": gateway.list_tools()})
+            return _json_rpc_result(request_id, {"tools": [
+                tool for tool in gateway.list_tools()
+                if tool_required_scope(tool["name"]) in identity.scopes
+                and (tool_required_scope(tool["name"]) not in CLOUD_OAUTH_SCOPES or identity.auth_type == "oauth")
+            ]})
         if method == "tools/call":
             name = str(params.get("name") or "")
             required_scope = tool_required_scope(name)
-            if required_scope not in identity.scopes:
+            if (required_scope not in identity.scopes
+                    or (required_scope in CLOUD_OAUTH_SCOPES and identity.auth_type != "oauth")):
                 return _json_rpc_error(
                     request_id,
                     -32003,
@@ -503,7 +535,11 @@ def _handle_json_rpc(
             arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
             correlation_id = secrets.token_hex(12)
             started = time.monotonic()
-            deadline_at = started + config.tool_deadline_seconds
+            # A reply includes source GET, one POST and verification GET.
+            tool_budget = (config.max_reply_deadline_seconds if name in {"max_posted_reply", "max_send_message"}
+                           else config.max_history_deadline_seconds if name in {"max_messages", "max_message"}
+                           else config.tool_deadline_seconds)
+            deadline_at = started + tool_budget
             cancel_event = threading.Event()
             future = tool_executor.submit(
                 lambda: gateway.call_tool(
@@ -533,7 +569,7 @@ def _handle_json_rpc(
                     data={"code": "tool_capacity_exhausted", "request_id": correlation_id},
                 )
             try:
-                result = future.result(timeout=config.tool_deadline_seconds)
+                result = future.result(timeout=tool_budget)
             except FutureTimeoutError:
                 cancel_event.set()
                 duration_ms = int((time.monotonic() - started) * 1000)
@@ -599,7 +635,11 @@ def _tool_result(
     result_bytes: int,
 ) -> dict[str, Any]:
     return {
+        # MCP CallToolResult requires content even when structuredContent carries
+        # the complete result. Keep the payload single-copy for cloud clients.
+        "content": [],
         "structuredContent": result,
+        "isError": False,
         "_meta": {
             "requestId": request_id,
             "serverDurationMs": duration_ms,
@@ -610,7 +650,7 @@ def _tool_result(
 
 def _authorize(handler: BaseHTTPRequestHandler, config: WebCoreDataMcpServerConfig) -> AuthIdentity | None:
     if config.auth_mode == "disabled":
-        return AuthIdentity("loopback-disabled-auth", tuple(config.scopes), "disabled")
+        return AuthIdentity("loopback-disabled-auth", _legacy_auth_scopes(config), "disabled")
     header = handler.headers.get("Authorization", "")
     prefix = "Bearer "
     if not header.startswith(prefix):
@@ -619,11 +659,11 @@ def _authorize(handler: BaseHTTPRequestHandler, config: WebCoreDataMcpServerConf
     if not token:
         return None
     if config.bearer_enabled and config.bearer_token and hmac.compare_digest(token, config.bearer_token):
-        return AuthIdentity(f"bearer:{_token_identity(token)}", tuple(config.scopes), "bearer")
+        return AuthIdentity(f"bearer:{_token_identity(token)}", _legacy_auth_scopes(config), "bearer")
     if config.bearer_enabled and config.bearer_token_sha256:
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
         if hmac.compare_digest(digest, config.bearer_token_sha256):
-            return AuthIdentity(f"bearer:{_token_identity(token)}", tuple(config.scopes), "bearer")
+            return AuthIdentity(f"bearer:{_token_identity(token)}", _legacy_auth_scopes(config), "bearer")
     if config.oauth_enabled:
         oauth_identity = _verify_oauth_access_token(token, config)
         if oauth_identity is not None:
@@ -675,7 +715,8 @@ def _authorization_server_metadata(
         "authorization_endpoint": f"{issuer}{DEFAULT_OAUTH_AUTHORIZE_PATH}",
         "token_endpoint": f"{issuer}{DEFAULT_OAUTH_TOKEN_PATH}",
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
+        "grant_types_supported": (["authorization_code", "refresh_token"]
+                                  if config.oauth_refresh_store_path is not None else ["authorization_code"]),
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": list(config.scopes),
@@ -744,8 +785,19 @@ def _handle_token_post(handler: BaseHTTPRequestHandler, config: WebCoreDataMcpSe
     except ValueError as exc:
         _write_token_error(handler, HTTPStatus.BAD_REQUEST, "invalid_request", str(exc))
         return
+    if form.get("grant_type") == "refresh_token" and config.oauth_refresh_store_path is not None:
+        try:
+            result = _exchange_refresh_token(config, form)
+        except RefreshTokenError as exc:
+            _write_token_error(handler, HTTPStatus.BAD_REQUEST, exc.code, "Refresh grant is invalid; reconnect if needed")
+            return
+        except RefreshStorageError:
+            _write_token_error(handler, HTTPStatus.SERVICE_UNAVAILABLE, "temporarily_unavailable", "OAuth refresh storage unavailable")
+            return
+        _write_json(handler, HTTPStatus.OK, result)
+        return
     if form.get("grant_type") != "authorization_code":
-        _write_token_error(handler, HTTPStatus.BAD_REQUEST, "unsupported_grant_type", "grant_type must be authorization_code")
+        _write_token_error(handler, HTTPStatus.BAD_REQUEST, "unsupported_grant_type", "Unsupported grant_type")
         return
     code = str(form.get("code") or "")
     redirect_uri = str(form.get("redirect_uri") or "")
@@ -764,6 +816,9 @@ def _handle_token_post(handler: BaseHTTPRequestHandler, config: WebCoreDataMcpSe
             code_verifier=code_verifier,
             resource=resource,
         )
+    except RefreshStorageError:
+        _write_token_error(handler, HTTPStatus.SERVICE_UNAVAILABLE, "temporarily_unavailable", "OAuth refresh storage unavailable")
+        return
     except Exception as exc:
         _write_token_error(handler, HTTPStatus.INTERNAL_SERVER_ERROR, "server_error", _safe_error(str(exc)))
         return
@@ -817,7 +872,10 @@ def _issue_authorization_redirect(
     subject: str,
 ) -> None:
     scope_result = _validated_scope(params.get("scope", ""), config)
-    scopes = tuple(scope_result.get("scopes") or config.scopes)
+    if scope_result.get("error"):
+        _write_json(handler, HTTPStatus.BAD_REQUEST, {"error": "invalid_scope"})
+        return
+    scopes = tuple(scope_result["scopes"])
     code = secrets.token_urlsafe(32)
     now = int(time.time())
     record = {
@@ -872,17 +930,56 @@ def _exchange_authorization_code(
         store[code_hash] = record
         _save_code_store(config, store)
     scopes = tuple(item for item in str(record.get("scope") or "").split() if item)
+    subject = str(record.get("subject") or config.oauth_owner_username)
+    if subject != config.oauth_owner_username or not scopes or not set(scopes) <= set(config.scopes):
+        return {"error": "invalid_grant", "detail": "authorization grant is no longer supported"}
+    refresh = None
+    if config.oauth_refresh_store_path is not None:
+        refresh = _refresh_store(config).mint(subject=subject, client_id=client_id, resource=resource, scopes=scopes)
     access_token = _make_access_token(
         config,
-        subject=str(record.get("subject") or config.oauth_owner_username),
+        subject=subject,
         client_id=client_id,
         scopes=scopes,
     )
-    return {
+    result = {
         "access_token": access_token,
         "token_type": "Bearer",
         "expires_in": config.oauth_access_token_ttl_seconds,
         "scope": " ".join(scopes),
+    }
+    if refresh is not None:
+        result["refresh_token"] = refresh.refresh_token
+        result["refresh_token_expires_in"] = max(0, refresh.expires_at - int(time.time()))
+    return result
+
+
+def _refresh_store(config: WebCoreDataMcpServerConfig) -> RefreshTokenStore:
+    if config.oauth_refresh_store_path is None:
+        raise RefreshStorageError()
+    generation = hashlib.sha256(config.oauth_signing_secret.encode("utf-8")).hexdigest()
+    return RefreshTokenStore(config.oauth_refresh_store_path, generation)
+
+
+def _exchange_refresh_token(config: WebCoreDataMcpServerConfig, form: Mapping[str, str]) -> dict[str, Any]:
+    client_id = str(form.get("client_id") or "")
+    resource = str(form.get("resource") or _resource(config))
+    if (not client_id or not _allowed_by_prefix(client_id, config.oauth_allowed_client_id_prefixes)
+            or resource != _resource(config)):
+        raise RefreshTokenError()
+    requested = tuple(str(form["scope"]).split()) if "scope" in form else None
+    grant: RefreshGrant = _refresh_store(config).rotate(
+        str(form.get("refresh_token") or ""), client_id=client_id, resource=resource,
+        allowed_scopes=config.scopes, expected_subject=config.oauth_owner_username,
+        requested_scopes=requested,
+    )
+    return {
+        "access_token": _make_access_token(config, subject=grant.subject, client_id=grant.client_id, scopes=grant.scopes),
+        "token_type": "Bearer",
+        "expires_in": config.oauth_access_token_ttl_seconds,
+        "scope": " ".join(grant.scopes),
+        "refresh_token": grant.refresh_token,
+        "refresh_token_expires_in": max(0, grant.expires_at - int(time.time())),
     }
 
 
@@ -1034,11 +1131,18 @@ def _verify_pbkdf2_sha256(password: str, encoded: str) -> bool:
 def _validated_scope(raw_scope: str | None, config: WebCoreDataMcpServerConfig) -> dict[str, Any]:
     scopes = tuple(item for item in str(raw_scope or "").split() if item)
     if not scopes:
-        return {"scopes": tuple(config.scopes)}
+        # Existing clients omitting scope keep the old grant surface. New data
+        # domains always require an explicit OAuth scope request and consent.
+        legacy = _legacy_auth_scopes(config)
+        return {"scopes": legacy} if legacy else {"error": "explicit scope is required"}
     unsupported = [scope for scope in scopes if scope not in config.scopes]
     if unsupported:
         return {"error": "unsupported scope"}
     return {"scopes": scopes}
+
+
+def _legacy_auth_scopes(config: WebCoreDataMcpServerConfig) -> tuple[str, ...]:
+    return tuple(scope for scope in config.scopes if scope not in CLOUD_OAUTH_SCOPES)
 
 
 def _read_form_request(handler: BaseHTTPRequestHandler) -> dict[str, str]:
@@ -1357,6 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
                     "has_oauth_owner_password_hash": bool(config.oauth_owner_password_hash),
                     "has_oauth_session_secret": bool(config.oauth_session_secret),
                     "oauth_code_store_path": str(config.oauth_code_store_path) if config.oauth_code_store_path else "",
+                    "oauth_refresh_enabled": config.oauth_refresh_store_path is not None,
                     "max_http_workers": config.max_http_workers,
                     "max_tool_workers": config.max_tool_workers,
                     "tool_deadline_seconds": config.tool_deadline_seconds,

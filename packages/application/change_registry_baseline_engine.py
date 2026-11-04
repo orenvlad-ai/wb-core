@@ -902,11 +902,23 @@ class ChangeRegistryBaselineEngine:
                 raise ChangeRegistryConflict(
                     "fact chain does not match the projected exact state"
                 )
-            close_active(completed_at, checkpoint_id)
-            active_value = current_value
-            active_start = completed_at
-            active_checkpoint_id = checkpoint_id
-            active_fact_id = str(fact["fact_id"])
+            from packages.application.change_registry_external import decorate_facts
+            refined = decorate_facts(conn, [fact])[0].get("external_registration")
+            if refined:
+                # Inside an uncertain transition window neither value is asserted.
+                # Exact native timestamps join adjacent intervals without a gap.
+                for step in refined["steps"]:
+                    close_active(step["observed_from"], checkpoint_id)
+                    active_value = CanonicalValue("integer", integer_value=step["after_value_integer"])
+                    active_start = step["observed_to"]
+                    active_checkpoint_id = checkpoint_id
+                    active_fact_id = str(fact["fact_id"])
+            else:
+                close_active(completed_at, checkpoint_id)
+                active_value = current_value
+                active_start = completed_at
+                active_checkpoint_id = checkpoint_id
+                active_fact_id = str(fact["fact_id"])
 
         if active_value is not None:
             intervals.append(

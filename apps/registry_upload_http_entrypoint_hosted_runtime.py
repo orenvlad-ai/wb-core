@@ -1753,6 +1753,7 @@ def render_nginx_public_route_block(
         modifier = "=" if route["match"] == "exact" else "^~"
         methods = ", ".join(route.get("methods") or [])
         route_proxy_pass_url = str(route.get("proxy_pass_url") or proxy_pass_url)
+        is_max_webhook = route["name"] == "max_webhook"
         route_lines = [
             f"    # {route['name']} ({methods})",
             f"    location {modifier} {route['path']} {{",
@@ -1761,10 +1762,17 @@ def render_nginx_public_route_block(
             "        proxy_set_header X-Real-IP $remote_addr;",
             "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
             "        proxy_set_header X-Forwarded-Proto $scheme;",
-            f"        client_max_body_size {client_max_body_size};",
-            f"        proxy_read_timeout {read_timeout};",
-            f"        proxy_send_timeout {send_timeout};",
+            f"        client_max_body_size {'1m' if is_max_webhook else client_max_body_size};",
+            f"        proxy_read_timeout {'25s' if is_max_webhook else read_timeout};",
+            f"        proxy_send_timeout {'10s' if is_max_webhook else send_timeout};",
         ]
+        if is_max_webhook:
+            route_lines.extend([
+                "        if ($request_method != POST) { return 405; }",
+                "        client_body_timeout 10s;",
+                "        proxy_request_buffering on;",
+                "        access_log off;",
+            ])
         if route["name"] in {"sheet_vitrina_wb_buyer_viewer_auth", "sheet_vitrina_seller_viewer_auth"}:
             route_lines.extend([
                 "        internal;",

@@ -5699,11 +5699,21 @@ def _plan_correction(
         lines=lines,
         movements=movements,
     )
+    domain = {"target_document_id": target_id, "append_only": True}
+    if "management_cost_acceptance" in manifest:
+        from packages.application.fbs_document_cost import management_cost_acceptance
+        try:
+            domain["management_cost_acceptance"] = management_cost_acceptance(
+                manifest["management_cost_acceptance"], raw_movements,
+                business_date=str(request["business_date"]),
+            )
+        except (ValueError, TypeError, KeyError, InvalidOperation) as exc:
+            raise FfPoolDocumentError("management_cost_acceptance_invalid", str(exc)) from exc
     return {
         "primary_document_id": document_id,
         "root_document_id": root_id,
         "documents": [document],
-        "domain_manifest": {"target_document_id": target_id, "append_only": True},
+        "domain_manifest": domain,
     }
 
 

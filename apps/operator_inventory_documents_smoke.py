@@ -158,6 +158,29 @@ class InventoryDocuments(unittest.TestCase):
     def signed(self,name,target,q=-1,value='-10',pool='FBS'):
         return self.preview(name,'correction',{'target_document_id':target,'movements':[{'facility_id':'A','pool':pool,'nm_id':1,'quantity_delta':q,'capital_delta_rub':value}]})
 
+    def test_native_management_acceptance_is_hash_bound_and_serialized(self):
+        from apps.fbs_document_cost_smoke import management_correction
+        target = self.base_document()
+        self.set_catalog(range(1, 35))
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            original = dict(conn.execute(f"SELECT * FROM {BALANCES_TABLE} WHERE facility_id='A' AND pool='FBO' AND nm_id=1").fetchone())
+            for nm in (2, 3, 4):
+                values = {**original, 'nm_id': nm}
+                conn.execute(f'INSERT INTO {BALANCES_TABLE}({",".join(values)}) VALUES({",".join("?" for _ in values)})', list(values.values()))
+        fixture = management_correction(DAY)['cost_document']
+        manifest = {**fixture['domain'], 'target_document_id': target, 'movements': fixture['movements']}
+        preview = self.preview('management-acceptance', 'correction', manifest)
+        receipt = self.confirm(preview)
+        self.assertTrue(receipt['physical_applied'], receipt)
+        with operations.readonly(self.runtime.db_path) as conn:
+            document = _documents(conn, document_id=receipt['document']['document_id'])[0]
+            accepted = document['cost_document']['domain']['management_cost_acceptance']
+            self.assertEqual(accepted['supplier_scope_nm_ids'], list(range(1, 35)))
+            self.assertEqual(accepted['prior_profit_history'], 'unchanged')
+            self.assertEqual(accepted['affected_current_fbo'], fixture['domain']['management_cost_acceptance']['affected_current_fbo'])
+            self.assertTrue(document['cost_document']['posted_manifest_sha256'].startswith('sha256:'))
+
     def test_full_roster_explicit_zero_prestate_and_epoch(self):
         self.set_catalog((1,2))
         with self.assertRaises(FfPoolSurfaceError):self.inventory('incomplete')

@@ -263,6 +263,7 @@ DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/bid/com
 DEFAULT_SKU_MANAGEMENT_HISTORY_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/history"
 DEFAULT_CHANGE_REGISTRY_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/change-registry"
 DEFAULT_CHANGE_REGISTRY_MANUAL_SCAN_PATH = f"{DEFAULT_CHANGE_REGISTRY_PATH}/manual-scan"
+DEFAULT_CHANGE_REGISTRY_EXTERNAL_PATH = f"{DEFAULT_CHANGE_REGISTRY_PATH}/external"
 DEFAULT_CHANGE_REGISTRY_ANNOTATIONS_PATH = f"{DEFAULT_CHANGE_REGISTRY_PATH}/annotations"
 DEFAULT_SKU_INVENTORY_BALANCE_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/inventory-balance"
 DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH = f"{DEFAULT_SKU_INVENTORY_BALANCE_PATH}/settings"
@@ -1805,6 +1806,7 @@ def _build_handler(
                 DEFAULT_SKU_MANAGEMENT_BID_PREVIEW_PATH: lambda body, actor: entrypoint.handle_sku_management_bid_preview_request(body, actor=actor),
                 DEFAULT_SKU_MANAGEMENT_BID_COMMIT_PATH: lambda body, actor: entrypoint.handle_sku_management_bid_commit_request(body, actor=actor),
                 DEFAULT_CHANGE_REGISTRY_MANUAL_SCAN_PATH: lambda body, actor: entrypoint.handle_change_registry_manual_scan_request(body, actor=actor),
+                DEFAULT_CHANGE_REGISTRY_EXTERNAL_PATH: lambda body, actor: entrypoint.handle_change_registry_external_request(body, actor=actor),
                 DEFAULT_CHANGE_REGISTRY_ANNOTATIONS_PATH: lambda body, actor: entrypoint.handle_change_registry_annotation_request(body, actor=actor),
             }
             if parsed.path in sku_management_post_handlers:
@@ -12124,6 +12126,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "change_registry_path": DEFAULT_CHANGE_REGISTRY_PATH,
         "change_registry_manual_scan_path": DEFAULT_CHANGE_REGISTRY_MANUAL_SCAN_PATH,
         "change_registry_annotations_path": DEFAULT_CHANGE_REGISTRY_ANNOTATIONS_PATH,
+        "change_registry_external_path": DEFAULT_CHANGE_REGISTRY_EXTERNAL_PATH,
         "sku_inventory_balance_path": DEFAULT_SKU_INVENTORY_BALANCE_PATH,
         "sku_inventory_balance_settings_path": DEFAULT_SKU_INVENTORY_BALANCE_SETTINGS_PATH,
         "sku_inventory_balance_calculate_path": DEFAULT_SKU_INVENTORY_BALANCE_CALCULATE_PATH,

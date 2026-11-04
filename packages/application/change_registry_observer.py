@@ -1463,7 +1463,9 @@ class ChangeRegistryReadSurface:
                 in scoped_subjects
             ][:exact_limit]
 
-        fact_payloads = [dict(row) for row in facts]
+        from packages.application.change_registry_external import decorate_facts, effective_changes
+        with self.store_registry.session("operational", mode="ro", operation="external_registry_overview") as conn:
+            fact_payloads = decorate_facts(conn, facts)
         interval_state: list[dict[str, Any]] = []
         seen: set[tuple[str, int, int, str, str]] = set()
         for fact in fact_payloads:
@@ -1539,6 +1541,7 @@ class ChangeRegistryReadSurface:
                 "source_manifests": [dict(row) for row in source_manifests],
             },
             "facts": fact_payloads,
+            "effective_changes": effective_changes(fact_payloads),
             "interval_state": interval_state,
             "incidents": [dict(row) for row in incidents],
             "jobs": [dict(row) for row in jobs],

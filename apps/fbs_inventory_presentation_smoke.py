@@ -50,6 +50,30 @@ def row(key, value=999, nm=1):
 
 
 class PresentationTests(unittest.TestCase):
+    def test_management_acceptance_is_scoped_and_keeps_missing_and_quantity_limits(self):
+        from apps.fbs_document_cost_smoke import capture as cost_capture, management_correction, initialize_candidate
+        day = '2026-09-08'
+        basis = [('A', nm, 100, '100') for nm in (1, 2, 3, 4, 5, 35)]
+        state = initialize_candidate(cost_capture(rows=basis, fbo=basis))
+        state = evaluate_candidate(state, cost_capture(day, [management_correction()], rows=basis))
+        source = wb(day)
+        source['rows'] = [{**source['rows'][0], 'nm_id': nm} for nm in (1, 2, 3, 4, 5, 35)]
+        snap = snapshot(state, source, day=day)
+        data = snap.payload()
+        self.assertIn('management_cost_acceptance', data['rows']['5'])
+        self.assertNotIn('management_cost_acceptance', data['rows']['35'])
+        cell = snap.presentation('100', nm=1, metric_key=COST)
+        self.assertEqual(cell['quality_label'], 'Стоимость принята для управленческого учёта с ' + day)
+        self.assertEqual(cell['quality_state'], 'preliminary')
+        self.assertIn('Полный физический', snap.warehouse_detail()['balances'][0]['human_evidence']['items'][-1]['quantity_source'])
+        for nm, metric, value in ((35, COST, '100'), (1, 'own_capital_WB_capital_rub', '100'), (1, COST, None), (None, COST, '100')):
+            cell = snap.presentation(value, nm=nm, metric_key=metric)
+            self.assertNotIn('management_cost_acceptance', cell)
+        state['pending_documents'] = [{'document_id': 'missing-expense', 'reason': 'unresolved'}]
+        blocked = snapshot(state, source, day=day)
+        self.assertNotIn('management_cost_acceptance', blocked.payload()['rows']['1'])
+        self.assertIsNone(blocked.metrics(1)[COST])
+
     def test_source_replacement_and_all_sums(self):
         s=snapshot();p=s.payload();ff=s.warehouse_detail()
         self.assertEqual(ff['warehouse']['total_quantity'],'1500')

@@ -173,6 +173,36 @@
     }
   },
   "groups": {
+    "change_registry_external": {
+      "patterns": [
+        "packages/application/change_registry_external.py",
+        "packages/application/change_registry.py",
+        "packages/application/change_registry_observer.py",
+        "packages/application/change_registry_baseline_engine.py",
+        "apps/change_registry_external_smoke.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/change_registry_external_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/change_registry_baseline_engine_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/change_registry_observer_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/change_registry_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
+    },
     "fbs_overhead_presentation": {
       "patterns": ["packages/application/fbs_overhead_presentation.py", "apps/fbs_overhead_presentation_smoke.py"],
       "commands": [["python3", "apps/fbs_overhead_presentation_smoke.py"]],

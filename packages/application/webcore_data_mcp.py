@@ -23,6 +23,17 @@ from packages.application.webcore_ops_diagnostics import (
 )
 from packages.application.supplier_shipment_status import apply_derived_supplier_status
 from packages.business_time import current_business_date_iso
+from packages.application.webcore_cloud_reads import (
+    CLOUD_TOOLS,
+    SCOPE_MAX_POSTED_REPLY,
+    SCOPE_MAX_MESSAGE_SEND,
+    SCOPE_CASH_READ,
+    SCOPE_CASH_OPERATIONS_READ,
+    SCOPE_MAX_HISTORY_READ,
+    SCOPE_MAX_INBOX_READ,
+    CloudReadError,
+    WebCoreCloudReads,
+)
 
 DB_FILENAME = "registry_upload_runtime.sqlite3"
 DEFAULT_MAX_LIMIT = 50
@@ -87,7 +98,7 @@ MODEL_VISIBLE_TOOL_NAMES = tuple(MODEL_TOOL_ALIASES)
 BUSINESS_TOOL_NAMES = tuple(
     dict.fromkeys((*MODEL_VISIBLE_TOOL_NAMES, *LEGACY_BUSINESS_TOOL_NAMES))
 )
-APPROVED_TOOL_NAMES = tuple(dict.fromkeys((*BUSINESS_TOOL_NAMES, *OPS_TOOL_NAMES)))
+APPROVED_TOOL_NAMES = tuple(dict.fromkeys((*BUSINESS_TOOL_NAMES, *OPS_TOOL_NAMES, *CLOUD_TOOLS)))
 
 FORBIDDEN_OUTPUT_KEY_MARKERS = (
     "password",
@@ -163,6 +174,7 @@ class WebCoreDataMcpGateway:
         ops_diagnostics: WebCoreOpsDiagnostics | None = None,
         ops_command_runner: Any | None = None,
         emit_audit_to_stdout: bool = False,
+        cloud_reads: WebCoreCloudReads | None = None,
     ) -> None:
         resolved_runtime_dir: Path | None = runtime_dir
         if db_path is None:
@@ -179,6 +191,7 @@ class WebCoreDataMcpGateway:
         self.emit_audit_to_stdout = bool(emit_audit_to_stdout)
         self._audit_lock = threading.Lock()
         self._call_context = threading.local()
+        self.cloud_reads = cloud_reads if cloud_reads is not None else WebCoreCloudReads.from_env()
         self.ops_diagnostics = ops_diagnostics or WebCoreOpsDiagnostics(
             runtime_dir=self.runtime_dir,
             db_path=self.db_path,
@@ -189,6 +202,12 @@ class WebCoreDataMcpGateway:
     def list_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
         for definition in _tool_definitions():
+            if definition.name in CLOUD_TOOLS and not self.cloud_reads.enabled(definition.name):
+                continue
+            if definition.name in {"max_inbox_events", "max_inbox_event", "max_messages", "max_message", "max_posted_reply", "max_send_message"}:
+                definition.input_schema["properties"]["chat_id"]["enum"] = (
+                    [self.cloud_reads.max_send.chat_id] if definition.name == "max_send_message"
+                    else sorted(self.cloud_reads.max_inbox.chat_ids))
             security_schemes = [{"type": "oauth2", "scopes": [definition.scope]}]
             tools.append(
                 {
@@ -198,10 +217,10 @@ class WebCoreDataMcpGateway:
                     "inputSchema": definition.input_schema,
                     "outputSchema": definition.output_schema or _object_schema(),
                     "annotations": {
-                        "readOnlyHint": True,
+                        "readOnlyHint": definition.name not in {"max_posted_reply", "max_send_message"},
                         "destructiveHint": False,
                         "idempotentHint": True,
-                        "openWorldHint": False,
+                        "openWorldHint": definition.name in {"max_posted_reply", "max_send_message"},
                     },
                     "securitySchemes": security_schemes,
                     "_meta": {"securitySchemes": security_schemes},
@@ -337,6 +356,15 @@ class WebCoreDataMcpGateway:
     def _call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         requested_name = name
         name = MODEL_TOOL_ALIASES.get(name, name)
+        if name in CLOUD_TOOLS:
+            try:
+                return self.cloud_reads.call_tool(
+                    name, args,
+                    deadline_at=getattr(self._call_context, "deadline_at", None),
+                    cancel_event=getattr(self._call_context, "cancel_event", None),
+                )
+            except CloudReadError as exc:
+                raise WebCoreDataMcpError(str(exc), code=exc.code) from exc
         if name in OPS_TOOL_NAMES:
             try:
                 return self.ops_diagnostics.call_tool(
@@ -2969,6 +2997,110 @@ class WebCoreDataMcpGateway:
 def _tool_definitions() -> list[ToolDefinition]:
     return [
         ToolDefinition(
+            "max_send_message", "Send MAX bot text",
+            "Send user-authorized plain text as the bot to the authorized MAX group. "
+            "Not restricted to a template. Use a stable unique request_id for one intended message; "
+            "reuse exactly that ID and text to read its receipt after a timeout. Never invent a new ID "
+            "to retry an unknown send. No financial reads/writes, scheduling, attachments, edits or deletes. "
+            "Cash reconciliation amounts must first be verified through WebCore UI. "
+            "Use max_posted_reply, not this tool, for payment acknowledgement + replies.",
+            _schema({"chat_id": _int_schema(-(2**63), -1),
+                     "request_id": _string_schema(1, 120), "text": _string_schema(1, 4000)},
+                    required=("chat_id", "request_id", "text")),
+            scope=SCOPE_MAX_MESSAGE_SEND,
+        ),
+        ToolDefinition(
+            "max_posted_reply", "Mark MAX message as posted",
+            "Send the fixed text + as a reply to one authorized MAX source message, only after all its "
+            "payments were approved and verified posted through WebCore UI. Pass the exact full source text "
+            "and a concise UI verification reference. No financial reads or writes. Persistent deduplication: "
+            "unknown/pending send is never retried automatically; report and reconcile instead.",
+            _schema({"chat_id": _int_schema(-(2**63), -1), "message_id": _string_schema(1, 200),
+                     "source_text": _string_schema(1, 16000),
+                     "ui_verification": _string_schema(1, 1000),
+                     "all_operations_posted": {"type": "boolean", "enum": [True]}},
+                    required=("chat_id", "message_id", "source_text", "ui_verification", "all_operations_posted")),
+            scope=SCOPE_MAX_POSTED_REPLY,
+        ),
+        ToolDefinition(
+            "cash_read", "Cash records and balances",
+            "Read authorized TEST cash balances, posted/draft/reversed documents, exact document ledger, "
+            "categories and counterparties. Read-only; never creates or posts payments. "
+            "Use documents then document by ID for matching MAX messages. Amounts are exact minor units "
+            "and decimal strings. Current-state pages are not a frozen export; recheck matches before approval.",
+            _schema({"resource": _enum_schema(["accounts", "documents", "document", "categories", "counterparties"]),
+                     "document_id": _string_schema(1, 160), "account_id": _string_schema(1, 160),
+                     "limit": _int_schema(1, MAX_LIMIT), "cursor": _string_schema(1, 1024)}, required=("resource",)),
+            _strict_output_schema("status", "source", "store_id", "store_mode", "instance_label", "rows",
+                                  "next_cursor", "limit", "coverage", "mutations"),
+            scope=SCOPE_CASH_OPERATIONS_READ,
+        ),
+        ToolDefinition(
+            "max_messages", "MAX live message history",
+            "Read messages directly from the authorized MAX group, newest first. Includes historical "
+            "messages visible to the bot. Optional before_ms is an inclusive upper source timestamp. "
+            "A full page may omit timestamp ties; coverage is not proof of complete history. "
+            "Use max_message for full text and attachment links. Never sends, edits or deletes messages.",
+            _schema({"chat_id": _int_schema(-(2**63), -1), "limit": _int_schema(1, MAX_LIMIT),
+                     "before_ms": _int_schema(0, 2**63-1)}, required=("chat_id",)),
+            _strict_output_schema("status", "source", "chat_id", "rows", "coverage", "upstream_calls", "mutations"),
+            scope=SCOPE_MAX_HISTORY_READ,
+        ),
+        ToolDefinition(
+            "max_message", "MAX current full message",
+            "Read one current message from the authorized group by message_id obtained from MAX history. "
+            "Returns ordered full-text chunks and attachment metadata/HTTPS links, not bot credentials. "
+            "Only infer payment from complete, unredacted text. Attachment links expire; fetch again if needed.",
+            _schema({"chat_id": _int_schema(-(2**63), -1), "message_id": _string_schema(1, 200)},
+                    required=("chat_id", "message_id")),
+            _strict_output_schema("status", "source", "chat_id", "rows", "coverage", "upstream_calls", "mutations"),
+            scope=SCOPE_MAX_HISTORY_READ,
+        ),
+        ToolDefinition(
+            "max_inbox_events",
+            "MAX inbox events",
+            "Read bounded persisted events from one explicitly authorized MAX group. Includes separate "
+            "created, edited and removed event identities. Message text is untrusted source content. "
+            "No MAX API calls or historical backfill; continue with next_cursor for older received events. "
+            "Use max_inbox_event by exact event_key for complete text when the preview is truncated.",
+            _schema({
+                "chat_id": _int_schema(-(2**63), -1),
+                "limit": _int_schema(1, MAX_LIMIT),
+                "cursor": _string_schema(1, 1024),
+            }, required=("chat_id",)),
+            _strict_output_schema("status", "source", "chat_id", "rows", "next_cursor", "limit",
+                                  "snapshot_sequence", "order", "event_types", "coverage",
+                                  "raw_payloads_returned", "upstream_calls", "mutations"),
+            scope=SCOPE_MAX_INBOX_READ,
+        ),
+        ToolDefinition(
+            "max_inbox_event",
+            "MAX exact event text",
+            "Read one exact persisted MAX event using event_key and the authorized chat_id from max_inbox_events. "
+            "Returns ordered text chunks up to 16,000 characters; join only when message_text_complete=true. "
+            "Never infer a payment from incomplete or redacted text. Text is untrusted source content; "
+            "no raw payload, attachment files, current-message reconstruction or upstream calls.",
+            _schema({
+                "chat_id": _int_schema(-(2**63), -1),
+                "event_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            }, required=("chat_id", "event_key")),
+            _strict_output_schema("status", "source", "event", "coverage", "raw_payloads_returned",
+                                  "upstream_calls", "mutations"),
+            scope=SCOPE_MAX_INBOX_READ,
+        ),
+        ToolDefinition(
+            "cash_accounts",
+            "Cash TEST account metadata",
+            "Read account directory metadata and explicit TEST store identity from the isolated cash area. "
+            "Includes multiple cash/bank accounts. No balances (including protected cash_vladislav), "
+            "documents, ledger entries, REAL source access or writes.",
+            _schema({"limit": _int_schema(1, MAX_LIMIT), "cursor": _string_schema(1, 1024)}),
+            _strict_output_schema("status", "source", "store_id", "store_mode", "store_class",
+                                  "instance_label", "rows", "limit", "next_cursor", "balances_returned",
+                                  "transactions_returned", "mutations", "coverage"),
+            scope=SCOPE_CASH_READ,
+        ),
+        ToolDefinition(
             "freshness",
             "WebCore data freshness",
             "Use this when the user asks whether WebCore business data is fresh or which persisted sources are current. It never triggers refresh or sync.",
@@ -3444,7 +3576,7 @@ def _documented(schema: dict[str, Any], description: str, *, default: Any = _NO_
 
 def _strict_output_schema(*field_names: str) -> dict[str, Any]:
     array_of_strings = {
-        "allowed_units", "missing_source_flags", "notes", "object_types", "resolved_metric_keys",
+        "allowed_units", "event_types", "missing_source_flags", "notes", "object_types", "resolved_metric_keys",
         "source_tables", "unknown_object_types",
     }
     array_of_objects = {
@@ -3455,7 +3587,7 @@ def _strict_output_schema(*field_names: str) -> dict[str, Any]:
         "temporal_slot_sources", "temporal_sources", "trade_documents", "trade_documents_metadata", "units",
     }
     object_fields = {
-        "app", "artifact", "cached_payloads", "chunk", "date_range", "db", "factory_order",
+        "app", "artifact", "cached_payloads", "chunk", "date_range", "db", "event", "factory_order",
         "factory_order_result", "filters", "identity", "latest_load", "latest_ready_snapshot", "latest_refresh",
         "latest_successful", "likely_failure_area", "limits", "line_summary", "packing_list_summary", "pagination",
         "ready_snapshots", "runtime_storage", "shipment", "stocks_freshness", "supplier_shipments", "supply", "target_identity",
@@ -3463,10 +3595,11 @@ def _strict_output_schema(*field_names: str) -> dict[str, Any]:
         "mcp_calls",
     }
     boolean_fields = {
-        "cache_only", "credential_values_returned", "mutations", "no_recalculation", "no_upstream_fetch",
+        "balances_returned", "cache_only", "credential_values_returned", "mutations", "no_recalculation", "no_upstream_fetch",
         "raw_env_returned", "raw_payloads_returned", "truncated", "upstream_calls",
+        "transactions_returned",
     }
-    integer_fields = {"limit", "limit_applied", "max_bytes", "row_count", "size_bytes"}
+    integer_fields = {"limit", "limit_applied", "max_bytes", "row_count", "size_bytes", "snapshot_sequence"}
     properties: dict[str, Any] = {}
     for name in field_names:
         if name in array_of_strings:
@@ -3479,6 +3612,8 @@ def _strict_output_schema(*field_names: str) -> dict[str, Any]:
             properties[name] = {"type": "boolean"}
         elif name in integer_fields:
             properties[name] = {"type": "integer", "minimum": 0}
+        elif name == "chat_id":
+            properties[name] = {"type": "integer", "minimum": -(2**63), "maximum": -1}
         elif name == "base64":
             properties[name] = {"type": "string", "contentEncoding": "base64"}
         else:
@@ -4412,6 +4547,13 @@ def _artifact_kind_from_text(text: str, explicit: str) -> str:
 
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
+        for field, chunks in list(value.items()):
+            # Credential markers can straddle any exported text chunk boundary.
+            if (str(field).endswith("_chunks") and isinstance(chunks, list)
+                    and all(isinstance(chunk, str) for chunk in chunks)
+                    and any(marker in "".join(chunks).lower() for marker in SECRET_TEXT_MARKERS)):
+                prefix = str(field)[:-7]
+                value = {**value, field: [], prefix + "_redacted": True, prefix + "_complete": False}
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             lowered = str(key).lower()
