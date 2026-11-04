@@ -108,7 +108,7 @@ Preview and prepared transitions still refuse this difference; only recovery of
 the already durable same-plan restoring/committed operation can prove it.
 
 The recovery independently pins the installed buyer CLI, procedure admission
-and barrier source bytes to reviewed base e47c7aa78b48a3cecb6f45506bab42ee46859d95.
+and barrier source bytes to reviewed base 678f6130fc6d3f86ee9a29562f29dc5284f468e3.
 It retains exact configuration/digests, original timer target, unchanged raw
 controls, completed owner/runtime/formula authority and original window/baseline.
 A fresh bounded native journal read must prove one complete start/guarded-skip/
@@ -140,6 +140,32 @@ timer commands only while the same invocation is still current. A later timer
 invocation refuses the retained receipt; this narrow fix does not refresh or
 replace a committed/retained receipt. Root must separately review that case.
 Ordinary exact-prior pause/resume/direct release remain strict for all services.
+
+The same proof now admits exactly three additional guarded services from reviewed
+installed base `678f6130fc6d3f86ee9a29562f29dc5284f468e3`: Feedbacks Auto Complaints
+Due Tick, Health Candidate and Health Confirmation. Each has a fixed canonical
+unit, argv, description and CLI source hash; the shared default admission/barrier
+hashes are pinned to that base. Buyer wrappers and proof schema remain compatible.
+This is not a generic failed-service exception. Each original timer must itself
+be enabled/active and restored; the original service must be static/failed with
+exit-code 1, followed by a separately proven guarded static/inactive success.
+Closure Retry remains excluded, including an originally disabled/inactive timer.
+The original plan, baseline, completed deploy owner and installed files are never
+rewritten. Multiple completions are accumulated independently; subsequent fresh
+readbacks cannot erase earlier proofs, and an earlier invocation changing during
+another service's proof refuses before any receipt is accepted.
+
+Complaints has explicit runtime argv. Health omits it, so its stronger no-effects
+argument also uses the pinned CLI control flow: before `_execute_health_tick`,
+environment/cookie loading and runtime construction only read/compute; once its
+body starts, failures (including MaintenanceAdmissionBlocked) are caught and emit
+a distinct health terminal receipt. Exact four journal events with only the
+ordinary guarded-skip JSON and successful exit therefore cannot be a health
+failure after effects, even with an environment override. No secret environment
+transport, service rewrite or fabricated guard witness is introduced. Tests cover
+both health phases, body failure versus guard skip, all three units, independent
+multiunit provenance and earlier-invocation drift. The bounded native journal and
+post-journal idle/configuration checks remain mandatory for every unit.
 
 Use a full isolated verified candidate tree whose exact base equals the actual
 installed runtime SHA. Its ONLY differences are these four reviewed paths:
