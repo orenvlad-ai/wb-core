@@ -215,3 +215,28 @@ claim для повторной отправки. После изменения 
 также читается заново; новый POST при этом не выполняется.
 
 MAX history reads (`max_messages`, `max_message`) have a separate bounded 40-second tool budget, configurable with `WEBCORE_DATA_MCP_MAX_HISTORY_DEADLINE_SECONDS` (0.05–120 seconds). MAX GET socket timeout is 20 seconds, capped by remaining tool time. Other tool deadlines and reply deduplication are unchanged. A history timeout is not evidence of an empty history; repeat read-only retrieval before deciding payment chronology.
+
+## Произвольный текст WBC Cloud bot
+
+`max_send_message` отправляет обычный текст (1–4000 символов) в одну отдельно
+разрешённую группу; не привязан к шаблону сверки. Требует отдельный OAuth grant
+`webcore.max_messages.write`; прежний grant плюсиков его не даёт. Кассу не читает
+и не изменяет. Параметры: `chat_id`, стабильный `request_id`, точный `text`.
+
+```dotenv
+WEBCORE_DATA_MCP_MAX_MESSAGE_SEND_ENABLED=1
+WEBCORE_DATA_MCP_MAX_SEND_CHAT_ID=-73424579439250
+WEBCORE_DATA_MCP_MAX_SEND_BOT_ID=516064626
+# Добавить webcore.max_messages.write к WEBCORE_DATA_MCP_SCOPES.
+# Используется существующий приватный MAX_REPLY_STORE_PATH, отдельная таблица bot_messages.
+```
+
+Для каждой намеренной отправки сохранять один request_id. Повтор с тем же ID
+возвращает квитанцию, а при известном message_id может выполнить GET-проверку.
+Unknown/pending без message_id требует сверки, не нового request_id и не POST.
+Другой текст для того же ID возвращает request_conflict. Сообщение подтверждается
+по точным группе, собственному bot_id, message_id и тексту. Статус sent монотонен.
+Расширение группы чтения не расширяет группу отправки. Расписание не включается.
+Плюсики по проведённым платежам по-прежнему отправлять через max_posted_reply.
+Проверки: `python3 apps/webcore_max_send_message_smoke.py` и
+`python3 apps/webcore_max_posted_reply_smoke.py`.
