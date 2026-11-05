@@ -21,9 +21,12 @@ from packages.application.wb_autoanswers_runtime import (
     iso_utc,
     parse_timestamp,
 )
+from packages.application.business_data_maintenance_pause import load_state as load_maintenance_pause
+from packages.application.business_data_write_barrier import barrier_status
 
 
 LIFECYCLE_CONTRACT = "wb_autoanswers_lifecycle_v1"
+MAINTENANCE_PRESENTATION_CONTRACT = "wb_autoanswers_maintenance_presentation_v1"
 LIFECYCLE_STATE_FILENAME = ".wb-autoanswers-lifecycle.json"
 LIFECYCLE_LOCK_FILENAME = ".wb-autoanswers-lifecycle.lock"
 READONLY_TIMER = "wb-core-autoanswers-readonly-sync.timer"
@@ -370,6 +373,51 @@ class AutoanswersLifecycle:
             if stop_reason in BLOCKING_STOP_REASONS
             else "matched"
         )
+        maintenance_pause = {"contract": MAINTENANCE_PRESENTATION_CONTRACT, "confirmed": False}
+        if (
+            settings.effective_enabled
+            and desired_mode in {"draft_only", "auto_safe", "auto_all"}
+            and not suspended_by_master
+            and persisted_matches
+            and stop_reason in {"", "no_eligible_jobs", "worker_unavailable"}
+            and str(persisted.get("last_error") or "") in {"", "worker_unavailable"}
+            and last_error in {"worker_unavailable", "no_eligible_jobs", "component drift: readonly_sync,worker"}
+            and all(
+                item["desired"]
+                and item["timer"].get("is_enabled") == "disabled"
+                and item["timer"].get("is_active") == "inactive"
+                and item["service"].get("is_active") == "inactive"
+                and (item["service"].get("properties") or {}).get("Result") == "success"
+                and not item["last_error"]
+                for item in components.values()
+            )
+        ):
+            # Presentation evidence only: never reconcile units, alter intent,
+            # clear a runtime stop, or infer planned maintenance from drift.
+            try:
+                pause = load_maintenance_pause(self.runtime_dir) or {}
+                barrier = barrier_status(self.runtime_dir)
+                if (
+                    barrier.get("status") == "active"
+                    and barrier.get("phase") == "held"
+                    and barrier.get("window_kind") == "maintenance_pause"
+                    and barrier.get("hold_confirmed") is True
+                    and pause.get("phase") == "held"
+                    and not pause.get("error")
+                    and (pause.get("hold_readback") or {}).get("quiet") is True
+                    and pause.get("window_id") == barrier.get("window_id")
+                    and bool(barrier.get("window_id"))
+                    and pause.get("plan_fingerprint") == barrier.get("plan_fingerprint")
+                    and bool(barrier.get("plan_fingerprint"))
+                ):
+                    maintenance_pause.update(
+                        confirmed=True,
+                        window_id=barrier["window_id"],
+                        plan_fingerprint=barrier["plan_fingerprint"],
+                    )
+            except (OSError, ValueError, RuntimeError, TypeError, AttributeError):
+                # Unknown/corrupt maintenance remains the ordinary fault view.
+                pass
         return {
             "contract": LIFECYCLE_CONTRACT,
             "process_key": "autoanswers",
@@ -399,6 +447,7 @@ class AutoanswersLifecycle:
             "components": components,
             "component_states": components,
             "stop_reason": stop_reason,
+            "maintenance_pause": maintenance_pause,
             "budget_state": str(budget.get("budget_state") or "unknown"),
             "budget": budget,
             "fresh_scheduler_tick": fresh_tick,
