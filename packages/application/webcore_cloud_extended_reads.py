@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import logging
 from pathlib import Path
 import re
 import ssl
 import stat
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, build_opener, HTTPSHandler, HTTPRedirectHandler
 
@@ -133,7 +134,31 @@ class MaxHistoryReader:
             raise ValueError("MAX history requires the explicit inbox group binding")
         return cls(env.get("WEBCORE_DATA_MCP_MAX_TOKEN_PATH", ""), env.get("WEBCORE_DATA_MCP_MAX_CA_PATH"), inbox.chat_ids)
 
-    def _get(self, params, deadline_at):
+    @staticmethod
+    def _get_failure(exc):
+        """Controlled metadata only; exception strings may contain credentials."""
+        if isinstance(exc, HTTPError):
+            return "http_" + str(exc.code), exc.code, exc.code == 429 or 500 <= exc.code <= 599
+        cause = exc.reason if isinstance(exc, URLError) else exc
+        if isinstance(cause, ssl.SSLError):
+            return "tls", None, False
+        if isinstance(cause, TimeoutError):
+            return "timeout", None, True
+        if isinstance(exc, URLError):
+            return "transport", None, True
+        if isinstance(exc, OSError):
+            return "transport", None, True
+        return "invalid_response", None, False
+
+    def _get(self, params, deadline_at, cancel_event=None):
+        # Both attempts share the caller's deadline, including readbacks after
+        # POST. With no caller budget, retain the previous 20-second allowance.
+        deadline_at = deadline_at if deadline_at is not None else time.monotonic() + 20.0
+        def check_budget():
+            if ((cancel_event and cancel_event.is_set())
+                    or time.monotonic() >= deadline_at):
+                raise CloudReadError("MAX GET cancelled or deadline exceeded; no write", "deadline_exceeded")
+        check_budget()
         info = self.token_path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 8192:
             raise CloudReadError("MAX credential file unavailable")
@@ -144,19 +169,51 @@ class MaxHistoryReader:
         if self.ca_path:
             _fixed_path(self.ca_path)
             context.load_verify_locations(cafile=str(self.ca_path))
-        timeout = min(20.0, max(0.1, deadline_at-time.monotonic())) if deadline_at is not None else 20.0
-        req = Request("https://platform-api2.max.ru/messages?"+urlencode(params), headers={"Authorization":token,"Accept":"application/json"})
-        try:
-            with build_opener(_NoRedirect(), HTTPSHandler(context=context)).open(req, timeout=timeout) as response:
-                raw = response.read(2*1024*1024+1)
-            if len(raw)>2*1024*1024:
-                raise CloudReadError("MAX response exceeds read limit", "source_limit")
-            result = json.loads(raw)
-            if not isinstance(result, dict) or not isinstance(result.get("messages"), list):
-                raise CloudReadError("MAX returned an invalid message list")
-            return result["messages"]
-        except (URLError, TimeoutError, OSError, ValueError) as exc:
-            raise CloudReadError("MAX history request failed; no result or write", "upstream_unavailable") from exc
+        req = Request("https://platform-api2.max.ru/messages?"+urlencode(params),
+                      headers={"Authorization":token,"Accept":"application/json"}, method="GET")
+        opener = build_opener(_NoRedirect(), HTTPSHandler(context=context))
+        for attempt in (1, 2):
+            check_budget()
+            phase = "open"
+            try:
+                with opener.open(req, timeout=min(20.0, deadline_at-time.monotonic())) as response:
+                    phase = "read"
+                    raw = response.read(2*1024*1024+1)
+                check_budget()
+                if len(raw)>2*1024*1024:
+                    raise CloudReadError("MAX response exceeds read limit", "source_limit")
+                phase = "decode"
+                result = json.loads(raw)
+                if not isinstance(result, dict) or not isinstance(result.get("messages"), list):
+                    raise ValueError("Invalid message list")
+                return result["messages"]
+            except CloudReadError:
+                raise
+            except (URLError, TimeoutError, OSError, ValueError) as exc:
+                reason, status, transient = self._get_failure(exc)
+                code = "max_get_" + phase + "_" + reason
+                logging.getLogger(__name__).warning(
+                    "MAX GET failure phase=%s code=%s http_status=%s attempt=%s",
+                    phase, code, status, attempt)
+                error = CloudReadError("MAX GET failed; no write (" + code + ")", code)
+                delay = 0.25
+                # Never shorten a server-requested pause or sleep unboundedly.
+                retry_after = exc.headers.get("Retry-After") if isinstance(exc, HTTPError) and exc.headers else None
+                if isinstance(exc, HTTPError):
+                    exc.close()
+                if retry_after is not None:
+                    try:
+                        delay = max(delay, float(retry_after))
+                    except ValueError:
+                        transient = False
+                if (attempt == 2 or not transient or not 0.25 <= delay <= 1.0
+                        or deadline_at-time.monotonic() <= delay):
+                    raise error from exc
+                if cancel_event:
+                    cancel_event.wait(delay)
+                else:
+                    time.sleep(delay)
+                check_budget()
 
     def call(self, name, args, deadline_at, cancel_event):
         detail = name == "max_message"
@@ -177,7 +234,7 @@ class MaxHistoryReader:
             params["from"] = before
         if cancel_event and cancel_event.is_set():
             raise CloudReadError("Read cancelled", "deadline_exceeded")
-        messages = self._get(params, deadline_at)
+        messages = self._get(params, deadline_at, cancel_event)
         if len(messages) > (1 if detail else params["count"]):
             raise CloudReadError("MAX response exceeded requested page")
         rows = []
