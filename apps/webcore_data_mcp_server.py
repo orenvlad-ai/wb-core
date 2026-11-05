@@ -560,8 +560,8 @@ def _handle_json_rpc(
             correlation_id = secrets.token_hex(12)
             started = time.monotonic()
             # A reply includes source GET, one POST and verification GET.
-            tool_budget = (config.max_reply_deadline_seconds if name in {"max_posted_reply", "max_send_message", "transit_send_message"}
-                           else config.max_history_deadline_seconds if name in {"max_messages", "max_message", "transit_messages", "transit_message"}
+            tool_budget = (config.max_reply_deadline_seconds if name in {"max_posted_reply", "max_send_message", "transit_send_message", "accounting_send_message"}
+                           else config.max_history_deadline_seconds if name in {"max_messages", "max_message", "transit_messages", "transit_message", "accounting_messages", "accounting_message"}
                            else config.tool_deadline_seconds)
             deadline_at = started + tool_budget
             cancel_event = threading.Event()
