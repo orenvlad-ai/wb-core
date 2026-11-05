@@ -29,13 +29,15 @@ SCOPE_MAX_INBOX_READ = "webcore.max_inbox.read"
 SCOPE_CASH_READ = "webcore.cash.read"
 SCOPE_CASH_OPERATIONS_READ = "webcore.cash.operations.read"
 SCOPE_MAX_HISTORY_READ = "webcore.max_history.read"
+SCOPE_TRANSIT_SEND = "webcore.max_transit.write"
 SCOPE_TRANSIT_READ = "webcore.max_transit.read"
 TRANSIT_GROUP_ID = -73424916294290
 TRANSIT_READ_TOOLS = {"transit_messages": "max_messages", "transit_message": "max_message"}
 CLOUD_READ_SCOPES = frozenset({SCOPE_MAX_INBOX_READ, SCOPE_CASH_READ, SCOPE_CASH_OPERATIONS_READ, SCOPE_MAX_HISTORY_READ, SCOPE_TRANSIT_READ})
-CLOUD_OAUTH_SCOPES = CLOUD_READ_SCOPES | {SCOPE_MAX_POSTED_REPLY, SCOPE_MAX_MESSAGE_SEND}
+CLOUD_OAUTH_SCOPES = CLOUD_READ_SCOPES | {SCOPE_MAX_POSTED_REPLY, SCOPE_MAX_MESSAGE_SEND, SCOPE_TRANSIT_SEND}
 CLOUD_READ_TOOLS = ("max_inbox_events", "max_inbox_event", "cash_accounts", "cash_read", "max_messages", "max_message", "max_ack_status", *TRANSIT_READ_TOOLS)
-CLOUD_TOOLS = (*CLOUD_READ_TOOLS, "max_posted_reply", "max_send_message")
+CLOUD_WRITE_TOOLS = ("max_posted_reply", "max_send_message", "transit_send_message")
+CLOUD_TOOLS = (*CLOUD_READ_TOOLS, *CLOUD_WRITE_TOOLS)
 MAX_PAGE_SIZE = 100
 MAX_MESSAGE_TEXT_CHARS = 16_000
 MESSAGE_TEXT_CHUNK_CHARS = 500
@@ -91,10 +93,12 @@ class CashReadConfig:
 class WebCoreCloudReads:
     def __init__(self, *, max_inbox: MaxInboxReadConfig | None = None,
                  cash: CashReadConfig | None = None, financial_read: bool = False,
-                 max_api: Any = None, max_reply: Any = None, max_send: Any = None, max_ack_queue: Any = None, transit_api: Any = None) -> None:
+                 max_api: Any = None, max_reply: Any = None, max_send: Any = None, max_ack_queue: Any = None, transit_api: Any = None,
+                 transit_send: Any = None) -> None:
         self.max_inbox = max_inbox
         self.cash = cash
         self.financial_read = financial_read
+        self.transit_send = transit_send
         self.transit_api = transit_api
         self.max_api = max_api
         self.max_reply = max_reply
@@ -128,6 +132,12 @@ class WebCoreCloudReads:
         if _enabled(env, "WEBCORE_DATA_MCP_TRANSIT_HISTORY_ENABLED"):
             transit_api = MaxHistoryReader(env.get("WEBCORE_DATA_MCP_MAX_TOKEN_PATH", ""),
                                           env.get("WEBCORE_DATA_MCP_MAX_CA_PATH"), frozenset({TRANSIT_GROUP_ID}))
+        transit_send = None
+        if _enabled(env, "WEBCORE_DATA_MCP_TRANSIT_SEND_ENABLED"):
+            if transit_api is None:
+                raise ValueError("Transit sending requires configured transit history")
+            transit_send = MaxSendMessage(transit_api, env.get("WEBCORE_DATA_MCP_MAX_REPLY_STORE_PATH", ""),
+                                         int(env.get("WEBCORE_DATA_MCP_MAX_SEND_BOT_ID", "0")), TRANSIT_GROUP_ID)
         reply = MaxPostedReply.from_env(env, api)
         ack_queue = None
         if _enabled(env, "WEBCORE_DATA_MCP_MAX_ACK_QUEUE_ENABLED"):
@@ -139,10 +149,11 @@ class WebCoreCloudReads:
         return cls(max_inbox=max_config, cash=cash_config,
                    financial_read=_enabled(env, "WEBCORE_DATA_MCP_CASH_OPERATIONS_READ_ENABLED"),
                    max_api=api, max_reply=reply, max_ack_queue=ack_queue,
-                   max_send=MaxSendMessage.from_env(env, api), transit_api=transit_api)
+                   max_send=MaxSendMessage.from_env(env, api), transit_api=transit_api, transit_send=transit_send)
 
     def enabled(self, name: str) -> bool:
         return ((name in TRANSIT_READ_TOOLS and self.transit_api is not None)
+                or (name == "transit_send_message" and self.transit_send is not None)
                 or (name == "max_send_message" and self.max_send is not None)
                 or (name == "max_posted_reply" and self.max_reply is not None)
                 or (name == "max_ack_status" and self.max_ack_queue is not None)
@@ -157,6 +168,9 @@ class WebCoreCloudReads:
         if not self.enabled(name):
             raise CloudReadError("Cloud read source is not enabled", "source_not_enabled")
         try:
+            if name == "transit_send_message":
+                _arguments(args, {"request_id", "text"})
+                return self.transit_send.call(dict(args, chat_id=TRANSIT_GROUP_ID), deadline_at, cancel_event)
             if name in TRANSIT_READ_TOOLS:
                 _arguments(args, {"message_id"} if name == "transit_message" else {"limit", "before_ms"})
                 return self.transit_api.call(TRANSIT_READ_TOOLS[name], dict(args, chat_id=TRANSIT_GROUP_ID),

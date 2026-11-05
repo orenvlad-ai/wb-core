@@ -25,6 +25,8 @@ from packages.application.supplier_shipment_status import apply_derived_supplier
 from packages.business_time import current_business_date_iso
 from packages.application.webcore_cloud_reads import (
     CLOUD_TOOLS,
+    CLOUD_WRITE_TOOLS,
+    SCOPE_TRANSIT_SEND,
     SCOPE_MAX_POSTED_REPLY,
     SCOPE_MAX_MESSAGE_SEND,
     SCOPE_CASH_READ,
@@ -220,10 +222,10 @@ class WebCoreDataMcpGateway:
                     "inputSchema": definition.input_schema,
                     "outputSchema": definition.output_schema or _object_schema(),
                     "annotations": {
-                        "readOnlyHint": definition.name not in {"max_posted_reply", "max_send_message"},
+                        "readOnlyHint": definition.name not in CLOUD_WRITE_TOOLS,
                         "destructiveHint": False,
                         "idempotentHint": True,
-                        "openWorldHint": definition.name in {"max_posted_reply", "max_send_message"},
+                        "openWorldHint": definition.name in CLOUD_WRITE_TOOLS,
                     },
                     "securitySchemes": security_schemes,
                     "_meta": {"securitySchemes": security_schemes},
@@ -2999,6 +3001,14 @@ class WebCoreDataMcpGateway:
 
 def _tool_definitions() -> list[ToolDefinition]:
     return [
+        ToolDefinition(
+            "transit_send_message", "Send a text to Transit Plus",
+            "Send the user-approved plain text to the fixed logistics group as the MAX bot. "
+            "Reuse the same request_id to check a receipt. Never resubmit an uncertain send under a new ID.",
+            _schema({"request_id": _string_schema(1, 120), "text": _string_schema(1, 4000)},
+                    required=("request_id", "text")),
+            scope=SCOPE_TRANSIT_SEND,
+        ),
         ToolDefinition(
             "max_send_message", "Send MAX bot text",
             "Send user-authorized plain text as the bot to the authorized MAX group. "
