@@ -204,11 +204,11 @@ class WebCoreDataMcpGateway:
         for definition in _tool_definitions():
             if definition.name in CLOUD_TOOLS and not self.cloud_reads.enabled(definition.name):
                 continue
-            if definition.name in {"max_inbox_events", "max_inbox_event", "max_messages", "max_message", "max_posted_reply", "max_send_message"}:
+            if definition.name in {"max_inbox_events", "max_inbox_event", "max_messages", "max_message", "max_posted_reply", "max_send_message", "max_ack_status"}:
                 definition.input_schema["properties"]["chat_id"]["enum"] = (
                     [self.cloud_reads.max_send.chat_id] if definition.name == "max_send_message"
                     else [self.cloud_reads.max_ack_queue.chat_id]
-                    if definition.name == "max_posted_reply" and self.cloud_reads.max_ack_queue is not None
+                    if definition.name in {"max_posted_reply", "max_ack_status"} and self.cloud_reads.max_ack_queue is not None
                     else sorted(self.cloud_reads.max_inbox.chat_ids))
             security_schemes = [{"type": "oauth2", "scopes": [definition.scope]}]
             tools.append(
@@ -3041,6 +3041,24 @@ def _tool_definitions() -> list[ToolDefinition]:
             scope=SCOPE_CASH_OPERATIONS_READ,
         ),
         ToolDefinition(
+            "max_ack_status", "MAX acknowledgement delivery receipts",
+            "Read persisted + acknowledgement receipts for 1 to 100 exact source message IDs in the "
+            "configured queue group. Uses the existing MAX history read grant; requires no payment "
+            "attestation and never enqueues, sends, reconciles or changes records. Only sent confirms "
+            "prior verified delivery. Missing, queued, retry_wait, pending and unknown are not sent; "
+            "none authorizes resubmission. Check all_delivery_confirmed before final cash reconciliation. "
+            "automatic_resends is the recorded recovery submission count, or null for older journals. "
+            "No live source-version check or financial verification.",
+            _schema({"chat_id": _int_schema(-(2**63), -1),
+                     "message_ids": {"type": "array", "items": {"type": "string", "minLength": 1,
+                        "maxLength": 200, "pattern": "^[A-Za-z0-9._:-]+$"},
+                        "minItems": 1, "maxItems": 100, "uniqueItems": True}},
+                    required=("chat_id", "message_ids")),
+            _strict_output_schema("status", "source", "chat_id", "rows", "all_delivery_confirmed",
+                                  "coverage", "upstream_calls", "mutations"),
+            scope=SCOPE_MAX_HISTORY_READ,
+        ),
+        ToolDefinition(
             "max_messages", "MAX live message history",
             "Read messages directly from the authorized MAX group, newest first. Includes historical "
             "messages visible to the bot. Optional before_ms is an inclusive upper source timestamp. "
@@ -3600,6 +3618,7 @@ def _strict_output_schema(*field_names: str) -> dict[str, Any]:
         "mcp_calls",
     }
     boolean_fields = {
+        "all_delivery_confirmed",
         "balances_returned", "cache_only", "credential_values_returned", "mutations", "no_recalculation", "no_upstream_fetch",
         "raw_env_returned", "raw_payloads_returned", "truncated", "upstream_calls",
         "transactions_returned",

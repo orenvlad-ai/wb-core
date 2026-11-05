@@ -192,7 +192,7 @@ class QueueTests(unittest.TestCase):
         self.assertFalse(result['sent_now'])
         self.assertEqual(self.reply._post.call_count, 1)
 
-    def test_unknown_absence_never_becomes_retry_or_post(self):
+    def test_legacy_without_durable_attempt_never_becomes_retry_or_post(self):
         self.legacy()
         for _ in range(3):
             self.due()
@@ -304,6 +304,284 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.queue.run_once()['status'], 'unknown')
         self.due()
         self.assertEqual(self.queue.run_once()['status'], 'sent')
+        self.reply._post.assert_not_called()
+
+    def failed_attempt(self):
+        self.queue.call(self.args)
+        self.reply._post.side_effect = TimeoutError('private failure must not persist')
+        self.assertEqual(self.queue.run_once()['status'], 'unknown')
+        self.reply._post.reset_mock(side_effect=True)
+        self.reply._post.side_effect = self.post
+        # A visible older message anchors successful history coverage.
+        anchor = self.ack('mid.other', 'mid.anchor')
+        anchor['timestamp'] = 1
+        self.history = [anchor]
+        with self.queue._connect() as conn:
+            conn.execute('UPDATE max_ack_recovery SET attempt_started_at=?', (time.time()-1000,))
+        self.due()
+
+    def confirm_absence(self):
+        self.assertEqual(self.queue.run_once()['status'], 'unknown')
+        with self.queue._connect() as conn:
+            row = conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()
+            self.assertIsNotNone(row[0])
+            conn.execute('UPDATE max_ack_recovery SET absence_proved_at=?', (time.time()-120,))
+        self.due()
+
+    def test_complete_absence_requires_two_fresh_scans_and_survives_restart(self):
+        self.failed_attempt()
+        self.confirm_absence()
+        self.reply._post.assert_not_called()
+        queue = MaxAckQueue(self.reply, 777, chat_id=-100)
+        result = queue.run_once()
+        self.assertTrue(result['sent_now'])
+        self.assertEqual(result['status'], 'sent')
+        self.reply._post.assert_called_once()
+        self.assertEqual(self.reply._post.call_args.args[:2], (-100, self.args['message_id']))
+        with queue._connect() as conn:
+            self.assertEqual(conn.execute('SELECT resend_count FROM max_ack_recovery').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT error_code FROM max_ack_original_failure').fetchone()[0], 'upstream_timeout')
+            self.assertEqual(conn.execute('SELECT phase FROM reply_diagnostics').fetchone()[0], 'verified')
+
+    def test_settling_and_confirmation_cooldowns_block_resend(self):
+        self.failed_attempt()
+        with self.queue._connect() as conn:
+            conn.execute('UPDATE max_ack_recovery SET attempt_started_at=?', (time.time(),))
+        self.queue.run_once()
+        with self.queue._connect() as conn:
+            self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+            conn.execute('UPDATE max_ack_recovery SET attempt_started_at=?', (time.time()-1000,))
+        self.due()
+        self.queue.run_once()
+        self.due()
+        self.queue.run_once()
+        self.reply._post.assert_not_called()
+
+    def test_delayed_delivery_on_confirmation_scan_prevents_resend(self):
+        self.failed_attempt()
+        self.confirm_absence()
+        ack = self.ack(self.args['message_id'])
+        self.history = [ack]; self.messages['mid.reply'] = ack
+        self.assertEqual(self.queue.run_once()['status'], 'sent')
+        self.reply._post.assert_not_called()
+
+    def test_network_error_on_confirmation_scan_does_not_resend_or_clear_failure(self):
+        self.failed_attempt()
+        self.confirm_absence()
+        self.api._get.side_effect = TimeoutError('credential must not persist')
+        self.assertEqual(self.queue.run_once()['status'], 'unknown')
+        self.reply._post.assert_not_called()
+        with self.queue._connect() as conn:
+            self.assertEqual(conn.execute('SELECT error_code FROM max_ack_original_failure').fetchone()[0], 'upstream_timeout')
+
+    def test_incomplete_history_does_not_authorize_resend(self):
+        self.failed_attempt()
+        self.queue.HISTORY_PAGES = 1
+        self.queue.HISTORY_PAGE_SIZE = 2
+        now_ms = int(time.time()*1000)
+        self.history = [self.ack('mid.other', str(i)) for i in (1, 2)]
+        for m, stamp in zip(self.history, (now_ms, now_ms-1)):
+            m['timestamp'] = stamp
+        self.queue.run_once()
+        with self.queue._connect() as conn:
+            self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+        self.reply._post.assert_not_called()
+
+    def test_timestamp_tie_does_not_authorize_resend(self):
+        self.failed_attempt()
+        self.queue.HISTORY_PAGE_SIZE = 2
+        self.history = [self.ack('mid.other', str(i)) for i in (1, 2, 3)]
+        for m in self.history:
+            m['timestamp'] = int(time.time()*1000)
+        self.queue.run_once()
+        with self.queue._connect() as conn:
+            self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+        self.reply._post.assert_not_called()
+
+    def test_invalid_foreign_and_unordered_history_cannot_prove_absence(self):
+        self.failed_attempt()
+        cases = []
+        invalid = self.ack('mid.other'); invalid.pop('timestamp'); cases.append([invalid])
+        foreign = self.ack('mid.other'); foreign['recipient']['chat_id'] = -200; cases.append([foreign])
+        early, late = self.ack('mid.other', 'early'), self.ack('mid.other', 'late')
+        early['timestamp'], late['timestamp'] = 1000, 2000
+        cases.append([early, late])
+        for history in cases:
+            with self.subTest(history=history):
+                self.history = history
+                self.due(); self.queue.run_once()
+                with self.queue._connect() as conn:
+                    self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+        self.reply._post.assert_not_called()
+
+    def test_plausible_unverifiable_reply_cannot_prove_absence(self):
+        self.failed_attempt()
+        self.history = [self.ack(self.args['message_id'])]
+        self.queue.run_once()
+        with self.queue._connect() as conn:
+            self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+        self.reply._post.assert_not_called()
+
+    def test_bounded_resends_and_progressively_longer_settling(self):
+        self.failed_attempt()
+        self.reply._post.side_effect = TimeoutError()
+        for count in (1, 2):
+            self.confirm_absence()
+            self.assertEqual(self.queue.run_once()['status'], 'unknown')
+            with self.queue._connect() as conn:
+                row = conn.execute('SELECT resend_count,attempt_started_at,absence_proved_at FROM max_ack_recovery').fetchone()
+                self.assertEqual(row[0], count)
+                self.assertIsNone(row[2])
+                self.assertLess(time.time()-row[1], 10)
+                conn.execute('UPDATE max_ack_recovery SET attempt_started_at=?', (time.time()-10000,))
+            self.due()
+        for _ in range(3):
+            self.queue.run_once(); self.due()
+        self.assertEqual(self.reply._post.call_count, 2)
+
+    def test_concurrent_recovery_workers_resend_once(self):
+        self.failed_attempt()
+        self.confirm_absence()
+        with ThreadPoolExecutor(6) as pool:
+            results = list(pool.map(lambda _: self.queue.run_once(), range(6)))
+        self.reply._post.assert_called_once()
+        self.assertEqual(sum(r is not None for r in results), 1)
+
+    def test_crash_during_resend_consumes_attempt_and_requires_new_proof(self):
+        self.failed_attempt()
+        self.confirm_absence()
+        self.reply._post.side_effect = SystemExit()
+        with self.assertRaises(SystemExit):
+            self.queue.run_once()
+        with self.queue._connect() as conn:
+            row = conn.execute('SELECT resend_count,absence_proved_at FROM max_ack_recovery').fetchone()
+            self.assertEqual(row, (1, None))
+        self.due()
+        self.assertEqual(self.queue.run_once()['status'], 'unknown')
+        self.reply._post.assert_called_once()
+
+    def test_existing_unknown_queue_uses_created_at_but_adopted_legacy_has_no_boundary(self):
+        self.legacy()
+        # Reproduce the pre-upgrade schema and existing 4890-like queued unknown.
+        with self.reply._connect() as conn:
+            conn.execute('''CREATE TABLE max_ack_queue (
+                chat_id INTEGER NOT NULL,source_id TEXT NOT NULL,source_text TEXT,
+                created_at REAL NOT NULL,next_attempt_at REAL NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
+                lease_token TEXT,lease_until REAL NOT NULL DEFAULT 0,history_before_ms INTEGER,
+                PRIMARY KEY(chat_id,source_id))''')
+            conn.execute('INSERT INTO max_ack_queue (chat_id,source_id,created_at,next_attempt_at) VALUES (?,?,?,0)',
+                         (-100, self.args['message_id'], time.time()-1000))
+            conn.execute('INSERT INTO reply_diagnostics VALUES (?,?,?,?,?,?)',
+                         (-100, self.args['message_id'], 'unknown', 'upstream_timeout', None, time.time()-900))
+        anchor = self.ack('mid.other', 'mid.anchor')
+        anchor['timestamp'] = 1
+        self.history = [anchor]
+        self.confirm_absence()
+        self.assertEqual(self.queue.run_once()['status'], 'sent')
+        self.reply._post.assert_called_once()
+        with self.queue._connect() as conn:
+            self.assertEqual(conn.execute('SELECT error_code FROM max_ack_original_failure').fetchone()[0], 'upstream_timeout')
+
+    def test_empty_or_short_history_without_old_anchor_cannot_prove_absence(self):
+        self.failed_attempt()
+        recent = self.ack('mid.other')
+        recent['timestamp'] = int(time.time()*1000)
+        for history in ([], [recent]):
+            self.history = history
+            self.due(); self.queue.run_once()
+            with self.queue._connect() as conn:
+                self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+        self.reply._post.assert_not_called()
+
+    def test_known_reply_id_prevents_recovery_even_when_history_crosses_boundary(self):
+        self.failed_attempt()
+        with self.queue._connect() as conn:
+            conn.execute('UPDATE replies SET reply_id=?', ('mid.known',))
+        for _ in range(3):
+            self.due(); self.queue.run_once()
+        self.reply._post.assert_not_called()
+        with self.queue._connect() as conn:
+            self.assertEqual(conn.execute('SELECT reply_id FROM replies').fetchone()[0], 'mid.known')
+            self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+
+    def test_own_bot_plus_with_incomplete_link_blocks_absence(self):
+        self.failed_attempt()
+        anchor = self.history[0]
+        for link in (None, {}, {'type': 'reply'}, {'type': 'reply', 'message': {'mid': ''}}):
+            uncertain = self.ack(self.args['message_id'])
+            uncertain['link'] = link
+            self.history = [uncertain, anchor]
+            self.due(); self.queue.run_once()
+            with self.queue._connect() as conn:
+                self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+        self.reply._post.assert_not_called()
+
+    def test_migrated_queue_created_after_post_requires_source_timestamp_coverage(self):
+        self.legacy()
+        with self.reply._connect() as conn:
+            conn.execute('''CREATE TABLE max_ack_queue (
+                chat_id INTEGER NOT NULL,source_id TEXT NOT NULL,source_text TEXT,
+                created_at REAL NOT NULL,next_attempt_at REAL NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
+                lease_token TEXT,lease_until REAL NOT NULL DEFAULT 0,history_before_ms INTEGER,
+                PRIMARY KEY(chat_id,source_id))''')
+            conn.execute('INSERT INTO max_ack_queue (chat_id,source_id,source_text,created_at,next_attempt_at) VALUES (?,?,?,?,0)',
+                         (-100, self.args['message_id'], 'payment', time.time()-1000))
+        # Short history crosses created_at, but not the much older live source.
+        recent = self.ack('mid.other'); recent['timestamp'] = 2000
+        self.history = [recent]
+        for _ in range(3):
+            self.due(); self.queue.run_once()
+        self.reply._post.assert_not_called()
+        with self.queue._connect() as conn:
+            self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+
+    def test_attachment_or_ambiguous_reply_to_source_prevents_absence(self):
+        self.failed_attempt()
+        ack = self.ack(self.args['message_id'])
+        ack['body']['attachments'] = [{'type': 'image'}]
+        self.history = [ack, self.history[0]]
+        self.queue.run_once()
+        self.reply._post.assert_not_called()
+        with self.queue._connect() as conn:
+            self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+
+    def test_recovery_cas_rechecks_lease_and_newly_known_reply_id(self):
+        self.failed_attempt()
+        self.confirm_absence()
+        original = self.queue._absence_ready
+        def concurrent_readback(job):
+            ready = original(job)
+            with self.queue._connect() as conn:
+                conn.execute('UPDATE replies SET reply_id=?', ('mid.concurrent',))
+            return ready
+        self.queue._absence_ready = concurrent_readback
+        self.assertEqual(self.queue.run_once()['status'], 'unknown')
+        self.reply._post.assert_not_called()
+        with self.queue._connect() as conn:
+            self.assertEqual(conn.execute('SELECT reply_id FROM replies').fetchone()[0], 'mid.concurrent')
+            self.assertEqual(conn.execute('SELECT resend_count FROM max_ack_recovery').fetchone()[0], 0)
+
+    def test_uncertain_recovery_commit_consumes_resend_without_blind_post(self):
+        self.failed_attempt()
+        self.confirm_absence()
+        original = self.queue._connect
+        @contextmanager
+        def uncertain_commit():
+            is_submission = False
+            with original() as conn:
+                before = conn.execute('SELECT resend_count FROM max_ack_recovery').fetchone()[0]
+                yield conn
+                is_submission = conn.execute('SELECT resend_count FROM max_ack_recovery').fetchone()[0] > before
+            if is_submission:
+                raise OSError('journal receipt lost after durable recovery claim')
+        self.queue._connect = uncertain_commit
+        self.assertEqual(self.queue.run_once()['status'], 'unknown')
+        self.queue._connect = original
+        self.reply._post.assert_not_called()
+        with self.queue._connect() as conn:
+            self.assertEqual(conn.execute('SELECT resend_count,absence_proved_at FROM max_ack_recovery').fetchone(), (1, None))
+        self.due()
+        self.assertEqual(self.queue.run_once()['status'], 'unknown')
         self.reply._post.assert_not_called()
 
 
