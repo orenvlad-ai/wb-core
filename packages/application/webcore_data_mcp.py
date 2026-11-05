@@ -30,6 +30,7 @@ from packages.application.webcore_cloud_reads import (
     SCOPE_CASH_READ,
     SCOPE_CASH_OPERATIONS_READ,
     SCOPE_MAX_HISTORY_READ,
+    SCOPE_TRANSIT_READ,
     SCOPE_MAX_INBOX_READ,
     CloudReadError,
     WebCoreCloudReads,
@@ -3057,6 +3058,20 @@ def _tool_definitions() -> list[ToolDefinition]:
             _strict_output_schema("status", "source", "chat_id", "rows", "all_delivery_confirmed",
                                   "coverage", "upstream_calls", "mutations"),
             scope=SCOPE_MAX_HISTORY_READ,
+        ),
+        ToolDefinition(
+            "transit_messages", "Transit Plus message history",
+            "Read only the logistics group's messages, newest first. Use transit_message for attachments.",
+            _schema({"limit": _int_schema(1, MAX_LIMIT), "before_ms": _int_schema(0, 2**63-1)}),
+            _strict_output_schema("status", "source", "chat_id", "rows", "coverage", "upstream_calls", "mutations"),
+            scope=SCOPE_TRANSIT_READ,
+        ),
+        ToolDefinition(
+            "transit_message", "Transit Plus full message and attachments",
+            "Read one logistics message and its attachment names and temporary HTTPS links.",
+            _schema({"message_id": _string_schema(1, 200)}, required=("message_id",)),
+            _strict_output_schema("status", "source", "chat_id", "rows", "coverage", "upstream_calls", "mutations"),
+            scope=SCOPE_TRANSIT_READ,
         ),
         ToolDefinition(
             "max_messages", "MAX live message history",

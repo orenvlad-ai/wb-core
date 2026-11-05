@@ -27,7 +27,7 @@ from apps.webcore_data_mcp_smoke import _get_json, _post_form, _post_json
 from packages.application.finance_liquidity_cash import bootstrap_finance_cash_store
 from packages.application.max_webhook_inbox import MaxWebhookConfig, parse_inbox_event, persist_inbox_event
 from packages.application.webcore_cloud_reads import (
-    CLOUD_READ_SCOPES, CloudReadError, MaxInboxReadConfig, SCOPE_CASH_READ,
+    SCOPE_TRANSIT_READ, TRANSIT_GROUP_ID, CLOUD_READ_SCOPES, CloudReadError, MaxInboxReadConfig, SCOPE_CASH_READ,
     SCOPE_MAX_INBOX_READ, WebCoreCloudReads,
 )
 from packages.application.webcore_data_mcp import WebCoreDataMcpError, WebCoreDataMcpGateway
@@ -142,6 +142,33 @@ class CloudReadTests(unittest.TestCase):
         self.assertEqual(self.rpc(forged, "tools/call", name="cash_accounts")["error"]["data"]["code"], "insufficient_scope")
         self.assertEqual(_validated_scope("", self.config)["scopes"], DEFAULT_SCOPES)
         self.assertEqual(_validated_scope(SCOPE_CASH_READ, self.config)["scopes"], (SCOPE_CASH_READ,))
+
+    def test_transit_scope_reads_only_its_group_and_attachment(self):
+        from unittest.mock import patch
+
+        identity = AuthIdentity("logistics", (SCOPE_TRANSIT_READ,), "oauth")
+        self.assertEqual(self.rpc(identity, "tools/list")["result"]["tools"], [])
+        self.gateway.cloud_reads = WebCoreCloudReads.from_env(dict(
+            self.env, WEBCORE_DATA_MCP_TRANSIT_HISTORY_ENABLED="1",
+            WEBCORE_DATA_MCP_MAX_TOKEN_PATH=str(self.root / "test-token"),
+        ))
+        tools = self.rpc(identity, "tools/list")["result"]["tools"]
+        self.assertEqual({tool["name"] for tool in tools}, {"transit_message", "transit_messages"})
+        for tool in tools:
+            self.assertNotIn("chat_id", tool["inputSchema"]["properties"])
+        with self.assertRaises(CloudReadError):
+            self.gateway.cloud_reads.call_tool("transit_messages", {"chat_id": -100})
+        message = {"recipient": {"chat_id": TRANSIT_GROUP_ID, "chat_type": "chat"},
+                   "body": {"mid": "test", "text": "Shipment", "attachments": [
+                       {"type": "file", "filename": "invoice.pdf", "payload": {"url": "https://example.org/file"}}]}}
+        with patch.object(self.gateway.cloud_reads.transit_api, "_get", return_value=[message]):
+            result = self.gateway.cloud_reads.call_tool("transit_message", {"message_id": "test"})
+            self.assertEqual(result["rows"][0]["attachments"][0]["filename"], "invoice.pdf")
+            message["recipient"]["chat_id"] = -100
+            with self.assertRaises(CloudReadError):
+                self.gateway.cloud_reads.call_tool("transit_message", {"message_id": "test"})
+        self.assertEqual(self.rpc(identity, "tools/call", name="max_posted_reply")["error"]["data"]["code"],
+                         "insufficient_scope")
 
     def test_max_pagination_preserves_edits_deletes_and_snapshot(self):
         self.event("message_created", "one")
