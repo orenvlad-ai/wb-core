@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from apps.webcore_cloud_reads_smoke import CloudReadTests
 from apps.webcore_data_mcp_server import AuthIdentity
-from packages.application.webcore_cloud_reads import SCOPE_MAX_MESSAGE_SEND, CloudReadError
+from packages.application.webcore_cloud_reads import SCOPE_MAX_MESSAGE_SEND, SCOPE_TRANSIT_READ, SCOPE_TRANSIT_SEND, TRANSIT_GROUP_ID, CloudReadError
 from packages.application.webcore_max_send_message import MaxSendMessage
 
 class SendTests(CloudReadTests):
@@ -35,6 +35,27 @@ class SendTests(CloudReadTests):
         self.assertEqual(tool['inputSchema']['properties']['chat_id']['enum'],[-100])
         result=self.rpc(AuthIdentity('owner',(SCOPE_MAX_MESSAGE_SEND,),'oauth'),'tools/call',name='max_send_message',arguments=self.args)
         self.assertEqual(result['result']['structuredContent']['status'],'sent')
+
+    def test_transit_sender_is_bound_to_group_and_separate_write_grant(self):
+        self.api.chat_ids = {TRANSIT_GROUP_ID}
+        self.message['recipient']['chat_id'] = TRANSIT_GROUP_ID
+        sender = MaxSendMessage(self.api, self.sender.path, 99, TRANSIT_GROUP_ID)
+        sender._send_payload = self.sender._send_payload
+        self.reads.transit_send = sender
+        args = {'request_id': 'transit-1', 'text': self.args['text']}
+        for scope in (SCOPE_MAX_MESSAGE_SEND, SCOPE_TRANSIT_READ):
+            result = self.rpc(AuthIdentity('owner', (scope,), 'oauth'), 'tools/call',
+                              name='transit_send_message', arguments=args)
+            self.assertEqual(result['error']['data']['code'], 'insufficient_scope')
+        with self.assertRaises(CloudReadError):
+            self.reads.call_tool('transit_send_message', dict(args, chat_id=-100))
+        identity = AuthIdentity('owner', (SCOPE_TRANSIT_SEND,), 'oauth')
+        tools = self.rpc(identity, 'tools/list')['result']['tools']
+        self.assertEqual([t['name'] for t in tools], ['transit_send_message'])
+        self.assertFalse(tools[0]['annotations']['readOnlyHint'])
+        result = self.rpc(identity, 'tools/call', name='transit_send_message', arguments=args)
+        self.assertEqual(result['result']['structuredContent']['status'], 'sent')
+        self.assertEqual(sender._send_payload.call_args.args[0], TRANSIT_GROUP_ID)
 
     def test_default_off_and_explicit_bot(self):
         self.assertIsNone(MaxSendMessage.from_env({},self.api))
