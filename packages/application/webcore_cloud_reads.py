@@ -31,7 +31,7 @@ SCOPE_CASH_OPERATIONS_READ = "webcore.cash.operations.read"
 SCOPE_MAX_HISTORY_READ = "webcore.max_history.read"
 CLOUD_READ_SCOPES = frozenset({SCOPE_MAX_INBOX_READ, SCOPE_CASH_READ, SCOPE_CASH_OPERATIONS_READ, SCOPE_MAX_HISTORY_READ})
 CLOUD_OAUTH_SCOPES = CLOUD_READ_SCOPES | {SCOPE_MAX_POSTED_REPLY, SCOPE_MAX_MESSAGE_SEND}
-CLOUD_READ_TOOLS = ("max_inbox_events", "max_inbox_event", "cash_accounts", "cash_read", "max_messages", "max_message")
+CLOUD_READ_TOOLS = ("max_inbox_events", "max_inbox_event", "cash_accounts", "cash_read", "max_messages", "max_message", "max_ack_status")
 CLOUD_TOOLS = (*CLOUD_READ_TOOLS, "max_posted_reply", "max_send_message")
 MAX_PAGE_SIZE = 100
 MAX_MESSAGE_TEXT_CHARS = 16_000
@@ -136,6 +136,7 @@ class WebCoreCloudReads:
     def enabled(self, name: str) -> bool:
         return ((name == "max_send_message" and self.max_send is not None)
                 or (name == "max_posted_reply" and self.max_reply is not None)
+                or (name == "max_ack_status" and self.max_ack_queue is not None)
                 or (name in {"max_inbox_events", "max_inbox_event"} and self.max_inbox is not None)
                 or (name == "cash_accounts" and self.cash is not None)
                 or (name == "cash_read" and self.cash is not None and self.financial_read)
@@ -147,6 +148,8 @@ class WebCoreCloudReads:
         if not self.enabled(name):
             raise CloudReadError("Cloud read source is not enabled", "source_not_enabled")
         try:
+            if name == "max_ack_status":
+                return self._max_ack_status(args, deadline_at, cancel_event)
             if name == "max_send_message":
                 return self.max_send.call(args, deadline_at, cancel_event)
             if name == "max_posted_reply":
@@ -185,6 +188,55 @@ class WebCoreCloudReads:
             yield conn
         finally:
             conn.close()
+
+    def _max_ack_status(self, args: Mapping[str, Any], deadline_at: float | None,
+                        cancel_event: threading.Event | None) -> dict[str, Any]:
+        """Read durable receipts only; never call the queue's writing connection."""
+        _arguments(args, {"chat_id", "message_ids"})
+        chat = args.get("chat_id")
+        if type(chat) is not int or chat != self.max_ack_queue.chat_id:
+            raise CloudReadError("MAX group is not authorized", "group_not_authorized")
+        mids = args.get("message_ids")
+        if (not isinstance(mids, list) or not 1 <= len(mids) <= MAX_PAGE_SIZE
+                or any(not isinstance(mid, str) or re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", mid) is None
+                       for mid in mids)
+                or len(set(mids)) != len(mids)):
+            raise CloudReadError("message_ids must contain 1 to 100 unique source message IDs", "invalid_arguments")
+        if ((cancel_event and cancel_event.is_set())
+                or (deadline_at is not None and time.monotonic() >= deadline_at)):
+            raise CloudReadError("Receipt read deadline exceeded", "deadline_exceeded")
+        marks = ",".join("?" for _ in mids)
+        with self._connect(self.max_ack_queue.reply.path, deadline_at, cancel_event) as conn:
+            stored = conn.execute(
+                f"SELECT source_id,state,reply_id FROM replies WHERE chat_id=? AND source_id IN ({marks})",
+                (chat, *mids)).fetchall()
+            # Older journals remain readable without any schema initialization.
+            has_recovery = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_ack_recovery'").fetchone()
+            recovery = ({row["source_id"]: row["resend_count"] for row in conn.execute(
+                f"SELECT source_id,resend_count FROM max_ack_recovery WHERE chat_id=? AND source_id IN ({marks})",
+                (chat, *mids)).fetchall()} if has_recovery else {})
+        receipts = {row["source_id"]: row for row in stored}
+        rows = []
+        for mid in mids:
+            row = receipts.get(mid)
+            state, reply_id = (row["state"], row["reply_id"]) if row else ("not_found", None)
+            if (state not in {"queued", "retry_wait", "pending", "unknown", "sent", "source_changed", "not_found"}
+                    or (reply_id is not None and (not isinstance(reply_id, str)
+                        or re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", reply_id) is None))
+                    or (state == "sent" and reply_id is None)):
+                raise CloudReadError("Acknowledgement receipt is unavailable")
+            resends = recovery.get(mid)
+            if resends is not None and (type(resends) is not int or resends < 0):
+                raise CloudReadError("Acknowledgement receipt is unavailable")
+            rows.append(dict(message_id=mid, status=state, reply_message_id=reply_id,
+                             delivery_confirmed=state == "sent", automatic_resends=resends))
+        return dict(status="ok", source="persisted_max_acknowledgement_receipts", chat_id=chat, rows=rows,
+                    all_delivery_confirmed=all(row["delivery_confirmed"] for row in rows),
+                    coverage="Durable acknowledgement receipts only; sent records prior verified delivery. "
+                             "Missing is not sent and does not authorize resubmission. No live MAX read, "
+                             "source-version check or financial verification is performed.",
+                    upstream_calls=False, mutations=False)
 
     def _max_events(self, args: Mapping[str, Any], deadline_at: float | None,
                     cancel_event: threading.Event | None) -> dict[str, Any]:

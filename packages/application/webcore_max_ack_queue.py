@@ -2,8 +2,9 @@
 
 The gateway owns OAuth scope checks. This queue retains the exact authorized
 chat/source/UI attestation and uses the existing reply journal as its dedup key.
-Only a committed queued -> pending CAS permits POST. Pending/unknown (including
-legacy rows) can only be reconciled by reads, even after a process crash.
+Only a committed submission CAS permits POST. An unknown fixed acknowledgement
+may be retried only after two complete fresh absence scans and a settling delay;
+legacy records without a durable attempt boundary remain readback-only.
 """
 from __future__ import annotations
 
@@ -23,6 +24,9 @@ class MaxAckQueue:
     RECONCILE_SECONDS = 60.0
     HISTORY_PAGES = 3
     HISTORY_PAGE_SIZE = 100
+    RESEND_SETTLE_SECONDS = 300.0
+    ABSENCE_CONFIRM_SECONDS = 60.0
+    MAX_RESENDS = 2
 
     def __init__(self, reply, bot_id, *, chat_id):
         if type(bot_id) is not int or bot_id <= 0:
@@ -45,6 +49,21 @@ class MaxAckQueue:
                 history_before_ms INTEGER,
                 PRIMARY KEY(chat_id,source_id))''')
             conn.execute('CREATE INDEX IF NOT EXISTS max_ack_queue_due ON max_ack_queue(next_attempt_at,created_at)')
+            conn.execute('''CREATE TABLE IF NOT EXISTS max_ack_recovery (
+                chat_id INTEGER NOT NULL, source_id TEXT NOT NULL,
+                attempt_started_at REAL, resend_count INTEGER NOT NULL DEFAULT 0,
+                absence_proved_at REAL, PRIMARY KEY(chat_id,source_id))''')
+            # Migration cannot prove queue.created_at preceded an old POST. Such
+            # rows also require coverage back to the live source timestamp.
+            # Newly adopted legacy rows have no durable attempt boundary.
+            conn.execute('''INSERT OR IGNORE INTO max_ack_recovery
+                (chat_id,source_id,attempt_started_at)
+                SELECT chat_id,source_id,created_at FROM max_ack_queue''')
+            conn.execute('''CREATE TABLE IF NOT EXISTS max_ack_original_failure (
+                chat_id INTEGER, source_id TEXT, phase TEXT, error_code TEXT,
+                http_status INTEGER, updated_at REAL, PRIMARY KEY(chat_id,source_id))''')
+            conn.execute('''INSERT OR IGNORE INTO max_ack_original_failure
+                SELECT * FROM reply_diagnostics WHERE length(error_code)>0''')
             # Schema creation must not leave a transaction open before BEGIN IMMEDIATE.
             conn.commit()
             yield conn
@@ -96,6 +115,8 @@ class MaxAckQueue:
                 # original attestation digest matches. Never replace evidence.
                 conn.execute('UPDATE max_ack_queue SET source_text=COALESCE(source_text,?) WHERE chat_id=? AND source_id=?',
                              (args['source_text'], chat, mid))
+            conn.execute('''INSERT OR IGNORE INTO max_ack_recovery
+                (chat_id,source_id,attempt_started_at) VALUES (?,?,NULL)''', (chat, mid))
             return self._receipt(row, digest)
 
     def _claim(self):
@@ -114,9 +135,14 @@ class MaxAckQueue:
                 AND NOT EXISTS (SELECT 1 FROM max_ack_queue q
                     WHERE q.chat_id=r.chat_id AND q.source_id=r.source_id)
                 ORDER BY r.rowid LIMIT 100''', (now, now, *chats))
+            conn.execute('''INSERT OR IGNORE INTO max_ack_recovery
+                (chat_id,source_id,attempt_started_at)
+                SELECT chat_id,source_id,NULL FROM max_ack_queue''')
             row = conn.execute(f'''SELECT q.chat_id,q.source_id,q.source_text,
-                    r.source_digest,r.state,r.reply_id,q.attempts,q.history_before_ms
+                    r.source_digest,r.state,r.reply_id,q.attempts,q.history_before_ms,
+                    a.attempt_started_at,a.resend_count,a.absence_proved_at
                 FROM max_ack_queue q JOIN replies r USING(chat_id,source_id)
+                JOIN max_ack_recovery a USING(chat_id,source_id)
                 WHERE q.chat_id IN ({marks}) AND q.next_attempt_at<=? AND q.lease_until<=?
                     AND r.state IN ('queued','retry_wait','pending','unknown')
                 ORDER BY q.next_attempt_at,q.created_at,q.rowid LIMIT 1''', (*chats, now, now)).fetchone()
@@ -127,7 +153,7 @@ class MaxAckQueue:
             # A prior worker may have died at any point after its durable claim.
             if row[4] == 'pending':
                 conn.execute("UPDATE replies SET state='unknown' WHERE chat_id=? AND source_id=? AND state='pending'", row[:2])
-            return (*row, token)
+            return (*row[:8], token, *row[8:])
 
     def _source(self, job, deadline):
         chat, mid, text, digest = job[:4]
@@ -180,15 +206,52 @@ class MaxAckQueue:
                     next_attempt_at=?,history_before_ms=? WHERE chat_id=? AND source_id=? AND lease_token=?''',
                              (time.time()+delay, cursor, chat, mid, token))
                 code, status = self.reply._error_code(error) if error else ('', None)
-                conn.execute('INSERT OR REPLACE INTO reply_diagnostics VALUES (?,?,?,?,?,?)',
-                             (chat, mid, 'verified' if state == 'sent' else state, code, status, time.time()))
+                diagnostic = (chat, mid, 'verified' if state == 'sent' else state, code, status, time.time())
+                if error:
+                    conn.execute('INSERT OR IGNORE INTO max_ack_original_failure VALUES (?,?,?,?,?,?)', diagnostic)
+                # A successful empty read is not a replacement for the original
+                # transport/verification failure that caused unknown delivery.
+                verb = 'REPLACE' if error or state == 'sent' else 'IGNORE'
+                conn.execute(f'INSERT OR {verb} INTO reply_diagnostics VALUES (?,?,?,?,?,?)', diagnostic)
             row = conn.execute('SELECT source_digest,state,reply_id FROM replies WHERE chat_id=? AND source_id=?', (chat, mid)).fetchone()
         return self._receipt(row)
+
+    def _absence_ready(self, job):
+        """Two independent, fresh complete scans; durable lease owns the proof."""
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('''SELECT a.attempt_started_at,a.resend_count,a.absence_proved_at
+                FROM max_ack_recovery a JOIN max_ack_queue q USING(chat_id,source_id)
+                WHERE a.chat_id=? AND a.source_id=? AND q.lease_token=? AND q.lease_until>?''',
+                               (job[0], job[1], job[8], now)).fetchone()
+            if (not row or row[0] is None or row[1] >= self.MAX_RESENDS
+                    or now-row[0] < self.RESEND_SETTLE_SECONDS * 2**row[1]):
+                return False
+            if row[2] is None:
+                conn.execute('UPDATE max_ack_recovery SET absence_proved_at=? WHERE chat_id=? AND source_id=?',
+                             (now, job[0], job[1]))
+                return False
+            return now-row[2] >= self.ABSENCE_CONFIRM_SECONDS
 
     def _reconcile(self, job, source, deadline):
         if job[5] and self._verified_id(job[5], job, source, deadline):
             return self._finish(job, 'sent', reply_id=job[5])
         cursor = job[7]
+        # A resumed older scan can discover delivery, but cannot prove that
+        # newer messages have stayed absent since its previous worker run.
+        complete = cursor is None and job[9] is not None and not job[5]
+        boundary = int(job[9]*1000) if job[9] is not None else None
+        # MAX timestamps and this machine's wall clock need not be aligned.
+        # Source creation is a server-clock floor preceding every possible POST,
+        # including imported records whose queue was created after delivery.
+        if boundary is not None:
+            source_stamp = source.get('timestamp_ms')
+            if type(source_stamp) is not int or not 0 <= source_stamp < 2**63:
+                complete = False
+            elif boundary is not None:
+                boundary = min(boundary, source_stamp)
+        absent = False
         for _ in range(self.HISTORY_PAGES):
             if time.monotonic() >= deadline:
                 break
@@ -196,27 +259,57 @@ class MaxAckQueue:
             if cursor is not None:
                 params['from'] = cursor
             messages = self.api._get(params, deadline)
-            if len(messages) > self.HISTORY_PAGE_SIZE:
+            if not isinstance(messages, list) or len(messages) > self.HISTORY_PAGE_SIZE:
                 raise CloudReadError('MAX history exceeded page bound', 'source_limit')
+            valid = all(isinstance(m, dict)
+                        and m.get('recipient', {}).get('chat_id') == job[0]
+                        and m.get('recipient', {}).get('chat_type') == 'chat'
+                        and type(m.get('timestamp')) is int and 0 <= m['timestamp'] < 2**63
+                        and self._valid_mid(m.get('body', {}).get('mid'))
+                        and isinstance(m.get('body', {}).get('text'), str)
+                        and type(m.get('sender', {}).get('user_id')) is int
+                        and type(m.get('sender', {}).get('is_bot')) is bool
+                        for m in messages)
+            if not valid:
+                complete = False
             for message in messages:
+                # An own-bot '+' with an incomplete reply link may be the
+                # original delivery. Its absence cannot be positively proven.
+                if (isinstance(message, dict)
+                        and message.get('sender', {}).get('user_id') == self.bot_id
+                        and message.get('body', {}).get('text') == '+'):
+                    link = message.get('link') or {}
+                    linked_id = (link.get('message') or {}).get('mid')
+                    if (link.get('type') != 'reply' or not self._valid_mid(linked_id)
+                            or linked_id == job[1]
+                            or (linked_id != job[1] and len(linked_id) == len(job[1]) == 36
+                                and linked_id[-16:] == job[1][-16:])):
+                        complete = False
                 if self._matches(message, job[0], job[1], source):
                     reply_id = message.get('body', {}).get('mid')
                     if self._verified_id(reply_id, job, source, deadline):
                         return self._finish(job, 'sent', reply_id=reply_id)
-            stamps = [m.get('timestamp') for m in messages]
-            valid = stamps and all(type(t) is int and 0 <= t < 2**63 for t in stamps)
-            oldest = min(stamps) if valid else None
-            source_stamp = source.get('timestamp_ms')
-            if (len(messages) < self.HISTORY_PAGE_SIZE or oldest is None
-                    or (type(source_stamp) is int and oldest < source_stamp)):
-                cursor = None  # Restart from newest next time: absence is not proof.
+                    complete = False  # A plausible delivery must not be retried.
+            stamps = [m['timestamp'] for m in messages] if valid else []
+            if stamps != sorted(stamps, reverse=True) or (cursor is not None and any(t > cursor for t in stamps)):
+                complete = False
+            oldest = min(stamps) if stamps else None
+            if cursor is not None and oldest is not None and oldest >= cursor:
+                cursor = None  # Inclusive boundary is saturated/ambiguous.
                 break
-            if cursor is not None and oldest >= cursor:
-                # An inclusive timestamp tie cannot prove complete coverage. Do
-                # not skip it or infer absence; a later pass starts from newest.
+            if valid and oldest is not None and boundary is not None and oldest < boundary:
+                absent = complete
+                cursor = None
+                break
+            if len(messages) < self.HISTORY_PAGE_SIZE:
+                cursor = None  # Short/empty is not proof of the older interval.
+                break
+            if oldest is None:
                 cursor = None
                 break
             cursor = oldest
+        if absent and self._absence_ready(job):
+            return True
         return self._finish(job, 'unknown', cursor=cursor)
 
     def run_once(self):
@@ -228,10 +321,13 @@ class MaxAckQueue:
         submitted = job[4] in {'pending', 'unknown'}
         try:
             source = self._source(job, deadline)
+            recovering = submitted
             if submitted:
-                return self._reconcile(job, source, deadline)
-            # Pre-submit reads may safely retry; after this CAS every outcome,
-            # including process death before POST, is readback-only forever.
+                reconciled = self._reconcile(job, source, deadline)
+                if reconciled is not True:
+                    return reconciled
+            # A recovery submission requires a fresh complete absence proof and
+            # consumes its bounded retry before any POST, including on crashes.
             if deadline - time.monotonic() < 30:
                 raise CloudReadError('Insufficient worker submission budget', 'deadline_exceeded')
             # A journal/commit failure during the submission claim is also
@@ -239,12 +335,26 @@ class MaxAckQueue:
             submitted = True
             with self._connect() as conn:
                 conn.execute('BEGIN IMMEDIATE')
+                now = time.time()
+                eligible = ('unknown', 'pending') if recovering else ('queued', 'retry_wait')
                 claimed = conn.execute('''UPDATE replies SET state='pending'
                     WHERE chat_id=? AND source_id=? AND source_digest=?
-                    AND state IN ('queued','retry_wait') AND EXISTS (
+                    AND state IN (?,?) AND (?=0 OR reply_id IS NULL) AND EXISTS (
                         SELECT 1 FROM max_ack_queue q WHERE q.chat_id=replies.chat_id
-                        AND q.source_id=replies.source_id AND q.lease_token=? AND q.lease_until>?)''',
-                                       (job[0], job[1], job[3], job[8], time.time())).rowcount
+                        AND q.source_id=replies.source_id AND q.lease_token=? AND q.lease_until>?)
+                    AND EXISTS (SELECT 1 FROM max_ack_recovery a
+                        WHERE a.chat_id=replies.chat_id AND a.source_id=replies.source_id
+                        AND (?=0 OR (a.resend_count<? AND a.attempt_started_at IS NOT NULL
+                            AND ?-a.attempt_started_at>=? * (1 << a.resend_count)
+                            AND a.absence_proved_at IS NOT NULL AND ?-a.absence_proved_at>=?)))''',
+                                       (job[0], job[1], job[3], *eligible, int(recovering), job[8], now,
+                                        int(recovering), self.MAX_RESENDS, now, self.RESEND_SETTLE_SECONDS,
+                                        now, self.ABSENCE_CONFIRM_SECONDS)).rowcount
+                if claimed:
+                    conn.execute('''UPDATE max_ack_recovery SET attempt_started_at=?,
+                        resend_count=resend_count+?,absence_proved_at=NULL WHERE chat_id=? AND source_id=?''',
+                                 (now, int(recovering), job[0], job[1]))
+                    conn.execute('UPDATE max_ack_queue SET history_before_ms=NULL WHERE chat_id=? AND source_id=?', job[:2])
             if not claimed:
                 return self._finish(job, 'unknown')
             submitted = True
