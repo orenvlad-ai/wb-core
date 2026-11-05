@@ -27,6 +27,8 @@ from packages.application.webcore_cloud_reads import (
     CLOUD_TOOLS,
     CLOUD_WRITE_TOOLS,
     SCOPE_TRANSIT_SEND,
+    SCOPE_ACCOUNTING_READ,
+    SCOPE_ACCOUNTING_SEND,
     SCOPE_MAX_POSTED_REPLY,
     SCOPE_MAX_MESSAGE_SEND,
     SCOPE_CASH_READ,
@@ -3010,6 +3012,14 @@ def _tool_definitions() -> list[ToolDefinition]:
             scope=SCOPE_TRANSIT_SEND,
         ),
         ToolDefinition(
+            "accounting_send_message", "Send a text to Accounting",
+            "Send the user-approved plain text to the fixed accounting group as the MAX bot. "
+            "Reuse the same request_id to check a receipt. Never resubmit an uncertain send under a new ID.",
+            _schema({"request_id": _string_schema(1, 120), "text": _string_schema(1, 4000)},
+                    required=("request_id", "text")),
+            scope=SCOPE_ACCOUNTING_SEND,
+        ),
+        ToolDefinition(
             "max_send_message", "Send MAX bot text",
             "Send user-authorized plain text as the bot to the authorized MAX group. "
             "Not restricted to a template. Use a stable unique request_id for one intended message; "
@@ -3077,11 +3087,25 @@ def _tool_definitions() -> list[ToolDefinition]:
             scope=SCOPE_TRANSIT_READ,
         ),
         ToolDefinition(
+            "accounting_messages", "Accounting message history",
+            "Read only the accounting group's messages, newest first. Use accounting_message for attachments.",
+            _schema({"limit": _int_schema(1, MAX_LIMIT), "before_ms": _int_schema(0, 2**63-1)}),
+            _strict_output_schema("status", "source", "chat_id", "rows", "coverage", "upstream_calls", "mutations"),
+            scope=SCOPE_ACCOUNTING_READ,
+        ),
+        ToolDefinition(
             "transit_message", "Transit Plus full message and attachments",
             "Read one logistics message and its attachment names and temporary HTTPS links.",
             _schema({"message_id": _string_schema(1, 200)}, required=("message_id",)),
             _strict_output_schema("status", "source", "chat_id", "rows", "coverage", "upstream_calls", "mutations"),
             scope=SCOPE_TRANSIT_READ,
+        ),
+        ToolDefinition(
+            "accounting_message", "Accounting full message and attachments",
+            "Read one accounting message and its attachment names and temporary HTTPS links.",
+            _schema({"message_id": _string_schema(1, 200)}, required=("message_id",)),
+            _strict_output_schema("status", "source", "chat_id", "rows", "coverage", "upstream_calls", "mutations"),
+            scope=SCOPE_ACCOUNTING_READ,
         ),
         ToolDefinition(
             "max_messages", "MAX live message history",
