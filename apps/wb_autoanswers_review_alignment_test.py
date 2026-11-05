@@ -11,6 +11,26 @@ from packages.application.wb_autoanswers_owner_policy import (
 
 
 class ReviewAlignmentTest(unittest.TestCase):
+    def test_noframe_gap_note_survives_mixed_review_and_model_investigation(self) -> None:
+        for text, route, reply in (
+            ("Само стекло хорошее, но маленькое для 16, очень большой отступ от краёв, пришлось выкинуть",
+             "public_only", "Здравствуйте. Жаль, что стекло пришлось выбросить."),
+            ("Положили видимо не на тот телефон, гораздо меньше чем должно быть",
+             "seller_chat", "Здравствуйте. Напишите в чат продавца для проверки модели."),
+        ):
+            content = {"product": {"supplier_article": "No Frame Matte iPhone 15 / 16"}, "text": text}
+            result = {"final_route": route, "final_reply": reply}
+            def apply(content, result):
+                return apply_owner_policy(feedback_id="gap", rating=2, content_json=content, result=result)
+            changed = apply(content, result)
+            self.assertEqual(changed["final_route"], route)
+            self.assertTrue(changed["final_reply"].startswith(reply))
+            self.assertIn("для совместимости с чехлом", changed["final_reply"])
+            self.assertNotIn("ожидали", changed["final_reply"])
+            self.assertEqual(apply(content, changed)["final_reply"], changed["final_reply"])
+            self.assertEqual(apply({**content, "product": {}}, result)["final_reply"], reply)
+            self.assertEqual(apply({**content, "text": "Подошло идеально по размеру"}, result)["final_reply"], reply)
+
     def test_installation_crack_is_eligible_without_video(self) -> None:
         decision = classify_return_guard({"text": "Стекло треснуло, пока устанавливал"})
         self.assertIn("installation_breakage_before_use", decision["hard_return_reasons"])

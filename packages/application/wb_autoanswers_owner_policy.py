@@ -580,6 +580,44 @@ def forbidden_public_reply_patterns(reply: str) -> list[str]:
     ]
 
 
+NOFRAME_CASE_NOTE = (
+    "В линейке No Frame (без рамок) небольшой отступ по краям предусмотрен для совместимости "
+    "с чехлом, чтобы его бортик не поддевал стекло."
+)
+
+
+def _explain_noframe_gap(content_json: Any, pipeline: Mapping[str, Any], reply: str) -> tuple[str, bool]:
+    try:
+        content = content_json if isinstance(content_json, Mapping) else json.loads(content_json or "{}")
+    except (ValueError, TypeError):
+        return reply, False
+    if not isinstance(content, Mapping):
+        return reply, False
+    product = content.get("product") or {}
+    if not isinstance(product, Mapping):
+        return reply, False
+    article = product.get("supplier_article") or content.get("seller_article") or ""
+    if not re.fullmatch(r"No Frame (?:Clean|Matte|Anti-Spy) iPhone [0-9 /A-Za-z]+", article):
+        return reply, False
+    text = _normalize(_content_text(content))
+    size_issue = pipeline.get("primary_issue") == "SIZE_FIT" or any(
+        issue.get("code") == "SIZE_FIT" for issue in pipeline.get("issues") or [] if isinstance(issue, Mapping)
+    )
+    explicit_gap = re.search(
+        r"не доходит до (?:кра|рам)|не (?:закрывает|покрывает) (?:весь |полностью )?экран|"
+        r"не по размеру|меньше (?:чем |экрана)|"
+        r"(?:больш|огромн|заметн)\w* (?:зазор|отступ)|(?:остается|остаются) (?:зазор|отступ)",
+        text,
+    )
+    if not size_issue and not explicit_gap:
+        return reply, False
+    # The approved full reply already explains the purpose. A passing mention
+    # of a case elsewhere in a mixed complaint is insufficient.
+    if "для совместимости с чехл" in reply.lower() or NOFRAME_CASE_NOTE in reply:
+        return reply, False
+    return f"{reply} {NOFRAME_CASE_NOTE}", True
+
+
 def apply_owner_policy(
     *,
     feedback_id: str,
@@ -617,6 +655,7 @@ def apply_owner_policy(
                 template_id = f"soft_public_v{index + 1}"
                 reason = "no_independent_hard_return_signal"
 
+    reply, case_note_added = _explain_noframe_gap(content_json, stored.get("pipeline_result") or {}, reply)
     reply, unfortunately_action = normalize_unfortunately(reply)
     matched_forbidden = forbidden_public_reply_patterns(reply) if route == "public_only" else []
     if matched_forbidden:
@@ -663,6 +702,7 @@ def apply_owner_policy(
         "explicit_impact": decision["explicit_impact"],
         "template_id": template_id,
         "unfortunately_action": unfortunately_action,
+        "noframe_case_note_added": case_note_added,
         "operator_handoff": False,
         "model_calls": 0,
     }
