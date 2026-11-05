@@ -12,7 +12,6 @@ import argparse
 from datetime import datetime, time as clock_time, timedelta, timezone
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import sys
@@ -32,7 +31,8 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sheet_vitrina_v1_auto_refresh import SheetVitrinaV1AutoRefreshSchedulesBlock  # noqa: E402
 from packages.application.wb_buyer_authenticated_observations import (  # noqa: E402
     append_observation, begin_publication, begin_run, classify_observation,
-    finish_publication, finish_run, load_active_requested_nm_ids, run_ordinal,
+    finish_publication, finish_run, load_collection_requested_nm_ids, load_daily_projection,
+    select_collection_nm_ids,
 )
 from packages.business_time import business_date_from_timestamp  # noqa: E402
 from packages.contracts.prices_snapshot_block import PricesSnapshotRequest  # noqa: E402
@@ -75,7 +75,7 @@ def _sanitize_seller_goods(payload: Mapping[str, Any], wanted: list[int], measur
 
 
 def _requested_ids(runtime: RegistryUploadDbBackedRuntime) -> list[int]:
-    return load_active_requested_nm_ids(runtime)
+    return load_collection_requested_nm_ids(runtime)
 
 
 def _recent_configured_slot(runtime_dir: Path, now: datetime) -> tuple[str, str] | None:
@@ -138,17 +138,14 @@ def collect_once(
         # Official adapter exceptions can include raw HTTP response bodies.
         # Never log or persist them; buyer observations remain useful alone.
         seller_status = "unavailable"
-    # A slow first card can consume the five-minute browser budget. Rotate
-    # the *start* even for today's 33-SKU roster so later slots reach the
-    # tail. The step is coprime with the roster size, eventually reaching all
-    # positions; the first repeat starts near the previous tail.
-    roster_size = len(requested_nm_ids)
-    rotation_step = max(1, roster_size - 8)
-    while math.gcd(rotation_step, roster_size) != 1:
-        rotation_step -= 1
-    offset = run_ordinal(runtime, run_id) * rotation_step % roster_size
-    rotated = requested_nm_ids[offset:] + requested_nm_ids[:offset]
-    selected = rotated[:MAX_CHROME_ROWS]
+    # The monitor catalog spans multiple bounded Chrome batches. Prioritize
+    # cards not yet visited today, retaining the existing 40-card/5-minute cap.
+    try:
+        selected = select_collection_nm_ids(runtime, requested_nm_ids=requested_nm_ids,
+                                            business_date=business_date, limit=MAX_CHROME_ROWS)
+    except Exception:
+        finish_run(runtime, run_id=run_id, finished_at=now(), status="error")
+        raise
     buyer_rows: dict[int, dict[str, Any]] = {}
     try:
         for row in reader(selected):
@@ -157,6 +154,7 @@ def collect_once(
     except Exception:
         pass  # Missing selected rows are explicitly persisted below.
     observed_count = 0
+    daily_covered_count = 0
     effective_count = 0
     attempted_dates: set[str] = set()
     reader_lifecycle = "clean"
@@ -182,11 +180,17 @@ def collect_once(
                 reader_lifecycle = observation["reader_lifecycle_status"]
             observed_count += observation["status"] == "observed"
             effective_count += observation["effective_nonwallet_discount"] is not None
-        status = "completed" if observed_count == len(requested_nm_ids) and reader_lifecycle == "clean" else "partial"
+        # The full same-day account-scoped coverage can span several batches.
+        # A failed current batch remains partial even if older prices are known.
+        daily_covered_count = load_daily_projection(runtime,business_date,requested_nm_ids)["covered_count"]
+        status = "completed" if (daily_covered_count == len(requested_nm_ids)
+                                  and observed_count == len(selected)
+                                  and reader_lifecycle == "clean") else "partial"
     finally:
         finish_run(runtime, run_id=run_id, finished_at=now(), status=status)
     return {"status": status, "run_id": run_id, "business_date": business_date,
             "requested_count": len(requested_nm_ids), "buyer_covered_count": observed_count,
+            "daily_covered_count": daily_covered_count,
             "effective_discount_covered_count": effective_count, "seller_status": seller_status,
             "reader_lifecycle_status": reader_lifecycle, "publication_business_dates": sorted(attempted_dates)}
 
