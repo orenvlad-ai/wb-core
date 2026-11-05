@@ -56,7 +56,7 @@ def browser(base, *, edition, rating_expected):
         assert requests and all(parse_qs(urlsplit(url).query).get('history_snapshot') == ['1'] for url in requests), requests
         selector = '[data-table-body] td[data-row-id="TOTAL|avg_card_rating"][data-col-id="date:2026-10-04"]'
         if rating_expected:
-            assert page.locator(selector).inner_text() == '4,75'
+            assert page.locator(selector).inner_text() == '4,75123'
             assert page.locator('[data-table-body] td[data-row-id="TOTAL|avg_card_rating"][data-col-id="date:2026-10-05"]').inner_text() == '—'
             page.locator('[data-metrics-settings-open]').click()
             # Pairing is a catalog assertion, independent of the modal list filter.
