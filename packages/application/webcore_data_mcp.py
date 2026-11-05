@@ -207,6 +207,8 @@ class WebCoreDataMcpGateway:
             if definition.name in {"max_inbox_events", "max_inbox_event", "max_messages", "max_message", "max_posted_reply", "max_send_message"}:
                 definition.input_schema["properties"]["chat_id"]["enum"] = (
                     [self.cloud_reads.max_send.chat_id] if definition.name == "max_send_message"
+                    else [self.cloud_reads.max_ack_queue.chat_id]
+                    if definition.name == "max_posted_reply" and self.cloud_reads.max_ack_queue is not None
                     else sorted(self.cloud_reads.max_inbox.chat_ids))
             security_schemes = [{"type": "oauth2", "scopes": [definition.scope]}]
             tools.append(
@@ -3014,7 +3016,10 @@ def _tool_definitions() -> list[ToolDefinition]:
             "Send the fixed text + as a reply to one authorized MAX source message, only after all its "
             "payments were approved and verified posted through WebCore UI. Pass the exact full source text "
             "and a concise UI verification reference. No financial reads or writes. Persistent deduplication: "
-            "unknown/pending send is never retried automatically; report and reconcile instead.",
+            "with queued delivery, accepted=true means the job is durable and the operator can continue. "
+            "Repeat the same arguments to read delivery status; only sent confirms delivery. "
+            "Check each accepted acknowledgement before sending final cash reconciliation. "
+            "An uncertain network submission is only reconciled, never automatically resent.",
             _schema({"chat_id": _int_schema(-(2**63), -1), "message_id": _string_schema(1, 200),
                      "source_text": _string_schema(1, 16000),
                      "ui_verification": _string_schema(1, 1000),
