@@ -545,7 +545,7 @@ class QueueTests(unittest.TestCase):
         with self.queue._connect() as conn:
             self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
 
-    def test_recovery_cas_rechecks_lease_and_newly_known_reply_id(self):
+    def test_recovery_cas_rechecks_newly_known_reply_id(self):
         self.failed_attempt()
         self.confirm_absence()
         original = self.queue._absence_ready
@@ -583,6 +583,32 @@ class QueueTests(unittest.TestCase):
         self.due()
         self.assertEqual(self.queue.run_once()['status'], 'unknown')
         self.reply._post.assert_not_called()
+
+    def test_local_clock_skew_cannot_end_scan_before_server_timestamped_ack(self):
+        self.failed_attempt()
+        # A page older than local POST time can still be newer than the source
+        # and delivered acknowledgement in MAX's clock domain.
+        recent = self.ack('mid.other'); recent['timestamp'] = 2000
+        self.history = [recent]
+        self.queue.run_once()
+        with self.queue._connect() as conn:
+            self.assertIsNone(conn.execute('SELECT absence_proved_at FROM max_ack_recovery').fetchone()[0])
+        self.reply._post.assert_not_called()
+
+    def test_expired_worker_lease_cannot_authorize_resend(self):
+        self.failed_attempt()
+        self.confirm_absence()
+        original = self.queue._absence_ready
+        def expire_after_proof(job):
+            ready = original(job)
+            with self.queue._connect() as conn:
+                conn.execute('UPDATE max_ack_queue SET lease_until=0')
+            return ready
+        self.queue._absence_ready = expire_after_proof
+        self.assertEqual(self.queue.run_once()['status'], 'unknown')
+        self.reply._post.assert_not_called()
+        with self.queue._connect() as conn:
+            self.assertEqual(conn.execute('SELECT resend_count FROM max_ack_recovery').fetchone()[0], 0)
 
 
 if __name__ == '__main__':

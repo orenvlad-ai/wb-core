@@ -52,14 +52,13 @@ class MaxAckQueue:
             conn.execute('''CREATE TABLE IF NOT EXISTS max_ack_recovery (
                 chat_id INTEGER NOT NULL, source_id TEXT NOT NULL,
                 attempt_started_at REAL, resend_count INTEGER NOT NULL DEFAULT 0,
-                absence_proved_at REAL, source_boundary INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(chat_id,source_id))''')
+                absence_proved_at REAL, PRIMARY KEY(chat_id,source_id))''')
             # Migration cannot prove queue.created_at preceded an old POST. Such
             # rows also require coverage back to the live source timestamp.
             # Newly adopted legacy rows have no durable attempt boundary.
             conn.execute('''INSERT OR IGNORE INTO max_ack_recovery
-                (chat_id,source_id,attempt_started_at,source_boundary)
-                SELECT chat_id,source_id,created_at,1 FROM max_ack_queue''')
+                (chat_id,source_id,attempt_started_at)
+                SELECT chat_id,source_id,created_at FROM max_ack_queue''')
             conn.execute('''CREATE TABLE IF NOT EXISTS max_ack_original_failure (
                 chat_id INTEGER, source_id TEXT, phase TEXT, error_code TEXT,
                 http_status INTEGER, updated_at REAL, PRIMARY KEY(chat_id,source_id))''')
@@ -141,7 +140,7 @@ class MaxAckQueue:
                 SELECT chat_id,source_id,NULL FROM max_ack_queue''')
             row = conn.execute(f'''SELECT q.chat_id,q.source_id,q.source_text,
                     r.source_digest,r.state,r.reply_id,q.attempts,q.history_before_ms,
-                    a.attempt_started_at,a.resend_count,a.absence_proved_at,a.source_boundary
+                    a.attempt_started_at,a.resend_count,a.absence_proved_at
                 FROM max_ack_queue q JOIN replies r USING(chat_id,source_id)
                 JOIN max_ack_recovery a USING(chat_id,source_id)
                 WHERE q.chat_id IN ({marks}) AND q.next_attempt_at<=? AND q.lease_until<=?
@@ -243,7 +242,10 @@ class MaxAckQueue:
         # newer messages have stayed absent since its previous worker run.
         complete = cursor is None and job[9] is not None and not job[5]
         boundary = int(job[9]*1000) if job[9] is not None else None
-        if job[12]:
+        # MAX timestamps and this machine's wall clock need not be aligned.
+        # Source creation is a server-clock floor preceding every possible POST,
+        # including imported records whose queue was created after delivery.
+        if boundary is not None:
             source_stamp = source.get('timestamp_ms')
             if type(source_stamp) is not int or not 0 <= source_stamp < 2**63:
                 complete = False
@@ -350,7 +352,7 @@ class MaxAckQueue:
                                         now, self.ABSENCE_CONFIRM_SECONDS)).rowcount
                 if claimed:
                     conn.execute('''UPDATE max_ack_recovery SET attempt_started_at=?,
-                        resend_count=resend_count+?,absence_proved_at=NULL,source_boundary=0 WHERE chat_id=? AND source_id=?''',
+                        resend_count=resend_count+?,absence_proved_at=NULL WHERE chat_id=? AND source_id=?''',
                                  (now, int(recovering), job[0], job[1]))
                     conn.execute('UPDATE max_ack_queue SET history_before_ms=NULL WHERE chat_id=? AND source_id=?', job[:2])
             if not claimed:
