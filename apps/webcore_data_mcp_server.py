@@ -10,6 +10,7 @@ import hashlib
 import html
 import hmac
 import json
+import logging
 import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -347,6 +348,22 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         self.tool_executor = tool_executor
         super().__init__(server_address, handler)
 
+    def start_ack_worker(self, queue: Any) -> None:
+        self._ack_stop = threading.Event()
+
+        def deliver() -> None:
+            while not self._ack_stop.is_set():
+                try:
+                    processed = queue.run_once()
+                except Exception as exc:
+                    logging.getLogger(__name__).error("MAX acknowledgement worker: %s", type(exc).__name__)
+                    self._ack_stop.wait(5)
+                else:
+                    self._ack_stop.wait(0.5 if processed is not None else 2)
+
+        self._ack_thread = threading.Thread(target=deliver, name="max-ack-delivery", daemon=True)
+        self._ack_thread.start()
+
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self._request_slots.acquire(blocking=False):
             _reject_overloaded_socket(request)
@@ -365,6 +382,9 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
             self._request_slots.release()
 
     def server_close(self) -> None:
+        if hasattr(self, "_ack_stop"):
+            self._ack_stop.set()
+            self._ack_thread.join(timeout=2)
         self.tool_executor.close()
         super().server_close()
 
@@ -383,12 +403,16 @@ def build_server(
     )
     tool_executor = BoundedToolExecutor(resolved_config.max_tool_workers)
     handler_cls = _build_handler(resolved_config, resolved_gateway, tool_executor)
-    return BoundedThreadingHTTPServer(
+    server = BoundedThreadingHTTPServer(
         (resolved_config.host, resolved_config.port),
         handler_cls,
         max_workers=resolved_config.max_http_workers,
         tool_executor=tool_executor,
     )
+    queue = resolved_gateway.cloud_reads.max_ack_queue
+    if queue is not None:
+        server.start_ack_worker(queue)
+    return server
 
 
 def _build_handler(

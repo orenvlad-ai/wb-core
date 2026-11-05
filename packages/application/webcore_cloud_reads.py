@@ -88,13 +88,14 @@ class CashReadConfig:
 class WebCoreCloudReads:
     def __init__(self, *, max_inbox: MaxInboxReadConfig | None = None,
                  cash: CashReadConfig | None = None, financial_read: bool = False,
-                 max_api: Any = None, max_reply: Any = None, max_send: Any = None) -> None:
+                 max_api: Any = None, max_reply: Any = None, max_send: Any = None, max_ack_queue: Any = None) -> None:
         self.max_inbox = max_inbox
         self.cash = cash
         self.financial_read = financial_read
         self.max_api = max_api
         self.max_reply = max_reply
         self.max_send = max_send
+        self.max_ack_queue = max_ack_queue
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> WebCoreCloudReads:
@@ -119,9 +120,17 @@ class WebCoreCloudReads:
         from packages.application.webcore_max_posted_reply import MaxPostedReply
         from packages.application.webcore_max_send_message import MaxSendMessage
         api = MaxHistoryReader.from_env(env, max_config)
+        reply = MaxPostedReply.from_env(env, api)
+        ack_queue = None
+        if _enabled(env, "WEBCORE_DATA_MCP_MAX_ACK_QUEUE_ENABLED"):
+            from packages.application.webcore_max_ack_queue import MaxAckQueue
+            if reply is None:
+                raise ValueError("MAX acknowledgement queue requires the posted-reply binding")
+            ack_queue = MaxAckQueue(reply, int(env.get("WEBCORE_DATA_MCP_MAX_SEND_BOT_ID", "0")),
+                                    chat_id=int(env.get("WEBCORE_DATA_MCP_MAX_SEND_CHAT_ID", "0")))
         return cls(max_inbox=max_config, cash=cash_config,
                    financial_read=_enabled(env, "WEBCORE_DATA_MCP_CASH_OPERATIONS_READ_ENABLED"),
-                   max_api=api, max_reply=MaxPostedReply.from_env(env, api),
+                   max_api=api, max_reply=reply, max_ack_queue=ack_queue,
                    max_send=MaxSendMessage.from_env(env, api))
 
     def enabled(self, name: str) -> bool:
@@ -141,7 +150,8 @@ class WebCoreCloudReads:
             if name == "max_send_message":
                 return self.max_send.call(args, deadline_at, cancel_event)
             if name == "max_posted_reply":
-                return self.max_reply.call(args, deadline_at, cancel_event)
+                handler = self.max_ack_queue or self.max_reply
+                return handler.call(args, deadline_at, cancel_event)
             if name in {"max_messages", "max_message"}:
                 return self.max_api.call(name, args, deadline_at, cancel_event)
             if name == "cash_read":
