@@ -270,6 +270,116 @@ class CycleTests(unittest.TestCase):
                 self.assertEqual(receipt['current_stage'],fail)
                 self.assertTrue(all(i['status']=='pending' for i in receipt['stages'][STAGES.index(fail)+1:]))
                 self.assertEqual(fake.events.count('warehouse'),int(STAGES.index(fail)>=STAGES.index('warehouse')))
+    def test_real_sqlite_lock_diagnostic_survives_reload_without_changing_failure(self):
+        db = self.root / 'locked.sqlite3'
+        owner = sqlite3.connect(db)
+        other = sqlite3.connect(db, timeout=0)
+        self.addCleanup(owner.close); self.addCleanup(other.close)
+        owner.execute('create table test(value text)'); owner.commit()
+        owner.execute('begin immediate')
+        receipt, lock = self.accepted()
+        fake = CycleFake(self.root)
+        def blocked():
+            fake.events.append('finance_sources')
+            other.execute('insert into test values (?)', ('private-value',))
+        fake._cycle_finance_sources = blocked
+        try:
+            with heavy_admitted(self.root, operation='cycle'), self.assertRaises(sqlite3.OperationalError):
+                run_cycle(fake, self.store, receipt, self.config, lambda _:None)
+        finally:
+            lock.close(); owner.rollback()
+        saved = self.store.read(receipt['cycle_id'])
+        diagnostic = saved['error_diagnostic']
+        self.assertEqual(diagnostic['stage'], 'finance_sources')
+        cause = diagnostic['exceptions'][0]
+        self.assertEqual(cause['message'], 'database is locked')
+        if hasattr(sqlite3, 'SQLITE_BUSY'):
+            self.assertEqual(cause['sqlite_errorcode'], sqlite3.SQLITE_BUSY)
+        self.assertTrue(any(f['function'] == 'blocked' for f in cause['frames']))
+        self.assertNotIn('private-value', json.dumps(saved))
+        self.assertEqual(saved['summary']['publication']['status'], 'not_started')
+        self.assertNotIn('warehouse', fake.events)
+        prior, lease = self.accepted(); self.assertIsNone(lease)
+        self.assertEqual(prior['cycle_id'], receipt['cycle_id'])
+
+    def test_http_chain_keeps_status_and_frames_but_never_body_headers_or_url(self):
+        from urllib.error import HTTPError
+        receipt, lock = self.accepted()
+        fake = CycleFake(self.root)
+        def failed(*args):
+            try:
+                raise HTTPError('https://secret-host/?token=private-token', 500,
+                    'private-response-body', {'Authorization': 'private-header'}, None)
+            except HTTPError as exc:
+                raise RuntimeError('private-wrapped-message') from exc
+        fake._cycle_warehouse = failed
+        try:
+            with heavy_admitted(self.root, operation='cycle'), self.assertRaises(RuntimeError):
+                run_cycle(fake, self.store, receipt, self.config, lambda _:None)
+        finally:
+            lock.close()
+        saved = self.store.read(receipt['cycle_id'])
+        self.assertEqual(saved['error_diagnostic']['exceptions'][1]['http_status'], 500)
+        self.assertNotIn('private-', json.dumps(saved))
+        self.assertNotIn('secret-host', json.dumps(saved))
+        self.assertEqual(saved['summary']['failed_stage'], 'warehouse')
+
+    def test_terminal_summary_distinguishes_publication_from_later_failure(self):
+        for index, failure in enumerate((None, 'final_ready', 'rolling14')):
+            with self.subTest(failure=failure):
+                receipt, lock = self.accepted(key='summary-'+str(index),
+                    slot=f'2026-09-29T{10+index:02}:00:00+00:00')
+                fake = CycleFake(self.root, failure)
+                try:
+                    with heavy_admitted(self.root, operation='cycle'):
+                        if failure:
+                            with self.assertRaises(CycleStageFailure):
+                                run_cycle(fake,self.store,receipt,self.config,lambda _:None)
+                        else:
+                            run_cycle(fake,self.store,receipt,self.config,lambda _:None)
+                finally:
+                    lock.close()
+                saved = self.store.read(receipt['cycle_id'])
+                self.assertEqual(saved['summary']['execution'], 'failed' if failure else 'complete')
+                self.assertEqual(saved['summary']['publication']['status'],
+                    'unknown' if failure == 'final_ready' else 'confirmed')
+                self.assertEqual(saved['summary']['duration_ms'], 0)
+
+    def test_diagnostic_failure_never_masks_domain_exception(self):
+        receipt, lock = self.accepted(); fake = CycleFake(self.root, 'warehouse')
+        try:
+            with heavy_admitted(self.root, operation='cycle'), patch(
+                    'packages.application.sheet_vitrina_v1_cycle.cycle_error_diagnostic',
+                    side_effect=ValueError('broken observer')):
+                with self.assertRaisesRegex(CycleStageFailure, 'offline_warehouse'):
+                    run_cycle(fake,self.store,receipt,self.config,lambda _:None)
+        finally:
+            lock.close()
+        saved = self.store.read(receipt['cycle_id'])
+        self.assertEqual(saved['diagnostic_status'], 'unavailable')
+        self.assertEqual(saved['summary']['execution'], 'failed')
+
+    def test_optional_diagnostics_do_not_exceed_existing_receipt_budget(self):
+        from packages.application.sheet_vitrina_v1_cycle import _observe_terminal
+        receipt, lock = self.accepted()
+        try:
+            receipt.update(status='failed', finished_at=STAMP)
+            # A pre-existing receipt just below the established budget must
+            # remain writable even when the optional summary does not fit.
+            receipt['padding'] = ''
+            size = len(json.dumps(receipt, sort_keys=True, separators=(',', ':'),
+                ensure_ascii=False).encode())
+            receipt['padding'] = 'x' * (256 * 1024 - size - 10)
+            self.store.write(receipt)
+            _observe_terminal(receipt, RuntimeError('secret'))
+            self.store.write(receipt)
+            saved = self.store.read(receipt['cycle_id'])
+            self.assertEqual(saved['status'], 'failed')
+            self.assertNotIn('summary', saved)
+            self.assertNotIn('error_diagnostic', saved)
+        finally:
+            lock.close()
+
     def test_consumed_source_drift_never_derives_or_recollects(self):
         receipt,lock=self.accepted();fake=CycleFake(self.root,'source_drift')
         try:
