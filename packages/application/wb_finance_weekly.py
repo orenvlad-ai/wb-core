@@ -835,12 +835,12 @@ class WbFinanceWeeklyBlock:
     def shared_cost_snapshot(self) -> SharedSkuCostSnapshot | None:
         return self._shared_cost_snapshot
 
-    def _pin_active_cost(self, manifest=None):
+    def _pin_active_cost(self, manifest=None, *, observe_later=False):
         if not self.shared_cost_is_candidate:
             from packages.application.fbs_accounting_runtime import load_shared
             self._shared_cost_snapshot = load_shared(self.runtime_dir)
             self._shared_cost_base = self._shared_cost_snapshot
-            if self._shared_cost_snapshot is not None:
+            if self._shared_cost_snapshot is not None and not observe_later:
                 from packages.application.vitrina_last_known_cost import approved_reporting_snapshot
                 with closing(self.store_registry.connect("operational", mode="ro",
                         operation="finance_approved_cost_estimates", manifest=manifest or self.store_registry.load())) as estimate_conn:
@@ -7125,9 +7125,9 @@ class WbFinanceWeeklyBlock:
             raise
         return conn
 
-    def _connect_stale_cost_plan(self, *, storage_authority: list[GenerationManifest] | None = None) -> sqlite3.Connection:
+    def _connect_stale_cost_plan(self, *, storage_authority: list[GenerationManifest] | None = None, proof_read: bool = False) -> sqlite3.Connection:
         manifest = self.store_registry.load()
-        self._pin_active_cost(manifest)
+        self._pin_active_cost(manifest, observe_later=proof_read)
         conn = self.store_registry.connect(
             "operational",
             mode="ro",
@@ -7191,11 +7191,12 @@ class WbFinanceWeeklyBlock:
 
     @contextmanager
     def _finance_read_proof(self, authority, deadline):
-        from packages.application.dependency_proof import DependencyProof, readonly_deadline
+        from packages.application.dependency_proof import DependencyProof, readonly_deadline, DetachedReadConnection
         with ExitStack() as resources, ExitStack() as proof_scope:
             proof_scope.enter_context(readonly_deadline(None, deadline))
             book_fence = resources.enter_context(self._finance_book_fence())
-            conn = resources.enter_context(closing(self._connect_stale_cost_plan(storage_authority=authority)))
+            live = resources.enter_context(closing(self._connect_stale_cost_plan(storage_authority=authority, proof_read=True)))
+            conn = DetachedReadConnection(live)
             proof = DependencyProof.capture(conn)
             proof_scope.enter_context(proof.observe())
             proof_scope.enter_context(readonly_deadline(conn, deadline))
@@ -7295,7 +7296,11 @@ class WbFinanceWeeklyBlock:
         if self.shared_cost_is_candidate:
             return self._connect_shared_cost_preview()
         manifest = self.store_registry.load()
-        self._pin_active_cost(manifest)
+        # The proof writer consumes the already detached, observed cost image.
+        # Reloading/decompressing a whole book here would hold the warehouse
+        # writer for unbounded work after its readonly budget was closed.
+        if not proof_guard:
+            self._pin_active_cost(manifest)
         conn = self.store_registry.connect(
             "operational",
             mode="rw",

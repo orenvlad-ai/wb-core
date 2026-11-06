@@ -231,6 +231,8 @@ def project(plan: dict[str, Any], *, dates: list[str], source: dict[str, Any],
 def load_presentations(conn: Any, *, bundle_version: str, dates: list[str] | None, cost_only: bool = False) -> dict[str, Any]:
     """Only explicitly applied estimates can survive ordinary publication."""
     result: dict[str, Any] = {}
+    from packages.application.dependency_proof import check_deadline
+    check_deadline()
     if dates == []:
         return result
     placeholders = ",".join("?" for _ in (dates or []))
@@ -242,7 +244,9 @@ def load_presentations(conn: Any, *, bundle_version: str, dates: list[str] | Non
         "AND json_extract(dated.value,'$.source')=? "
         "ORDER BY snapshot.refreshed_at,snapshot.as_of_date,snapshot.snapshot_id")
     for key, day, raw in conn.execute(query, (bundle_version, *(dates or []), SOURCE)):
+        check_deadline()
         result.setdefault(key, {})[day] = json.loads(raw)
+        check_deadline()
     return result
 
 

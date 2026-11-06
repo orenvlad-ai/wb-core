@@ -141,6 +141,19 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(self.calls, {'writer':1, 'dml':0})
         self.assertEqual(self.image(), before)
 
+    def test_raw_writer_is_reserved_after_last_check_until_commit(self):
+        self.split()
+        native = self.block._replace_finance_target_images
+        def write(conn, **kwargs):
+            with closing(sqlite3.connect(self.raw_path, timeout=0)) as outsider:
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                    outsider.execute("UPDATE finance_raw_current_rows SET raw_json='{}'")
+            return native(conn, **kwargs)
+        with patch.object(self.block, '_replace_finance_target_images', side_effect=write):
+            result = self.run_apply()
+        self.assertEqual(result['post_verify_stale_week_count'], 0)
+        self.assertEqual(self.calls['dml'], 1)
+
     def test_writer_generation_identity_change_is_terminal(self):
         original = self.block._sqlite_persistent_identity
         calls = []
@@ -365,6 +378,31 @@ class SharedBookHandoffTests(unittest.TestCase):
         book, version = self.make_book()
         failed = deepcopy(book); failed['publication_error']='fixture source unavailable'
         self.apply_september(lambda: accounting.save(self.root, failed, expected=version, operation_id='hide-open-period'))
+
+    def test_direct_book_blob_edit_before_handoff_is_rejected(self):
+        from packages.application import fbs_accounting_runtime as accounting
+        self.make_book()
+        def mutate(_):
+            with closing(sqlite3.connect(accounting.path(self.root))) as conn, conn:
+                conn.execute('UPDATE accounting_blobs SET payload=zeroblob(length(payload)) WHERE digest=(SELECT digest FROM accounting_blobs LIMIT 1)')
+        with self.assertRaises(CompletionProofError) as caught:
+            self.run_apply(mutate)
+        self.assertEqual(caught.exception.reason, 'finance_book_changed')
+        self.assertEqual(self.calls['dml'], 0)
+
+    def test_direct_book_writer_is_reserved_through_target_commit(self):
+        from packages.application import fbs_accounting_runtime as accounting
+        self.make_book()
+        native = self.block._replace_finance_target_images
+        def write(conn, **kwargs):
+            with closing(sqlite3.connect(accounting.path(self.root), timeout=0)) as outsider:
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                    outsider.execute('UPDATE accounting_blobs SET payload=payload')
+            return native(conn, **kwargs)
+        with patch.object(self.block, '_replace_finance_target_images', side_effect=write):
+            result = self.run_apply()
+        self.assertEqual(result['post_verify_stale_week_count'], 0)
+        self.assertEqual(self.calls['dml'], 1)
 
     def test_common_writer_owner_fences_real_book_save_through_finance_commit(self):
         from packages.application import fbs_accounting_runtime as accounting
