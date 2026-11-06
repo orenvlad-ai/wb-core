@@ -1426,7 +1426,7 @@ class WarehouseRecoveryRegistry:
                 raise RecoveryPolicyError('retained operation after digest mismatch')
             if completion_guard is not None:
                 with _connect(self.db_path) as conn:
-                    completion_guard.prepare_connection(conn)
+                    completion_guard.prepare_connection(conn,stage='S3')
                     initial_changes = conn.total_changes
                     conn.execute('BEGIN IMMEDIATE')
                     transaction = completion_guard(conn, begin=True, initial_changes=initial_changes)
@@ -3901,7 +3901,7 @@ class WarehouseRecoveryRegistry:
         now = self._now()
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
-            if completion_guard is not None: completion_guard.prepare_connection(conn)
+            if completion_guard is not None: completion_guard.prepare_connection(conn,stage='S3')
             initial_changes = conn.total_changes
             conn.execute("BEGIN IMMEDIATE")
             try:

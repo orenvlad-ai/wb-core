@@ -2013,7 +2013,7 @@ class FfPoolDocumentService:
         if completion_guard is not None: completion_guard()
         with _connect(self.db_path) as conn:
             if completion_guard is not None:
-                completion_guard.prepare_connection(conn)
+                completion_guard.prepare_connection(conn,stage='S2')
                 initial_changes=conn.total_changes
                 conn.execute("BEGIN IMMEDIATE")
                 transaction=completion_guard(conn,begin=True,initial_changes=initial_changes)
@@ -2032,7 +2032,9 @@ class FfPoolDocumentService:
                     raise ValueError('overhead_completion_guided_replay_forbidden')
             state = str(request["state"])
             if state == "complete":
-                if completion_guard is not None: conn.commit()
+                if completion_guard is not None:
+                    completion_guard(conn,transaction=transaction)
+                    conn.commit()
                 return self.status(request_id=request_id)
             if state not in {"posted", "replay"}:
                 return self.status(request_id=request_id)
@@ -2138,7 +2140,7 @@ class FfPoolDocumentService:
             raise RecoveryPolicyError('retained operation after digest mismatch')
         if completion_guard is not None: completion_guard()
         with _connect(self.db_path) as conn:
-            if completion_guard is not None: completion_guard.prepare_connection(conn)
+            if completion_guard is not None: completion_guard.prepare_connection(conn,stage='S4')
             initial_changes=conn.total_changes
             conn.execute("BEGIN IMMEDIATE")
             if completion_guard is not None: transaction=completion_guard(conn,begin=True,initial_changes=initial_changes)

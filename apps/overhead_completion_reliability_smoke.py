@@ -92,6 +92,51 @@ class CompletionReliabilityTests(unittest.TestCase):
                 with patch.object(DependencyProof,'assert_current',fence):self.assertEqual(case.complete(*args)['processed_count'],1)
             self.assertEqual(checked,[True]);self.assertEqual(case.business_image(),case.before)
 
+    def test_own_progress_drift_before_acceptance_cannot_complete(self):
+        from packages.application.ff_pool_documents import REQUESTS_TABLE,TARGETED_RECALC_QUEUE_TABLE
+        mutations={
+            'queue_status':f"UPDATE {TARGETED_RECALC_QUEUE_TABLE} SET economics_status='pending',finance_status='pending'",
+            'queue_fingerprint':f"UPDATE {TARGETED_RECALC_QUEUE_TABLE} SET finance_source_fingerprint='foreign'",
+            'receipt':f"UPDATE {operations.TABLE} SET receipt_json='{{\"native_completion\":{{\"foreign\":true}}}}'",
+            'native_state':f"UPDATE {REQUESTS_TABLE} SET state='posted' WHERE document_kind='pool_overhead'",
+            'checkpoint':"UPDATE sheet_vitrina_v1_recovery_operations SET checkpoint_digest='sha256:foreign' WHERE operation_kind='ff_pool_document_posting'",
+            'scope':"UPDATE sheet_vitrina_v1_recovery_operations SET target_scope_json=json_set(target_scope_json,'$.foreign',1) WHERE operation_kind='ff_pool_document_posting'",
+        }
+        for label,sql in mutations.items():
+            with self.subTest(mutation=label):
+                case,_=self.fixture();original=operations._update;injected=[]
+                def update(db_path,identity,state,reason,receipt=None,*,guard=None):
+                    if state=='completed' and guard is not None:
+                        with closing(sqlite3.connect(db_path)) as conn,conn:conn.execute(sql)
+                        injected.append(True)
+                    return original(db_path,identity,state,reason,receipt,guard=guard)
+                with warehouse_functional_job_lock(case.root):
+                    args=case.proof_inputs()
+                    with patch.object(operations,'_update',update),self.assertRaises(CompletionProofError):case.complete(*args)
+                self.assertEqual(injected,[True])
+                self.assertNotEqual(operations.read_acceptance(case.runtime.db_path,case.identity)['state'],'completed')
+                self.assertEqual(case.business_image(),case.before)
+                case.doCleanups()
+
+    def test_native_overhead_handoffs_never_scan_unrelated_fbo_providers(self):
+        from packages.application import fbs_historical_fbo_sources,current_fbo_supply_cost_source
+        case,_=self.fixture()
+        with warehouse_functional_job_lock(case.root):
+            args=case.proof_inputs()
+            with patch.object(fbs_historical_fbo_sources,'capture_historical_fbo_documents',side_effect=AssertionError('unrelated historical FBO scan')),patch.object(current_fbo_supply_cost_source,'capture_documents',side_effect=AssertionError('unrelated FBO dispatch scan')):
+                self.assertEqual(case.complete(*args)['processed_count'],1)
+        self.assertEqual(case.business_image(),case.before)
+
+    def test_expired_before_first_cohort_is_pending_failure(self):
+        case,_=self.fixture()
+        with warehouse_functional_job_lock(case.root):
+            captured,finance,economics=case.proof_inputs()
+            with self.assertRaises(CompletionProofError) as caught:
+                operations.complete_current_cycle(case.runtime,captured,finance_block=case.finance,finance_receipt=finance,economics_receipt=economics,now=case.now,proof_budget_seconds=1e-12)
+        self.assertEqual(caught.exception.diagnostic()['processed_count'],0)
+        self.assertEqual(caught.exception.diagnostic()['pending_count'],1)
+        self.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
+
     def test_crash_before_and_after_every_commit_matrix(self):
         connect=sqlite3.connect
         for mode in ('DELETE','WAL'):

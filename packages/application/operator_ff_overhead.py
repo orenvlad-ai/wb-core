@@ -508,7 +508,7 @@ def _update(db_path, identity, state, reason, receipt=None, *, guard=None):
     with closing(sqlite3.connect(Path(db_path).resolve().as_uri()+"?mode=rw", uri=True, timeout=2)) as conn, conn:
         conn.row_factory=sqlite3.Row
         if guard is not None:
-            guard.prepare_connection(conn)
+            guard.prepare_connection(conn,stage='S5')
             initial_changes=conn.total_changes
             conn.execute("BEGIN IMMEDIATE")
             transaction=guard(conn,begin=True,initial_changes=initial_changes)
@@ -796,9 +796,12 @@ def _completion_source(conn, identity):
         if recovery['lifecycle_state']!='retained' or not any(_fingerprint(json.loads(event[0]))==expected_after for event in events):
             raise ValueError('overhead_completion_native_event_unproven')
     from packages.application.fbs_snapshot_cost_sources import _documents
-    native=next((d for d in _documents(conn, document_id=document['document_id']) if d['document_id']==document['document_id']),None)
+    native=next((d for d in _documents(conn, document_id=document['document_id'],native_only=True) if d['document_id']==document['document_id']),None)
     if native is None: raise ValueError('overhead_completion_native_document_missing')
-    return dict(native_document_fingerprint=native['fingerprint'],request_id=identity,source_digest=row['source_digest'],source_json=row['source_json'],actor=row['actor'],
+    recovery_mutable={'lifecycle_state','state_version','next_action','after_digest','writer_state','timer_state','rollback_available','updated_at','last_heartbeat_at'}
+    recovery_immutable={key:recovery[key] for key in recovery.keys() if key not in recovery_mutable}
+    native_after_image=dict(document_id=document['document_id'],root_document_id=document['root_document_id'],operation_id=document['operation_id'],manifest_sha256=document['posted_manifest_sha256'])
+    return dict(recovery_immutable=recovery_immutable,native_after_image=native_after_image,native_document_fingerprint=native['fingerprint'],request_id=identity,source_digest=row['source_digest'],source_json=row['source_json'],actor=row['actor'],
         posted_manifest=posted,materials=materials,recovery_operation_id=request['recovery_operation_id'],
         queue_id=queue_id,stable_source_id=stable,source_revision=revision,effective_date=queue['effective_date'],affected_nm_ids=nm_ids)
 
@@ -869,36 +872,53 @@ class _CompletionReadset:
         return dict(digest='sha256:'+digest.hexdigest(),rows=rows,bytes=size,queries=len(self.queries))
 
 
-def complete_current_cycle(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None, proof_budget_seconds=COMPLETION_PROOF_BUDGET_SECONDS):
+def complete_current_cycle(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None, proof_budget_seconds=COMPLETION_PROOF_BUDGET_SECONDS, cohort_size=8):
     """Oldest first, bounded coherent groups, without interrupting a begun finalizer."""
     from time import monotonic
     import math
     if not isinstance(proof_budget_seconds,(int,float)) or not math.isfinite(proof_budget_seconds) or proof_budget_seconds<=0:
         raise ValueError('overhead_completion_invalid_proof_budget')
+    if type(cohort_size) is not int or not 1<=cohort_size<=8:
+        raise ValueError('overhead_completion_invalid_cohort_size')
     deadline=monotonic()+proof_budget_seconds
     completed=0
     sources=captured['sources']
-    for offset in range(0,len(sources)):
+    for offset in range(0,len(sources),cohort_size):
         if monotonic()>=deadline:break
-        cohort=sources[offset:offset+1]
-        result=_complete_cohort(runtime,{**captured,'sources':cohort},finance_block=finance_block,
-            finance_receipt=finance_receipt,economics_receipt=economics_receipt,now=now,deadline=deadline)
+        cohort=sources[offset:offset+cohort_size]
+        from packages.application.dependency_proof import CompletionProofError
+        try:
+            result=_complete_cohort(runtime,{**captured,'sources':cohort},finance_block=finance_block,
+                finance_receipt=finance_receipt,economics_receipt=economics_receipt,now=now,deadline=deadline)
+        except CompletionProofError as exc:
+            completed+=exc.processed_count or 0
+            exc.processed_count=completed;exc.pending_count=len(sources)-completed
+            exc.business_write_started=exc.business_write_started or completed>0
+            raise
         completed+=result['processed_count']
         if result['processed_count']!=len(cohort):break
-    return dict(processed_count=completed,pending_count=len(sources)-completed)
+    if completed!=len(sources):
+        from packages.application.dependency_proof import CompletionProofError
+        error=CompletionProofError('overhead_completion_pending',classification='budget_exhausted',business_write_started=completed>0)
+        error.processed_count=completed;error.pending_count=len(sources)-completed
+        raise error
+    return dict(processed_count=completed,pending_count=0)
 
 
 def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None, deadline=None):
     from packages.application.dependency_proof import CompletionProofError
-    state={'business_write_started':False}
+    state={'business_write_started':False,'completed_count':0}
     try:
         return _complete_cohort_proof(runtime,captured,finance_block=finance_block,finance_receipt=finance_receipt,
             economics_receipt=economics_receipt,now=now,deadline=deadline,write_state=state)
     except CompletionProofError as exc:
         exc.business_write_started=state['business_write_started']
+        exc.processed_count=state['completed_count']
         raise
     except ValueError as exc:
-        raise CompletionProofError('overhead_completion_unproven',business_write_started=state['business_write_started']) from exc
+        error=CompletionProofError('overhead_completion_unproven',business_write_started=state['business_write_started'])
+        error.processed_count=state['completed_count']
+        raise error from exc
 
 
 def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None, deadline=None, write_state):
@@ -923,10 +943,10 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
     completed=0
     with ExitStack() as scope:
         proof_budget=ExitStack()
-        scope.callback(proof_budget.close)
+        scope.push(proof_budget)
         proof_budget.enter_context(readonly_deadline(None,deadline))
         authority=[]
-        observer=scope.enter_context(closing(finance_block._connect_stale_cost_plan(storage_authority=authority)))
+        observer=scope.enter_context(closing(finance_block._connect_stale_cost_plan(storage_authority=authority,proof_read=True)))
         registry=finance_block.store_registry
         if authority != [captured['authority']] or registry.load()!=captured['authority']:
             raise ValueError('overhead_completion_storage_changed')
@@ -944,6 +964,7 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
         policy_selector=load_selector(Path(runtime.runtime_dir))
         book_identity=finance_block._sqlite_persistent_identity(book_observer)
         book_files=files_identity(book_observer)
+        scope.push(proof_budget) # Also covers partial deadline-context entry before either connection closes.
         proof_budget.enter_context(readonly_deadline(observer,deadline))
         proof_budget.enter_context(readonly_deadline(book_observer,deadline))
         detached=DetachedReadConnection(observer)
@@ -1029,8 +1050,14 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
                 raise CompletionProofError('overhead_completion_authority_changed',classification='authority_changed')
             dependencies.assert_current(connection)
         for frozen in captured['sources']:
+            from time import monotonic
+            if deadline is not None and monotonic()>=deadline:break
+            from packages.application.operator_ff_overhead_completion_state import NativeProgressFence
+            progress=NativeProgressFence(frozen)
             transactions={}
-            def prepare_connection(conn):
+            transaction_images={}
+            transaction_stages={}
+            def prepare_connection(conn, *, stage='readback'):
                 if conn.in_transaction:
                     raise CompletionProofError('overhead_completion_prepare_before_begin_required')
                 paths={str(Path(r[2]).resolve()) for r in conn.execute('PRAGMA database_list') if r[1]!='temp'}
@@ -1040,10 +1067,12 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
                         conn.execute('ATTACH DATABASE ? AS completion_reservation_'+str(index),(Path(path).as_uri()+'?mode=rw',))
                         paths.add(path)
                 conn.execute('CREATE TEMP TABLE IF NOT EXISTS completion_transaction_nonce(token TEXT)')
+                transaction_stages[conn]=stage
             def guard(conn=None, *, begin=False, initial_changes=None, transaction=None):
                 if conn is None:
                     refresh_fence()
                     with closing(readonly(runtime.db_path)) as opened:
+                        if progress.expected is not None:progress.check(opened)
                         if _completion_source(opened,frozen['request_id'])!=frozen:
                             raise CompletionProofError('overhead_completion_source_changed',classification='immutable_source_changed')
                     return
@@ -1054,6 +1083,7 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
                     from uuid import uuid4
                     transaction=uuid4().hex
                     transactions[conn]=transaction
+                    transaction_images[conn]=progress.begin(conn,transaction_stages.get(conn,'readback'))
                     conn.execute('DELETE FROM completion_transaction_nonce')
                     conn.execute('INSERT INTO completion_transaction_nonce VALUES(?)',(transaction,))
                 elif writer:
@@ -1064,6 +1094,7 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
                 if _completion_source(conn,frozen['request_id'])!=frozen:
                     raise CompletionProofError('overhead_completion_source_changed',classification='immutable_source_changed')
                 if writer and not begin:
+                    progress.finish(conn,transaction_stages.get(conn,'readback'),transaction_images.pop(conn))
                     conn.execute('DELETE FROM completion_transaction_nonce')
                     transactions.pop(conn,None)
                 return transaction
@@ -1076,8 +1107,9 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
                     storage_authority={**manifest_payload(captured['authority']),'implicit':captured['authority'].implicit},
                     storage_manifest_sha256=captured['authority'].manifest_sha256,accounting_publication=publication,economics_publication=economics_receipt,
                     finance_publication=dict(receipt=finance_receipt,zero_stale_plan_fingerprint=plan['fingerprint'],applicable_weeks=sorted(keys),cohort_seal=seal,**image))
+                progress.bind_proof(proof,finance_receipt['fingerprint'])
                 with closing(registry.connect('operational',mode='rw',operation='operator_overhead_completion',manifest=captured['authority'])) as writer:
-                    prepare_connection(writer)
+                    prepare_connection(writer,stage='S1')
                     initial_changes=writer.total_changes
                     writer.execute('BEGIN IMMEDIATE')
                     try:
@@ -1100,4 +1132,5 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
                 _update(runtime.db_path,frozen['request_id'],'completed','',receipt,guard=guard)
             _finalize_confirmed(runtime,acceptance,prepare_guard=prepare_guard,finish=finish)
             completed+=1
+            write_state['completed_count']=completed
     return dict(processed_count=completed)

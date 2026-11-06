@@ -1382,7 +1382,7 @@ class NativeCompletionTests(unittest.TestCase):
             args=self.proof_inputs()
             with patch.object(sqlite3,'connect',connect),patch.object(self.finance,'_finance_source_dependency_fingerprint',side_effect=fingerprint),patch.object(operations._CompletionReadset,'seal',stream):
                 self.assertEqual(self.complete(*args)['processed_count'],2)
-        self.assertEqual(len(heavy),6) # One explicitly budgeted cohort per payment; three source checks each.
+        self.assertEqual(len(heavy),3) # Shared Finance proof across the bounded two-document cohort.
         self.assertFalse(any(c['inside_writer'] for c in heavy));self.assertEqual(raw_under_writer,[])
         self.assertEqual(self.business_image(),before)
         self.assertEqual(self.native_terminal(second['request_id']),('complete','retained'))
@@ -1405,16 +1405,19 @@ class NativeCompletionTests(unittest.TestCase):
         with warehouse_functional_job_lock(self.root):
             block,plan=self.functional_plan();self.functional=block.apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'],backup_dir=self.root/'backups')
         self.publish(self.prepare());before=self.business_image()
-        actual=time.monotonic;started=[]
+        actual=time.monotonic;finished=[]
+        native_finalize=operations._finalize_confirmed
+        def finalize(*args,**kwargs):
+            result=native_finalize(*args,**kwargs);finished.append(True);return result
         def clock():
             caller=inspect.currentframe().f_back.f_code.co_name
-            if caller in {'complete_current_cycle','_complete_cohort'}:
-                started.append(True);return actual()+operations.COMPLETION_PROOF_BUDGET_SECONDS+1 if len(started)>2 else actual()
-            return actual()
+            return actual()+operations.COMPLETION_PROOF_BUDGET_SECONDS+1 if finished and caller in {'complete_current_cycle','_complete_cohort_proof'} else actual()
         with warehouse_functional_job_lock(self.root):
             args=self.proof_inputs()
-            with patch.object(time,'monotonic',clock):result=self.complete(*args)
-            self.assertEqual(result,dict(processed_count=1,pending_count=1))
+            from packages.application.dependency_proof import CompletionProofError
+            with patch.object(time,'monotonic',clock),patch.object(operations,'_finalize_confirmed',finalize),self.assertRaises(CompletionProofError) as caught:self.complete(*args)
+            self.assertEqual(caught.exception.diagnostic()['processed_count'],1)
+            self.assertEqual(caught.exception.diagnostic()['pending_count'],1)
             self.assertEqual(self.native_terminal(args[0]['sources'][1]['request_id']),('posted','mutation_running'))
             with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate')):
                 self.assertEqual(self.complete(*self.proof_inputs()),dict(processed_count=1,pending_count=0))

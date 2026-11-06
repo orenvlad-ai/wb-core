@@ -29,7 +29,7 @@ _SAFE_REASONS = frozenset({
     'dependency_proof_budget_exhausted','overhead_completion_book_changed',
     'overhead_completion_authority_changed','overhead_completion_prepare_before_begin_required',
     'overhead_completion_source_changed','overhead_completion_pre_dml_fence_required',
-    'overhead_completion_transaction_unbound','overhead_completion_unproven',
+    'overhead_completion_transaction_unbound','overhead_completion_unproven','overhead_completion_progress_changed','overhead_completion_pending',
     'finance_book_changed', 'finance_book_appeared', 'finance_book_changed_at_handoff',
 })
 _SAFE_PHASES = frozenset({'proof','planning','validation','writer_handoff','retention','completion'})
@@ -49,11 +49,15 @@ class CompletionProofError(ValueError):
         self.changed_dependency_count=None
         self.before_vector_digest=None
         self.after_vector_digest=None
+        self.processed_count=None
+        self.pending_count=None
 
     def diagnostic(self):
         return dict(contract_version=CONTRACT, reason=self.reason, phase=self.phase,
                     classification=self.classification, business_write_started=self.business_write_started,
                     result_certainty='unknown' if self.business_write_started else 'not_started',
+                    processed_count=self.processed_count if type(self.processed_count) is int and self.processed_count>=0 else None,
+                    pending_count=self.pending_count if type(self.pending_count) is int and self.pending_count>=0 else None,
                     changed_schemas=[s for s in self.changed_schemas if s in {'main','raw','book'}],
                     changed_dependency_count=self.changed_dependency_count if type(self.changed_dependency_count) is int and self.changed_dependency_count>=0 else None,
                     before_vector_digest=self.before_vector_digest if _safe_digest(self.before_vector_digest) else None,
