@@ -10,6 +10,30 @@ from packages.application.dependency_proof import DependencyProof, CompletionPro
 
 
 class DependencyProofTests(unittest.TestCase):
+    def test_interrupted_first_install_rolls_back_trigger_and_counter_together(self):
+        class Interrupted(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):
+                result = super().execute(sql, *args, **kwargs)
+                if sql.startswith('CREATE TRIGGER'):
+                    raise RuntimeError('crash after first trigger')
+                return result
+        for mode in ('DELETE', 'WAL'):
+            root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+            path = root / 'install.sqlite3'
+            conn = sqlite3.connect(path, factory=Interrupted)
+            conn.execute('PRAGMA journal_mode='+mode)
+            conn.execute('CREATE TABLE source(id INTEGER PRIMARY KEY, value TEXT)')
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'crash'), conn:
+                    install_dependency_revisions(conn)
+            finally:
+                conn.close()
+            with sqlite3.connect(path) as recovered:
+                self.assertEqual(recovered.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger'").fetchone()[0], 0)
+                self.assertEqual(recovered.execute("SELECT count(*) FROM sqlite_master WHERE name='wbc_dependency_revisions'").fetchone()[0], 0)
+                install_dependency_revisions(recovered)
+            _, proof = self.capture(path)
+
     def fixture(self, mode):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         path = root / 'source.sqlite3'

@@ -82,6 +82,11 @@ def install_dependency_revisions(conn):
     This must run on each physical main/raw store, never on accounting. Existing
     triggers must match exactly; a damaged installed contract is not auto-repaired.
     """
+    # SQLite DDL otherwise autocommits before the first revision-row INSERT.
+    # An interrupted first install must not strand a trigger without its row.
+    # The caller owns commit/rollback of this entire physical-store migration.
+    if not conn.in_transaction:
+        conn.execute('BEGIN IMMEDIATE')
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
     if tables & {'accounting_current', 'accounting_revisions', 'accounting_blobs'}:
         raise CompletionProofError('dependency_installer_accounting_forbidden')
