@@ -25,6 +25,7 @@ from packages.adapters import stocks_block as stocks
 from packages.application.sheet_vitrina_v1_cycle import (
     CycleReceiptStore, CycleHistoryConfig, run_cycle, cycle_error_diagnostic,
 )
+from packages.application.stocks_block import transform_legacy_payload
 from packages.application.business_data_procedure_admission import initialize_admission
 from packages.application.business_data_heavy_admission import heavy_admitted
 from packages.application.warehouse_functional import ensure_warehouse_functional_schema
@@ -196,11 +197,39 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIsNone(evidence['http_status'])
         self.assertEqual((evidence['stage'], evidence['reason']), ('request', 'transport'))
 
+    def test_exact_aggregate_regions_succeed_through_real_spawn(self):
+        for region in ('Склад WB', 'Россия'):
+            row = {**item(), 'warehouseId': -999999, 'warehouseName': 'Склад WB',
+                'regionName': region, 'quantity': 19, 'inWayToClient': 4, 'inWayFromClient': 2}
+            with self.subTest(region=region), loopback([(200, body([row]))]) as (url, received):
+                source = self.source(url)
+                payload = source.fetch(self.request)
+                data = payload['data']
+                self.assertEqual(len(received), 1)
+                self.assertEqual(data['raw_rows'], [row])
+                self.assertFalse(data['warehouse_granularity_complete'])
+                self.assertEqual(data['normalization']['aggregate_sentinel_row_count'], 1)
+                normalized = data['rows'][0]
+                self.assertEqual((normalized['warehouseId'], normalized['warehouseName']), (0, 'Остальные'))
+                self.assertEqual((normalized['sourceWarehouseId'], normalized['sourceRegionName']), (-999999, region))
+                self.assertEqual(normalized['normalizationReason'], 'exact_wb_aggregate_sentinel')
+                result = transform_legacy_payload(payload).result
+                self.assertEqual(result.kind, 'success')
+                self.assertFalse(result.warehouse_granularity_complete)
+                self.assertEqual(result.raw_rows_digest, data['raw_rows_digest'])
+                stock = result.items[0]
+                self.assertEqual((stock.stock_total, stock.in_way_to_client,
+                    stock.in_way_from_client, stock.wb_contour_total), (19, 4, 2, 25))
+                self.assertFalse(source._single_flights)
+
     def test_decode_and_validation_errors_have_safe_codes_and_no_provider_data(self):
         invalid_row = {**item(), 'warehouseId': SECRET, 'warehouseName': SECRET}
+        invalid_aggregate = {**item(), 'warehouseId': -999999, 'warehouseName': 'Склад WB', 'regionName': SECRET}
         cases = [(b'{'+SECRET.encode(), ValueError, 'JSONDecodeError', 'decode', 'invalid_json'),
             (b'\xff'+SECRET.encode(), ValueError, 'UnicodeDecodeError', 'decode', 'invalid_encoding'),
             (json.dumps({'data': {'items': [invalid_row]}}).encode(), RuntimeError,
+                '_StocksValidationError', 'validation', 'invalid_warehouse_id'),
+            (json.dumps({'data': {'items': [invalid_aggregate]}}).encode(), RuntimeError,
                 '_StocksValidationError', 'validation', 'invalid_warehouse_id'),
             (json.dumps({'data': SECRET}).encode(), RuntimeError, '_StocksValidationError', 'validation', 'invalid_data')]
         for data, kind, origin, stage, reason in cases:

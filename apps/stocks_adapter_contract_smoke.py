@@ -148,10 +148,10 @@ def _canonical_digest(rows: list[dict[str, Any]]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _assert_exact_sentinel_and_raw_evidence() -> None:
+def _assert_exact_sentinel_and_raw_evidence(region: str) -> None:
     raw_rows = [
-        _item(101, -999999, name="Склад WB", quantity=17),
-        _item(202, -999999, name="Склад WB", quantity=23),
+        _item(101, -999999, name="Склад WB", region=region, quantity=17),
+        _item(202, -999999, name="Склад WB", region=region, quantity=23),
     ]
     opener = _InjectedOpener([{"data": {"items": raw_rows}}])
     payload = _source(opener).fetch(
@@ -178,6 +178,8 @@ def _assert_exact_sentinel_and_raw_evidence() -> None:
         row["warehouseId"] == 0
         and row["warehouseName"] == "Остальные"
         and row["sourceWarehouseId"] == -999999
+        and row["sourceWarehouseName"] == "Склад WB"
+        and row["regionName"] == row["sourceRegionName"] == region
         and row["normalizationReason"] == "exact_wb_aggregate_sentinel"
         for row in data["rows"]
     ):
@@ -185,8 +187,27 @@ def _assert_exact_sentinel_and_raw_evidence() -> None:
     result = transform_legacy_payload(payload).result
     if result.kind != "success" or result.count != 2:
         raise AssertionError(f"aggregate sentinel must retain SKU coverage: {result}")
-    if sum(item.stock_total for item in result.items) != 40:
-        raise AssertionError(f"aggregate sentinel quantities were lost: {result.items}")
+    if [
+        (item.nm_id, item.stock_total, item.in_way_to_client,
+         item.in_way_from_client, item.wb_contour_total)
+        for item in result.items
+    ] != [(101, 17.0, 2.0, 1.0, 20.0), (202, 23.0, 2.0, 1.0, 26.0)]:
+        raise AssertionError(f"aggregate quantities were lost or double-counted: {result.items}")
+    if result.raw_rows_digest != data["raw_rows_digest"]:
+        raise AssertionError("StocksSuccess lost original source provenance")
+    if any(
+        value != 0.0
+        for item in result.items
+        for key, value in asdict(item).items()
+        if key.startswith("stock_ru_")
+    ) or any(row.planning_zone_key is not None for row in result.warehouse_rows):
+        raise AssertionError("aggregate source invented a regional/planning allocation")
+    mapping_rows = raw_rows + [
+        _item(101, 1, name="Синтетический склад", region="Центральный", quantity=3),
+    ]
+    mapping = _source(_InjectedOpener([{"data": {"items": mapping_rows}}])).fetch_warehouse_region_map([101, 202])
+    if mapping != {"Синтетический склад": "Центральный"}:
+        raise AssertionError(f"aggregate source entered current region fallback: {mapping}")
     if result.warehouse_granularity_complete is not False:
         raise AssertionError("StocksSuccess must retain aggregate-only quality")
 
@@ -194,6 +215,15 @@ def _assert_exact_sentinel_and_raw_evidence() -> None:
 def _assert_strict_sentinel_identity() -> None:
     bad_rows = (
         _item(101, -1, name="Склад 1", quantity=1),
+        _item(101, -1, name="Склад WB", region="Россия", quantity=1),
+        _item(101, -999999, name="Неизвестный", region="Россия", quantity=1),
+        _item(101, -999999, name="Склад WB другой", region="Россия", quantity=1),
+        _item(101, -999999, name="Склад WB", region="Россия другая", quantity=1),
+        _item(101, -999999, name="Склад WB", region="Центральный", quantity=1),
+        _item(101, -999999, name="Склад WB", region="", quantity=1),
+        _item(101, -999999.0, name="Склад WB", region="Россия", quantity=1),
+        _item(101, "-999999", name="Склад WB", region="Россия", quantity=1),
+        _item(101, True, name="Склад WB", region="Россия", quantity=1),
         _item(101, -999999, name="Неизвестный", quantity=1),
         _item(101, -999999, name="Склад WB", region="Неизвестный", quantity=1),
         _item(101, -999999.0, name="Склад WB", quantity=1),
@@ -255,7 +285,7 @@ def _assert_historical_mixed_granularity() -> None:
         raise AssertionError("mixed historical SKU total was not preserved")
 
 
-def _assert_live_plan_and_temporal_round_trip() -> None:
+def _assert_live_plan_and_temporal_round_trip(region: str) -> None:
     bundle = json.loads(INPUT_BUNDLE_FIXTURE.read_text(encoding="utf-8"))
     enabled_nm_ids = sorted(
         int(item["nm_id"])
@@ -322,7 +352,7 @@ def _assert_live_plan_and_temporal_round_trip() -> None:
                 nm_id=item.nm_id,
                 warehouse_id=0,
                 warehouse_name="Остальные",
-                region_name="Склад WB",
+                region_name=region,
                 quantity=item.stock_total,
                 planning_zone_key=None,
                 classification_status="outside_central_planning",
@@ -438,10 +468,11 @@ def main() -> None:
     previous = os.environ.get(TOKEN_ENV)
     os.environ[TOKEN_ENV] = "injected-smoke-token"
     try:
-        _assert_exact_sentinel_and_raw_evidence()
+        for region in ("Склад WB", "Россия"):
+            _assert_exact_sentinel_and_raw_evidence(region)
+            _assert_live_plan_and_temporal_round_trip(region)
         _assert_strict_sentinel_identity()
         _assert_historical_mixed_granularity()
-        _assert_live_plan_and_temporal_round_trip()
         print("exact_typed_sentinel: ok")
         print("raw_source_evidence: ok")
         print("mixed_historical_granularity: ok")

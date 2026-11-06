@@ -78,7 +78,7 @@ update_note: "Общий Seller Analytics CSV transport сохраняет `STOC
   - publish guard не допускает success при неполном coverage requested `nmId`;
   - current `wb-warehouses` adapter по-прежнему уважает `X-Ratelimit-Retry` / `X-Ratelimit-Reset`, использует per-seller limiter и после bounded retry budget не превращается в fake-success внутри source.
   - production evidence фиксирует специальный official bucket `warehouseId=0`, `warehouseName=Остальные`: он может нести `inWayToClient`/`inWayFromClient` при нулевом physical quantity и потому сохраняется в WB contour/raw audit; для дедупликации его identity включает warehouse name + region. Любой другой zero/negative/invalid `warehouseId` остаётся fail-closed, а bounded error evidence фиксирует только allowlisted context и digest строки.
-  - official current response additionally accepts only the exact typed WB aggregate sentinel `warehouseId=-999999`, `warehouseName=Склад WB`, `regionName=Склад WB`. The original source rows and their digest remain unchanged evidence; a separate normalization envelope maps the sentinel to the service bucket only for SKU-total calculation and marks `warehouse_granularity_complete=false`. Float, bool, string, partial-name and every other negative-ID variant remain invalid.
+  - official current response additionally accepts only the exact typed WB aggregate sentinel `warehouseId=-999999`, `warehouseName=Склад WB`, with `regionName` from the closed allowlist `Склад WB` / `Россия`. Both variants retain aggregate-only meaning: `Россия` does not identify a concrete warehouse or permit regional allocation. The original source rows and their digest remain unchanged evidence; a separate normalization envelope maps the sentinel to the service bucket only for SKU-total calculation and marks `warehouse_granularity_complete=false`. Float, bool, string, partial-name and every other negative-ID variant remain invalid.
   - historical `OfficeName=Склад WB` has the same aggregate-only meaning. A date containing that row is incomplete even when concrete offices are mixed into the same CSV; the aggregate quantity remains in exact SKU/TOTAL `stock_total` and is never allocated through a persisted `OfficeName -> regionName` fallback. Regional stock and incident actual/excluded/effective cells stay explicit blanks, not zeros.
 
 ## 2.1 Current inventory resilience and total deadline
@@ -187,7 +187,7 @@ change retry eligibility, deadlines, publication or cache decisions.
 
 `python3 apps/stocks_failure_diagnostics_smoke.py` exercises real spawned workers
 with local HTTP/fault fixtures and reloads both the SQLite phase journal and
-cycle receipt. It checks failure classification and absence of test secrets.
+cycle receipt. It checks failure classification and absence of test secrets, plus successful aggregate sentinel normalization for both allowed regions through real spawned workers.
 It does not call WB or establish the cause of any historical production failure.
 
 # 3. Target contract и смысл результата
