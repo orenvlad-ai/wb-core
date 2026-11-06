@@ -33,6 +33,20 @@ class CycleStageFailure(RuntimeError):
     pass
 
 
+class CycleDateRollover(CycleStageFailure):
+    """A completed boundary or a guarded, not-yet-started dated operation."""
+    def __init__(self, expected_date, observed_date):
+        super().__init__('cycle_business_date_changed')
+        self.expected_date = expected_date
+        self.observed_date = observed_date
+
+
+def require_cycle_business_date(expected_date, now):
+    observed = current_business_date_iso(now)
+    if observed != expected_date:
+        raise CycleDateRollover(expected_date, observed)
+
+
 def validate_recovery_as_of_date(day, now=None):
     """One explicit closed date in rolling14; a receipt is readable after rollover."""
     if not isinstance(day, str):
@@ -206,6 +220,7 @@ def cycle_summary(receipt):
     quality = ('degraded' if ready.get('status') == 'degraded' else
         'complete' if ready.get('status') == 'complete' else 'unknown')
     return {'schema_version': 1, 'cycle_id': receipt['cycle_id'],
+        **({'rollover': dict(receipt['rollover'])} if receipt.get('rollover') else {}),
         'execution': receipt['status'], 'failed_stage': receipt.get('current_stage') or
             ('initialization' if receipt['status'] in {'failed', 'interrupted'} else ''),
         'started_at': receipt.get('started_at'), 'finished_at': receipt.get('finished_at'),
@@ -300,6 +315,44 @@ class CycleReceiptStore:
             os.fsync(fd)
         finally:
             os.close(fd)
+
+    def roll_over(self, receipt, *, observed_date):
+        """Archive one finished epoch before starting fresh, under the same lease.
+
+        This is not a recovery queue: a lost owner still interrupts the durable
+        request. Source handles and incomplete operations are never resumed.
+        """
+        if receipt.get('rollover'):
+            raise CycleStageFailure('cycle_rollover_limit')
+        if date.fromisoformat(observed_date) != date.fromisoformat(receipt['business_date']) + timedelta(days=1):
+            raise CycleStageFailure('cycle_rollover_date_invalid')
+        archive = {key: value for key, value in receipt.items()
+                   if key not in {'summary', 'error_diagnostic'}}
+        archive['epoch_disposition'] = 'rolled_over'
+        archive['epoch_ended_at'] = receipt['epoch_transition']['observed_at']
+        raw = canonical(archive)
+        if len(raw.encode()) > 256 * 1024:
+            raise CycleConflict('cycle_receipt_size')
+        name = receipt['cycle_id'] + '.rollover-0.json'
+        path = self.root / name
+        if path.exists():
+            raise CycleConflict('cycle_rollover_archive_exists')
+        _atomic(path, archive)
+        fd = os.open(self.root, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        rollover = dict(from_date=receipt['business_date'], to_date=observed_date,
+                        archive_file=name, archive_digest=digest(path.read_text()),
+                        stage=receipt['current_stage'], observed_at=receipt['epoch_transition']['observed_at'])
+        receipt.setdefault('accepted_business_date', receipt['business_date'])
+        receipt.update(business_date=observed_date, rollover=rollover, status='running', current_stage='',
+                       finished_at=None, error_code='', final_versions={},
+                       stages=[dict(stage=name, status='pending', versions={}, warnings=[]) for name in STAGES])
+        for key in ('summary', 'error_diagnostic', 'history_failure', 'fbs_failure', 'epoch_transition'):
+            receipt.pop(key, None)
+        self.write(receipt)
 
     def _request_identity(self, *, request_key, slot_utc, config, recovery_as_of_date=None):
         if not request_key or len(request_key) > 160:
@@ -487,6 +540,32 @@ def daily_report_proof(block, *, attempts=(), payload=None):
 
 
 def run_cycle(entrypoint, store, receipt, history_config, log):
+    """At most one fresh next-day epoch; never retry an unknown stage outcome."""
+    while True:
+        try:
+            return _run_cycle_epoch(entrypoint, store, receipt, history_config, log)
+        except CycleDateRollover as exc:
+            try:
+                if exc.expected_date != receipt['business_date']:
+                    raise CycleStageFailure('cycle_rollover_context_changed')
+                store.roll_over(receipt, observed_date=exc.observed_date)
+            except BaseException as failure:
+                receipt.update(status='failed' if isinstance(failure, Exception) else 'interrupted', error_code=(str(failure) if isinstance(failure, CycleStageFailure)
+                    else type(failure).__name__)[:256], finished_at=store.timestamp_factory())
+                receipt.pop('epoch_transition', None)
+                for item in receipt['stages']:
+                    if item['status'] == 'running':
+                        item.update(status=receipt['status'], error_code=receipt['error_code'],
+                                    finished_at=receipt['finished_at'])
+                try:
+                    _observe_terminal(receipt, failure)
+                    store.write(receipt)
+                except Exception:
+                    pass  # Never replace cancellation/the original transition failure.
+                raise
+
+
+def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
     """Only the owning admitted worker calls this; no external-stage retries."""
     from packages.application.business_data_heavy_admission import require_heavy_owner
     if require_heavy_owner(entrypoint.runtime.runtime_dir).operation != 'cycle':
@@ -525,7 +604,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         # policy. Every source group and both temporal slots remain mandatory.
         summary = source_adapter.collected_source_summary(handle, **(
             {'allow_manual_full_scope': True} if recovery_day else {}))
-        if summary['business_date'] != receipt['business_date']:
+        if summary['business_date'] not in {receipt['business_date'], current_business_date_iso(entrypoint.now_factory())}:
             raise CycleStageFailure('cycle_business_date_changed')
         return validate_collection(summary, require_full_scope=True)
     def finance_sources():
@@ -542,6 +621,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         nonlocal ready
         entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
         plan = source_adapter.derive_collected(handle)
+        require_cycle_business_date(receipt['business_date'], entrypoint.now_factory())
         ready, proof = entrypoint._cycle_publish_ready(plan, **(
             {'execution_mode': 'manual_operator'} if recovery_day else {}))
         return proof
@@ -559,8 +639,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
                 warnings.append(dict(source_key='closed_ready', date=day,
                     policy='deferred_accounting_unavailable'))
                 continue
-            if current_business_date_iso(entrypoint.now_factory()) != receipt['business_date']:
-                raise CycleStageFailure('cycle_business_date_changed')
+            require_cycle_business_date(receipt['business_date'], entrypoint.now_factory())
             entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
             try:
                 # A prior ready commit needs evidence readback, not an accepted
@@ -573,9 +652,11 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
                     plan = source_adapter.derive_collected(closed.compose(handle, day))
                     if closed.retained_replay(day):
                         plan = closed.merge_retained_ready(day, plan)
-                        _, result = entrypoint._cycle_publish_dated_ready(plan, retained_only=True)
+                        _, result = entrypoint._cycle_publish_dated_ready(plan, retained_only=True,
+                            expected_business_date=receipt['business_date'])
                     else:
-                        _, result = entrypoint._cycle_publish_dated_ready(plan)
+                        _, result = entrypoint._cycle_publish_dated_ready(plan,
+                            expected_business_date=receipt['business_date'])
                     warnings.extend(result.warnings)
                     proof = closed.record_ready(day)
                 proofs.append(proof)
@@ -607,7 +688,14 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
             value = closed.status()
             if not value or any(value['dates'][day]['state'] != 'acknowledged' for day in backfill_dates):
                 raise CycleStageFailure('closed_native_ack_missing')
-        entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
+        # The completed native proof is persisted by the outer stage before
+        # rollover. New-day predecessor admission belongs to the fresh epoch.
+        if current_business_date_iso(entrypoint.now_factory()) == receipt['business_date']:
+            try:
+                entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
+            except CycleDateRollover as exc:
+                if exc.expected_date != receipt['business_date']:
+                    raise
         return proof
     try:
         # A durable accepted cycle must terminalize even if constructing its
@@ -624,27 +712,36 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
             lambda: entrypoint._cycle_warehouse(store, receipt, fbs),
             entrypoint._cycle_daily_projection, closed_ready, final_ready, history)
         for item, action in zip(receipt['stages'], actions, strict=True):
-            if current_business_date_iso(entrypoint.now_factory()) != receipt['business_date']:
-                raise CycleStageFailure('cycle_business_date_changed')
+            require_cycle_business_date(receipt['business_date'], entrypoint.now_factory())
             receipt.update(status='running', current_stage=item['stage'])
             item.update(status='running', started_at=store.timestamp_factory())
             store.write(receipt)  # Before effects: a crash is uncertain, never pending replay.
             from packages.application.fbs_accounting_degraded import degraded_accounting_scope
             with degraded_accounting_scope(entrypoint.runtime, receipt['final_versions']):
                 proof = action()
-            if current_business_date_iso(entrypoint.now_factory()) != receipt['business_date']:
-                raise CycleStageFailure('cycle_business_date_changed')
             if not isinstance(proof, StageProof) or not proof.versions or not all(isinstance(v,str) and v for v in proof.versions.values()):
                 raise CycleStageFailure('cycle_stage_proof_missing:' + item['stage'])
             item.update(status='degraded' if proof.warnings else 'complete', finished_at=store.timestamp_factory(),
                 versions=proof.versions, warnings=list(proof.warnings))
             receipt['final_versions'].update(proof.versions)
             store.write(receipt)
+            # A new epoch is authorized only by an already validated, durable
+            # completed proof, never by the clock masking a bad/unknown result.
+            require_cycle_business_date(receipt['business_date'], entrypoint.now_factory())
         receipt.update(status='degraded' if any(i['status']=='degraded' for i in receipt['stages']) else 'complete',
             finished_at=store.timestamp_factory(), current_stage='')
         _observe_terminal(receipt)
         store.write(receipt)
         return receipt
+    except CycleDateRollover as exc:
+        # Keep the canonical request running. A transient terminal status can
+        # itself terminalize the transport/observer before the new epoch starts.
+        receipt.update(status='running', finished_at=None,
+            epoch_transition={'from_date': exc.expected_date, 'to_date': exc.observed_date,
+                              'observed_at': store.timestamp_factory(),
+                              'boundary': receipt.get('current_stage') or 'initialization'})
+        store.write(receipt)
+        raise
     except BaseException as exc:
         # Small codes only: exception text can contain a provider response/secret.
         from packages.application.owned_history_worker_capability import HistoryDelegationError

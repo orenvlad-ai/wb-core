@@ -1219,6 +1219,7 @@ class SheetVitrinaV1LivePlanBlock:
         _include_archived_metrics_for_audit: bool = False,
         _collection: _CollectedBuildSources | None = None,
         _collect_only: bool = False,
+        _cycle_business_date: str | None = None,
     ) -> SheetVitrinaV1Envelope:
         emit = log or _noop_live_plan_log
         selected_source_keys = {str(item).strip() for item in (source_keys or []) if str(item).strip()}
@@ -1289,6 +1290,9 @@ class SheetVitrinaV1LivePlanBlock:
             if _collect_only:
                 _collection.scope = scope
             elif _collection.scope != scope:
+                if _cycle_business_date is not None and _collection.scope[2] != current_date:
+                    from packages.application.sheet_vitrina_v1_cycle import require_cycle_business_date
+                    require_cycle_business_date(_cycle_business_date, self.now_factory())
                 raise ReadyPublicationConflict("ready_collection_scope_or_date_changed")
 
         mature_buyout_started = _start_refresh_phase(

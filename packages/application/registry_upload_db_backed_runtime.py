@@ -434,6 +434,7 @@ class RegistryUploadDbBackedRuntime:
         build_inputs=None,
         _prepared_book=None,
         _retained_closed_replay=False,
+        _before_publication=None,
     ) -> SheetVitrinaV1RefreshResult:
         _validate_timestamp(refreshed_at, field_name="refreshed_at")
         from packages.application.web_vitrina_official_fbs import (
@@ -449,6 +450,8 @@ class RegistryUploadDbBackedRuntime:
         from packages.business_time import current_business_date_iso
 
         publication_now = datetime.now(timezone.utc)
+        if _before_publication is not None:
+            _before_publication(publication_now)
         publication_date = current_business_date_iso(publication_now)
         from packages.application.fbs_accounting_runtime import (
             load, inventory_from_book, materialize, writer_lock, _save_book, _after_book_commit,
@@ -615,6 +618,8 @@ class RegistryUploadDbBackedRuntime:
             if load(self.runtime_dir)[1] != expected_book:
                 raise ReadyPublicationConflict("ready_book_changed")
             current_degraded_accounting(self.runtime_dir)
+            if _before_publication is not None:
+                _before_publication(datetime.now(timezone.utc))
             record_intent(conn, operation_id=operation_id, attempt_id=attempt_id, kind="book_ready" if _prepared_book else "ready",
                 expected=expected, inputs={"material": material_inputs, "history": history_inputs,
                     "authority": expected.authority,

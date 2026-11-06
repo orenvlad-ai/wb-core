@@ -46,11 +46,11 @@ class OwnedEntry(wiring.FixedDomainEntry):
         self.operator_jobs.enable_snapshot_admission(self.runtime.runtime_dir)
         self._sheet_cycle_lock = threading.RLock()
 
-    def _publish_exact_ready(self, plan):
+    def _publish_exact_ready(self, plan, **kwargs):
         self.events.append('ready:' + plan.as_of_date)
         # The current result uses the same exact canonical CAS/complete receipt;
         # unrelated ordinary refresh notification/tail behavior is not exercised.
-        return Entry._cycle_publish_dated_ready(self, plan)
+        return Entry._cycle_publish_dated_ready(self, plan, **kwargs)
 
     _cycle_publish_dated_ready = _publish_exact_ready
     _cycle_publish_ready = _publish_exact_ready
