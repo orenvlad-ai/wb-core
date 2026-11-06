@@ -189,6 +189,7 @@ class DependencyProof:
         self.conn = conn
         self.reads = {}
         self.stores = {}
+        self.views = {}
         self.sealed = False
         for _, schema, filename in conn.execute('PRAGMA database_list'):
             if schema == 'temp':
@@ -197,6 +198,7 @@ class DependencyProof:
             stat = path.stat()
             schema_version = conn.execute(f'PRAGMA {quote(schema)}.schema_version').fetchone()[0]
             master = list(conn.execute(f'SELECT type,name,sql FROM {quote(schema)}.sqlite_master'))
+            self.views[schema] = {r[1] for r in master if r[0] == 'view'}
             tables = {r[1] for r in master if r[0] == 'table' and not r[1].startswith('sqlite_')}
             if REVISIONS not in tables:
                 raise CompletionProofError('dependency_revision_migration_required')
@@ -222,6 +224,12 @@ class DependencyProof:
         if self.sealed:
             raise CompletionProofError('dependency_proof_already_sealed')
         def authorizer(action, table, column, schema, source):
+            # SQLite reports READ for the view itself as well as its underlying
+            # tables. Views have no data revision: their definitions are bound
+            # by the captured schema_version; every underlying table READ still
+            # passes through the ordinary revision check below.
+            if action == sqlite3.SQLITE_READ and table in self.views.get(schema, ()):
+                return sqlite3.SQLITE_OK
             # Built-in JSON table functions read only their already-observed input.
             if action == sqlite3.SQLITE_READ and table in ('json_each','json_tree') and table not in self.stores.get(schema,{}).get('revisions',{}):
                 return sqlite3.SQLITE_OK
