@@ -21,6 +21,7 @@ PREFIX = 'wbc_dependency_revision_'
 
 
 _SAFE_REASONS = frozenset({
+    'dependency_detached_readonly_required','dependency_detached_cursor_bypass_forbidden',
     'dependency_installer_accounting_forbidden','dependency_trigger_contract_changed',
     'dependency_proof_requires_autocommit','dependency_revision_migration_required',
     'dependency_table_uncovered','dependency_proof_already_sealed','dependency_store_not_bound',
@@ -44,11 +45,23 @@ class CompletionProofError(ValueError):
         super().__init__(reason)
         self.reason, self.phase, self.classification = reason, phase, classification
         self.business_write_started = business_write_started is True
+        self.changed_schemas=[]
+        self.changed_dependency_count=None
+        self.before_vector_digest=None
+        self.after_vector_digest=None
 
     def diagnostic(self):
         return dict(contract_version=CONTRACT, reason=self.reason, phase=self.phase,
                     classification=self.classification, business_write_started=self.business_write_started,
-                    result_certainty='unknown' if self.business_write_started else 'not_started')
+                    result_certainty='unknown' if self.business_write_started else 'not_started',
+                    changed_schemas=[s for s in self.changed_schemas if s in {'main','raw','book'}],
+                    changed_dependency_count=self.changed_dependency_count if type(self.changed_dependency_count) is int and self.changed_dependency_count>=0 else None,
+                    before_vector_digest=self.before_vector_digest if _safe_digest(self.before_vector_digest) else None,
+                    after_vector_digest=self.after_vector_digest if _safe_digest(self.after_vector_digest) else None)
+
+
+def _safe_digest(value):
+    return isinstance(value,str) and len(value)==71 and value.startswith('sha256:') and all(c in '0123456789abcdef' for c in value[7:])
 
 
 def quote(value):
@@ -84,6 +97,55 @@ def install_dependency_revisions(conn):
             else:
                 conn.execute(sql)
         conn.execute(f'INSERT OR IGNORE INTO {quote(REVISIONS)} VALUES (?,0)', (table,))
+
+
+class _DetachedCursor:
+    def __init__(self, cursor):
+        self.description=cursor.description
+        self.rowcount=cursor.rowcount
+        self.lastrowid=cursor.lastrowid
+        self.rows=cursor.fetchall()
+        self.offset=0
+        cursor.close()
+
+    def fetchone(self):
+        if self.offset>=len(self.rows): return None
+        row=self.rows[self.offset];self.offset+=1
+        return row
+
+    def fetchall(self):
+        rows=self.rows[self.offset:];self.offset=len(self.rows)
+        return rows
+
+    def fetchmany(self, size=1):
+        rows=self.rows[self.offset:self.offset+size];self.offset+=len(rows)
+        return rows
+
+    def __iter__(self):
+        while self.offset<len(self.rows):
+            yield self.fetchone()
+
+
+class DetachedReadConnection:
+    """Release each SQL statement's DELETE reader before caller Python work.
+
+    SQL execution/fetch is still bounded by SQLite's progress handler. Revision
+    vectors close changes between detached statements; this is not a transaction.
+    """
+    def __init__(self, connection):
+        if connection.in_transaction or connection.execute('PRAGMA query_only').fetchone()[0]!=1:
+            raise CompletionProofError('dependency_detached_readonly_required')
+        self.connection=connection
+
+    def execute(self, sql, parameters=()):
+        cursor=self.connection.execute(sql,parameters)
+        return _DetachedCursor(cursor) if cursor.description is not None else cursor
+
+    def cursor(self, *args, **kwargs):
+        raise CompletionProofError('dependency_detached_cursor_bypass_forbidden')
+
+    def __getattr__(self, key):
+        return getattr(self.connection,key)
 
 
 class DependencyProof:
@@ -165,8 +227,16 @@ class DependencyProof:
             if not selected:
                 continue
             values = dict(conn.execute(f'SELECT table_name,revision FROM {quote(schema)}.{quote(REVISIONS)} WHERE table_name IN ({",".join("?" for _ in selected)})', selected))
-            if any(values.get(table) != store['revisions'][table] for table in selected):
-                raise CompletionProofError('dependency_revision_changed')
+            changed=[table for table in selected if values.get(table)!=store['revisions'][table]]
+            if changed:
+                error=CompletionProofError('dependency_revision_changed')
+                error.changed_schemas=['main' if original=='main' else 'raw']
+                error.changed_dependency_count=len(changed)
+                def digest(values):
+                    return 'sha256:'+hashlib.sha256(json.dumps([[t,values.get(t)] for t in sorted(selected)],separators=(',',':')).encode()).hexdigest()
+                error.before_vector_digest=digest(store['revisions'])
+                error.after_vector_digest=digest(values)
+                raise error
 
     def receipt(self):
         vector = [dict(schema=schema, table=table, columns=sorted(columns),

@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
-from packages.application.dependency_proof import DependencyProof, CompletionProofError, install_dependency_revisions, readonly_deadline, check_deadline
+from packages.application.dependency_proof import DependencyProof, CompletionProofError, install_dependency_revisions, readonly_deadline, check_deadline, DetachedReadConnection
 
 
 class DependencyProofTests(unittest.TestCase):
@@ -81,6 +81,25 @@ class DependencyProofTests(unittest.TestCase):
             proof.assert_current(reader)
             with sqlite3.connect(raw) as concurrent: concurrent.execute('DELETE FROM source')
             with self.assertRaises(CompletionProofError): proof.assert_current(reader)
+
+    def test_delete_detaches_reader_before_python_processing(self):
+        path=self.fixture('DELETE');conn,_=self.capture(path)
+        cursor=DetachedReadConnection(conn).execute('SELECT value FROM source')
+        # Cursor has not been consumed by its Python caller; DELETE COMMIT must
+        # still succeed. A live sqlite cursor would hold its SHARED read lock.
+        with sqlite3.connect(path,timeout=.01) as writer:
+            writer.execute('INSERT INTO unrelated VALUES("while-processing")')
+        self.assertEqual([r[0] for r in cursor],['a'])
+
+    def test_diagnostics_are_bounded_and_report_changed_domain(self):
+        value=CompletionProofError('SELECT secret',phase='token:secret',classification='provider-secret',business_write_started='secret').diagnostic()
+        self.assertNotIn('secret',json.dumps(value));self.assertFalse(value['business_write_started'])
+        path=self.fixture('DELETE');conn,proof=self.capture(path)
+        with sqlite3.connect(path) as writer:writer.execute('DELETE FROM source')
+        with self.assertRaises(CompletionProofError) as caught:proof.assert_current(conn)
+        diagnostic=caught.exception.diagnostic()
+        self.assertEqual(diagnostic['changed_schemas'],['main']);self.assertEqual(diagnostic['changed_dependency_count'],1)
+        self.assertNotEqual(diagnostic['before_vector_digest'],diagnostic['after_vector_digest'])
 
     def test_python_budget_interrupts_readonly_work(self):
         path=self.fixture('DELETE'); conn,_=self.capture(path)
