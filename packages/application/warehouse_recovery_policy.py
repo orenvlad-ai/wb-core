@@ -1408,6 +1408,7 @@ class WarehouseRecoveryRegistry:
         non_target_digest: str = "",
         timer_state: str = "",
         transition_evidence_digest: str = "",
+        completion_guard=None,
     ) -> dict[str, Any]:
         operation = self.get_operation(operation_id)
         if operation is None:
@@ -1421,6 +1422,19 @@ class WarehouseRecoveryRegistry:
             raise RecoveryPolicyError("non-target digest changed after mutation")
         current = str(operation["lifecycle"])
         if current == RecoveryState.RETAINED.value:
+            if operation.get('after_digest') != after_digest:
+                raise RecoveryPolicyError('retained operation after digest mismatch')
+            if completion_guard is not None:
+                with _connect(self.db_path) as conn:
+                    completion_guard.prepare_connection(conn)
+                    initial_changes = conn.total_changes
+                    conn.execute('BEGIN IMMEDIATE')
+                    transaction = completion_guard(conn, begin=True, initial_changes=initial_changes)
+                    row = conn.execute('SELECT lifecycle_state,after_digest FROM sheet_vitrina_v1_recovery_operations WHERE operation_id=?', (operation_id,)).fetchone()
+                    if row is None or tuple(row) != (RecoveryState.RETAINED.value, after_digest):
+                        raise RecoveryPolicyError('retained operation changed during readback')
+                    completion_guard(conn, transaction=transaction)
+                    conn.commit()
             return operation
         self._inject(operation_id, "after_business_mutation")
         self._transition(
@@ -1432,6 +1446,7 @@ class WarehouseRecoveryRegistry:
             writer_state="idle",
             timer_state=timer_state,
             transition_evidence_digest=transition_evidence_digest,
+            completion_guard=completion_guard,
         )
         result = self.get_operation(operation_id)
         if result is None:
@@ -3876,6 +3891,7 @@ class WarehouseRecoveryRegistry:
         writer_state: str | None = None,
         timer_state: str | None = None,
         transition_evidence_digest: str = "",
+        completion_guard=None,
     ) -> None:
         allowed = ALLOWED_TRANSITIONS.get(expected_state, frozenset())
         if next_state not in allowed:
@@ -3885,8 +3901,11 @@ class WarehouseRecoveryRegistry:
         now = self._now()
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            if completion_guard is not None: completion_guard.prepare_connection(conn)
+            initial_changes = conn.total_changes
             conn.execute("BEGIN IMMEDIATE")
             try:
+                transaction = completion_guard(conn, begin=True, initial_changes=initial_changes) if completion_guard is not None else None
                 row = conn.execute(
                     """
                     SELECT state_version FROM sheet_vitrina_v1_recovery_operations
@@ -3964,8 +3983,9 @@ class WarehouseRecoveryRegistry:
                         ),
                     ),
                 )
+                if completion_guard is not None: completion_guard(conn, transaction=transaction)
                 conn.commit()
-            except Exception:
+            except BaseException:
                 conn.rollback()
                 raise
         self._fsync_registry()
@@ -4744,7 +4764,7 @@ def _sanitation_verified_archive_paths(
 
 @contextmanager
 def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    conn = connect_sqlite(db_path)
+    conn = connect_sqlite(db_path, uri=True)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")

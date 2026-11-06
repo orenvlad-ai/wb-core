@@ -28,7 +28,7 @@ _SAFE_REASONS = frozenset({
     'dependency_proof_budget_exhausted','overhead_completion_book_changed',
     'overhead_completion_authority_changed','overhead_completion_prepare_before_begin_required',
     'overhead_completion_source_changed','overhead_completion_pre_dml_fence_required',
-    'overhead_completion_transaction_unbound',
+    'overhead_completion_transaction_unbound','overhead_completion_unproven',
     'finance_book_changed', 'finance_book_appeared', 'finance_book_changed_at_handoff',
 })
 _SAFE_PHASES = frozenset({'proof','planning','validation','writer_handoff','retention','completion'})
