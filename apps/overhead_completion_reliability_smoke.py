@@ -155,6 +155,33 @@ class CompletionReliabilityTests(unittest.TestCase):
         self.assertEqual(caught.exception.diagnostic()['processed_count'],0)
         self.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
 
+    def test_split_generation_rows_bound_before_and_after_proof(self):
+        for logical in ('operational','finance_raw'):
+            for point in ('before_capture','before_S5'):
+                with self.subTest(logical=logical,point=point):
+                    case,raw=self.fixture(split=True)
+                    path=case.runtime.db_path if logical=='operational' else raw
+                    table='finance_operational_schema_meta' if logical=='operational' else 'finance_raw_schema_meta'
+                    changed=[]
+                    def mutate():
+                        if not changed:
+                            with closing(sqlite3.connect(path)) as conn,conn:conn.execute(f"UPDATE {table} SET generation_id='foreign-generation'")
+                            changed.append(True)
+                    capture=DependencyProof.capture;update=operations._update
+                    def capture_after_open(conn):
+                        mutate();return capture(conn)
+                    def update_after_native(db_path,identity,state,reason,receipt=None,*,guard=None):
+                        if state=='completed' and guard is not None:mutate()
+                        return update(db_path,identity,state,reason,receipt,guard=guard)
+                    with warehouse_functional_job_lock(case.root):
+                        args=case.proof_inputs()
+                        hook=patch.object(DependencyProof,'capture',side_effect=capture_after_open) if point=='before_capture' else patch.object(operations,'_update',update_after_native)
+                        with hook,self.assertRaises(CompletionProofError):case.complete(*args)
+                    self.assertEqual(changed,[True])
+                    self.assertNotEqual(operations.read_acceptance(case.runtime.db_path,case.identity)['state'],'completed')
+                    self.assertEqual(case.business_image(),case.before)
+                    case.doCleanups()
+
     def test_crash_before_and_after_every_commit_matrix(self):
         connect=sqlite3.connect
         for mode in ('DELETE','WAL'):

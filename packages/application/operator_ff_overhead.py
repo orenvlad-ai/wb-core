@@ -924,7 +924,7 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
 def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None, deadline=None, write_state):
     """One coherent bounded cohort proof, then short guarded native handoffs."""
     from contextlib import ExitStack
-    from packages.application.dependency_proof import DependencyProof, CompletionProofError, readonly_deadline, check_deadline, DetachedReadConnection
+    from packages.application.dependency_proof import DependencyProof, CompletionProofError, readonly_deadline, check_deadline, DetachedReadConnection, verify_registry_rows
     from datetime import date
     from packages.application import fbs_accounting_runtime as accounting
     from packages.application.fbs_overhead_presentation import OverheadAccountingView
@@ -973,6 +973,7 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
         observed=dependencies.observe()
         observed.__enter__()
         scope.callback(observed.__exit__, None, None, None)
+        verify_registry_rows(detached,registry,captured['authority'])
         finance_block._shared_cost_snapshot=approved_reporting_snapshot(accounting.load_shared(runtime.runtime_dir,bound_book=(book,version)),detached)
         finance_block._canonical_cost_snapshot_connection=None
         finance_block._nomenclature_cache_connection=None

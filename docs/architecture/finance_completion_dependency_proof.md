@@ -61,7 +61,12 @@ FF posting → warehouse functional writer → accounting writer → attached SQ
 reservation. The existing main/raw Finance writer order is retained. Reservations
 release on commit/rollback/connection close; a conflicting direct multi-store
 writer may receive BUSY and fails closed. There is no blanket business retry.
-Manifest publication and schedule-selector transitions take an exclusive
+Active split-store metadata rows are explicitly read under the authorizer after
+the before-vector and compared to all five pinned manifest fields (schema,
+logical role, generation ID/epoch and source fingerprint). Their observed
+revisions then protect later stages. This also closes the gap between initial
+StoreRegistry connection admission and revision capture; a matching path alone
+is not authority. Manifest publication and schedule-selector transitions take an exclusive
 generation pin. Inactive migration candidates may be replaced before activation;
 the published authority switch is pinned. Existing-file SQLite backup restore
 changes the destination schema cookie and invalidates an active proof. Arbitrary

@@ -21,6 +21,7 @@ PREFIX = 'wbc_dependency_revision_'
 
 
 _SAFE_REASONS = frozenset({
+    'dependency_store_authority_changed',
     'dependency_detached_readonly_required','dependency_detached_cursor_bypass_forbidden',
     'dependency_installer_accounting_forbidden','dependency_trigger_contract_changed',
     'dependency_proof_requires_autocommit','dependency_revision_migration_required',
@@ -106,6 +107,28 @@ def install_dependency_revisions(conn):
             else:
                 conn.execute(sql)
         conn.execute(f'INSERT OR IGNORE INTO {quote(REVISIONS)} VALUES (?,0)', (table,))
+
+
+def verify_registry_rows(conn, registry, manifest):
+    """Bind each active physical generation's metadata to the pinned manifest.
+
+    Call inside DependencyProof.observe AFTER capturing its before-vector. This
+    closes the registry-open → vector-capture gap; observed table revisions then
+    protect all later handoffs without reopening any connection.
+    """
+    if manifest.implicit or manifest.state=='monolith':
+        return
+    aliases={str(Path(row[2]).resolve()):row[1] for row in conn.execute('PRAGMA database_list') if row[1]!='temp'}
+    for logical,table,generation in (
+            ('operational','finance_operational_schema_meta',manifest.operational),
+            ('finance_raw','finance_raw_schema_meta',manifest.raw)):
+        schema=aliases.get(str(registry.resolve(logical,manifest=manifest)))
+        if schema is None:
+            raise CompletionProofError('dependency_store_authority_changed',classification='authority_changed')
+        row=conn.execute(f'SELECT schema_revision,logical_store,generation_id,generation_epoch,source_fingerprint FROM {quote(schema)}.{quote(table)} WHERE singleton=1').fetchone()
+        expected=(generation.schema_revision,logical,generation.generation_id,generation.generation_epoch,manifest.source_fingerprint)
+        if row is None or tuple(row)!=expected:
+            raise CompletionProofError('dependency_store_authority_changed',classification='authority_changed')
 
 
 class _DetachedCursor:

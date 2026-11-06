@@ -750,7 +750,14 @@
       "business_data_schedule_transition.apply/rollback: exclusive generation_pin",
       "finance_storage_migration: prepare/recopy replace inactive candidate; activation uses atomic_write_manifest"
     ],
-    "file_replacement_guard": "manifest generation pin plus physical dev/inode and schema_version; SQLite backup-to-existing-file increments destination schema_version"
+    "file_replacement_guard": "manifest generation pin plus physical dev/inode and schema_version; SQLite backup-to-existing-file increments destination schema_version",
+    "sqlite_metadata": {
+      "tables": [
+        "finance_operational_schema_meta",
+        "finance_raw_schema_meta"
+      ],
+      "read_contract": "verify_registry_rows inside DependencyProof.observe after capture; exact schema_revision/logical_store/generation_id/generation_epoch/source_fingerprint match manifest; observed revision vector protects every later commit"
+    }
   },
   "commits": [
     {
