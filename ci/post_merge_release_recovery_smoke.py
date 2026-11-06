@@ -125,6 +125,11 @@ def test_failure_evidence() -> None:
     timestamped = ''.join('2026-10-15T02:08:14.5338243Z ' + line + '\n'
                           for line in variable_log.decode().splitlines()).encode()
     assert recovery._prove_failed_stage(timestamped, 77, "One-shot deployed release")["job_log_sha256"] == recovery.digest(timestamped)
+    current_log = timestamped.replace(b'apps/github_release_runner.py', b'ci/github_release_runner.py')
+    assert recovery._prove_failed_stage(current_log, 77, "One-shot deployed release")["job_log_sha256"] == recovery.digest(current_log)
+    expect_reason('failed-stage-not-root-storage-readback-exit3', lambda:
+                  recovery._prove_failed_stage(current_log.replace(b'ci/github_release_runner.py', b'other/github_release_runner.py'),
+                                               77, "One-shot deployed release"))
     for bad in (
         variable_log.replace(b'  GATE_RUN_ID: 77', b'  GATE_RUN_ID: 78'),
         variable_log.replace(b'  GATE_RUN_ID: 77\n', b''),
@@ -137,8 +142,16 @@ def test_failure_evidence() -> None:
         variable_log.replace(b'env:\n', b'env:\n##[group]nested\n'),
         variable_log.replace(b'##[endgroup]', b''),
     ):
-        expect_reason('failed-stage-not-root-storage-readback-exit3',
-                      lambda bad=bad: recovery._prove_failed_stage(bad, 77, "One-shot deployed release"))
+        for variant in (bad, bad.replace(b'apps/github_release_runner.py', b'ci/github_release_runner.py')):
+            expect_reason('failed-stage-not-root-storage-readback-exit3',
+                          lambda variant=variant: recovery._prove_failed_stage(variant, 77, "One-shot deployed release"))
+    for status in (1, 2, 255):
+        expect_reason('failed-stage-not-root-storage-readback-exit3', lambda status=status:
+                      recovery._prove_failed_stage(current_log.replace(b'exit status 3', f'exit status {status}'.encode()),
+                                                   77, "One-shot deployed release"))
+    expect_reason('failed-stage-not-definite-single-exit3', lambda:
+                  recovery._prove_failed_stage(current_log + b'\nsubprocess.CalledProcessError: Command [] returned non-zero exit status 3.',
+                                               77, "One-shot deployed release"))
     expect_reason(
         "failed-stage-not-root-storage-readback-exit3",
         lambda: recovery._prove_failed_stage(failure_log(255), 77, "One-shot deployed release"),
