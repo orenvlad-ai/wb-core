@@ -8,6 +8,11 @@ import time
 import unittest
 from unittest.mock import patch
 
+import sys
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from apps import operator_ff_overhead_smoke as native
 from apps.operator_ff_overhead_smoke import operations, accounting, warehouse_functional_job_lock, FfPoolDocumentService
 from packages.application.dependency_proof import DependencyProof, CompletionProofError

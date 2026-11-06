@@ -6,6 +6,11 @@ import tempfile
 import threading
 import time
 import unittest
+import sys
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from packages.application.dependency_proof import DependencyProof, CompletionProofError, install_dependency_revisions, readonly_deadline, check_deadline, DetachedReadConnection
 
 
