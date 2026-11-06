@@ -122,6 +122,8 @@ def verify_registry_rows(conn, registry, manifest):
     for logical,table,generation in (
             ('operational','finance_operational_schema_meta',manifest.operational),
             ('finance_raw','finance_raw_schema_meta',manifest.raw)):
+        if logical=='finance_raw' and not (manifest.state=='cutover' and manifest.canonical_source=='split'):
+            continue
         schema=aliases.get(str(registry.resolve(logical,manifest=manifest)))
         if schema is None:
             raise CompletionProofError('dependency_store_authority_changed',classification='authority_changed')

@@ -7191,7 +7191,7 @@ class WbFinanceWeeklyBlock:
 
     @contextmanager
     def _finance_read_proof(self, authority, deadline):
-        from packages.application.dependency_proof import DependencyProof, readonly_deadline, DetachedReadConnection
+        from packages.application.dependency_proof import DependencyProof, readonly_deadline, DetachedReadConnection, verify_registry_rows
         with ExitStack() as resources, ExitStack() as proof_scope:
             proof_scope.enter_context(readonly_deadline(None, deadline))
             book_fence = resources.enter_context(self._finance_book_fence())
@@ -7200,6 +7200,7 @@ class WbFinanceWeeklyBlock:
             proof = DependencyProof.capture(conn)
             proof_scope.enter_context(proof.observe())
             proof_scope.enter_context(readonly_deadline(conn, deadline))
+            verify_registry_rows(conn, self.store_registry, authority[0])
             self._observe_active_cost(conn)
             yield conn, proof, proof_scope, book_fence
 
@@ -7242,7 +7243,10 @@ class WbFinanceWeeklyBlock:
             raise ValueError('shared_cost_candidate_is_read_only')
         manifest = self.store_registry.load()
         paths = set()
-        for store in ('operational', 'finance_raw'):
+        stores = ('operational', 'finance_raw') if (
+            manifest.state == 'cutover' and manifest.canonical_source == 'split'
+        ) else ('operational',)
+        for store in stores:
             path = self.store_registry.resolve(store, manifest=manifest)
             if path in paths:
                 continue
