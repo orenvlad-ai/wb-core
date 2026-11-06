@@ -34,6 +34,7 @@ from packages.contracts.stocks_failure_diagnostics import (
 WB_OTHER_WAREHOUSE_NAME = "остальные"
 WB_AGGREGATE_WAREHOUSE_ID = -999999
 WB_AGGREGATE_WAREHOUSE_NAME = "склад wb"
+WB_AGGREGATE_REGION_NAMES = frozenset({WB_AGGREGATE_WAREHOUSE_NAME, "россия"})
 
 # Unix datagrams are atomic, so an interrupted child cannot leave the parent
 # blocked halfway through a frame. Larger records are assembled with a hard cap.
@@ -1451,7 +1452,7 @@ def _is_exact_wb_aggregate_sentinel(item: Mapping[str, Any]) -> bool:
     region_name = str(item.get("regionName") or "").strip().casefold()
     return (
         warehouse_name == WB_AGGREGATE_WAREHOUSE_NAME
-        and region_name == WB_AGGREGATE_WAREHOUSE_NAME
+        and region_name in WB_AGGREGATE_REGION_NAMES
     )
 
 

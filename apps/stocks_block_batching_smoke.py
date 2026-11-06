@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 from packages.adapters.stocks_block import HttpBackedStocksSource
 from packages.application.stocks_block import StocksBlock
 from packages.contracts.stocks_block import StocksRequest
+from packages.contracts.stocks_failure_diagnostics import stocks_failure_diagnostic
 
 TOKEN_ENV = "WB_STOCKS_BATCHING_SMOKE_TOKEN"
 
@@ -238,10 +239,9 @@ def _check_repeated_full_page_is_incomplete() -> None:
         try:
             _execute_request(stub, nm_ids=[101], page_limit=1)
         except RuntimeError as exc:
-            if not any(
-                marker in str(exc)
-                for marker in ("repeated a full page", "duplicate size/warehouse")
-            ):
+            if (stocks_failure_diagnostic(exc) or {}).get("reason") not in {
+                "repeated_page", "duplicate_row",
+            }:
                 raise AssertionError(f"unexpected pagination failure: {exc}") from exc
         else:
             raise AssertionError("repeated full official page must not publish a snapshot")
@@ -255,15 +255,9 @@ def _check_invalid_or_duplicate_rows_fail_closed() -> None:
     invalid_zero_warehouse = _stock_item(101, 1011, 0, "Центральный", 0)
     invalid_zero_warehouse["warehouseName"] = "Неизвестный склад"
     for items, expected in (
-        ([invalid], "invalid inWayFromClient"),
-        (
-            [invalid_warehouse],
-            "invalid warehouseId for nmId 101 "
-            "(present=true, type=NoneType, value=None, "
-            'context={"warehouseName":"Склад 1","regionName":"Центральный",'
-            '"quantity":1,"inWayToClient":0,"inWayFromClient":0}, row_digest=',
-        ),
-        ([invalid_zero_warehouse], "invalid warehouseId for nmId 101"),
+        ([invalid], "invalid_quantity"),
+        ([invalid_warehouse], "invalid_warehouse_id"),
+        ([invalid_zero_warehouse], "invalid_warehouse_id"),
         (
             [
                 {
@@ -275,21 +269,21 @@ def _check_invalid_or_duplicate_rows_fail_closed() -> None:
                     "warehouseName": "Остальные",
                 },
             ],
-            "duplicate size/warehouse",
+            "duplicate_row",
         ),
         (
             [
                 _stock_item(101, 1011, 1, "Центральный", 1),
                 _stock_item(101, 1011, 1, "Центральный", 2),
             ],
-            "duplicate size/warehouse",
+            "duplicate_row",
         ),
     ):
         with _StocksApiStub([_json_response(200, {"data": {"items": items}})]) as stub:
             try:
                 _execute_request(stub, nm_ids=[101], page_limit=250000)
             except RuntimeError as exc:
-                if expected not in str(exc):
+                if (stocks_failure_diagnostic(exc) or {}).get("reason") != expected:
                     raise AssertionError(f"unexpected invalid-payload failure: {exc}") from exc
             else:
                 raise AssertionError("invalid official payload must not publish a snapshot")
@@ -368,8 +362,9 @@ def _check_retry_exhaustion_surfaces_429() -> None:
                 reuse_ttl_seconds=0.0,
             )
         except RuntimeError as exc:
-            if "status 429" not in str(exc):
-                raise AssertionError(f"unexpected 429 error text: {exc}") from exc
+            diagnostic = stocks_failure_diagnostic(exc) or {}
+            if diagnostic.get("reason") != "http_status" or diagnostic.get("http_status") != 429:
+                raise AssertionError(f"unexpected 429 diagnostic: {diagnostic}") from exc
         else:
             raise AssertionError("exhausted 429 retries must surface the upstream failure")
         if len(stub.request_bodies) != 2:
