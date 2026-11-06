@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -703,7 +704,24 @@ def build_manifest(
     return replace(manifest, manifest_sha256=digest)
 
 
+@contextmanager
+def generation_pin(runtime_dir, *, exclusive=False):
+    """Serialize published authority replacement with short proof handoffs."""
+    file = Path(runtime_dir).resolve() / '.storage-generation.lock'
+    with file.open('a+b') as handle:
+        fcntl.flock(handle, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def atomic_write_manifest(path: Path, manifest: GenerationManifest) -> None:
+    with generation_pin(Path(path).resolve().parent, exclusive=True):
+        _atomic_write_manifest_pinned(path, manifest)
+
+
+def _atomic_write_manifest_pinned(path: Path, manifest: GenerationManifest) -> None:
     """Durably replace one exact generation manifest.
 
     This function is intentionally never called from ordinary runtime startup.

@@ -106,6 +106,9 @@ class DependencyProof:
         if self.sealed:
             raise CompletionProofError('dependency_proof_already_sealed')
         def authorizer(action, table, column, schema, source):
+            # Built-in JSON table functions read only their already-observed input.
+            if action == sqlite3.SQLITE_READ and table in ('json_each','json_tree') and table not in self.stores.get(schema,{}).get('revisions',{}):
+                return sqlite3.SQLITE_OK
             if action == sqlite3.SQLITE_READ and schema != 'temp' and table not in ('sqlite_master', 'sqlite_schema'):
                 if schema not in self.stores or table not in self.stores[schema]['revisions'] or table == REVISIONS:
                     return sqlite3.SQLITE_DENY

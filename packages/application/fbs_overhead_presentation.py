@@ -16,8 +16,8 @@ SOURCE = "fbs_snapshot_overhead_allocation_v1"
 
 
 class OverheadAccountingView:
-    def __init__(self, runtime_dir, db_path, *, now=None):
-        self.book, self.version = load(runtime_dir)
+    def __init__(self, runtime_dir, db_path, *, now=None, bound_book=None):
+        self.book, self.version = bound_book if bound_book is not None else load(runtime_dir)
         self.db_path = db_path
         self.now = now or datetime.now(timezone.utc)
 
