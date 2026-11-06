@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
-from packages.application.dependency_proof import DependencyProof, CompletionProofError, install_dependency_revisions, readonly_deadline
+from packages.application.dependency_proof import DependencyProof, CompletionProofError, install_dependency_revisions, readonly_deadline, check_deadline
 
 
 class DependencyProofTests(unittest.TestCase):
@@ -87,7 +87,9 @@ class DependencyProofTests(unittest.TestCase):
         with self.assertRaisesRegex(CompletionProofError,'budget_exhausted'):
             with readonly_deadline(conn,time.monotonic()+.01):
                 value=0
-                for i in range(1000000): value+=i
+                for i in range(1000000):
+                    check_deadline()
+                    value+=i
         self.assertFalse(conn.in_transaction)
         self.assertEqual(conn.execute('SELECT value FROM source').fetchone()[0],'a')
 

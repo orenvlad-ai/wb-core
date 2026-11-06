@@ -54,12 +54,27 @@ class FbsAccountingUnavailable(ValueError):
 
 
 def unpack(conn, text):
+    from packages.application.dependency_proof import check_deadline
+    check_deadline()
     index = json.loads(text)
+    check_deadline()
     def blob(key):
         row = conn.execute("SELECT payload FROM accounting_blobs WHERE digest=?", (key,)).fetchone()
-        value = json.loads(zlib.decompress(row[0]))
+        # Bounded decompression output avoids one long uninterruptible inflate.
+        decoder=zlib.decompressobj()
+        pieces=[]
+        pending=row[0]
+        while pending:
+            check_deadline()
+            pieces.append(decoder.decompress(pending,65536))
+            pending=decoder.unconsumed_tail
+        pieces.append(decoder.flush())
+        check_deadline()
+        value = json.loads(b''.join(pieces))
+        check_deadline()
         if fingerprint(value) != key:
             raise ValueError("fbs_accounting_blob_corrupt")
+        check_deadline()
         return value
     for field in ("shared_days", "wb_days", "retained_days", "presentations"):
         index[field] = {day: blob(key) for day, key in index[field].items()}

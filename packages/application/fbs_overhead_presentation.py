@@ -73,6 +73,8 @@ class OverheadAccountingView:
             lines = []
             pool_amounts = {}
             for key, amount in sorted(amounts.items()):
+                from packages.application.dependency_proof import check_deadline
+                check_deadline()
                 facility, pool, nm = key.split(":")
                 if facility != summary["facility_id"] or pool not in pools:
                     raise ValueError("accounting_allocation_scope_mismatch")

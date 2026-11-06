@@ -8,6 +8,7 @@ No reader transaction or writer reservation is kept during expensive Python work
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 from pathlib import Path
@@ -19,8 +20,26 @@ REVISIONS = 'wbc_dependency_revisions'
 PREFIX = 'wbc_dependency_revision_'
 
 
+_SAFE_REASONS = frozenset({
+    'dependency_installer_accounting_forbidden','dependency_trigger_contract_changed',
+    'dependency_proof_requires_autocommit','dependency_revision_migration_required',
+    'dependency_table_uncovered','dependency_proof_already_sealed','dependency_store_not_bound',
+    'dependency_file_replaced','dependency_schema_changed','dependency_revision_changed',
+    'dependency_proof_budget_exhausted','overhead_completion_book_changed',
+    'overhead_completion_authority_changed','overhead_completion_prepare_before_begin_required',
+    'overhead_completion_source_changed','overhead_completion_pre_dml_fence_required',
+    'overhead_completion_transaction_unbound',
+})
+_SAFE_PHASES = frozenset({'proof','planning','validation','writer_handoff','retention','completion'})
+_SAFE_CLASSES = frozenset({'relevant_dependency_changed','authority_changed','immutable_source_changed',
+    'lock_busy','budget_exhausted','result_unknown','unrelated_or_unclassified_commit'})
+
+
 class CompletionProofError(ValueError):
     def __init__(self, reason, *, phase='proof', classification='relevant_dependency_changed', business_write_started=False):
+        reason = reason if reason in _SAFE_REASONS else 'dependency_proof_failed'
+        phase = phase if phase in _SAFE_PHASES else 'proof'
+        classification = classification if classification in _SAFE_CLASSES else 'result_unknown'
         super().__init__(reason)
         self.reason, self.phase, self.classification = reason, phase, classification
         self.business_write_started = business_write_started
@@ -158,30 +177,34 @@ class DependencyProof:
         return body
 
 
+_DEADLINE = ContextVar('dependency_proof_deadline', default=None)
+
+
+def check_deadline():
+    deadline = _DEADLINE.get()
+    if deadline is not None and time.monotonic() >= deadline:
+        raise CompletionProofError('dependency_proof_budget_exhausted', classification='budget_exhausted')
+
+
 @contextmanager
 def readonly_deadline(conn, deadline):
-    """Cooperative SQL and Python budget. Never wrap a business transaction.
+    """One cooperative SQL/Python budget; never wrap a business transaction.
 
-    Python trace checks at function/line boundaries cover JSON dispatch/allocation
-    loops. C primitives remain indivisible; report their duration separately.
+    Native loops call check_deadline between bounded units. A single C JSON/hash
+    call is indivisible; this API makes no hard real-time guarantee for it.
     """
-    import sys
-    if deadline is None:
-        yield
-        return
-    def check():
-        if time.monotonic() >= deadline:
-            raise CompletionProofError('dependency_proof_budget_exhausted', classification='budget_exhausted')
-    def trace(frame, event, arg):
-        check()
-        return trace
-    previous = sys.gettrace()
-    check()
-    conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
-    sys.settrace(trace)
+    token = _DEADLINE.set(deadline)
+    def progress():
+        return int(deadline is not None and time.monotonic() >= deadline)
+    if conn is not None: conn.set_progress_handler(progress, 1000)
     try:
+        check_deadline()
         yield
-        check()
+        check_deadline()
+    except sqlite3.OperationalError as exc:
+        if getattr(exc,'sqlite_errorcode',None)==sqlite3.SQLITE_INTERRUPT:
+            check_deadline()
+        raise
     finally:
-        sys.settrace(previous)
-        conn.set_progress_handler(None, 0)
+        if conn is not None: conn.set_progress_handler(None, 0)
+        _DEADLINE.reset(token)
