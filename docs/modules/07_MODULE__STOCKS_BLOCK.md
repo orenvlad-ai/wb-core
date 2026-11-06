@@ -10,6 +10,7 @@ source_basis:
   - "apps/stocks_block_smoke.py"
   - "apps/stocks_block_http_smoke.py"
   - "apps/stocks_adapter_contract_smoke.py"
+  - "apps/stocks_resilience_smoke.py"
 related_modules:
   - "packages/contracts/stocks_block.py"
   - "packages/adapters/stocks_block.py"
@@ -79,6 +80,75 @@ update_note: "Общий Seller Analytics CSV transport сохраняет `STOC
   - production evidence фиксирует специальный official bucket `warehouseId=0`, `warehouseName=Остальные`: он может нести `inWayToClient`/`inWayFromClient` при нулевом physical quantity и потому сохраняется в WB contour/raw audit; для дедупликации его identity включает warehouse name + region. Любой другой zero/negative/invalid `warehouseId` остаётся fail-closed, а bounded error evidence фиксирует только allowlisted context и digest строки.
   - official current response additionally accepts only the exact typed WB aggregate sentinel `warehouseId=-999999`, `warehouseName=Склад WB`, `regionName=Склад WB`. The original source rows and their digest remain unchanged evidence; a separate normalization envelope maps the sentinel to the service bucket only for SKU-total calculation and marks `warehouse_granularity_complete=false`. Float, bool, string, partial-name and every other negative-ID variant remain invalid.
   - historical `OfficeName=Склад WB` has the same aggregate-only meaning. A date containing that row is incomplete even when concrete offices are mixed into the same CSV; the aggregate quantity remains in exact SKU/TOTAL `stock_total` and is never allocated through a persisted `OfficeName -> regionName` fallback. Regional stock and incident actual/excluded/effective cells stay explicit blanks, not zeros.
+
+## 2.1 Current inventory resilience and total deadline
+
+`HttpBackedStocksSource.fetch` starts one monotonic deadline before runtime
+configuration, cache lookup and single-flight admission. The default is 180s;
+`WB_STOCKS_FETCH_DEADLINE_SECONDS` overrides it with a finite value in `(0,1800]`.
+The constructor offers the same budget for fixtures. The separate per-send
+`OFFICIAL_API_TIMEOUT_SECONDS` remains capped by the remaining total budget.
+The deadline includes every nmID batch/page, rate-limit/backoff wait, HTTP
+connect/DNS/TLS/body, JSON decoding, validation, normalization/hashing and result
+transfer. A budget that cannot accommodate a rate-limit wait fails immediately.
+Only complete pagination may reach the shared cache or a successful waiter.
+
+The 180s default was selected on 2026-11-06 using the read-only production journal
+sample of the last 30 `official_complete_wb_stocks` stages (2026-10-31–2026-11-06):
+29 successes took 12–41s; one HTTP500 failure took 21s. Recent successes were
+31,34,34,33,33,33,40,32,29s. These are whole-stage durations, an upper-bound proxy
+for fetch duration, **not** measured fetch p50/p95 or page counts. 180s exceeds
+four times the observed successful maximum and leaves room for two retries and
+20s seller spacing; the 1800s configuration ceiling remains below the existing
+three-hour cycle cadence. This is a bounded failure policy, not a proven latency
+SLA. Production fetch/page distributions still need observation after release.
+An identical local HTTP fixture (one page, 1000 rows, 157914 response bytes), five
+uncached runs per version on 2026-11-06, measured baseline median/max
+0.0057/0.0092s and isolated candidate 0.0802/0.0851s. This measures spawn/IPC
+overhead for that fixture only; it is not a representative production percentile.
+
+Production urllib work runs in one isolated, spawn-created process per leader
+fetch, rather than one process per page. The parent owns the seller limiter,
+cache and single-flight markers; the child performs only the readonly stocks
+request and computation. The parent mediates each send's atomic rate-slot
+reservation. Spawn avoids inheriting locked mutexes from the threaded runtime.
+On expiry/error/interrupt the child is terminated and joined (with bounded
+terminate/kill cleanup); the leader always removes its marker and wakes waiters
+with an explicit success/error. A follower has its own bounded wait and cannot
+cancel its leader. Its result must match the seller/date/nmID key and carry
+`pagination_complete=true`; zero cache TTL also supports successful followers.
+
+A response is read in bounded chunks, with explicit local safety ceilings of
+128MiB for a successful page and 1MiB for an error body. Exceeding a ceiling is
+an incomplete fetch, never a truncated success. The endpoint's existing contract
+caps page rows at 250000 but supplies no byte/string-length guarantee; these byte
+ceilings are local resource policy, not an assertion about an upstream maximum.
+The process deadline cancels stalled reads and slowly arriving 200/500 bodies,
+as well as CPU parsing/hashing, instead of treating a socket timeout as a total
+HTTP timeout. The parent receives/deserializes results in a separate relay thread
+and rejects a late result before cache publication. Explicit injected opener or
+fake-clock/sleep dependencies are cooperative fixture paths; production uses the
+default isolated transport.
+
+Each page has at most **three sends total** across all reasons. Retry admission
+is restricted to HTTP500/502/503/504, existing bounded429 handling and classified
+timeout/reset/aborted/broken-pipe transport failures. TLS/certificate, configuration,
+authentication, payload and validation errors are terminal. Jittered exponential
+backoff shares the same deadline and seller limiter. Every send reserves a slot,
+including failed sends; 429 respects the maximum of `X-Ratelimit-Retry`,
+`X-Ratelimit-Reset`, `Retry-After` and the configured seller interval. Even an
+exhausted429 updates the shared cooldown. Retries preserve `nmIds`, `chrtIds`,
+`limit` and the current `offset`; there is no date in this current-inventory call.
+The historical CSV create/poll/download contract is unchanged.
+
+`python3 apps/stocks_resilience_smoke.py` covers deterministic budget, retry,
+pagination, validation and cache boundaries, plus actual spawn/urllib slow-body
+cancellation, parsing cancellation, child cleanup and follower/leader isolation.
+The existing `apps/sheet_vitrina_v1_stocks_refresh_smoke.py` fixture currently
+fails with `stock_nomenclature_scope_incomplete` / `stock_catalog_scope=unknown`;
+the same failure was reproduced with the pre-change stocks adapter. This is a
+separate fixture/catalog-scope issue, not a passing integration claim for this
+change.
 
 # 3. Target contract и смысл результата
 
@@ -155,6 +225,7 @@ Policy revisions carry `active`, warehouse IDs and identities, reason, `effectiv
 - artifact-backed smoke: `apps/stocks_block_smoke.py`
 - region normalization smoke: `apps/stocks_block_region_mapping_smoke.py`
 - targeted batching/rate-limit smoke: `apps/stocks_block_batching_smoke.py`
+- deadline/retry/cancellation smoke: `apps/stocks_resilience_smoke.py`
 - authoritative server-side smoke: `apps/stocks_block_http_smoke.py`
 - historical CSV smoke: `apps/stocks_historical_csv_smoke.py`
 - refresh integration smoke: `apps/sheet_vitrina_v1_stocks_refresh_smoke.py`

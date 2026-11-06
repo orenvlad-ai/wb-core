@@ -65,8 +65,12 @@ class _Response:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            body, self._body = self._body, b""
+        else:
+            body, self._body = self._body[:size], self._body[size:]
+        return body
 
 
 class _InjectedOpener:
