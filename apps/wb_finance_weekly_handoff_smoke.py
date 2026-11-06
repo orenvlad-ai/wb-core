@@ -38,7 +38,7 @@ class HandoffTests(unittest.TestCase):
             conn.commit()
         self.raw_path, self.raw_table = self.block.db_path, 'wb_finance_weekly_raw_rows'
 
-    def split(self):
+    def split(self, *, persistent_view=False):
         self.raw_path = self.root / 'raw.sqlite3'
         with closing(sqlite3.connect(self.block.db_path)) as main, closing(sqlite3.connect(self.raw_path)) as raw:
             main.backup(raw)
@@ -52,12 +52,34 @@ class HandoffTests(unittest.TestCase):
                     (revision, logical, generation, 'test', 'sha256:'+'a'*64, '2026-07-27T00:00:00Z'))
                 if path == self.raw_path:
                     conn.execute('ALTER TABLE wb_finance_weekly_raw_rows RENAME TO finance_raw_current_rows')
+                    if persistent_view:
+                        conn.execute('ALTER TABLE finance_raw_current_rows RENAME TO finance_fixture_rows')
+                        conn.execute('CREATE VIEW finance_raw_current_rows AS SELECT * FROM finance_fixture_rows')
         manifest = build_manifest(state='cutover', canonical_source='split', generation_epoch='test',
             raw_generation_id='raw-test', raw_relative_path=self.raw_path.name, raw_watermark='1',
             operational_generation_id='op-test', operational_relative_path=self.block.db_path.name,
             operational_watermark='1', rollback_generation_id='monolith', source_fingerprint='sha256:'+'a'*64)
         atomic_write_manifest(self.block.store_registry.manifest_path, manifest)
-        self.raw_table = 'finance_raw_current_rows'
+        self.raw_table = 'finance_fixture_rows' if persistent_view else 'finance_raw_current_rows'
+
+    def test_split_persistent_raw_view_completes_native_finance_apply(self):
+        # Production exposes a persistent view under the connection-local view,
+        # whereas older split fixtures used a physical table with the same name.
+        self.split(persistent_view=True)
+        result = self.run_apply()
+        self.assertEqual(result['status'], 'applied')
+        self.assertEqual(result['post_verify_stale_week_count'], 0)
+        self.assertEqual(self.calls, {'writer': 1, 'dml': 1})
+
+    def test_split_persistent_raw_view_still_rejects_underlying_change(self):
+        self.split(persistent_view=True)
+        before = self.image()
+        with self.assertRaises(CompletionProofError) as caught:
+            self.run_apply(lambda n: self.commit(
+                "UPDATE finance_fixture_rows SET raw_json='{}' WHERE rrd_id='1'", raw=True) if n == 1 else None)
+        self.assertEqual(caught.exception.reason, 'dependency_revision_changed')
+        self.assertEqual(self.calls['dml'], 0)
+        self.assertEqual(self.image(), before)
 
     def image(self):
         with self.block._connect_stale_cost_plan() as conn:
