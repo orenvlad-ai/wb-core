@@ -173,6 +173,11 @@
     }
   },
   "groups": {
+    "sqlite_contention": {
+      "patterns": ["packages/application/sqlite_contention.py", "apps/sqlite_schema_contention_smoke.py", "apps/sqlite_contention_smoke.py"],
+      "commands": [["python3", "apps/sqlite_schema_contention_smoke.py"], ["python3", "apps/sqlite_contention_smoke.py"], ["python3", "apps/registry_upload_db_backed_runtime_smoke.py"], ["python3", "apps/web_vitrina_group_trigger_upgrade_smoke.py"], ["python3", "apps/ready_publication_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "stocks_failure_diagnostics": {
       "patterns": [
         "packages/adapters/stocks_block.py",

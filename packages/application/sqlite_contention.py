@@ -252,8 +252,23 @@ class ObservedSQLiteConnection(sqlite3.Connection):
         was_in_transaction = self.in_transaction
         # executescript() can contain implicit commits and several already
         # applied statements.  Replaying it after BUSY is not generally safe.
-        # Schema migrations are serialized by their repo-owned file locks.
-        cursor = sqlite3.Connection.executescript(self, sql_script)
+        # Give SQLite the configured native wait for each statement instead
+        # of the short timeout used by our Python statement retry loop. This
+        # is a per-statement budget, not a deadline for the entire script.
+        # Invoke the script exactly once, preserving its commit semantics and
+        # any partial effects if a later statement fails.
+        previous_timeout = int(
+            sqlite3.Connection.execute(self, "PRAGMA busy_timeout").fetchone()[0]
+        )
+        sqlite3.Connection.execute(
+            self, f"PRAGMA busy_timeout = {self._contention_timeout_ms}"
+        )
+        try:
+            cursor = sqlite3.Connection.executescript(self, sql_script)
+        finally:
+            sqlite3.Connection.execute(
+                self, f"PRAGMA busy_timeout = {previous_timeout}"
+            )
         self._track_transaction_after_statement(was_in_transaction)
         self._track_write_phase("schema", sql=sql_script)
         return cursor
