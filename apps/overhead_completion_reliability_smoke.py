@@ -142,6 +142,19 @@ class CompletionReliabilityTests(unittest.TestCase):
         self.assertEqual(caught.exception.diagnostic()['pending_count'],1)
         self.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
 
+    def test_deadline_partial_entry_does_not_mask_budget_error(self):
+        from packages.application import dependency_proof
+        case,_=self.fixture();original=dependency_proof.readonly_deadline;calls=[]
+        def budget(conn,deadline):
+            calls.append(conn)
+            return original(conn,-1 if len(calls)==3 else deadline)
+        with warehouse_functional_job_lock(case.root):
+            args=case.proof_inputs()
+            with patch.object(dependency_proof,'readonly_deadline',budget),self.assertRaises(CompletionProofError) as caught:case.complete(*args)
+        self.assertEqual(caught.exception.diagnostic()['classification'],'budget_exhausted')
+        self.assertEqual(caught.exception.diagnostic()['processed_count'],0)
+        self.assertEqual(case.native_terminal(case.identity),('posted','mutation_running'))
+
     def test_crash_before_and_after_every_commit_matrix(self):
         connect=sqlite3.connect
         for mode in ('DELETE','WAL'):

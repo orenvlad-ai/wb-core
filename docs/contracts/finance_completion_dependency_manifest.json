@@ -706,7 +706,7 @@
   ],
   "absence_rule": "sqlite_master/schema_version before and after all reads; existing empty tables are authorizer-observed and revisioned; newly created fallback table changes schema_version",
   "native_identity_checks": {
-    "reader": "operator_ff_overhead._completion_source on caller writer connection before and after each DML",
+    "reader": "operator_ff_overhead._completion_source on caller writer connection before and after each DML; NativeProgressFence compares exact request-scoped mutable images and permits only explicit S1–S5 deltas",
     "tables": [
       "sheet_vitrina_v1_ff_pool_overhead_confirmations",
       "sheet_vitrina_v1_ff_pool_overhead_cancellations",
@@ -720,9 +720,10 @@
       "sheet_vitrina_v1_warehouse_business_operations",
       "sheet_vitrina_v1_warehouse_targeted_recalc_queue",
       "sheet_vitrina_v1_recovery_operations",
-      "sheet_vitrina_v1_ff_workflow_events"
+      "sheet_vitrina_v1_ff_workflow_events",
+      "sheet_vitrina_v1_recovery_transitions"
     ],
-    "scope": "exact request/document/operation/queue identities and source digests; retained after_digest; complete replay event must match native after image"
+    "scope": "exact request/document/operation/queue identities and source digests; retained after_digest; complete replay event must match native after image; exact immutable recovery checkpoint/full scope; exact S1 proof and queue Finance marker; no native state regression"
   },
   "book": {
     "tables": [
@@ -801,5 +802,5 @@
     "accounting writer flock",
     "single main connection BEGIN IMMEDIATE with rw raw/book attachments"
   ],
-  "mutation_policy": "No posting call. No baseline reset. Proof dependency counters do not include mutable native lifecycle fields; those are validated by exact source/digest/event readback in every writer transaction. All proof scans run before first writer reservation."
+  "mutation_policy": "No posting call. No baseline reset. Proof dependency counters do not include mutable native lifecycle fields; those are validated by exact source/digest/event readback in every writer transaction. All proof scans run before first writer reservation. NativeProgressFence binds queue/status/proof and receipt bytes through all commits. Pending cohorts raise typed failure; cumulative completed effects remain durable."
 }

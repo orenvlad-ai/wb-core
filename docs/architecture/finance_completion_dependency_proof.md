@@ -45,10 +45,16 @@ against non-cooperating direct SQL writers. Attachments receive no DML. The
 vector, book observer, source identity and authority are checked inside the
 writer before DML and again before commit. Connection nonce evidence is local to
 that transaction and consumed by its final guard. A rollback cannot reuse it.
-Own lifecycle mutations do not enter the Finance/Ready table vector. Their exact
-request/document/queue/recovery operands, retained after image and completion
-event are independently checked on this same writer; there is no whole-table
-ignore list or baseline adoption between durable commits.
+Own lifecycle mutations do not enter the Finance/Ready table vector. A separate
+request-scoped progress fence carries exact queue, acceptance proof, request state,
+recovery row, workflow events and recovery transition images. Each next BEGIN
+must match the last exact own image; each pre-commit check allows only the named
+S1–S5 field/event delta, binds the original S1 proof and Finance marker fingerprint,
+and requires complete/retained/event/after-image evidence inside S5. Recovery
+checkpoint and full immutable scope are frozen too. This is an exact own-row
+delta, never a whole-table ignore list or global-token baseline adoption.
+Targeted native overhead normalization does not call unrelated historical/current
+FBO dispatch providers inside any writer reservation.
 
 Application lock order is warehouse job ownership → shared generation pin →
 FF posting → warehouse functional writer → accounting writer → attached SQLite
@@ -77,13 +83,20 @@ for confirmed pool-overhead completion.
 
 ## Budget and measurements
 
-The initial cohort is one document. The configured proof ceiling is 1800 seconds,
+Initial one-document fixtures measured the handoff, then the existing bounded
+eight-document cohort was retained to share the full Finance proof. A two-document
+fixture verifies three Finance source scans total, one semantic seal, and no
+Finance raw/image scan under the writer; its maximum writer transaction was
+9.15 ms after the exact progress fences. `cohort_size=1` remains available for
+isolated measurements. The configured proof ceiling is 1800 seconds,
 below the existing three-hour cycle interval; it is an operational ceiling, not
 a demonstrated SLA. A caller may supply a smaller finite positive budget. The
 same deadline starts before initial book loading and covers SQL progress,
 Finance native row loops, allocation loops, readset hashing and 64-KiB book inflate
 chunks. All readonly budget contexts close before mutation; begun transactions
-finish or roll back. A C JSON/hash call remains indivisible. Representative-copy
+finish or roll back. Deadline checks between documents may leave some completed
+and some pending, but that result raises a typed failure with cumulative processed
+and pending counts. It cannot be returned as warehouse success or admit final_ready. A C JSON/hash call remains indivisible. Representative-copy
 measurement is required before claiming a strict wall-clock ceiling.
 
 Local structural benchmark, 358 tables/1074 triggers, 10,000 simple inserts and
@@ -116,6 +129,17 @@ in main/raw. Existing source and lifecycle schemas are unchanged; old readers an
 writers continue to work and old writers advance the counters automatically.
 Receipts add a versioned proof but retain the native completion envelope. Existing
 v2 receipts are re-proven before continuation. A rollback must preserve all
-committed operations and counter objects. Generation/table-renaming migrations
+committed operations and counter objects. The installer starts a transaction before its first DDL;
+interruption rolls back the complete trigger/counter installation.
+
+The combined release has an additional journal compatibility boundary: the old
+`a07b6a5` journal reader raises `KeyError` on new phase rows. While maintenance
+remains held and before any new-version job/cycle is accepted, rollback to that
+verified old SHA remains compatible with the additive revision schema and the
+unchanged three-table book. After the first new journal job/phase row is written,
+use a forward fix or a specifically prepared compatibility backport; do not
+roll back the application blindly and do not delete journal evidence.
+
+Generation/table-renaming migrations
 must explicitly migrate the trigger contract or will fail closed; dropping or
 resetting counters during normal operation is not a rollback procedure.
