@@ -108,6 +108,16 @@ def admit(conn):
         raise ValueError("not_an_isolated_fbs_accounting_book")
 
 
+
+@contextmanager
+def readonly_book_connection(runtime_dir):
+    """Open only the accounting-owned isolated book, without creating it."""
+    with closing(sqlite3.connect(path(runtime_dir).as_uri() + '?mode=ro', uri=True)) as conn:
+        conn.execute('PRAGMA query_only=ON')
+        admit(conn)
+        yield conn
+
+
 def load(runtime_dir, *, version=None, connection=None):
     file = path(runtime_dir)
     if connection is None:

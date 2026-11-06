@@ -7215,7 +7215,7 @@ class WbFinanceWeeklyBlock:
     @contextmanager
     def _finance_book_fence(self):
         """Same live observer brackets detached book reads, including blob edits."""
-        from packages.application.fbs_accounting_runtime import path as book_path
+        from packages.application.fbs_accounting_runtime import path as book_path, readonly_book_connection
         from packages.application.dependency_proof import CompletionProofError
         path = book_path(self.runtime_dir)
         if not path.exists():
@@ -7224,7 +7224,7 @@ class WbFinanceWeeklyBlock:
                     raise CompletionProofError('finance_book_appeared')
             yield missing
             return
-        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as conn:
+        with readonly_book_connection(self.runtime_dir) as conn:
             conn.execute('PRAGMA query_only=ON')
             stat = path.stat()
             identity = stat.st_dev, stat.st_ino
@@ -7261,13 +7261,13 @@ class WbFinanceWeeklyBlock:
 
     @contextmanager
     def _connect_proof_writer(self, *, storage_authority):
-        from packages.application.fbs_accounting_runtime import writer_lock, path as book_path
+        from packages.application.fbs_accounting_runtime import writer_lock, path as book_path, readonly_book_connection
         from packages.application.dependency_proof import CompletionProofError
         path = book_path(self.runtime_dir)
         def current():
             if not path.exists():
                 return None
-            with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as book:
+            with readonly_book_connection(self.runtime_dir) as book:
                 book.execute('PRAGMA query_only=ON')
                 row = book.execute('SELECT version FROM accounting_current WHERE singleton=1').fetchone()
                 stat = path.stat()
