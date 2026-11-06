@@ -221,8 +221,9 @@ class CycleTests(unittest.TestCase):
                     fake.mark('warehouse')
                     return StageProof({'fbs_accounting_status':'unavailable'},({'policy':'unavailable'},))
                 fake._cycle_warehouse=warehouse
-                def dated(plan,*,retained_only=False):
+                def dated(plan,*,retained_only=False,expected_business_date=None):
                     self.assertTrue(retained_only)
+                    self.assertEqual(expected_business_date, '2026-09-29')
                     fake.events.append('retained_ready')
                     fake.backlog.value['dates']['2026-09-27']['state']='ready'
                     return {},StageProof({'ready':'committed'})
@@ -1181,7 +1182,9 @@ class BoundWarehouseTests(unittest.TestCase):
             self.assertEqual(proof.warnings, (
                 {'source_key':'warehouse_valuation','policy':'cost_unavailable','nm_id':'101','date':'2026-09-29'},
                 {'source_key':'warehouse_valuation','policy':'provisional_fbs_valuation','nm_id':'102','date':'2026-09-29'}))
-            historical_refresh.assert_called_once_with(entry.runtime)
+            historical_refresh.assert_called_once()
+            self.assertIs(historical_refresh.call_args.args[0], entry.runtime)
+            historical_refresh.call_args.kwargs['before_capture'](NOW)
             self.assertEqual(refresh.call_count,1)
             publication_read.assert_called_once_with(entry.runtime)
             operator_drain.assert_called_once_with(entry.runtime)

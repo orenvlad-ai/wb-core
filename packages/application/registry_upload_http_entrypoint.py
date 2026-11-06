@@ -3215,7 +3215,8 @@ class RegistryUploadHttpEntrypoint:
 
     def _cycle_sources(self):
         from packages.application.sheet_vitrina_v1_cycle_sources import SheetVitrinaCycleSources
-        return SheetVitrinaCycleSources(self.sheet_plan_block)
+        return SheetVitrinaCycleSources(self.sheet_plan_block,
+            expected_business_date=current_business_date_iso(self.now_factory()))
 
     def _cycle_finance_sources(self):
         from apps.wb_finance_daily import _worker_lock
@@ -3253,13 +3254,15 @@ class RegistryUploadHttpEntrypoint:
             return StageProof(versions, tuple(warnings))
 
     def _cycle_fbs_generation(self):
-        from packages.application.wb_fbs_warehouse_registry import REGISTRY_RUNS_TABLE, _complete_source_generation
+        from packages.application.wb_fbs_warehouse_registry import REGISTRY_RUNS_TABLE, STOCK_RUNS_TABLE, _complete_source_generation
         from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
         from packages.application.ready_publication import readonly, canonical, digest
         from packages.application.sheet_vitrina_v1_cycle import StageProof, FbsGenerationFailure
+        expected_day = current_business_date_iso(self.now_factory())
         with readonly(self.runtime.db_path) as conn:
             prior = conn.execute(f'SELECT coalesce(max(run_sequence),0) FROM {REGISTRY_RUNS_TABLE}').fetchone()[0]
         self.wb_fbs_warehouse_registry.collect()  # Exactly one attempt; never last-good as new collection.
+        observed_now = self.now_factory()
         with readonly(self.runtime.db_path) as conn:
             latest = conn.execute(f'SELECT * FROM {REGISTRY_RUNS_TABLE} ORDER BY run_sequence DESC LIMIT 1').fetchone()
             generation = _complete_source_generation(conn)
@@ -3269,11 +3272,17 @@ class RegistryUploadHttpEntrypoint:
                 raise FbsGenerationFailure(latest)
             if not generation['complete'] or generation['generation_id'] != latest['run_id']:
                 raise FbsGenerationFailure(latest, 'generation_binding_mismatch')
+            snapshot_days = {current_business_date_iso(datetime.fromisoformat(row[0].replace('Z', '+00:00')))
+                for row in conn.execute(f'SELECT snapshot_at FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=?', (latest['run_id'],))}
+            if len(snapshot_days) != 1 or not snapshot_days <= {expected_day, current_business_date_iso(observed_now)}:
+                raise FbsGenerationFailure(latest, 'generation_binding_mismatch')
+            snapshot_day = next(iter(snapshot_days))
             stock = read_complete_official_fbs_stock(conn, universe=None,
-                day=current_business_date_iso(self.now_factory()), now=self.now_factory())
+                day=snapshot_day, now=observed_now)
         if stock['generation_id'] != latest['run_id']:
             raise FbsGenerationFailure(latest, 'generation_binding_mismatch')
         return StageProof({'fbs_generation': stock['generation_id'], 'fbs_digest': stock['generation_digest'],
+            'fbs_business_date': snapshot_day,
             'fbs_catalog': digest(canonical({key: value for key, value in generation['catalog_scope'].items()
                 if key != 'generation_diagnostics'})),
             'fbs_mapping': digest(canonical([{key: row[key] for key in ('seller_warehouse_id', 'facility_id', 'mapping_id')}
@@ -3288,7 +3297,7 @@ class RegistryUploadHttpEntrypoint:
 
     def _cycle_warehouse(self, store, receipt, fbs):
         require_heavy_owner(self.runtime.runtime_dir)
-        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure, require_cycle_business_date
         from packages.application.ready_publication import readonly
         from packages.application.fbs_accounting_runtime import load
         from packages.application.warehouse_update_journal import PHASES
@@ -3300,7 +3309,8 @@ class RegistryUploadHttpEntrypoint:
             item['durable_ref'] = run_id
             store.write(receipt)  # Persist domain association before effects.
             try:
-                result = self._handle_owned_warehouse_manual_sync_request(owner_token=token, durable_run_id=run_id)
+                result = self._handle_owned_warehouse_manual_sync_request(owner_token=token, durable_run_id=run_id,
+                    before_capture=lambda now: require_cycle_business_date(receipt['business_date'], now))
             except BaseException as exc:
                 if not isinstance(exc, Exception):
                     self.warehouse_update_journal.finish(run_id, status='interrupted', error='cycle_cancelled', owner_token=token)
@@ -3398,15 +3408,18 @@ class RegistryUploadHttpEntrypoint:
                 'daily_projection_report_proofs': proof.versions['daily_report_proofs']}, proof.warnings + tuple(missing))
 
     def _cycle_validate_predecessors(self, finance, fbs, material):
-        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure, finance_raw_proof
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure, finance_raw_proof, require_cycle_business_date
         from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
         from packages.application.ready_publication import readonly
         current = finance_raw_proof(self)
         if any(current[key] != finance[key] for key in current):
             raise CycleStageFailure('cycle_finance_source_changed')
+        observed_now = self.now_factory()
+        if fbs.get('fbs_business_date'):
+            require_cycle_business_date(fbs['fbs_business_date'], observed_now)
         with readonly(self.runtime.db_path) as conn:
             stock = read_complete_official_fbs_stock(conn, universe=None,
-                day=current_business_date_iso(self.now_factory()), now=self.now_factory())
+                day=current_business_date_iso(observed_now), now=observed_now)
         if stock['generation_id'] != fbs['fbs_generation'] or stock['generation_digest'] != fbs['fbs_digest']:
             raise CycleStageFailure('cycle_fbs_generation_changed')
 
@@ -3421,7 +3434,9 @@ class RegistryUploadHttpEntrypoint:
             raise CycleStageFailure('cycle_material_version_changed')
 
     def _cycle_publish_ready(self, plan, *, execution_mode=EXECUTION_MODE_AUTO_DAILY):
-        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure, require_cycle_business_date
+        day = next(slot.column_date for slot in plan.temporal_slots if slot.slot_key == 'today_current')
+        before_publication = lambda _now: require_cycle_business_date(day, self.now_factory())
         current = self.runtime.load_current_state()
         expected = self.runtime.prepare_sheet_vitrina_ready_publication(bundle_version=current.bundle_version, as_of_date=plan.as_of_date)
         started = self.activated_at_factory()
@@ -3429,7 +3444,8 @@ class RegistryUploadHttpEntrypoint:
         phase = _start_operator_phase('build_plan_total', started_at=started)
         result = self._publish_sheet_refresh_plan(plan=plan, current_state=current, expected_ready=expected, emit=_noop_log,
             execution_mode=execution_mode, refresh_diagnostics=diagnostics, build_plan_phase=phase,
-            refresh_started_at=started, refresh_started_perf=time.perf_counter())
+            refresh_started_at=started, refresh_started_perf=time.perf_counter(),
+            before_publication=before_publication)
         if (result.get('status') != 'success' or result.get('semantic_status') not in {'success', 'warning', 'error'}
                 or not result.get('publication_operation_id') or not result.get('publication_attempt_id')):
             raise CycleStageFailure('final_ready_publication_unproven')
@@ -3442,10 +3458,13 @@ class RegistryUploadHttpEntrypoint:
             'policy': 'truthful_report_degraded', 'semantic_status': result['semantic_status']},)
         return versions, StageProof(versions, warnings)
 
-    def _cycle_publish_dated_ready(self, plan, *, retained_only=False):
-        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+    def _cycle_publish_dated_ready(self, plan, *, retained_only=False, expected_business_date=None):
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure, require_cycle_business_date
         from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
         require_heavy_owner(self.runtime.runtime_dir)
+        day = expected_business_date or current_business_date_iso(self.now_factory())
+        before_publication = lambda _now: require_cycle_business_date(day, self.now_factory())
+        before_publication(None)
         state = self.runtime.load_current_state()
         expected = self.runtime.prepare_sheet_vitrina_ready_publication(
             bundle_version=state.bundle_version, as_of_date=plan.as_of_date)
@@ -3457,7 +3476,7 @@ class RegistryUploadHttpEntrypoint:
                 previous_refreshed_at=previous_time, business_date=current_business_date_iso(self.now_factory()), runtime=self.runtime)
         result = self.runtime.save_sheet_vitrina_ready_snapshot(current_state=state, refreshed_at=refreshed,
             plan=plan, expected=expected, build_inputs=dict(plan.metadata or {}).get('publication_inputs'),
-            _retained_closed_replay=retained_only)
+            _retained_closed_replay=retained_only, _before_publication=before_publication)
         result = {key: getattr(result, key, '') for key in
             ('snapshot_id','plan_version','bundle_version','as_of_date','refreshed_at','publication_operation_id','publication_attempt_id','semantic_status')}
         if (result['semantic_status'] == 'error' and not retained_only) or not result.get('publication_operation_id') or not result.get('publication_attempt_id'):
@@ -7947,7 +7966,8 @@ class RegistryUploadHttpEntrypoint:
         payload["lock_metrics"] = metrics
         return payload
 
-    def _handle_owned_warehouse_manual_sync_request(self, *, owner_token: str, durable_run_id: str = "") -> dict[str, Any]:
+    def _handle_owned_warehouse_manual_sync_request(self, *, owner_token: str, durable_run_id: str = "",
+                                                  before_capture=None) -> dict[str, Any]:
         require_heavy_owner(self.runtime.runtime_dir)
         require_warehouse_job_owner(self.runtime.runtime_dir, owner_token)
         active_phase = ""
@@ -7957,15 +7977,24 @@ class RegistryUploadHttpEntrypoint:
             active_phase = phase_key
             self.warehouse_update_journal.phase_started(durable_run_id, phase_key)
             try:
+                if before_capture is not None:
+                    before_capture(self.now_factory())
                 value = operation()
             except Exception as exc:
                 # Optional terminal evidence must not replace the business error.
                 try:
                     from packages.application.warehouse_update_journal import phase_error_details
+                    from packages.application.sheet_vitrina_v1_cycle import CycleDateRollover
+                    details = phase_error_details(exc, phase_key, durable_run_id)
+                    if isinstance(exc, CycleDateRollover) and hasattr(exc, 'completed_effects'):
+                        details['completed_effects'] = exc.completed_effects
                     self.warehouse_update_journal.phase_finished(
                         durable_run_id, phase_key, status="failed", error=type(exc).__name__,
-                        details=phase_error_details(exc, phase_key, durable_run_id))
+                        details=details)
                 except Exception:
+                    if isinstance(exc, CycleDateRollover):
+                        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
+                        raise CycleStageFailure('cycle_rollover_evidence_unavailable') from exc
                     pass
                 raise
             item_count = 0
@@ -8024,17 +8053,37 @@ class RegistryUploadHttpEntrypoint:
             operator_documents = drain_operator_documents(self.runtime)
             plan = run_phase(
                 "official_complete_wb_stocks",
-                self.warehouse_functional_block.build_sync_plan,
+                (lambda: self.warehouse_functional_block.build_sync_plan(before_capture=before_capture))
+                if before_capture is not None else self.warehouse_functional_block.build_sync_plan,
             )
             def publish_functional() -> dict[str, Any]:
                 from apps.warehouse_functional_runner import _publish_fbs_snapshot_accounting
-                result = self.warehouse_functional_block.apply_plan(
-                    plan,
-                    confirm_fingerprint=str(plan["plan_fingerprint"]),
-                )
+                from packages.application.sheet_vitrina_v1_cycle import CycleDateRollover
+                from packages.application.warehouse_functional import WarehouseBusinessDateBoundaryError
+                try:
+                    result = self.warehouse_functional_block.apply_plan(
+                        plan, confirm_fingerprint=str(plan["plan_fingerprint"]))
+                except WarehouseBusinessDateBoundaryError:
+                    # This exact native check precedes the functional write.
+                    if before_capture is not None:
+                        before_capture(self.now_factory())
+                    raise
                 from packages.application.fbs_accounting_runtime import FbsAccountingUnavailable
                 try:
-                    accounting = _publish_fbs_snapshot_accounting(self.runtime)
+                    if before_capture is not None:
+                        before_capture(self.now_factory())
+                    accounting = (_publish_fbs_snapshot_accounting(self.runtime, before_capture=before_capture)
+                                  if before_capture is not None else _publish_fbs_snapshot_accounting(self.runtime))
+                except CycleDateRollover as exc:
+                    # Mandatory journal evidence survives a subsequent epoch;
+                    # the committed functional version is never inferred.
+                    version = (result.get('active_version') or {}).get('version_id')
+                    if not isinstance(version, str) or not version:
+                        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
+                        raise CycleStageFailure('cycle_rollover_functional_proof_missing') from exc
+                    exc.completed_effects = {'functional_version': version,
+                        'plan_fingerprint': str(plan['plan_fingerprint']), 'accounting_publication_not_started': True}
+                    raise
                 except FbsAccountingUnavailable as exc:
                     # The functional commit is proven; this exact book quality
                     # failure must not stop independent source publication.
@@ -8971,7 +9020,8 @@ class RegistryUploadHttpEntrypoint:
                 raise
 
     def _publish_sheet_refresh_plan(self, *, plan, current_state, expected_ready, emit,
-            execution_mode, refresh_diagnostics, build_plan_phase, refresh_started_at, refresh_started_perf):
+            execution_mode, refresh_diagnostics, build_plan_phase, refresh_started_at, refresh_started_perf,
+            before_publication=None):
         """Publication-only ordinary tail; collection is owned by the caller."""
         from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
         current_state, expected_ready = bind_local_derive_publication(
@@ -9012,6 +9062,8 @@ class RegistryUploadHttpEntrypoint:
             self.runtime,
             as_of_date=plan.as_of_date,
         )
+        if before_publication is not None:
+            before_publication(self.now_factory())
         plan = _with_full_refresh_metadata(
             plan,
             refreshed_at=refreshed_at,
@@ -9030,6 +9082,7 @@ class RegistryUploadHttpEntrypoint:
             plan=plan,
             expected=expected_ready,
             build_inputs=dict(plan.metadata or {}).get("publication_inputs"),
+            **({'_before_publication': before_publication} if before_publication is not None else {}),
         )
         active_refresh = active_refresh_summary(refresh_result)
         _finish_operator_phase(

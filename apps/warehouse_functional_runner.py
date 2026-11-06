@@ -972,13 +972,14 @@ def _collect_autonomous_transit_costs(
     )
 
 
-def _publish_fbs_snapshot_accounting(runtime: RegistryUploadDbBackedRuntime) -> dict[str, Any]:
+def _publish_fbs_snapshot_accounting(runtime: RegistryUploadDbBackedRuntime, *, before_capture=None) -> dict[str, Any]:
     from packages.application.fbs_accounting_runtime import refresh, load, FbsAccountingUnavailable
     from packages.application.fbs_accounting_historical_stages import HistoricalArchivedWbValuationUnavailable
 
     from packages.application.fbs_accounting_historical_cycle import refresh as historical_refresh
     try:
-        result = historical_refresh(runtime)
+        result = (historical_refresh(runtime, before_capture=before_capture)
+                  if before_capture is not None else historical_refresh(runtime))
     except HistoricalArchivedWbValuationUnavailable as exc:
         # Reuse only an already durable native invalidation. The historical
         # gap cannot itself grant degraded publication or mutate the book.
@@ -992,7 +993,8 @@ def _publish_fbs_snapshot_accounting(runtime: RegistryUploadDbBackedRuntime) -> 
             raise
         raise FbsAccountingUnavailable(version=version, blocked_date=open_days[0],
             historical_valuation_blocker=exc.blocker) from exc
-    return result if result is not None else refresh(runtime.runtime_dir, ready_runtime=runtime)
+    return result if result is not None else (refresh(runtime.runtime_dir, ready_runtime=runtime,
+        before_capture=before_capture) if before_capture is not None else refresh(runtime.runtime_dir, ready_runtime=runtime))
 
 
 def _recalculate_downstream_finance_cost(

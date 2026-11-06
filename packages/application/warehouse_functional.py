@@ -3898,12 +3898,12 @@ class WarehouseFunctionalBlock:
             }
         return self._build_plan(kind="functional_cutover")
 
-    def build_sync_plan(self, *, use_external_api: bool = True) -> dict[str, Any]:
+    def build_sync_plan(self, *, use_external_api: bool = True, before_capture=None) -> dict[str, Any]:
         if not use_external_api:
             raise WarehouseFunctionalError("bounded WB sync requires a fresh official snapshot")
         if self.readback().get("status") != "ready":
             raise WarehouseFunctionalError("functional cutover must be applied before hourly sync")
-        return self._build_plan(kind="hourly_wb_sync")
+        return self._build_plan(kind="hourly_wb_sync", before_capture=before_capture)
 
     def build_emergency_rebuild_plan(self) -> dict[str, Any]:
         """Rebuild from persisted sources only; never call an external API."""
@@ -4132,6 +4132,7 @@ class WarehouseFunctionalBlock:
         *,
         kind: str,
         wb_payload: Mapping[str, Any] | None = None,
+        before_capture=None,
     ) -> dict[str, Any]:
         if wb_payload is None:
             nomenclature = self.opening._opening_nomenclature_request()  # noqa: SLF001
@@ -4141,6 +4142,8 @@ class WarehouseFunctionalBlock:
             wb_payload=wb_payload,
             include_historical_correction=kind == "emergency_rebuild",
         )
+        if before_capture is not None:
+            before_capture(self.now_factory())
         captured_at = str(capture["captured_at"])
         ff_debit_coverage = (
             validate_cutover_ff_debit_coverage(capture) if kind == "functional_cutover" else None

@@ -72,7 +72,7 @@ class FixedDomainEntry:
         self.runtime.save_sheet_vitrina_ready_snapshot(current_state=current, refreshed_at=STAMP,
             plan=plan, expected=expected, build_inputs=plan.metadata['publication_inputs'])
         return {'snapshot_id': plan.snapshot_id}, StageProof({'ready_' + plan.as_of_date: plan.snapshot_id})
-    def _cycle_publish_dated_ready(self, plan):return self._publish(plan)
+    def _cycle_publish_dated_ready(self, plan, **kwargs):return self._publish(plan)
     def _cycle_publish_ready(self, plan):return self._publish(plan)
     def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None):
         self.events.append('rolling14')
@@ -235,7 +235,7 @@ class WiringTests(unittest.TestCase):
         self.assertFalse(any(event.startswith('ready:') or event == 'rolling14' for event in entry.events))
         self.assertEqual(self.case.counters['seller_funnel_block'].request_dates,
             [*OLD, '2026-04-19', '2026-04-20'])
-    def test_clock_crossing_inside_a_stage_is_failure_before_following_effects(self):
+    def test_rollover_refuses_an_adapter_fixed_to_the_previous_business_day(self):
         entry = FixedDomainEntry(self.case)
         original = entry._cycle_finance_sources
         def crossing():

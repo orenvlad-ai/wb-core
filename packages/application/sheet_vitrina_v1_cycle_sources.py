@@ -30,8 +30,9 @@ class _Invocation:
 
 
 class SheetVitrinaCycleSources:
-    def __init__(self, block: SheetVitrinaV1LivePlanBlock):
+    def __init__(self, block: SheetVitrinaV1LivePlanBlock, *, expected_business_date=None):
         self.block = block
+        self.expected_business_date = expected_business_date
         self._source_collections: WeakKeyDictionary = WeakKeyDictionary()
 
     def collect_sources(self, *args, **kwargs) -> CollectedLivePlanSources:
@@ -76,6 +77,9 @@ class SheetVitrinaCycleSources:
         )
         invocation = self._owned_collection(handle)
         collected = invocation.sources
+        from packages.application.sheet_vitrina_v1_cycle import require_cycle_business_date
+        if self.expected_business_date is not None:
+            require_cycle_business_date(self.expected_business_date, self.block.now_factory())
         args, kwargs = invocation.args, invocation.kwargs
         for attempt in range(1, 4):
             with capture_build_inputs(self.block.runtime.db_path, runtime_dir=self.block.runtime.runtime_dir) as inputs:
@@ -90,7 +94,11 @@ class SheetVitrinaCycleSources:
                         check_build_inputs(conn, inputs)
                         expected = capture_expected(conn, bundle_version=collected.scope[0],
                             as_of_date=collected.scope[1], authority=inputs["authority"])
-                    plan = self.block._build_plan(*args, **kwargs, _collection=collected)
+                    if self.expected_business_date is not None:
+                        require_cycle_business_date(self.expected_business_date, self.block.now_factory())
+                    plan = self.block._build_plan(*args, **kwargs, _collection=collected,
+                        **({'_cycle_business_date': self.expected_business_date}
+                           if self.expected_business_date is not None else {}))
                     with readonly(self.block.runtime.db_path) as conn:
                         check_build_inputs(conn, inputs)
                         check_expected(conn, expected)
@@ -128,10 +136,13 @@ class SheetVitrinaCycleSources:
         require_cycle_owner(self.block.runtime)
         invocation = self._owned_collection(handle)
         main = invocation.sources
+        from packages.application.sheet_vitrina_v1_cycle import require_cycle_business_date
+        observed_now = self.block.now_factory()
+        require_cycle_business_date(main.scope[2], observed_now)
         mode = invocation.kwargs.get('execution_mode', invocation.args[2] if len(invocation.args) > 2 else 'auto_daily')
         if (main.scope[4:] != ([], []) or mode != 'auto_daily'
-                or main.scope[1] != live.default_business_as_of_date(self.block.now_factory())
-                or main.scope[2] != live.current_business_date_iso(self.block.now_factory())):
+                or main.scope[1] != live.default_business_as_of_date(observed_now)
+                or main.scope[2] != live.current_business_date_iso(observed_now)):
             raise ClosedBacklogConflict('closed_main_full_current_scope_required')
         if day >= main.scope[1]:
             raise ClosedBacklogConflict('closed_date_must_precede_main')

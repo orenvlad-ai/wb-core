@@ -291,7 +291,7 @@ def _record_prepare_failure(runtime_dir, *, expected, error):
                                    inputs={}, kind="book_quality_failure")
 
 
-def prepare(runtime_dir, *, now=None, opening=False):
+def prepare(runtime_dir, *, now=None, opening=False, before_capture=None):
     before, expected = load(runtime_dir)
     if opening and before is not None:
         raise ValueError("accounting_already_initialized")
@@ -308,6 +308,8 @@ def prepare(runtime_dir, *, now=None, opening=False):
         # only afterwards: a long ready-plan build must not leave a stale wall
         # clock before a newer official-stock generation in this same capture.
         capture_now = now or datetime.now(timezone.utc)
+        if before_capture is not None:
+            before_capture(capture_now)
         prepared, expected = _prepare_from_snapshot(runtime_dir, db=db, conn=conn, now=capture_now, opening=opening,
                                                    before=before, expected=expected, inputs=inputs)
         prepared["publication_authority"] = authority
@@ -471,11 +473,13 @@ def retain_management_cost_history(conn, *, plan, expected, cutoff):
     return replace(result, metadata=metadata), donor
 
 
-def refresh(runtime_dir, *, ready_runtime=None):
+def refresh(runtime_dir, *, ready_runtime=None, before_capture=None):
     prior, prior_version = load(runtime_dir)
     if prior is None or not prior["active"]:
         return {"status": "not_active"}
     plan_now = datetime.now(timezone.utc)
+    if before_capture is not None:
+        before_capture(plan_now)
     build_inputs = None
     if ready_runtime is not None:
         from packages.business_time import default_business_as_of_date
@@ -502,8 +506,14 @@ def refresh(runtime_dir, *, ready_runtime=None):
     try:
         # ``prepare`` timestamps its capture after pinning the source snapshot.
         # Do not carry the pre-build plan clock into this separate capture.
-        book, expected = prepare(runtime_dir)
+        book, expected = (prepare(runtime_dir, before_capture=before_capture)
+                          if before_capture is not None else prepare(runtime_dir))
     except Exception as exc:
+        from packages.application.sheet_vitrina_v1_cycle import CycleDateRollover
+        if isinstance(exc, CycleDateRollover):
+            # This typed guard ran after pinning, before source capture and
+            # before any book/publication write. It is not a quality failure.
+            raise
         try:
             invalidated_version = _record_prepare_failure(runtime_dir, expected=prior_version, error=exc)
         except Exception as recording_error:
@@ -521,13 +531,16 @@ def refresh(runtime_dir, *, ready_runtime=None):
         raise
     if book is None:
         return {"status": "not_active"}
+    if before_capture is not None:
+        before_capture(datetime.now(timezone.utc))
     operation_id = "refresh-" + fingerprint(book)[7:]
     if ready_runtime is None:
         version = save(runtime_dir, book, expected=expected, operation_id=operation_id)
     else:
         ready_result = ready_runtime.save_sheet_vitrina_ready_snapshot(current_state=current, plan=plan,
             refreshed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            expected=expected_ready, build_inputs=build_inputs, _prepared_book=(book, expected))
+            expected=expected_ready, build_inputs=build_inputs, _prepared_book=(book, expected),
+            **({'_before_publication': before_capture} if before_capture is not None else {}))
         version = fingerprint(book)
         operation_id = ready_result.publication_operation_id
     return {"status": "published", "version": version, "date": max(book["shared_days"]),

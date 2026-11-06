@@ -25,11 +25,13 @@ from packages.application.fbs_snapshot_cost import canonical,fingerprint
 from packages.application.warehouse_functional_lock import require_warehouse_job_owner,warehouse_functional_write_lock
 
 
-def refresh(runtime, *, now=None):
+def refresh(runtime, *, now=None, before_capture=None):
     require_warehouse_job_owner(runtime.runtime_dir)
     from packages.application.web_vitrina_window_read_context import active_window_read_context
     require(active_window_read_context() is None,'historical_refresh_window_reader_active')
     now=now or datetime.now(timezone.utc)
+    if before_capture is not None:
+        before_capture(now)
     book,version=accounting.load(runtime.runtime_dir)
     if not book or not book['active']:return None
     prepared=[]
@@ -81,6 +83,8 @@ def refresh(runtime, *, now=None):
             ensure_inventory_history_schema(schema_conn)
             ready.ensure_publication_schema(schema_conn);schema_conn.commit()
             staging.ensure_staging_schema(schema_conn)
+    if before_capture is not None:
+        before_capture(datetime.now(timezone.utc))
     manifest=publication.prepare_publication(plan,runtime_dir=runtime.runtime_dir,owner_generation='source-book:'+version,
         operation_id=operation_id,now=now,current_envelope=current_envelope)
     return publication.publish(manifest,runtime_dir=runtime.runtime_dir)

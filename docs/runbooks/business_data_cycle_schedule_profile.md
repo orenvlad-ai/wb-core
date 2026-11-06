@@ -63,6 +63,32 @@ Technical publication failures and native history guards still fail the cycle.
 Old dated publication and exact closed-date/native acknowledgement retain their
 stricter existing proofs; current report degradation cannot acknowledge old debt.
 
+### Crossing business midnight
+
+One live owning request may start one fresh epoch when the actual canonical
+business date advances by exactly one day. Its request key, slot, cycle/job IDs
+and single-flight lease remain unchanged. `accepted_business_date` preserves the
+original date; `business_date` identifies the active epoch. All dated stages are
+rebuilt, including both full source slots, Finance, a new complete official FBS
+generation and a new warehouse journal. This adds a bounded full collection's
+work and latency; the nine-hour age policy and same-day/full-scope/identity checks
+are unchanged. Accounting closes the previous day from its saved quantity and
+opens the new day only from its real newly collected snapshot.
+
+Rollover is permitted after a validated durable completed stage, or an explicit
+date fence before publication begins. The warehouse journal retains any proven
+functional commit when midnight occurs during its publication. The prior epoch's
+proofs remain in one immutable `*.rollover-0.json` archive, referenced by filename
+and byte digest in the receipt and summary. The canonical request remains running
+during transition. ClosedBacklog anchors, accepted historical operands and native
+acknowledgements are reconciled through their existing durable contracts.
+
+An arbitrary failure, uncertain write, second rollover, backwards clock or a
+multi-day jump still stops the request. Publication already past its durable
+intent is never restarted merely because the date changed. A cancelled/lost owner
+remains interrupted; reading or submitting the same request does not resume its
+archive, retained in-memory handles or an unfinished epoch.
+
 `projected_schedule(runtime, raw_feature_intent)` exposes raw intent plus a
 separate effective schedule. Settings must preserve raw `activity.feature_intent`;
 substituting the projection would create false owner drift. The exact target
