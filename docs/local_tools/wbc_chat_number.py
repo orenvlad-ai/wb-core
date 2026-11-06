@@ -6,7 +6,6 @@ import sqlite3
 from uuid import UUID
 
 DEFAULT_DB = Path('/Users/Shared/WBC/chat-numbers.sqlite3')
-OPS_DB = Path('/Users/Shared/WBC/ops-chat-numbers.sqlite3')
 
 
 def allocate(db: Path, thread_id: str) -> int:
@@ -34,14 +33,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('thread_id', help='ID of the main chat; reuse the original ID when continuing its task')
     parser.add_argument('--title', help='Short topic; print the complete chat title without a separator')
-    parser.add_argument('--series', choices=('dev', 'ops'), default='dev',
-                        help='Independent local numbering series; ops uses suffix O')
     args = parser.parse_args()
     try:
         topic = normalize_topic(args.title) if args.title is not None else None
-        number = allocate(OPS_DB if args.series == 'ops' else DEFAULT_DB, args.thread_id)
-        label = f'{number:04d}' + ('O' if args.series == 'ops' else '')
-        print(f'WBC {label} {topic}' if topic is not None else label)
+        number = allocate(DEFAULT_DB, args.thread_id)
+        print(f'WBC {number:04d} {topic}' if topic is not None else f'{number:04d}')
     except (sqlite3.Error, ValueError, TypeError) as exc:
         parser.exit(1, f'Номер не выдан: {exc}. Не используйте запасной счётчик.\n')
 
