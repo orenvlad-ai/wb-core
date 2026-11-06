@@ -1,0 +1,805 @@
+{
+  "contract_version": "finance_completion_dependency_manifest_v1",
+  "proof_contract": "sqlite_dependency_proof_v1",
+  "coverage_rule": "Every persistent table in every physical main/raw store is instrumented; authorizer observations determine per-proof read dependency vector. Any absent table/trigger or changed schema fails closed. Accounting remains exactly its existing three tables.",
+  "scope_policy": "table-wide conservative dependency revisions; unrelated tables never enter the dependency vector; SQL schema membership is a separate conservative guard",
+  "readers": [
+    "wb_finance_weekly.WbFinanceWeeklyBlock._plan_stale_cost_weeks_in_connection",
+    "wb_finance_weekly.WbFinanceWeeklyBlock._aggregate_rows",
+    "wb_finance_weekly.WbFinanceWeeklyBlock._finance_source_dependency_fingerprint",
+    "wb_finance_weekly.WbFinanceWeeklyBlock._finance_state_digest",
+    "wb_finance_weekly.WbFinanceWeeklyBlock._finance_target_images",
+    "canonical_wb_cost_resolver.CanonicalChannelCostSnapshot.from_connection",
+    "canonical_wb_cost_resolver.CanonicalWbCostSnapshot.from_connection",
+    "canonical_wb_cost_resolver._LazyCommonInventoryCosts",
+    "vitrina_last_known_cost.approved_reporting_snapshot",
+    "web_vitrina_management_history.load_presentations",
+    "operator_nomenclature.finance_sources",
+    "fbs_accounting_runtime.current_publication_receipt"
+  ],
+  "physical_aliases": {
+    "monolith": [
+      "main"
+    ],
+    "split": [
+      "main",
+      "finance_raw_store:finance_raw_current_rows via TEMP wb_finance_weekly_raw_rows"
+    ]
+  },
+  "fixture_observed_dependencies": [
+    {
+      "table": "registry_upload_current_state",
+      "observed_columns": [
+        "bundle_version",
+        "slot"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_1c114f1e9db5089e78b57969_insert",
+          "sql_sha256": "695fd9aad1cb9ca9351f3b4c63472435167a8718274f0af9362dce17504bd1f9",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_1c114f1e9db5089e78b57969_update",
+          "sql_sha256": "f503e99b1b87ab4862cd8a872a155edbaf57dd5b8ca04a1ad4fd699e9ccbb023",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_1c114f1e9db5089e78b57969_delete",
+          "sql_sha256": "f65e420367033baca2ba2cd9f49e8b2ff4879c8fe87b8c7db6c06068386a8598",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_ff_facilities",
+      "observed_columns": [
+        "active",
+        "facility_id"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_90901b91a5b4d54413a65a72_insert",
+          "sql_sha256": "8b79a330f96eda0d8e4412034d143105487c0b57c0b6252ab8bb82a56c21bf81",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_90901b91a5b4d54413a65a72_update",
+          "sql_sha256": "f30ce3558cb7b84735a9a0ba8a153973969d6df5bf425d2bc9e522908d8a95cd",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_90901b91a5b4d54413a65a72_delete",
+          "sql_sha256": "3c45030dbf4b9b7cee35f2631fe18db2e48118ce5a8c84b117b30f6030c61dd5",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_ff_pool_movement_lines",
+      "observed_columns": [
+        "capital_delta_rub",
+        "facility_id",
+        "line_no",
+        "nm_id",
+        "operation_id",
+        "pool",
+        "quantity_delta"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_71a6d06d2c57a99e70030130_insert",
+          "sql_sha256": "4571c40babae5b26ed50b8990ac8e53d297d23c8edb70530beb66510c030c772",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_71a6d06d2c57a99e70030130_update",
+          "sql_sha256": "ed45722f5c36acb813b6eb66a1e8ac235d8bad3cc4eb3d016c878e2cb33e1a66",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_71a6d06d2c57a99e70030130_delete",
+          "sql_sha256": "c8c8c04ed47157f3b79e9a7efead222f56d2ae20c7e578a8efeeb5a8d614eda2",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_nomenclature_items",
+      "observed_columns": [
+        "ROWID",
+        "aliases_json",
+        "barcode",
+        "barcode_evidence_json",
+        "barcode_source",
+        "barcode_status",
+        "barcode_synced_at",
+        "barcode_updated_at",
+        "barcodes_json",
+        "comment",
+        "compatible_model_keys_json",
+        "compatible_models_text",
+        "created_at",
+        "factory_box_size",
+        "hidden_at",
+        "hidden_reason",
+        "is_active",
+        "is_hidden",
+        "item_id",
+        "match_key",
+        "nm_id",
+        "nomenclature_name",
+        "our_sku",
+        "product_type",
+        "purchase_price_yuan",
+        "updated_at",
+        "vendor_code",
+        "wb_subject_name",
+        "wb_sync_evidence_json",
+        "wb_sync_status",
+        "wb_synced_at",
+        "wb_title",
+        "wb_updated_at"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_b928e6f9907c2951a038ae28_insert",
+          "sql_sha256": "4d9ba8858a49099ca2118a4a9fbc9aeca5ada3e823e8e37ec3c3f31426f998a6",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_b928e6f9907c2951a038ae28_update",
+          "sql_sha256": "9c22035973b6c8baad660254b4db23233872e730e481a3928b5b343f57aa36b2",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_b928e6f9907c2951a038ae28_delete",
+          "sql_sha256": "e789582c54a799c57ca81e4f492925376d3e73c871688d8f5e6a47d27d78b03d",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_ready_publications",
+      "observed_columns": [
+        "after_digest",
+        "as_of_date",
+        "attempt_id",
+        "book_version",
+        "bundle_version",
+        "finished_at",
+        "operation_id",
+        "ready_required",
+        "state"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_fa05170995ce869b68ae133d_insert",
+          "sql_sha256": "9a2555a71ca7c29f5df54894d5d13c18485bcbd87fd0fb53a86159558a5e0312",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_fa05170995ce869b68ae133d_update",
+          "sql_sha256": "27751d3bb477255045704bbe6632354f9aedbd6fdd316cc5fe07a78f7bedc7f8",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_fa05170995ce869b68ae133d_delete",
+          "sql_sha256": "750520819d7b8674f788e2933a34aaf028d34af1a892ad8b8b927a1992369a86",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_ready_snapshots",
+      "observed_columns": [
+        "as_of_date",
+        "bundle_version",
+        "plan_json",
+        "refreshed_at",
+        "snapshot_id"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_587a5d1069a4bc2b7d696fbd_insert",
+          "sql_sha256": "46f8bda810500224da60cd311c2e307ff83cb666c2412ad6a4a768336f40d140",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_587a5d1069a4bc2b7d696fbd_update",
+          "sql_sha256": "7d279b2186274d99681f05ad4e75120813656e10cd8aef23e36b39bde217d9a8",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_587a5d1069a4bc2b7d696fbd_delete",
+          "sql_sha256": "644bb5ca411a3a13ec377f7b48cf88c737d91e6f905003b18e1b33ab8b2631a5",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_warehouse_archival_estimate_active",
+      "observed_columns": [
+        "slot",
+        "version_id"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_9cf79e2728d3f477cac597a5_insert",
+          "sql_sha256": "9eb4cccaed3da03e11d7e73a7b983501b41efb438256fce242afa7295a593644",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_9cf79e2728d3f477cac597a5_update",
+          "sql_sha256": "dfacd5110501224599726f99b16dd8e28480aabfe392c176bc6c2bc638d8866a",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_9cf79e2728d3f477cac597a5_delete",
+          "sql_sha256": "3e9a11ccd2ab166c7ce963c0a5bd95033dbf251aabeaebf85a90f957e5610b4d",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_warehouse_archival_estimate_rows",
+      "observed_columns": [
+        "item_name",
+        "lineage_json",
+        "nm_id",
+        "previous_quality",
+        "previous_unit_cost_rub",
+        "row_fingerprint",
+        "vendor_code",
+        "version_id"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_9b098588b838e4374eb6fc8a_insert",
+          "sql_sha256": "0e9bb6bdb070c3f191daecf5168d2ed88c2c0671f4762ee1a99423034b31159f",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_9b098588b838e4374eb6fc8a_update",
+          "sql_sha256": "1cd20fae4fb7d24a15d096de9250aa01e5bcc8083531940744c7449b074cbc6a",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_9b098588b838e4374eb6fc8a_delete",
+          "sql_sha256": "22b36b486d6bd5d16d727d352908b686147273479b24be1a4726b58b3021dfed",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_warehouse_archival_estimate_versions",
+      "observed_columns": [
+        "effective_date",
+        "manifest_digest",
+        "owner_approval_reference",
+        "plan_fingerprint",
+        "production_dry_run_plan_sha256",
+        "quality",
+        "source_digest",
+        "unit_cost_rub",
+        "version_id"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_25543cb4aedd643ca1f49eb5_insert",
+          "sql_sha256": "c344b8464d0f62bfdd9a00cf949589d84b7749d711a729e96fd6741e1c4008f9",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_25543cb4aedd643ca1f49eb5_update",
+          "sql_sha256": "d9a96c1edaa32bebe800272cec0a2ce348c44d440ca2004cbb1dd8f9646f20d1",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_25543cb4aedd643ca1f49eb5_delete",
+          "sql_sha256": "887788cae98c0098720e87539dbc1010a4d4d019f56dc8c3d9863bff150b4dfe",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_warehouse_business_operations",
+      "observed_columns": [
+        "business_date",
+        "operation_id"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_55d0621e27dcc8423a4228d7_insert",
+          "sql_sha256": "06a98de01182fec030c179f19a4b34ef6ebaaf70cd8aaa766262f35b5962273f",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_55d0621e27dcc8423a4228d7_update",
+          "sql_sha256": "6a7f6e36f848e61823e84358dade8e8c7cce8597083af85f28d3b10cef738bb2",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_55d0621e27dcc8423a4228d7_delete",
+          "sql_sha256": "9268dc0ac32ad099b80bac0455eb3500782a619ab119c828e1c54dc165538dbc",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_warehouse_functional_cutovers",
+      "observed_columns": [
+        "cutover_id",
+        "plan_fingerprint",
+        "status"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_5090f79a517086eefc539ac4_insert",
+          "sql_sha256": "16d5e8bb5a69f6eda9b67288fa6e512aabe3576146c0ef6068d780d9c110a897",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_5090f79a517086eefc539ac4_update",
+          "sql_sha256": "3a309c7438cb85176b2308f857513a575cc66deff13e1b9a95180e1dba292598",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_5090f79a517086eefc539ac4_delete",
+          "sql_sha256": "6ba18896550cca33d8e9c4519e43e0df657619327d3bafc105c7a60af0d7f5fc",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_warehouse_wb_daily_cost",
+      "observed_columns": [
+        "as_of_date",
+        "capital_rub",
+        "created_at",
+        "cutover_id",
+        "fingerprint",
+        "nm_id",
+        "provenance_json",
+        "quality",
+        "quantity",
+        "wac_rub"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_2add8f1f7e5e445cecbe9a91_insert",
+          "sql_sha256": "ae46465ded348731e5e00b8ce928de09030256aa944f1609c590dfeba48afdcb",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_2add8f1f7e5e445cecbe9a91_update",
+          "sql_sha256": "7ee0c71b27667dfacb52ddcb406454c981730c74e376594b5d8e3ae1d1f7b5fb",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_2add8f1f7e5e445cecbe9a91_delete",
+          "sql_sha256": "a68e5cef9af3e0eb6159772c77fc564c54f5b08786f327d5ca0adceaaef76db1",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_wb_supplies_fbs_order_observations",
+      "observed_columns": [
+        "observation_sequence",
+        "order_id",
+        "order_uid_sha256",
+        "rid_sha256"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_cdb81c132863b7c7258ea092_insert",
+          "sql_sha256": "1f820b41dd7364dbbbc40a5252af0857fc46f7c026a9d36189955bb64a8bc74b",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_cdb81c132863b7c7258ea092_update",
+          "sql_sha256": "74d7d845e223a090b529626721ce070d57f1d42f1fe7801e15665d648f4ca0e6",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_cdb81c132863b7c7258ea092_delete",
+          "sql_sha256": "c6f1e4b04c03adf060c546e85ec4812e0b11f9b884fa0b23be68a7ba9dc14a3b",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "sheet_vitrina_v1_wb_supply_cost_layers",
+      "observed_columns": [
+        "inputs_hash",
+        "is_current",
+        "nm_id",
+        "transit_amount_total",
+        "transit_cost_status",
+        "version",
+        "wb_acceptance_amount_total",
+        "wb_supply_cost_layer_id",
+        "wb_supply_id"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_8450321555a9d04da3b6ef59_insert",
+          "sql_sha256": "4b634e25dccfc535b8d4e96c397aa17310f1ec40e39426992ce8cc43284fb8ad",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_8450321555a9d04da3b6ef59_update",
+          "sql_sha256": "f82c77781578b335573ba1a4a821bc193162100a5f7d1b840b9bb9f3b1e58c03",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_8450321555a9d04da3b6ef59_delete",
+          "sql_sha256": "8a40917eeed7396ae5daf64aa826aff80eedefbd493917d63b162daa9848c9d1",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "wb_finance_weekly_aggregates",
+      "observed_columns": [
+        "calculated_at",
+        "classifier_version",
+        "metrics_json",
+        "report_ids_json",
+        "report_types_json",
+        "seller_id",
+        "unknown_reasons_json",
+        "week_end",
+        "week_start"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_4ebd11be2902cb977e2e6a16_insert",
+          "sql_sha256": "538276814cb94816374d94de1204a78e7fff3e8ba7098c1b8b32cec288451555",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_4ebd11be2902cb977e2e6a16_update",
+          "sql_sha256": "8c1ccab85d9418ede0d1a11f10aaf37aaa6e93c6446c4b79f75e97fd51abbe51",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_4ebd11be2902cb977e2e6a16_delete",
+          "sql_sha256": "33fe0dfebe22f0261c032d802f4e091be0c4109b535704f9dc80eca3d1262fc9",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "wb_finance_weekly_cost_coverage",
+      "observed_columns": [
+        "calculated_at",
+        "cogs_rub",
+        "cost_state_hash",
+        "coverage_json",
+        "coverage_pct",
+        "matched_units",
+        "problem_skus_json",
+        "quality_json",
+        "seller_id",
+        "unmatched_units",
+        "week_end",
+        "week_start"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_02c038d5e2e0ec63bd7c33fb_insert",
+          "sql_sha256": "0c839b0640f2309fc7c10bc093830e8d6bb263d4e9591bc8e2857ce2e01c0eb5",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_02c038d5e2e0ec63bd7c33fb_update",
+          "sql_sha256": "d3ca621ce2e5bada646404d6d46f22e8264964333b697372a8e5083185858795",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_02c038d5e2e0ec63bd7c33fb_delete",
+          "sql_sha256": "0c5a14f0b5cb84c15f1550713271f12536e3bcb008064bd98cf9fec5fb5f38c1",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "wb_finance_weekly_raw_rows",
+      "observed_columns": [
+        "raw_json",
+        "report_id",
+        "row_hash",
+        "rrd_id",
+        "seller_id",
+        "week_end",
+        "week_start"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_3d13cf69b85f85d535330dd6_insert",
+          "sql_sha256": "491178b8c26708b447d3a460257bdf37b5e7f64212a74f1cc7f04536c30c3c15",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_3d13cf69b85f85d535330dd6_update",
+          "sql_sha256": "3a3ca07ab5ccfdd7dbb9e676eee7fbf1471711669ff43d7072268ce1177a5942",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_3d13cf69b85f85d535330dd6_delete",
+          "sql_sha256": "11771167dcd7342e0ce9dc6a6ba4c663c48dd6cba3924fc8a811384c969e52f5",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "wb_finance_weekly_reconciliation",
+      "observed_columns": [
+        "checked_at",
+        "detail_json",
+        "difference_rub",
+        "seller_id",
+        "status",
+        "week_end",
+        "week_start"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_a489a33a44f93f91ba5f07cf_insert",
+          "sql_sha256": "347e3a079d4f8d17cf2d58836168dfcdd3918b2fd8ce509a0ef724c1e37bed8c",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_a489a33a44f93f91ba5f07cf_update",
+          "sql_sha256": "d9dc57d2db4cc83d43d7496f42bd7e75a3287cf27c00c4d0376c99983e8bbab5",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_a489a33a44f93f91ba5f07cf_delete",
+          "sql_sha256": "ba57f6b1a621d6d3ad60f0181060c3a45958d153a1014f3230a0a2060c8c6cb6",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "wb_finance_weekly_reports",
+      "observed_columns": [
+        "content_hash",
+        "report_id",
+        "report_type",
+        "row_count",
+        "seller_id",
+        "week_end",
+        "week_start"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_2fda564950c17255fa33172b_insert",
+          "sql_sha256": "a46432e89ab9bd6aae709fe27685af615155a8b9e566ffc520c4b1dae323ad11",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_2fda564950c17255fa33172b_update",
+          "sql_sha256": "9de9763cd880e7b8ce740f21c5270a688c92c3be2327a369e85354388701aedb",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_2fda564950c17255fa33172b_delete",
+          "sql_sha256": "a652d1e3b38b35e53ad18d22fd950140a0e8764e04a6a4789fd48f57e6e9422a",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "wb_finance_weekly_sku_aggregates",
+      "observed_columns": [
+        "calculated_at",
+        "cost_state_hash",
+        "coverage_json",
+        "formula_version",
+        "metrics_json",
+        "nm_id",
+        "raw_row_count",
+        "raw_source_digest",
+        "seller_id",
+        "week_content_hash",
+        "week_end",
+        "week_start"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_5b70e6b1ca92c3b25a6c3ccc_insert",
+          "sql_sha256": "7268eecbbfd7157e2e0c94f4ea7d335845c01074809ce7ca4e083fe7826b0ef3",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_5b70e6b1ca92c3b25a6c3ccc_update",
+          "sql_sha256": "ed1820cd2a61bb014b2120c59e782053ba30775af8bad5795f8f2ea4fb8d46e3",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_5b70e6b1ca92c3b25a6c3ccc_delete",
+          "sql_sha256": "c999c69052e956520f34fcfb417bf6258eb0d1e337deefe080fe8fa453a1b522",
+          "event": "DELETE"
+        }
+      ]
+    },
+    {
+      "table": "wb_finance_weekly_sync",
+      "observed_columns": [
+        "attempt_count",
+        "content_hash",
+        "first_loaded_at",
+        "last_error",
+        "last_synced_at",
+        "next_retry_at",
+        "raw_row_count",
+        "report_count",
+        "seller_id",
+        "status",
+        "unchanged_sync_count",
+        "week_end",
+        "week_start"
+      ],
+      "scope": "entire physical table, including insertion/deletion/empty membership",
+      "writer_coverage": "every SQLite INSERT/UPDATE/DELETE, including direct SQL and old application code",
+      "triggers": [
+        {
+          "name": "wbc_dependency_revision_e5f3f6deb592e7b1d3211cf9_insert",
+          "sql_sha256": "0d3e1a53aa1a48aaafdcae3d631dc8f0de70bf0f6a6325734c08304b9340177b",
+          "event": "INSERT"
+        },
+        {
+          "name": "wbc_dependency_revision_e5f3f6deb592e7b1d3211cf9_update",
+          "sql_sha256": "26013c7f3938b0e9d63c8a5a56403cdf27b98fbc332fa2ce5949045afc49e1f2",
+          "event": "UPDATE"
+        },
+        {
+          "name": "wbc_dependency_revision_e5f3f6deb592e7b1d3211cf9_delete",
+          "sql_sha256": "616476ba978e2326d3bcb934a0ac0c5e35db9a8e373b049c9ae38610a208dd87",
+          "event": "DELETE"
+        }
+      ]
+    }
+  ],
+  "absence_rule": "sqlite_master/schema_version before and after all reads; existing empty tables are authorizer-observed and revisioned; newly created fallback table changes schema_version",
+  "native_identity_checks": {
+    "reader": "operator_ff_overhead._completion_source on caller writer connection before and after each DML",
+    "tables": [
+      "sheet_vitrina_v1_ff_pool_overhead_confirmations",
+      "sheet_vitrina_v1_ff_pool_overhead_cancellations",
+      "sheet_vitrina_v1_ff_pool_overhead_replacements",
+      "sheet_vitrina_v1_ff_pool_document_requests",
+      "sheet_vitrina_v1_ff_pool_documents",
+      "sheet_vitrina_v1_ff_pool_document_lines",
+      "sheet_vitrina_v1_ff_pool_document_expense_lines",
+      "sheet_vitrina_v1_ff_pool_document_relations",
+      "sheet_vitrina_v1_ff_pool_movement_lines",
+      "sheet_vitrina_v1_warehouse_business_operations",
+      "sheet_vitrina_v1_warehouse_targeted_recalc_queue",
+      "sheet_vitrina_v1_recovery_operations",
+      "sheet_vitrina_v1_ff_workflow_events"
+    ],
+    "scope": "exact request/document/operation/queue identities and source digests; retained after_digest; complete replay event must match native after image"
+  },
+  "book": {
+    "tables": [
+      "accounting_current",
+      "accounting_revisions",
+      "accounting_blobs"
+    ],
+    "read": "one same-live readonly observer; detached book/current revision and every blob content hash verified; same observer data_version fenced before/after proof and while SQLite writer reservation excludes direct SQL",
+    "writers": [
+      "fbs_accounting_runtime._save_book",
+      "fbs_accounting_historical_revision_writer",
+      "direct SQL: excluded by writable attachment BEGIN IMMEDIATE"
+    ],
+    "schema_change": false
+  },
+  "authority": {
+    "files": [
+      "storage_generation_manifest.json",
+      ".business-data-schedule-profile.json",
+      "schedule transition authority records"
+    ],
+    "writers": [
+      "storage_registry.atomic_write_manifest: exclusive generation_pin",
+      "business_data_schedule_transition.apply/rollback: exclusive generation_pin",
+      "finance_storage_migration: prepare/recopy replace inactive candidate; activation uses atomic_write_manifest"
+    ],
+    "file_replacement_guard": "manifest generation pin plus physical dev/inode and schema_version; SQLite backup-to-existing-file increments destination schema_version"
+  },
+  "commits": [
+    {
+      "state": "S1",
+      "owner": "operator_ff_overhead.prepare_guard",
+      "writes": [
+        "exact queue economics/finance fields",
+        "same acceptance native_completion receipt"
+      ]
+    },
+    {
+      "state": "S2",
+      "owner": "ff_pool_documents._finalize_posted",
+      "writes": [
+        "same request posted→replay",
+        "same request replay running event"
+      ]
+    },
+    {
+      "state": "S3",
+      "owner": "WarehouseRecoveryRegistry._transition",
+      "writes": [
+        "same recovery operation lifecycle CAS and after_digest",
+        "one retained transition"
+      ],
+      "guard": "inside own BEGIN IMMEDIATE before DML and before commit"
+    },
+    {
+      "state": "S4",
+      "owner": "ff_pool_documents._finalize_posted",
+      "writes": [
+        "same request replay→complete",
+        "matching complete replay event"
+      ]
+    },
+    {
+      "state": "S5",
+      "owner": "operator_ff_overhead._update",
+      "writes": [
+        "same acceptance completed and native recovery receipt"
+      ]
+    }
+  ],
+  "lock_order": [
+    "warehouse job ownership",
+    "shared generation pin",
+    "ff pool posting flock",
+    "warehouse functional writer flock",
+    "accounting writer flock",
+    "single main connection BEGIN IMMEDIATE with rw raw/book attachments"
+  ],
+  "mutation_policy": "No posting call. No baseline reset. Proof dependency counters do not include mutable native lifecycle fields; those are validated by exact source/digest/event readback in every writer transaction. All proof scans run before first writer reservation."
+}

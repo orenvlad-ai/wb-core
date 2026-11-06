@@ -125,6 +125,24 @@ class DependencyProofTests(unittest.TestCase):
         self.assertEqual(diagnostic['changed_schemas'],['main']);self.assertEqual(diagnostic['changed_dependency_count'],1)
         self.assertNotEqual(diagnostic['before_vector_digest'],diagnostic['after_vector_digest'])
 
+    def test_same_inode_sqlite_restore_invalidates_schema_cookie(self):
+        path=self.fixture('DELETE');conn,proof=self.capture(path)
+        backup=sqlite3.connect(str(path)+'.backup');self.addCleanup(backup.close)
+        conn.backup(backup)
+        with sqlite3.connect(path) as writer:backup.backup(writer)
+        with self.assertRaisesRegex(CompletionProofError,'schema_changed'):proof.assert_current(conn)
+
+    def test_checked_in_manifest_matches_trigger_contract(self):
+        from packages.application.dependency_proof import _trigger
+        import hashlib
+        manifest=json.loads((Path(__file__).resolve().parents[1]/'docs/contracts/finance_completion_dependency_manifest.json').read_text())
+        self.assertEqual(manifest['proof_contract'],'sqlite_dependency_proof_v1')
+        for item in manifest['fixture_observed_dependencies']:
+            for trigger in item['triggers']:
+                name,sql=_trigger(item['table'],trigger['event'])
+                self.assertEqual(trigger['name'],name)
+                self.assertEqual(trigger['sql_sha256'],hashlib.sha256(sql.encode()).hexdigest())
+
     def test_python_budget_interrupts_readonly_work(self):
         path=self.fixture('DELETE'); conn,_=self.capture(path)
         with self.assertRaisesRegex(CompletionProofError,'budget_exhausted'):

@@ -786,6 +786,10 @@ def _completion_source(conn, identity):
     native_state=conn.execute(f'SELECT state FROM {REQUESTS_TABLE} WHERE request_id=?',(identity,)).fetchone()[0]
     if native_state not in ('posted','replay','complete'):
         raise ValueError('overhead_completion_native_state_invalid')
+    if native_state in ('replay','complete'):
+        from packages.application.ff_pool_documents import WORKFLOW_EVENTS_TABLE
+        if not conn.execute(f"SELECT 1 FROM {WORKFLOW_EVENTS_TABLE} WHERE action_type='facility_pool_document' AND identity=? AND stage='replay' AND status='running' LIMIT 1",(identity,)).fetchone():
+            raise ValueError('overhead_completion_replay_event_unproven')
     if native_state=='complete':
         from packages.application.ff_pool_documents import WORKFLOW_EVENTS_TABLE
         events=conn.execute(f"SELECT details_json FROM {WORKFLOW_EVENTS_TABLE} WHERE action_type='facility_pool_document' AND identity=? AND stage='replay' AND status='complete'",(identity,)).fetchall()
@@ -900,7 +904,7 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
 def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None, deadline=None, write_state):
     """One coherent bounded cohort proof, then short guarded native handoffs."""
     from contextlib import ExitStack
-    from packages.application.dependency_proof import DependencyProof, CompletionProofError, readonly_deadline, check_deadline
+    from packages.application.dependency_proof import DependencyProof, CompletionProofError, readonly_deadline, check_deadline, DetachedReadConnection
     from datetime import date
     from packages.application import fbs_accounting_runtime as accounting
     from packages.application.fbs_overhead_presentation import OverheadAccountingView
@@ -918,6 +922,9 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
         raise ValueError('overhead_completion_finance_unproven')
     completed=0
     with ExitStack() as scope:
+        proof_budget=ExitStack()
+        scope.callback(proof_budget.close)
+        proof_budget.enter_context(readonly_deadline(None,deadline))
         authority=[]
         observer=scope.enter_context(closing(finance_block._connect_stale_cost_plan(storage_authority=authority)))
         registry=finance_block.store_registry
@@ -933,29 +940,25 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
         book_observer=scope.enter_context(closing(sqlite3.connect(accounting.path(runtime.runtime_dir).as_uri()+'?mode=ro',uri=True)))
         book_observer.execute('PRAGMA query_only=ON')
         book_before=finance_block._sqlite_data_version_token(book_observer)
+        from packages.application.business_data_schedule_profile import load_selector
+        policy_selector=load_selector(Path(runtime.runtime_dir))
         book_identity=finance_block._sqlite_persistent_identity(book_observer)
         book_files=files_identity(book_observer)
-        budget=readonly_deadline(observer,deadline)
-        budget.__enter__()
-        budget_active=[True]
-        def close_budget():
-            if budget_active[0]:
-                budget_active[0]=False
-                budget.__exit__(None,None,None)
-        scope.callback(close_budget)
-        book_observer.set_progress_handler(lambda: int(deadline is not None and __import__('time').monotonic()>=deadline),1000)
+        proof_budget.enter_context(readonly_deadline(observer,deadline))
+        proof_budget.enter_context(readonly_deadline(book_observer,deadline))
+        detached=DetachedReadConnection(observer)
         book,version=accounting.load_detached(runtime.runtime_dir,book_observer)
         from packages.application.vitrina_last_known_cost import approved_reporting_snapshot
         observed=dependencies.observe()
         observed.__enter__()
         scope.callback(observed.__exit__, None, None, None)
-        finance_block._shared_cost_snapshot=approved_reporting_snapshot(accounting.load_shared(runtime.runtime_dir,bound_book=(book,version)),observer)
+        finance_block._shared_cost_snapshot=approved_reporting_snapshot(accounting.load_shared(runtime.runtime_dir,bound_book=(book,version)),detached)
         finance_block._canonical_cost_snapshot_connection=None
         finance_block._nomenclature_cache_connection=None
-        plan=finance_block._plan_stale_cost_weeks_in_connection(observer,
+        plan=finance_block._plan_stale_cost_weeks_in_connection(detached,
             date_from=date.fromisoformat(finance_block.shared_cost_snapshot.effective_date),date_to=None)
         if plan['stale_week_count']!=0: raise ValueError('overhead_completion_finance_stale')
-        reads=_CompletionReadset(observer)
+        reads=_CompletionReadset(detached)
         aliases,ambiguous,_,_=_nomenclature_identity_index(reads)
         nm_ids=sorted({str(nm) for frozen in captured['sources'] for nm in frozen['affected_nm_ids']})
         # The provider's operation date need not lie inside its report week.
@@ -987,12 +990,12 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
                 raise ValueError('overhead_completion_finance_foreign')
         else:
             targets={(finance_block.seller_id,str(w['week_start']),str(w['week_end'])) for w in finance_receipt.get('weeks',[])}
-            actual=finance_block._finance_source_dependency_fingerprint(observer,target_keys=targets,force_reload=True)
+            actual=finance_block._finance_source_dependency_fingerprint(detached,target_keys=targets,force_reload=True)
             if (not targets or finance_receipt.get('source_dependency')!=actual
                     or finance_receipt.get('post_source_dependency')!=actual
-                    or finance_receipt.get('target_image_digest')!=finance_block._json_digest(finance_block._finance_target_images(observer,targets))):
+                    or finance_receipt.get('target_image_digest')!=finance_block._json_digest(finance_block._finance_target_images(detached,targets))):
                 raise ValueError('overhead_completion_finance_foreign')
-        publication=accounting.current_publication_receipt(runtime,now=now,connection=observer,bound_book=(book,version))
+        publication=accounting.current_publication_receipt(runtime,now=now,connection=detached,bound_book=(book,version))
         if (not publication or economics_receipt.get('accounting_publication')!=publication
                 or finance_receipt.get('accounting_version')!=publication['accounting_version']
                 or finance_receipt.get('accounting_version_before')!=publication['accounting_version']
@@ -1016,12 +1019,11 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
         seal=reads.seal()
         observed.__exit__(None,None,None)
         dependency_receipt=dependencies.seal()
-        close_budget()
-        book_observer.set_progress_handler(None,0)
+        proof_budget.close()
         if book_before!=finance_block._sqlite_data_version_token(book_observer):
             raise CompletionProofError('overhead_completion_book_changed')
         def refresh_fence(connection=observer):
-            if (registry.load()!=captured['authority'] or files_identity(observer)!=files
+            if (registry.load()!=captured['authority'] or load_selector(Path(runtime.runtime_dir))!=policy_selector or files_identity(observer)!=files
                     or files_identity(book_observer)!=book_files
                     or finance_block._sqlite_data_version_token(book_observer)!=book_before):
                 raise CompletionProofError('overhead_completion_authority_changed',classification='authority_changed')
