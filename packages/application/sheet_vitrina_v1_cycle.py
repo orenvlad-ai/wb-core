@@ -114,6 +114,116 @@ def validate_collection(summary, *, require_full_scope=False):
         'source_capture_outcomes': canonical(summary['slots'])}, tuple(warnings))
 
 
+def _duration_ms(start, end):
+    if not start or not end:
+        return None
+    try:
+        return max(0, int((datetime.fromisoformat(end.replace('Z', '+00:00')) -
+            datetime.fromisoformat(start.replace('Z', '+00:00'))).total_seconds() * 1000))
+    except (TypeError, ValueError):
+        return None
+
+
+def cycle_error_diagnostic(exc, receipt):
+    """Bounded evidence, never exception bodies, SQL, locals or provider headers.
+
+    Unknown messages are deliberately omitted rather than regex-redacted: a
+    response can contain an arbitrary secret without a recognizable key.
+    """
+    import sqlite3
+    import re
+    root = Path(__file__).resolve().parents[2]
+    chain, seen = [], set()
+    current = exc
+    while current is not None and id(current) not in seen and len(chain) < 4:
+        seen.add(id(current))
+        kind = type(current).__name__
+        item = {'type': kind[:80] if re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]{0,79}', kind) else 'Exception',
+            'message_policy': 'raw_message_omitted', 'frames': []}
+        if isinstance(current, sqlite3.Error):
+            code = getattr(current, 'sqlite_errorcode', None)
+            if type(code) is int:
+                item['sqlite_errorcode'] = code
+            name = getattr(current, 'sqlite_errorname', '')
+            if isinstance(name, str) and re.fullmatch(r'SQLITE_[A-Z_0-9]{1,60}', name):
+                item['sqlite_errorname'] = name
+            # Exact known messages contain no SQL identifiers or user data.
+            message = str(current)
+            if message in {'database is locked', 'database table is locked',
+                    'database is busy', 'unable to open database file',
+                    'attempt to write a readonly database', 'disk I/O error',
+                    'database or disk is full', 'cannot start a transaction within a transaction',
+                    'database disk image is malformed', 'interrupted'}:
+                item.update(message=message, message_policy='known_sqlite_literal')
+        status = getattr(current, 'status_code', None)
+        if type(status) is int and 100 <= status <= 599:
+            item['http_status'] = status
+        # urllib HTTPError uses code; no URL, headers or response body is read.
+        from urllib.error import HTTPError
+        if isinstance(current, HTTPError) and type(current.code) is int and 100 <= current.code <= 599:
+            item['http_status'] = current.code
+        tb = current.__traceback__
+        while tb is not None:
+            code = tb.tb_frame.f_code
+            try:
+                relative = Path(code.co_filename).resolve().relative_to(root)
+            except ValueError:
+                relative = None
+            if relative is not None and relative.parts[0] in {'apps', 'packages'}:
+                item['frames'].append({'file': relative.as_posix(),
+                    'function': code.co_name[:100], 'line': tb.tb_lineno})
+            tb = tb.tb_next
+        item['frames'] = item['frames'][-8:]
+        chain.append(item)
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+    return {'schema_version': 1, 'stage': receipt.get('current_stage') or 'initialization',
+        'observed_at': receipt.get('finished_at'), 'exceptions': chain,
+        'effects': 'not_inferred_from_exception'}
+
+
+def cycle_summary(receipt):
+    """Report execution, confirmed publication and quality independently.
+
+    No domain reads, retries, recovery decisions or changed completion rules.
+    """
+    stages = receipt.get('stages', [])
+    ready = next((s for s in stages if s['stage'] == 'final_ready'), {})
+    versions = ready.get('versions', {})
+    if ready.get('status') in {'complete', 'degraded'}:
+        publication = 'confirmed'
+    elif ready.get('started_at'):
+        publication = 'unknown'
+    else:
+        publication = 'not_started'
+    quality = ('degraded' if ready.get('status') == 'degraded' else
+        'complete' if ready.get('status') == 'complete' else 'unknown')
+    return {'schema_version': 1, 'cycle_id': receipt['cycle_id'],
+        'execution': receipt['status'], 'failed_stage': receipt.get('current_stage') or
+            ('initialization' if receipt['status'] in {'failed', 'interrupted'} else ''),
+        'started_at': receipt.get('started_at'), 'finished_at': receipt.get('finished_at'),
+        'duration_ms': _duration_ms(receipt.get('started_at'), receipt.get('finished_at')),
+        'publication': {'scope': 'final_ready', 'status': publication, 'quality': quality,
+            **{k: versions[k] for k in ('snapshot_id', 'refreshed_at', 'publication_operation_id',
+                'publication_attempt_id', 'ready_semantic_status') if k in versions}},
+        'stages': [{'stage': s['stage'], 'status': s['status'],
+            'duration_ms': _duration_ms(s.get('started_at'), s.get('finished_at')),
+            'warning_count': len(s.get('warnings', []))} for s in stages],
+        'details': receipt['cycle_id'] + '.json'}
+
+
+def _observe_terminal(receipt, exc=None):
+    # Observability must never replace the original error or fail a good cycle.
+    try:
+        if exc is not None:
+            receipt['error_diagnostic'] = cycle_error_diagnostic(exc, receipt)
+    except Exception:
+        receipt['diagnostic_status'] = 'unavailable'
+    try:
+        receipt['summary'] = cycle_summary(receipt)
+    except Exception:
+        receipt['summary_status'] = 'unavailable'
+
+
 class CycleReceiptStore:
     """Small private JSONs and one fixed single-flight; construction is read-only."""
     def __init__(self, runtime_dir, timestamp_factory):
@@ -135,10 +245,14 @@ class CycleReceiptStore:
             for item in value['stages']:
                 if item['status'] == 'running':
                     item.update(status='interrupted', error_code='outcome_uncertain')
+            _observe_terminal(value)  # Read-side projection only; never writes/replays.
         return value
 
     def write(self, receipt):
         raw = canonical(receipt)
+        if len(raw.encode()) > 256 * 1024 and ('summary' in receipt or 'error_diagnostic' in receipt):
+            receipt = {k: v for k, v in receipt.items() if k not in {'summary', 'error_diagnostic'}}
+            raw = canonical(receipt)  # Preserve the pre-existing receipt budget/behavior.
         if len(raw.encode()) > 256 * 1024:
             raise CycleConflict('cycle_receipt_size')
         _atomic(self.root / (receipt['cycle_id'] + '.json'), receipt)
@@ -490,6 +604,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
             store.write(receipt)
         receipt.update(status='degraded' if any(i['status']=='degraded' for i in receipt['stages']) else 'complete',
             finished_at=store.timestamp_factory(), current_stage='')
+        _observe_terminal(receipt)
         store.write(receipt)
         return receipt
     except BaseException as exc:
@@ -511,5 +626,6 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
                     item['history_failure'] = dict(history_failure)
                 if fbs_failure:
                     item['fbs_failure'] = dict(fbs_failure)
+        _observe_terminal(receipt, exc)
         store.write(receipt)
         raise
