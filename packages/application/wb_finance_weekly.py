@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager, ExitStack
 from functools import wraps
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from packages.application.shared_sku_cost import SharedSkuCostSnapshot
 
 from packages.application.business_data_heavy_admission import heavy_admitted
+from packages.application.dependency_proof import check_deadline
 
 from packages.adapters.wb_finance_api import (
     FINANCE_URL,
@@ -753,6 +754,15 @@ def _finance_heavy_method(method):
     return admitted
 
 
+def _finance_generation_pinned(method):
+    @wraps(method)
+    def pinned(self, *args, **kwargs):
+        from packages.application.storage_registry import generation_pin
+        with generation_pin(self.runtime_dir):
+            return method(self, *args, **kwargs)
+    return pinned
+
+
 class FinanceStaleCostHandoffError(ValueError):
     """Fixed, bounded pre-write diagnostics; never retain provider/row payloads."""
     REASONS = frozenset({'finance_handoff_changed', 'finance_handoff_exhausted',
@@ -829,6 +839,7 @@ class WbFinanceWeeklyBlock:
         if not self.shared_cost_is_candidate:
             from packages.application.fbs_accounting_runtime import load_shared
             self._shared_cost_snapshot = load_shared(self.runtime_dir)
+            self._shared_cost_base = self._shared_cost_snapshot
             if self._shared_cost_snapshot is not None:
                 from packages.application.vitrina_last_known_cost import approved_reporting_snapshot
                 with closing(self.store_registry.connect("operational", mode="ro",
@@ -1988,6 +1999,7 @@ class WbFinanceWeeklyBlock:
         }
         unknown: set[str] = set()
         for row in rows:
+            check_deadline()
             points, fee = loyalty(row)
             values["loyalty_points"] += points
             values["loyalty_fee"] += fee
@@ -5963,6 +5975,7 @@ class WbFinanceWeeklyBlock:
         ).fetchall()
         stale: list[dict[str, Any]] = []
         for candidate in candidates:
+            check_deadline()
             start = date.fromisoformat(candidate["week_start"])
             end = date.fromisoformat(candidate["week_end"])
             raw_rows = conn.execute(
@@ -6092,6 +6105,7 @@ class WbFinanceWeeklyBlock:
         return plan
 
     @_finance_heavy_method
+    @_finance_generation_pinned
     def apply_stale_cost_weeks(
         self,
         *,
@@ -6102,9 +6116,11 @@ class WbFinanceWeeklyBlock:
     ) -> dict[str, Any]:
         """Build and verify a query-only projection, then run one short CAS."""
 
+        self._install_dependency_proof_schema()
+        proof_deadline = time.monotonic() + 1800.0
         phase_started = datetime.now(timezone.utc)
         original_authority: list[GenerationManifest] = []
-        with self._connect_stale_cost_plan(storage_authority=original_authority) as plan_conn:
+        with self._finance_read_proof(original_authority, proof_deadline) as (plan_conn, query_proof, proof_scope, book_fence):
             if (expected_storage_manifest_sha256 is not None
                     and original_authority[0].manifest_sha256 != expected_storage_manifest_sha256):
                 raise ValueError("Finance storage manifest changed before apply")
@@ -6114,8 +6130,6 @@ class WbFinanceWeeklyBlock:
                 plan_conn, date_from=date_from, date_to=date_to
             )
             operator_sources=plan.get('operator_nomenclature_sources',[])
-            if operator_sources and self._sqlite_data_version_token(plan_conn)!=operator_plan_token:
-                raise ValueError('Finance operator source changed during query planning')
             if str(plan["fingerprint"]) != expected_fingerprint:
                 raise ValueError("stale Finance cost plan fingerprint changed before apply")
             target_keys = {
@@ -6123,6 +6137,9 @@ class WbFinanceWeeklyBlock:
                 for item in plan["weeks"]
             }
             if not target_keys:
+                proof_scope.close()
+                query_proof.seal()
+                book_fence()
                 query_plan_ms = max(
                     0.0,
                     (
@@ -6139,17 +6156,18 @@ class WbFinanceWeeklyBlock:
                         'catalog_price_policy':'supplier_reference_not_historical_cost',
                         'non_target_preserved':True,'post_verify_stale_week_count':0}
                     ack_authority: list[GenerationManifest] = []
-                    with self._connect(storage_authority=ack_authority) as operator_writer:
+                    with self._connect_proof_writer(storage_authority=ack_authority) as (operator_writer, book_expected):
                         operator_writer.execute('BEGIN IMMEDIATE')
                         try:
                             if (ack_authority != original_authority
                                     or self.store_registry.load() != original_authority[0]
-                                    or self._sqlite_persistent_identity(operator_writer) != self._sqlite_persistent_identity(plan_conn)):
+                                    or self._proof_persistent_identity(operator_writer) != self._sqlite_persistent_identity(plan_conn)):
                                 raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
                                     phase='writer_handoff', classification='unclassified_commit', attempt=1,
                                     before=operator_plan_token, after=self._sqlite_data_version_token(plan_conn))
-                            if self._sqlite_data_version_token(plan_conn)!=operator_plan_token:
-                                raise ValueError('Finance operator source changed during acknowledgement handoff')
+                            self._assert_proof_book(operator_writer, book_expected)
+                            query_proof.assert_current(operator_writer)
+                            book_fence()
                             acknowledge_finance(operator_writer,selected=operator_sources,proof=proof)
                             operator_writer.commit()
                         except BaseException:
@@ -6245,18 +6263,18 @@ class WbFinanceWeeklyBlock:
                         plan_conn, target_keys=target_keys, target_only=False,
                     )
                     handoff_data_version = self._sqlite_data_version_token(plan_conn)
-                    if before != handoff_data_version:
-                        raise FinanceStaleCostHandoffError.changed(before, handoff_data_version,
-                            phase='validation', attempt=attempt)
+                    proof_scope.close()
+                    query_proof.seal()
+                    book_fence()
                     dependency_finished = datetime.now(timezone.utc)
 
                     # All book publishers own this same warehouse->book/main order.
                     # Hold it only for fresh compact shared refs and the final CAS.
                     with warehouse_functional_write_lock(self.runtime_dir, timeout_seconds=5):
                         writer_authority: list[GenerationManifest] = []
-                        with self._connect(storage_authority=writer_authority) as writer_conn:
+                        with self._connect_proof_writer(storage_authority=writer_authority) as (writer_conn, book_expected):
                             if (writer_authority != original_authority
-                                    or self._sqlite_persistent_identity(writer_conn) != observer_identity):
+                                    or self._proof_persistent_identity(writer_conn) != observer_identity):
                                 raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
                                     phase='writer_handoff', classification='unclassified_commit', attempt=attempt,
                                     before=handoff_data_version, after=self._sqlite_data_version_token(plan_conn))
@@ -6269,9 +6287,9 @@ class WbFinanceWeeklyBlock:
                             writer_conn.execute("BEGIN IMMEDIATE")
                             try:
                                 current = self._sqlite_data_version_token(plan_conn)
-                                if current != handoff_data_version:
-                                    raise FinanceStaleCostHandoffError.changed(handoff_data_version, current,
-                                        phase='writer_handoff', attempt=attempt)
+                                self._assert_proof_book(writer_conn, book_expected)
+                                query_proof.assert_current(writer_conn)
+                                book_fence()
                                 if self._json_digest(self._finance_target_images(writer_conn, target_keys)) != plan["target_before_image_digest"]:
                                     raise FinanceStaleCostHandoffError('finance_target_changed',
                                         phase='target_cas', classification='target_drift', attempt=attempt,
@@ -6284,7 +6302,10 @@ class WbFinanceWeeklyBlock:
                                 if self._json_digest(applied_images) != target_image_digest:
                                     raise ValueError("Finance target CAS readback differs from snapshot")
                                 writer_conn.commit()
-                            except BaseException:
+                            except BaseException as exc:
+                                from packages.application.dependency_proof import CompletionProofError
+                                if isinstance(exc, CompletionProofError) and dml_started:
+                                    exc.business_write_started = True
                                 writer_conn.rollback()
                                 raise
                             writer_finished = datetime.now(timezone.utc)
@@ -6301,7 +6322,7 @@ class WbFinanceWeeklyBlock:
                     break
 
         readback_authority: list[GenerationManifest] = []
-        with self._connect_stale_cost_plan(storage_authority=readback_authority) as conn:
+        with self._finance_committed_readback(), self._finance_read_proof(readback_authority, proof_deadline) as (conn, readback_proof, readback_scope, book_fence):
             self._assert_readonly_plan_connection(conn)
             if operator_sources and (readback_authority != original_authority
                     or self._sqlite_persistent_identity(conn) != observer_identity):
@@ -6328,6 +6349,9 @@ class WbFinanceWeeklyBlock:
             )
             if int(post_verify["stale_week_count"]) != 0 and not source_advanced:
                 raise ValueError("post-recalculation verification still contains stale weeks")
+            readback_scope.close()
+            readback_proof.seal()
+            book_fence()
             operator_acks=[]
             if operator_sources and not source_advanced and int(post_verify['stale_week_count'])==0:
                 from packages.application.operator_nomenclature import acknowledge_finance
@@ -6340,17 +6364,18 @@ class WbFinanceWeeklyBlock:
                     'non_target_preserved':True,'post_verify_stale_week_count':0,
                     'catalog_price_policy':'supplier_reference_not_historical_cost'}
                 ack_authority: list[GenerationManifest] = []
-                with self._connect(storage_authority=ack_authority) as operator_writer:
+                with self._connect_proof_writer(storage_authority=ack_authority) as (operator_writer, book_expected):
                     operator_writer.execute('BEGIN IMMEDIATE')
                     try:
                         if (ack_authority != readback_authority
                                 or self.store_registry.load() != readback_authority[0]
-                                or self._sqlite_persistent_identity(operator_writer) != self._sqlite_persistent_identity(conn)):
+                                or self._proof_persistent_identity(operator_writer) != self._sqlite_persistent_identity(conn)):
                             raise FinanceStaleCostHandoffError('finance_handoff_identity_changed',
                                 phase='writer_handoff', classification='unclassified_commit', attempt=1,
                                 before=operator_post_token, after=self._sqlite_data_version_token(conn))
-                        if self._sqlite_data_version_token(conn)!=operator_post_token:
-                            raise ValueError('Finance operator source changed during post-readback acknowledgement')
+                        self._assert_proof_book(operator_writer, book_expected)
+                        readback_proof.assert_current(operator_writer)
+                        book_fence()
                         acknowledge_finance(operator_writer,selected=operator_sources,proof=proof)
                         operator_writer.commit()
                     except BaseException:
@@ -6400,8 +6425,10 @@ class WbFinanceWeeklyBlock:
         aliases, ambiguous, _groups, _items = _nomenclature_identity_index(conn)
         scope = set()
         for seller, start, end in sorted(target_keys):
+            check_deadline()
             for row in conn.execute('SELECT raw_json FROM wb_finance_weekly_raw_rows '
                     'WHERE seller_id=? AND week_start=? AND week_end=?', (seller, start, end)):
+                check_deadline()
                 operation = json.loads(row['raw_json'])
                 if (str(operation.get('docTypeName') or '').casefold() not in {'продажа', 'возврат'}
                         or int(_decimal(operation.get('quantity'))) == 0):
@@ -6418,6 +6445,7 @@ class WbFinanceWeeklyBlock:
             ('effective_date', 'cost_method_version', 'candidate_only')} if policy is not None else None),
             'refs': []}
         for day, nm in scope:
+            check_deadline()
             resolution = shared.resolve(nm_id=nm, operation_date=date.fromisoformat(day)) if shared is not None else None
             material['refs'].append([day, nm, ({key: resolution.get(key) for key in
                 ('status', 'reason', 'unit_cost_rub', 'source_digest', 'canonical_source_version',
@@ -6483,6 +6511,7 @@ class WbFinanceWeeklyBlock:
                 "SELECT * FROM sheet_vitrina_v1_nomenclature_items "
                 "ORDER BY nm_id,rowid"
             ).fetchall():
+                check_deadline()
                 add("nomenclature", str(row["nm_id"] or ""), dict(row))
 
         relevant_wb_keys: set[tuple[str, str]] = set()
@@ -6499,6 +6528,7 @@ class WbFinanceWeeklyBlock:
                 if metadata is not None else None
             ))
         for seller_id, week_start, week_end in sorted(target_keys):
+            check_deadline()
             raw_rows = conn.execute(
                 "SELECT report_id,rrd_id,row_hash,raw_json "
                 f"FROM {raw_table} WHERE seller_id=? "
@@ -6506,6 +6536,7 @@ class WbFinanceWeeklyBlock:
                 (seller_id, week_start, week_end),
             ).fetchall()
             for row in raw_rows:
+                check_deadline()
                 raw_json = str(row["raw_json"] or "{}")
                 try:
                     operation = json.loads(raw_json)
@@ -6584,6 +6615,7 @@ class WbFinanceWeeklyBlock:
                     continue
                 matched_order_ids: set[int] = set()
                 for identity_hash in identity_hashes:
+                    check_deadline()
                     matched_order_ids.update(
                         snapshot.fbs_order_ids_by_identity_hash.get(identity_hash, ())
                     )
@@ -6615,6 +6647,7 @@ class WbFinanceWeeklyBlock:
                     "AND week_start=? AND week_end=? ORDER BY report_id",
                     (seller_id, week_start, week_end),
                 ).fetchall():
+                    check_deadline()
                     add(
                         "finance_report",
                         [seller_id, week_start, week_end, row["report_id"]],
@@ -6623,11 +6656,13 @@ class WbFinanceWeeklyBlock:
 
         if scoped_daily_dependencies:
             for alias in sorted(relevant_aliases):
+                check_deadline()
                 add("nomenclature_alias", alias, {
                     "resolved_nm_id": alias_to_nm.get(alias, ""),
                     "ambiguous": alias in ambiguous_aliases,
                 })
             for operation_day, nm_id in sorted(relevant_shared_keys):
+                check_deadline()
                 resolution = shared.resolve(
                     nm_id=nm_id, operation_date=date.fromisoformat(operation_day)
                 ) if shared is not None else None
@@ -6662,9 +6697,11 @@ class WbFinanceWeeklyBlock:
             )
             add("wb_cutover", FUNCTIONAL_CUTOVER_ID, dict(snapshot.wb.cutover or {}))
         for key in sorted(relevant_wb_keys):
+            check_deadline()
             row = snapshot.wb.daily_rows.get(key)
             add("wb_daily_cost", list(key), dict(row) if row is not None else None)
         for nm_id in sorted(relevant_wb_nm_ids):
+            check_deadline()
             row = snapshot.wb.archival_rows.get(nm_id)
             add(
                 "wb_archival_cost",
@@ -6677,6 +6714,7 @@ class WbFinanceWeeklyBlock:
                 snapshot.wb.archival_first_factual_dates.get(nm_id),
             )
         for key in sorted(relevant_fbs_cost_keys):
+            check_deadline()
             pooled = pooled_fbs_state_as_of(
                 snapshot,
                 business_date=key[0],
@@ -6713,6 +6751,7 @@ class WbFinanceWeeklyBlock:
             "wb_finance_weekly_sku_aggregates",
             "wb_finance_weekly_sync",
         ):
+            check_deadline()
             columns = [
                 str(row["name"])
                 for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -6726,6 +6765,7 @@ class WbFinanceWeeklyBlock:
                 continue
             rows: list[list[Any]] = []
             for seller_id, week_start, week_end in sorted(target_keys):
+                check_deadline()
                 selected = conn.execute(
                     f"SELECT * FROM {table} WHERE seller_id=? AND week_start=? "
                     "AND week_end=? ORDER BY "
@@ -6875,6 +6915,7 @@ class WbFinanceWeeklyBlock:
             "wb_finance_weekly_sku_aggregates",
             "wb_finance_weekly_sync",
         ):
+            check_deadline()
             columns = [
                 str(row["name"])
                 for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -6887,6 +6928,7 @@ class WbFinanceWeeklyBlock:
                 f"SELECT * FROM {table} ORDER BY {','.join(order_columns)}"
             ).fetchall()
             for row in rows:
+                check_deadline()
                 key = (
                     str(row["seller_id"]),
                     str(row["week_start"]),
@@ -7003,19 +7045,29 @@ class WbFinanceWeeklyBlock:
         *,
         manifest: GenerationManifest,
         query_only_primary: bool,
+        reserve_raw: bool = False,
     ) -> None:
         if not (
             manifest.state == "cutover"
             and manifest.canonical_source == "split"
         ):
             return
-        self.store_registry.attach_readonly(
-            conn,
-            "finance_raw",
-            schema_name="finance_raw_store",
-            operation="wb_finance_weekly_raw_read",
-            manifest=manifest,
-        )
+        if reserve_raw:
+            # Verify registry identity before attaching writable solely to reserve
+            # the raw file with the same BEGIN IMMEDIATE as main. No raw DML.
+            with closing(self.store_registry.connect("finance_raw", mode="ro",
+                    operation="finance_raw_proof_identity", manifest=manifest)):
+                pass
+            raw_path = self.store_registry.resolve("finance_raw", manifest=manifest)
+            conn.execute("ATTACH DATABASE ? AS finance_raw_store", (raw_path.as_uri() + "?mode=rw",))
+        else:
+            self.store_registry.attach_readonly(
+                conn,
+                "finance_raw",
+                schema_name="finance_raw_store",
+                operation="wb_finance_weekly_raw_read",
+                manifest=manifest,
+            )
         if query_only_primary:
             if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
                 raise ValueError("canonical Finance plan requires query_only")
@@ -7128,7 +7180,118 @@ class WbFinanceWeeklyBlock:
             raise ValueError("Finance SQLite main data version is unavailable")
         return versions
 
-    def _connect(self, *, storage_authority: list[GenerationManifest] | None = None) -> sqlite3.Connection:
+    @contextmanager
+    def _finance_committed_readback(self):
+        from packages.application.dependency_proof import CompletionProofError
+        try:
+            yield
+        except CompletionProofError as exc:
+            exc.business_write_started = True
+            raise
+
+    @contextmanager
+    def _finance_read_proof(self, authority, deadline):
+        from packages.application.dependency_proof import DependencyProof, readonly_deadline
+        with ExitStack() as resources, ExitStack() as proof_scope:
+            proof_scope.enter_context(readonly_deadline(None, deadline))
+            book_fence = resources.enter_context(self._finance_book_fence())
+            conn = resources.enter_context(closing(self._connect_stale_cost_plan(storage_authority=authority)))
+            proof = DependencyProof.capture(conn)
+            proof_scope.enter_context(proof.observe())
+            proof_scope.enter_context(readonly_deadline(conn, deadline))
+            self._observe_active_cost(conn)
+            yield conn, proof, proof_scope, book_fence
+
+    def _observe_active_cost(self, conn):
+        if not self.shared_cost_is_candidate and getattr(self, '_shared_cost_base', None) is not None:
+            from packages.application.vitrina_last_known_cost import approved_reporting_snapshot
+            self._shared_cost_snapshot = approved_reporting_snapshot(self._shared_cost_base, conn)
+        # A new observed scope must not reuse a cache filled before its authorizer.
+        self._canonical_cost_snapshot_connection = None
+        self._nomenclature_cache_connection = None
+
+    @contextmanager
+    def _finance_book_fence(self):
+        """Same live observer brackets detached book reads, including blob edits."""
+        from packages.application.fbs_accounting_runtime import path as book_path
+        from packages.application.dependency_proof import CompletionProofError
+        path = book_path(self.runtime_dir)
+        if not path.exists():
+            def missing():
+                if path.exists():
+                    raise CompletionProofError('finance_book_appeared')
+            yield missing
+            return
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as conn:
+            conn.execute('PRAGMA query_only=ON')
+            stat = path.stat()
+            identity = stat.st_dev, stat.st_ino
+            token = conn.execute('PRAGMA data_version').fetchone()[0]
+            def unchanged():
+                current = path.stat()
+                if ((current.st_dev, current.st_ino) != identity or
+                        conn.execute('PRAGMA data_version').fetchone()[0] != token):
+                    raise CompletionProofError('finance_book_changed')
+            yield unchanged
+
+    def _install_dependency_proof_schema(self):
+        """Explicit apply-side migration; query plans never bootstrap revisions."""
+        from packages.application.dependency_proof import install_dependency_revisions
+        if self.shared_cost_is_candidate:
+            raise ValueError('shared_cost_candidate_is_read_only')
+        manifest = self.store_registry.load()
+        paths = set()
+        for store in ('operational', 'finance_raw'):
+            path = self.store_registry.resolve(store, manifest=manifest)
+            if path in paths:
+                continue
+            paths.add(path)
+            with closing(self.store_registry.connect(store, mode='rw',
+                    operation='finance_dependency_schema', manifest=manifest)) as conn, conn:
+                install_dependency_revisions(conn)
+
+    def _proof_persistent_identity(self, conn):
+        return tuple((name, path) for name, path in self._sqlite_persistent_identity(conn)
+                     if name != 'finance_completion_book')
+
+    @contextmanager
+    def _connect_proof_writer(self, *, storage_authority):
+        from packages.application.fbs_accounting_runtime import writer_lock, path as book_path
+        from packages.application.dependency_proof import CompletionProofError
+        path = book_path(self.runtime_dir)
+        def current():
+            if not path.exists():
+                return None
+            with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as book:
+                book.execute('PRAGMA query_only=ON')
+                row = book.execute('SELECT version FROM accounting_current WHERE singleton=1').fetchone()
+                stat = path.stat()
+                return (str(path), stat.st_dev, stat.st_ino, row[0] if row else None)
+        before = current()
+        with closing(self._connect(storage_authority=storage_authority, proof_guard=True)) as conn:
+            with writer_lock(self.runtime_dir):
+                if current() != before:
+                    raise FinanceStaleCostHandoffError('finance_shared_cost_changed',
+                        phase='shared_fence', classification='shared_cost_drift', attempt=1)
+                if before is not None:
+                    conn.execute('ATTACH DATABASE ? AS finance_completion_book', (path.as_uri() + '?mode=rw',))
+                yield conn, before
+
+    def _assert_proof_book(self, conn, expected):
+        from packages.application.fbs_accounting_runtime import path as book_path
+        from packages.application.dependency_proof import CompletionProofError
+        path = book_path(self.runtime_dir)
+        if expected is None:
+            if path.exists():
+                raise CompletionProofError('finance_book_appeared')
+            return
+        stat = path.stat()
+        row = conn.execute('SELECT version FROM finance_completion_book.accounting_current WHERE singleton=1').fetchone()
+        actual = (str(path), stat.st_dev, stat.st_ino, row[0] if row else None)
+        if actual != expected:
+            raise CompletionProofError('finance_book_changed_at_handoff')
+
+    def _connect(self, *, storage_authority: list[GenerationManifest] | None = None, proof_guard: bool = False) -> sqlite3.Connection:
         if self.shared_cost_is_candidate:
             return self._connect_shared_cost_preview()
         manifest = self.store_registry.load()
@@ -7142,7 +7305,7 @@ class WbFinanceWeeklyBlock:
         self._attach_split_raw_read_view(
             conn,
             manifest=manifest,
-            query_only_primary=False,
+            query_only_primary=False, reserve_raw=proof_guard,
         )
         if storage_authority is not None:
             # Bind the immutable manifest actually used for this open/attach.

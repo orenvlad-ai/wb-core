@@ -29,6 +29,7 @@ _SAFE_REASONS = frozenset({
     'overhead_completion_authority_changed','overhead_completion_prepare_before_begin_required',
     'overhead_completion_source_changed','overhead_completion_pre_dml_fence_required',
     'overhead_completion_transaction_unbound',
+    'finance_book_changed', 'finance_book_appeared', 'finance_book_changed_at_handoff',
 })
 _SAFE_PHASES = frozenset({'proof','planning','validation','writer_handoff','retention','completion'})
 _SAFE_CLASSES = frozenset({'relevant_dependency_changed','authority_changed','immutable_source_changed',
@@ -42,7 +43,7 @@ class CompletionProofError(ValueError):
         classification = classification if classification in _SAFE_CLASSES else 'result_unknown'
         super().__init__(reason)
         self.reason, self.phase, self.classification = reason, phase, classification
-        self.business_write_started = business_write_started
+        self.business_write_started = business_write_started is True
 
     def diagnostic(self):
         return dict(contract_version=CONTRACT, reason=self.reason, phase=self.phase,
