@@ -350,11 +350,13 @@ class ProtectionTests(unittest.TestCase):
         value['recovery_case'] = case.value
         if case is recovery.RecoveryCase.PREDEPENDENCY_STORAGE:
             value['release_run_id'] = recovery.PREDEPENDENCY_RELEASE_RUN_ID
+        elif case is recovery.RecoveryCase.BUYER_CHROME_RESERVE:
+            value['release_run_id'] = recovery.BUYER_CHROME_RELEASE_RUN_ID
         original = {**value['source'], 'operation_id': operation}
         value['operation_id'] = recovery.recovery_operation_id(value['release_run_id'], original)
         value['predependency_diff'] = value['selective_b9_diff'] = {'exact': True}
         value['activation_failure_proof'] = {'job_rows': 0}
-        if case is recovery.RecoveryCase.PREDEPENDENCY_STORAGE:
+        if recovery.unchanged_dependency_tail_case(case):
             value['prestate']['predependency_live_contract'] = {'dependency_versions': {
                 'npm_modules': {'installed': True, 'versions': '8.17.1 3.0.1'}}}
         app = self.runtime / 'installed-markers'
@@ -378,7 +380,7 @@ class ProtectionTests(unittest.TestCase):
         commands = {name: [name] for name in ('root_storage_readback', 'status', 'auth', 'activation_readback')}
         commands.update(activation=stage('activation'), completion=stage('completion', stdin=True),
             completion_input='exact-cas', cleaner_precomplete_probe=['cleaner-probe'],
-            root_storage_status=stage('storage-refresh'))
+            root_storage_status=stage('storage-refresh'), buyer_root_reserve=['buyer-root-reserve'])
         commands['normal_activation_tail'] = {name: [name] for name in (
             'auth', 'status', 'storage_readback', 'barrier')}
         commands['normal_activation_tail'].update({name: stage(name) for name in (
@@ -400,6 +402,11 @@ class ProtectionTests(unittest.TestCase):
                 self.assertEqual(arguments[arguments.index('--operation') + 1], operation)
                 calls.append(arguments[0])
                 proof = owner.claim(self.runtime, operation, quiet_reader=self.quiet)
+                return subprocess.CompletedProcess(command, 0, stdout=json.dumps(proof), stderr='')
+            if shell == owner.remote_shell('check', app_dir=ROOT, runtime_dir=self.runtime,
+                    env_file=self.runtime / 'unused.env', operation=operation, expected_sha=SHA):
+                calls.append('check')
+                proof = owner.require_owner(self.runtime, operation, SHA)
                 return subprocess.CompletedProcess(command, 0, stdout=json.dumps(proof), stderr='')
             if ('packages.application.business_data_deploy_protection' in words
                     and words[words.index('packages.application.business_data_deploy_protection') + 1] in {'recovery-start', 'finish'}):
@@ -431,6 +438,19 @@ class ProtectionTests(unittest.TestCase):
         stack.enter_context(patch.object(recovery, '_predependency_diff_proof', return_value=value['predependency_diff']))
         stack.enter_context(patch.object(recovery, '_selective_b9_diff_proof', return_value=value['selective_b9_diff']))
         stack.enter_context(patch.object(recovery, 'collect_sqlite_activation_failure', return_value=value['activation_failure_proof']))
+        if case is recovery.RecoveryCase.BUYER_CHROME_RESERVE:
+            # This tail resumes the original started owner; it cannot claim a
+            # new one. Execute the production proof against private fixture state.
+            owner.claim(self.runtime, operation, quiet_reader=self.quiet)
+            owner.start(self.runtime, operation, SHA)
+            namespace = {}
+            exec(recovery._existing_started_owner_proof_source(), namespace)
+            def read_owner(_target, source):
+                return namespace['existing_started_owner_proof'](self.runtime,
+                    source['original_operation_id'], source['merge_sha'], self.runtime / 'unused.env')
+            stack.enter_context(patch.object(owner, '_clients', return_value=(self.systemd, self.quiet)))
+            stack.enter_context(patch.object(recovery, 'collect_existing_started_owner', side_effect=read_owner))
+            value['existing_started_owner'] = read_owner(target, value['source'])
         return recovery, value, client, target, effects, calls, state_flags, original, FINGERPRINT, stack
 
     def test_all_canonical_recovery_branches_execute_actual_owner_and_effect_guards(self):
@@ -448,7 +468,14 @@ class ProtectionTests(unittest.TestCase):
                 recovery, value, client, target, effects, calls, flags, original, fp, stack = self.recovery_fixture(case)
                 result = recovery.apply_recovery(client, value, fp, target)
                 self.assertEqual(result['state'], 'complete', result)
-                self.assertEqual(calls[:2], ['claim', 'recovery-start'])
+                if case is RecoveryCase.BUYER_CHROME_RESERVE:
+                    self.assertEqual(calls[:3], ['buyer-root-reserve', 'check', 'recovery-start'])
+                    self.assertNotIn('claim', calls)
+                    self.assertGreater(calls.count('buyer-root-reserve'), 1)
+                    self.assertEqual(owner.load(self.runtime)['operation_id'],
+                                     value['existing_started_owner']['owner']['operation_id'])
+                else:
+                    self.assertEqual(calls[:2], ['claim', 'recovery-start'])
                 self.assertEqual(calls[-1], 'finish')
                 self.assertEqual(owner.load(self.runtime)['phase'], 'complete')
                 self.assertTrue(barrier.barrier_status(self.runtime)['active'])
