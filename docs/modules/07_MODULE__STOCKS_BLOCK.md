@@ -169,6 +169,27 @@ the same failure was reproduced with the pre-change stocks adapter. This is a
 separate fixture/catalog-scope issue, not a passing integration claim for this
 change.
 
+## 2.2 Structured failure evidence
+
+Current-inventory failures carry bounded `stocks_failure` evidence through the
+spawned worker, parent exception, warehouse phase journal and cycle receipt.
+The shared contract permits only fixed reason/stage/type enums and bounded
+numeric HTTP status, errno, TLS verification code and timing fields. Raw messages,
+URLs, tokens, headers and provider bodies are not copied into this evidence.
+
+`attempt` counts actual sends for the failing page (1–3); zero means failure
+before its first send, and null means that the parent cannot observe the count.
+Attempt timing covers that send and response processing; total timing starts
+at fetch entry, including waits and worker startup. Unknown values remain null.
+If a worker cannot report before cancellation, parent evidence identifies the
+worker-wait boundary without inventing its remote state. Diagnostics do not
+change retry eligibility, deadlines, publication or cache decisions.
+
+`python3 apps/stocks_failure_diagnostics_smoke.py` exercises real spawned workers
+with local HTTP/fault fixtures and reloads both the SQLite phase journal and
+cycle receipt. It checks failure classification and absence of test secrets.
+It does not call WB or establish the cause of any historical production failure.
+
 # 3. Target contract и смысл результата
 
 Для нового сбора складских данных область запроса задаёт общая номенклатура

@@ -26,6 +26,9 @@ from packages.adapters.seller_analytics_csv_report import (
 )
 from packages.business_time import business_date_iso
 from packages.contracts.stocks_block import StocksRequest
+from packages.contracts.stocks_failure_diagnostics import (
+    attach_stocks_failure, exception_type, sanitize_stocks_failure,
+)
 
 
 WB_OTHER_WAREHOUSE_NAME = "остальные"
@@ -90,12 +93,73 @@ class StocksFetchIncompleteError(RuntimeError):
     """The full inventory was not proven inside its resource budget."""
 
 
+class _StocksValidationError(RuntimeError):
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
+
+
 @dataclass
 class _StocksDeadline:
     expires_at: float
     clock: Callable[[], float] = time.monotonic
     body_bytes: int = 0
     source_rows: int = 0
+    started_at: float | None = None
+    stage: str = "initialization"
+    attempt: int | None = None  # None: parent cannot observe the worker's sends.
+    attempt_started_at: float | None = None
+    attempt_elapsed_ms: int | None = None
+    http_status: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.started_at is None:
+            self.started_at = self.clock()
+
+    def failure(self, exc: BaseException) -> dict[str, Any]:
+        chain: list[BaseException] = []
+        current: BaseException | None = exc
+        while current is not None and all(current is not item for item in chain) and len(chain) < 6:
+            chain.append(current)
+            current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+        transport_reason = next((item.reason for item in chain
+            if isinstance(item, error.URLError) and isinstance(item.reason, BaseException)), None)
+        numeric_chain = chain + ([transport_reason] if transport_reason is not None else [])
+        reason = "program_error"
+        if isinstance(exc, _StocksValidationError):
+            reason = exc.reason
+        elif isinstance(exc, StocksFetchIncompleteError):
+            # Only our fixed literals are classified; no provider text is copied.
+            reason = {
+                "official stocks fetch incomplete: total deadline exhausted": "deadline_exhausted",
+                "official stocks fetch incomplete: rate-limit wait exceeds deadline": "deadline_exhausted",
+                "official stocks fetch incomplete: aggregate response byte limit exceeded": "resource_limit",
+                "official stocks fetch incomplete: response body size limit exceeded": "resource_limit",
+                "official stocks fetch incomplete: aggregate source row limit exceeded": "resource_limit",
+                "official stocks worker cancelled": "cancelled",
+            }.get(str(exc), "incomplete")
+        elif any(isinstance(item, _StocksHttpStatusError) for item in chain):
+            reason = "http_status"
+        elif isinstance(exc, json.JSONDecodeError):
+            reason = "invalid_json"
+        elif isinstance(exc, UnicodeDecodeError):
+            reason = "invalid_encoding"
+        elif any(isinstance(item, (error.URLError, OSError)) for item in chain):
+            reason = "transport"
+        now = self.clock()
+        elapsed = self.attempt_elapsed_ms
+        if elapsed is None and self.attempt_started_at is not None:
+            elapsed = max(0, int((now - self.attempt_started_at) * 1000))
+        return sanitize_stocks_failure(dict(
+            origin_type=exception_type(exc), cause_type=exception_type(chain[1]) if len(chain) > 1 else None,
+            root_cause_type=exception_type(chain[-1]) if len(chain) > 1 else None,
+            transport_reason_type=exception_type(transport_reason), stage=self.stage, reason=reason,
+            http_status=self.http_status,
+            errno=next((item.errno for item in numeric_chain if isinstance(item, OSError) and type(item.errno) is int), None),
+            tls_verify_code=next((getattr(item, "verify_code", None) for item in numeric_chain if isinstance(item, ssl.SSLCertVerificationError)), None),
+            attempt=self.attempt, attempt_elapsed_ms=elapsed,
+            total_elapsed_ms=max(0, int((now - self.started_at) * 1000)),
+        ))
 
     def remaining(self) -> float:
         remaining = self.expires_at - self.clock()
@@ -121,12 +185,13 @@ def _stocks_ipc_send(channel: socket.socket, record: Mapping[str, Any], deadline
 
 def _stocks_inventory_worker(connection: socket.socket, config: dict[str, Any], kwargs: dict[str, Any], expires_at: float) -> None:
     """Spawn target: readonly HTTP/parse work; never owns cache or business writes."""
+    deadline = _StocksDeadline(expires_at, attempt=0)
     try:
+        deadline.started_at = config.pop("_started_at", deadline.started_at)
         captured_now = config.pop("_captured_now", None)
         source = HttpBackedStocksSource(**config)
         if captured_now is not None:
             source._now_factory = lambda: captured_now
-        deadline = _StocksDeadline(expires_at)
 
         def slot(seller_key: str, retry_wait: float, reserve: bool) -> None:
             _stocks_ipc_send(connection, {"type": "slot" if reserve else "cooldown", "seller_key": seller_key, "wait": retry_wait}, deadline)
@@ -138,6 +203,7 @@ def _stocks_inventory_worker(connection: socket.socket, config: dict[str, Any], 
         payload = source._fetch_current_inventory(**kwargs, deadline=deadline)
         deadline.remaining()
         data = payload["data"]
+        deadline.stage = "serialization"
         header = {key: value for key, value in data.items() if key not in {"rows", "raw_rows", "page_offsets", "batch_requested_nm_ids"}}
         _stocks_ipc_send(connection, {"type": "header", "snapshot_date": payload["snapshot_date"], "data": header}, deadline)
         for field in ("raw_rows", "rows"):
@@ -147,10 +213,14 @@ def _stocks_inventory_worker(connection: socket.socket, config: dict[str, Any], 
             _stocks_ipc_send(connection, {"type": "offset", "offset": offset}, deadline)
         _stocks_ipc_send(connection, {"type": "complete"}, deadline)
     except Exception as exc:
-        # Only bounded error text crosses IPC; never pickle an exception with
-        # a potentially huge response body/document attached to it.
+        # Only exact allowlisted scalar evidence crosses IPC. Exceptions can
+        # retain response bodies, URLs, credentials and arbitrary provider text.
         try:
-            _stocks_ipc_send(connection, {"type": "error", "class": type(exc).__name__, "message": str(exc)[:512]}, _StocksDeadline(expires_at))
+            try:
+                evidence = deadline.failure(exc)
+            except Exception:
+                evidence = sanitize_stocks_failure({"origin_type": exception_type(exc)})
+            _stocks_ipc_send(connection, {"type": "error", "diagnostic": evidence}, _StocksDeadline(expires_at))
         except Exception:
             pass
     finally:
@@ -290,6 +360,10 @@ class HttpBackedStocksSource:
             self._store_cached_payload(request_key, payload, deadline=deadline)
             return payload
         except BaseException as exc:
+            try:
+                attach_stocks_failure(exc, deadline.failure(exc))
+            except Exception:
+                pass
             failure = exc if isinstance(exc, Exception) else StocksFetchIncompleteError("official stocks leader interrupted")
             raise
         finally:
@@ -300,6 +374,7 @@ class HttpBackedStocksSource:
         parent, child = socket.socketpair(type=socket.SOCK_DGRAM)
         parent.setblocking(False)
         config = dict(
+            _started_at=deadline.started_at,
             page_limit=self._page_limit,
             min_request_interval_seconds=self._min_request_interval_seconds,
             max_retries_on_429=self._max_retries_on_429,
@@ -317,6 +392,7 @@ class HttpBackedStocksSource:
         payload: dict[str, Any] | None = None
         seller_key = _seller_cache_key(base_url=kwargs["base_url"], token=kwargs["token"])
         try:
+            deadline.stage = "worker_wait"
             deadline.remaining()
             process.start()
             started = True
@@ -364,12 +440,14 @@ class HttpBackedStocksSource:
                     deadline.remaining()
                     parent.send(b"G")
                 elif kind == "error":
-                    text = str(message.get("message", "readonly worker failed"))[:512]
-                    if message.get("class") == "StocksFetchIncompleteError":
-                        raise StocksFetchIncompleteError(text)
-                    if message.get("class") in {"ValueError", "JSONDecodeError", "UnicodeDecodeError"}:
-                        raise ValueError(text)
-                    raise RuntimeError(text)
+                    evidence = sanitize_stocks_failure(message.get("diagnostic"))
+                    kind = evidence["origin_type"]
+                    text = "official stocks worker failed: " + evidence["reason"]
+                    exc = (StocksFetchIncompleteError(text) if kind == "StocksFetchIncompleteError" else
+                        ValueError(text) if kind in {"ValueError", "JSONDecodeError", "UnicodeDecodeError"} else
+                        RuntimeError(text))
+                    attach_stocks_failure(exc, evidence)
+                    raise exc
                 elif kind == "header":
                     if payload is not None or not isinstance(message.get("data"), dict):
                         raise StocksFetchIncompleteError("official stocks fetch incomplete: invalid result header")
@@ -438,7 +516,14 @@ class HttpBackedStocksSource:
             timeout_seconds=runtime.timeout_seconds,
             requested_snapshot_date="",
         )
-        payload = self._fetch_isolated(kwargs, deadline) if self._isolate_fetch else self._fetch_current_inventory(**kwargs, deadline=deadline)
+        try:
+            payload = self._fetch_isolated(kwargs, deadline) if self._isolate_fetch else self._fetch_current_inventory(**kwargs, deadline=deadline)
+        except Exception as exc:
+            try:
+                attach_stocks_failure(exc, deadline.failure(exc))
+            except Exception:
+                pass
+            raise
         items = payload["data"]["raw_rows"]
         mapping: dict[str, str] = {}
         for index, item in enumerate(items):
@@ -478,6 +563,7 @@ class HttpBackedStocksSource:
             timeout_seconds=timeout_seconds,
             deadline=deadline,
         )
+        deadline.stage = "normalization"
         normalized_items = [
             self._canonicalize_official_item(item)
             for item in raw_items
@@ -633,10 +719,11 @@ class HttpBackedStocksSource:
                 timeout_seconds=timeout_seconds,
                 deadline=deadline,
             )
+            deadline.stage = "validation"
             page_items = self._extract_items(page_payload)
             deadline.remaining()
             if len(page_items) > self._page_limit:
-                raise RuntimeError("official stocks request returned more rows than the page limit")
+                raise _StocksValidationError("page_limit", "official stocks request returned more rows than the page limit")
             deadline.source_rows += len(page_items)
             if deadline.source_rows > _STOCKS_SOURCE_TOTAL_ROWS:
                 raise StocksFetchIncompleteError("official stocks fetch incomplete: aggregate source row limit exceeded")
@@ -645,14 +732,14 @@ class HttpBackedStocksSource:
                     deadline.remaining()
                 identity = self._validate_official_item(item, requested_nm_ids=requested_set)
                 if identity in row_identities:
-                    raise RuntimeError(
+                    raise _StocksValidationError("duplicate_row",
                         "official stocks request returned duplicate size/warehouse row "
                         f"for nmId {identity[0]}"
                     )
                 row_identities.add(identity)
             page_offsets.append(offset)
             if len(page_offsets) > 1000:
-                raise RuntimeError("official stocks pagination exceeded the safety page limit")
+                raise _StocksValidationError("pagination_limit", "official stocks pagination exceeded the safety page limit")
             if len(page_items) == self._page_limit:
                 page_digest = hashlib.sha256(
                     json.dumps(
@@ -663,7 +750,7 @@ class HttpBackedStocksSource:
                     ).encode("utf-8")
                 ).hexdigest()
                 if page_digest in full_page_digests:
-                    raise RuntimeError("official stocks pagination repeated a full page")
+                    raise _StocksValidationError("repeated_page", "official stocks pagination repeated a full page")
                 full_page_digests.add(page_digest)
             items.extend(page_items)
             if len(page_items) < self._page_limit:
@@ -701,11 +788,11 @@ class HttpBackedStocksSource:
         chrt_id = item.get("chrtId")
         warehouse_id = item.get("warehouseId")
         if not isinstance(nm_id, int) or isinstance(nm_id, bool) or nm_id <= 0:
-            raise RuntimeError("official stocks request returned invalid nmId")
+            raise _StocksValidationError("invalid_nm_id", "official stocks request returned invalid nmId")
         if nm_id not in requested_nm_ids:
-            raise RuntimeError(f"official stocks request returned unexpected nmId {nm_id}")
+            raise _StocksValidationError("unexpected_nm_id", f"official stocks request returned unexpected nmId {nm_id}")
         if not isinstance(chrt_id, int) or isinstance(chrt_id, bool) or chrt_id <= 0:
-            raise RuntimeError(f"official stocks request returned invalid chrtId for nmId {nm_id}")
+            raise _StocksValidationError("invalid_chrt_id", f"official stocks request returned invalid chrtId for nmId {nm_id}")
         warehouse_name = str(item.get("warehouseName") or "").strip()
         region_name = str(item.get("regionName") or "").strip()
         warehouse_id_is_integer = isinstance(warehouse_id, int) and not isinstance(warehouse_id, bool)
@@ -748,7 +835,7 @@ class HttpBackedStocksSource:
             )
             if len(diagnostic_context) > 240:
                 diagnostic_context = f"{diagnostic_context[:237]}..."
-            raise RuntimeError(
+            raise _StocksValidationError("invalid_warehouse_id",
                 "official stocks request returned invalid warehouseId "
                 f"for nmId {nm_id} "
                 f"(present={str('warehouseId' in item).lower()}, "
@@ -764,7 +851,7 @@ class HttpBackedStocksSource:
                 or not math.isfinite(float(value))
                 or float(value) < 0
             ):
-                raise RuntimeError(
+                raise _StocksValidationError("invalid_quantity",
                     f"official stocks request returned invalid {field} for nmId {nm_id}"
                 )
         if is_other_bucket or is_aggregate_sentinel:
@@ -784,7 +871,12 @@ class HttpBackedStocksSource:
     ) -> Mapping[str, Any]:
         retries_429 = 0
         retry_wait = 0.0
+        deadline.attempt = 0
+        deadline.attempt_started_at = None
+        deadline.attempt_elapsed_ms = None
+        deadline.http_status = None
         for attempt in range(3):
+            deadline.stage = "rate_limit"
             deadline.remaining()
             if self._slot_gate is not None:
                 self._slot_gate(seller_key, retry_wait, True)
@@ -822,6 +914,12 @@ class HttpBackedStocksSource:
                 if not _stocks_transient_transport(exc) or attempt == 2:
                     raise RuntimeError("official stocks request transport failed") from exc
                 retry_wait = (2 ** attempt) + self._jitter()
+            finally:
+                try:
+                    if deadline.attempt_started_at is not None:
+                        deadline.attempt_elapsed_ms = max(0, int((deadline.clock() - deadline.attempt_started_at) * 1000))
+                except Exception:
+                    pass  # Optional timing must never replace a source error.
         raise AssertionError("unreachable stocks retry state")
 
     def _read_bounded_body(self, response: Any, *, limit: int, deadline: _StocksDeadline) -> bytes:
@@ -854,6 +952,7 @@ class HttpBackedStocksSource:
         timeout_seconds: float,
         deadline: _StocksDeadline,
     ) -> Mapping[str, Any]:
+        deadline.stage = "request"
         req = urllib_request.Request(
             url=f"{base_url}/api/analytics/v1/stocks-report/wb-warehouses",
             data=json.dumps({"nmIds": nm_ids, "chrtIds": [], "limit": self._page_limit, "offset": offset}).encode("utf-8"),
@@ -861,27 +960,40 @@ class HttpBackedStocksSource:
             headers={"Authorization": token, "Content-Type": "application/json"},
         )
         try:
-            with self._opener(req, timeout=min(timeout_seconds, deadline.remaining())) as response:
+            request_timeout = min(timeout_seconds, deadline.remaining())
+            deadline.attempt = (deadline.attempt or 0) + 1
+            deadline.attempt_started_at = deadline.clock()
+            deadline.attempt_elapsed_ms = None
+            deadline.http_status = None
+            with self._opener(req, timeout=request_timeout) as response:
+                status = getattr(response, "status", None)
+                deadline.http_status = status if type(status) is int else None
+                deadline.stage = "body_read"
                 body = self._read_bounded_body(response, limit=self._max_success_body_bytes, deadline=deadline)
+                deadline.stage = "decode"
                 payload = json.loads(body.decode("utf-8"))
                 deadline.remaining()
         except error.HTTPError as exc:
+            deadline.http_status = exc.code
+            deadline.stage = "body_read"
             with exc:
                 body = self._read_bounded_body(exc, limit=self._max_error_body_bytes, deadline=deadline)
+            deadline.stage = "request"
             raise _StocksHttpStatusError(exc.code, body.decode("utf-8", errors="replace"), headers=exc.headers or {}) from exc
+        deadline.stage = "validation"
         if not isinstance(payload, Mapping):
-            raise RuntimeError("official stocks request returned non-object payload")
+            raise _StocksValidationError("invalid_payload", "official stocks request returned non-object payload")
         return payload
 
     def _extract_items(self, payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         data = payload.get("data")
         if not isinstance(data, Mapping):
-            raise RuntimeError("official stocks request returned invalid data object")
+            raise _StocksValidationError("invalid_data", "official stocks request returned invalid data object")
         items = data.get("items")
         if not isinstance(items, list):
-            raise RuntimeError("official stocks request returned invalid data.items list")
+            raise _StocksValidationError("invalid_items", "official stocks request returned invalid data.items list")
         if not all(isinstance(item, Mapping) for item in items):
-            raise RuntimeError("official stocks request returned a non-object item")
+            raise _StocksValidationError("invalid_item", "official stocks request returned a non-object item")
         return list(items)
 
     def _parse_items_to_rows(

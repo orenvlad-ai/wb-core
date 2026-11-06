@@ -140,6 +140,10 @@ def cycle_error_diagnostic(exc, receipt):
         kind = type(current).__name__
         item = {'type': kind[:80] if re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]{0,79}', kind) else 'Exception',
             'message_policy': 'raw_message_omitted', 'frames': []}
+        from packages.contracts.stocks_failure_diagnostics import stocks_failure_diagnostic
+        stocks_failure = stocks_failure_diagnostic(current)
+        if stocks_failure is not None:
+            item['stocks_failure'] = stocks_failure
         from packages.application.dependency_proof import CompletionProofError
         from packages.application.wb_finance_weekly import FinanceStaleCostHandoffError
         if isinstance(current, (CompletionProofError, FinanceStaleCostHandoffError)):
