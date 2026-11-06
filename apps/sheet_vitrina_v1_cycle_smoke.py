@@ -375,8 +375,27 @@ class CycleTests(unittest.TestCase):
             self.store.write(receipt)
             saved = self.store.read(receipt['cycle_id'])
             self.assertEqual(saved['status'], 'failed')
-            self.assertNotIn('summary', saved)
-            self.assertNotIn('error_diagnostic', saved)
+            self.assertEqual(saved['summary']['execution'], 'failed')
+            self.assertEqual(saved['diagnostic_storage'], 'bounded_sidecar')
+            self.assertNotIn('secret', json.dumps(saved['error_diagnostic']))
+            # A later receipt cannot inherit a stale terminal sidecar.
+            receipt.pop('summary', None)
+            receipt.pop('error_diagnostic', None)
+            # Identical base bytes still belong to a new atomic file revision.
+            self.store.write(receipt)
+            self.assertNotIn('summary', self.store.read(receipt['cycle_id']))
+            from packages.application import sheet_vitrina_v1_cycle as cycle_module
+            atomic = cycle_module._atomic
+            def failed_evidence(path, value):
+                if path.name.endswith('.evidence'):
+                    raise OSError('auxiliary storage unavailable')
+                return atomic(path, value)
+            _observe_terminal(receipt, ValueError('new private body'))
+            with patch.object(cycle_module, '_atomic', side_effect=failed_evidence):
+                self.store.write(receipt)
+            saved = self.store.read(receipt['cycle_id'])
+            self.assertNotIn('summary', saved)  # Never resurrect the old sidecar.
+            self.assertEqual(saved['status'], 'failed')
         finally:
             lock.close()
 

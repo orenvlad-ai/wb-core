@@ -140,6 +140,10 @@ def cycle_error_diagnostic(exc, receipt):
         kind = type(current).__name__
         item = {'type': kind[:80] if re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]{0,79}', kind) else 'Exception',
             'message_policy': 'raw_message_omitted', 'frames': []}
+        from packages.application.dependency_proof import CompletionProofError
+        from packages.application.wb_finance_weekly import FinanceStaleCostHandoffError
+        if isinstance(current, (CompletionProofError, FinanceStaleCostHandoffError)):
+            item['proof_diagnostic'] = current.diagnostic()
         if isinstance(current, sqlite3.Error):
             code = getattr(current, 'sqlite_errorcode', None)
             if type(code) is int:
@@ -237,9 +241,24 @@ class CycleReceiptStore:
         path = self.root / (cycle_id + '.json')
         if not path.exists():
             return None
-        if path.stat().st_size > 256 * 1024:
-            raise CycleConflict('cycle_receipt_size')
-        value = json.loads(path.read_text())
+        with path.open() as handle:
+            stat = os.fstat(handle.fileno())
+            if stat.st_size > 256 * 1024:
+                raise CycleConflict('cycle_receipt_size')
+            value = json.load(handle)
+        file_identity = [stat.st_dev, stat.st_ino, stat.st_mtime_ns]
+        evidence_path = self.root / (cycle_id + '.evidence')
+        # A separate bounded evidence file preserves the original receipt and
+        # its proof bytes at the existing size limit. Bind it to exact content:
+        # a crash between the two renames must never attach a stale terminal.
+        try:
+            if evidence_path.stat().st_size <= 32768:
+                evidence = json.loads(evidence_path.read_text())
+                if (evidence.get('receipt_digest') == digest(canonical(value))
+                        and evidence.get('receipt_file_identity') == file_identity):
+                    value.update(evidence['fields'])
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         if value['status'] in ACTIVE and process_identity(value['owner_pid']) != value['process_identity']:
             value.update(status='interrupted', error_code='cycle_owner_lost')
             for item in value['stages']:
@@ -250,12 +269,27 @@ class CycleReceiptStore:
 
     def write(self, receipt):
         raw = canonical(receipt)
+        evidence = None
         if len(raw.encode()) > 256 * 1024 and ('summary' in receipt or 'error_diagnostic' in receipt):
+            fields = {k: receipt[k] for k in ('summary', 'error_diagnostic') if k in receipt}
             receipt = {k: v for k, v in receipt.items() if k not in {'summary', 'error_diagnostic'}}
             raw = canonical(receipt)  # Preserve the pre-existing receipt budget/behavior.
+            fields['diagnostic_storage'] = 'bounded_sidecar'
+            evidence = {'receipt_digest': digest(canonical(receipt)), 'fields': fields}
+            if len(canonical(evidence).encode()) > 32768:
+                fields.pop('error_diagnostic', None)
+                fields.update(diagnostic_truncated=True, diagnostic_omitted_count=1)
         if len(raw.encode()) > 256 * 1024:
             raise CycleConflict('cycle_receipt_size')
         _atomic(self.root / (receipt['cycle_id'] + '.json'), receipt)
+        if evidence is not None:
+            try:
+                stat = (self.root / (receipt['cycle_id'] + '.json')).stat()
+                evidence['receipt_file_identity'] = [stat.st_dev, stat.st_ino, stat.st_mtime_ns]
+                if len(canonical(evidence).encode()) <= 32768:
+                    _atomic(self.root / (receipt['cycle_id'] + '.evidence'), evidence)
+            except OSError:
+                pass  # Auxiliary storage may not mask the domain outcome.
         # _atomic fsyncs the file; directory fsync makes the rename durable too.
         fd = os.open(self.root, os.O_RDONLY)
         try:
