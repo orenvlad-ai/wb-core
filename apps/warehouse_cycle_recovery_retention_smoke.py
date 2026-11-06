@@ -90,6 +90,52 @@ class OwnedRetentionTests(unittest.TestCase):
             return RegistryUploadHttpEntrypoint._handle_owned_warehouse_manual_sync_request(self.entry,
                 owner_token=owner['owner_token'])
 
+    def test_completion_failures_have_exact_durable_step_and_preserve_original(self):
+        cases = (
+            ('operator_fulfillment_services.reconcile', 'fulfillment_completion'),
+            ('operator_ff_overhead.complete_current_cycle', 'overhead_completion'),
+            ('operator_supplier_processing.reconcile', 'supplier_completion'),
+            ('operator_ff_overhead.reconcile', 'overhead_reconciliation'),
+            ('operator_warehouse_documents.reconcile', 'operator_document_completion'),
+        )
+        for target, phase in cases:
+            with self.subTest(phase=phase), ExitStack() as stack:
+                self.ports(stack)
+                failure = sqlite3.OperationalError('database is locked')
+                stack.enter_context(patch('packages.application.' + target, side_effect=failure))
+                stack.enter_context(heavy_admitted(self.root, operation='cycle'))
+                owner = stack.enter_context(warehouse_functional_job_lock(self.root))
+                with self.assertRaises(sqlite3.OperationalError) as caught:
+                    RegistryUploadHttpEntrypoint._handle_owned_warehouse_manual_sync_request(
+                        self.entry, owner_token=owner['owner_token'])
+                self.assertIs(caught.exception, failure)
+            phases = {p['phase_key']: p for p in self.journal.public_status()['phases']}
+            self.assertEqual(phases['dependent_replay_economics']['status'], 'success')
+            self.assertEqual(phases[phase]['status'], 'failed')
+            diagnostic = phases[phase]['details']['error_diagnostic']
+            self.assertEqual(diagnostic['stage'], phase)
+            self.assertEqual(diagnostic['exceptions']['0']['message'], 'database is locked')
+            self.assertEqual(phases['recovery_retention_after']['status'], 'pending')
+
+    def test_failed_journal_does_not_replace_original_completion_error(self):
+        with ExitStack() as stack:
+            self.ports(stack)
+            failure = ValueError('secret body must not be logged')
+            stack.enter_context(patch('packages.application.operator_ff_overhead.complete_current_cycle', side_effect=failure))
+            original = self.journal.phase_finished
+            def finish(*args, **kwargs):
+                if kwargs.get('status') == 'failed':
+                    raise OSError('journal unavailable')
+                return original(*args, **kwargs)
+            stack.enter_context(patch.object(self.journal, 'phase_finished', side_effect=finish))
+            stack.enter_context(patch.object(self.journal, 'finish', side_effect=OSError('journal unavailable')))
+            stack.enter_context(heavy_admitted(self.root, operation='cycle'))
+            owner = stack.enter_context(warehouse_functional_job_lock(self.root))
+            with self.assertRaises(ValueError) as caught:
+                RegistryUploadHttpEntrypoint._handle_owned_warehouse_manual_sync_request(
+                    self.entry, owner_token=owner['owner_token'])
+            self.assertIs(caught.exception, failure)
+
     def test_verified_accounting_quality_failure_skips_financial_completion(self):
         from packages.application.fbs_accounting_runtime import FbsAccountingUnavailable
         from unittest.mock import Mock
@@ -201,7 +247,8 @@ class OwnedRetentionTests(unittest.TestCase):
         phases={p['phase_key']:p for p in restarted.public_status()['phases']}
         self.assertEqual(phases['dependent_replay_economics']['status'],'success')
         self.assertEqual(phases['recovery_retention_after']['status'],'failed')
-        self.assertEqual(phases['recovery_retention_after']['last_error'],'fixture-retention-failure')
+        self.assertEqual(phases['recovery_retention_after']['last_error'],'RecoveryPolicyError')
+        self.assertEqual(phases['recovery_retention_after']['details']['error_diagnostic']['exceptions']['0']['type'], 'RecoveryPolicyError')
         self.assertEqual(self.applies,1)
 
     def test_other_protected_states_and_writer_serialization(self):

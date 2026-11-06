@@ -121,14 +121,16 @@ state. A timestamp cutoff alone never establishes the initialization boundary.
     return result
 
 
-def _documents(conn: sqlite3.Connection, *, document_id: str | None = None) -> list[dict]:
+def _documents(conn: sqlite3.Connection, *, document_id: str | None = None, native_only: bool = False) -> list[dict]:
+    if native_only and document_id is None:
+        raise ValueError("native_document_exact_identity_required")
     # FBO's auxiliary book must remain completely document-owned. Unlike the
     # intentionally excluded FBS observer, an unmapped FBO movement is a source
     # contract change, not an operand to import from the old ledger.
     from packages.application.fbs_historical_fbo_sources import capture_historical_fbo_documents
-    historical = capture_historical_fbo_documents(conn)
+    historical = capture_historical_fbo_documents(conn) if not native_only else []
     from packages.application.current_fbo_supply_cost_source import capture_documents as capture_current_dispatches
-    historical += capture_current_dispatches(conn)
+    historical += capture_current_dispatches(conn) if not native_only else []
     historical_ids = tuple(d["operation_id"] for d in historical)
     admitted = (" AND m.operation_id NOT IN (" + ",".join("?" for _ in historical_ids) + ")") if historical_ids else ""
     unmapped = conn.execute(

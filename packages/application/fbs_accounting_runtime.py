@@ -54,12 +54,27 @@ class FbsAccountingUnavailable(ValueError):
 
 
 def unpack(conn, text):
+    from packages.application.dependency_proof import check_deadline
+    check_deadline()
     index = json.loads(text)
+    check_deadline()
     def blob(key):
         row = conn.execute("SELECT payload FROM accounting_blobs WHERE digest=?", (key,)).fetchone()
-        value = json.loads(zlib.decompress(row[0]))
+        # Bounded decompression output avoids one long uninterruptible inflate.
+        decoder=zlib.decompressobj()
+        pieces=[]
+        pending=row[0]
+        while pending:
+            check_deadline()
+            pieces.append(decoder.decompress(pending,65536))
+            pending=decoder.unconsumed_tail
+        pieces.append(decoder.flush())
+        check_deadline()
+        value = json.loads(b''.join(pieces))
+        check_deadline()
         if fingerprint(value) != key:
             raise ValueError("fbs_accounting_blob_corrupt")
+        check_deadline()
         return value
     for field in ("shared_days", "wb_days", "retained_days", "presentations"):
         index[field] = {day: blob(key) for day, key in index[field].items()}
@@ -91,6 +106,16 @@ def admit(conn):
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if tables and tables != TABLES:
         raise ValueError("not_an_isolated_fbs_accounting_book")
+
+
+
+@contextmanager
+def readonly_book_connection(runtime_dir):
+    """Open only the accounting-owned isolated book, without creating it."""
+    with closing(sqlite3.connect(path(runtime_dir).as_uri() + '?mode=ro', uri=True)) as conn:
+        conn.execute('PRAGMA query_only=ON')
+        admit(conn)
+        yield conn
 
 
 def load(runtime_dir, *, version=None, connection=None):
@@ -128,6 +153,30 @@ def load(runtime_dir, *, version=None, connection=None):
         if book.get("schema") != SCHEMA or fingerprint(book) != row[0]:
             raise ValueError("fbs_accounting_book_corrupt")
         return book, row[0]
+
+
+def load_detached(runtime_dir, connection):
+    """Build a hash-verified book without a long DELETE reader transaction.
+
+    The unchanged same-connection data_version closes autocommit read skew,
+    including direct SQL changes of immutable blobs. Callers keep this observer
+    alive and fence it again under a SQLite reservation before consuming proof.
+    """
+    if connection.in_transaction or connection.execute('PRAGMA query_only').fetchone()[0] != 1:
+        raise ValueError('fbs_accounting_detached_readonly_autocommit_required')
+    if Path(connection.execute('PRAGMA database_list').fetchone()[2]).resolve() != path(runtime_dir):
+        raise ValueError('fbs_accounting_detached_file_mismatch')
+    token = connection.execute('PRAGMA data_version').fetchone()[0]
+    admit(connection)
+    row = connection.execute('SELECT r.version,r.payload FROM accounting_current c JOIN accounting_revisions r USING(version)').fetchone()
+    if row is None:
+        raise ValueError('fbs_accounting_bound_revision_missing')
+    book = unpack(connection, row[1])
+    if book.get('schema') != SCHEMA or fingerprint(book) != row[0]:
+        raise ValueError('fbs_accounting_book_corrupt')
+    if connection.execute('PRAGMA data_version').fetchone()[0] != token:
+        raise ValueError('fbs_accounting_detached_revision_changed')
+    return book, row[0]
 
 
 @contextmanager
@@ -504,22 +553,22 @@ def publish_ready(runtime):
     return {"status": result.status}
 
 
-def current_publication_receipt(runtime, *, now=None):
+def current_publication_receipt(runtime, *, now=None, connection=None, bound_book=None):
     """Verify the current owner instead of replaying retired historical costs.
 
     The hourly runner has already published this book and its ready cells.
     An absent/stale publication must fail, not silently complete the queue.
     Explicit historical parameter requests retain their separate legacy path.
     """
-    book, version = load(runtime.runtime_dir)
+    book, version = bound_book if bound_book is not None else load(runtime.runtime_dir)
     if not book or not book["active"]:
         return None
     snapshot = inventory_from_book(book, now=now, runtime_dir=runtime.runtime_dir)
     data = snapshot.payload()
     if data["quality"] == "unavailable":
         raise ValueError("current_accounting_publication_unavailable")
-    with closing(sqlite3.connect(Path(runtime.db_path).resolve().as_uri() + "?mode=ro", uri=True)) as conn:
-        conn.execute("PRAGMA query_only=ON")
+    with (nullcontext(connection) if connection is not None else closing(sqlite3.connect(Path(runtime.db_path).resolve().as_uri() + "?mode=ro", uri=True))) as conn:
+        if connection is None: conn.execute("PRAGMA query_only=ON")
         row = conn.execute("""SELECT ready.plan_json,p.after_digest,p.operation_id,p.attempt_id
             FROM sheet_vitrina_v1_ready_publications p
             JOIN sheet_vitrina_v1_ready_snapshots ready
@@ -571,8 +620,8 @@ class ActiveSharedCostSnapshot(SharedSkuCostSnapshot):
         return day in self._days and self._days[day]["status"] == "closed"
 
 
-def load_shared(runtime_dir):
-    book, _ = load(runtime_dir)
+def load_shared(runtime_dir, *, bound_book=None):
+    book, _ = bound_book if bound_book is not None else load(runtime_dir)
     if book is None or not book["active"]:
         return None
     error = book.get("publication_error") or {}

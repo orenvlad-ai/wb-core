@@ -2,7 +2,7 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:0d022a28faab65139844a96f83feb725d08ecba2fb508ec73086fb073f834786",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:d5fe09c2c0a58bda99a1fb507b44e8d647431b98ff9ca4374b93c874167c20aa",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
     "packages/application/sheet_vitrina_v1_web_vitrina.py": "426ca35dc0074d87c064df72cdfbb2e3798a725c75e374df9f6e6b2c9c4c1f13",
@@ -12,7 +12,7 @@
     "packages/application/canonical_wb_cost_resolver.py": "cf91ff4f2c9ae01827b87181edd214338178464123f853b72d5a7bdaf9b3ca50",
     "packages/application/inventory_cost_blend.py": "e86949aef6462ca2244d8d6772d0f733dcaf781d2d1a1c5ac942854687c88218",
     "packages/application/vitrina_economics.py": "84fd424d0f47f8f77ccbaff9a7a37cf159f9e0d885ea134756d6e487107bab5b",
-    "packages/application/web_vitrina_management_history.py": "cd5e2c140b1d5ad22acdad72b8decd1df761a4a0a4ccedba823665b1fec600b6",
+    "packages/application/web_vitrina_management_history.py": "e43d04b113baa805cfc8eb48a3cf884480aa1da938ddf683c123cd26fc01ed4b",
     "packages/application/ff_pool_fbs_lifecycle.py": "7bad6f5719158311e7fa5f85e57e422d79d26b6bfa0804ae9ad6dd9f597fb5f9",
     "packages/application/sheet_vitrina_v1_buyout_percent.py": "cfa65410f9a9cb41555bcb03967c1d8e62c7dfa3537eec258b40e022c1099628",
     "packages/application/sheet_vitrina_v1_breakglass_last_good.py": "0bf46af67f5174e799501e353f8af8bb6cd57d4b97af44fdbab6237eb6d44f2f",
@@ -29,7 +29,7 @@
     "packages/application/vitrina_catalog.py": "22bc533476dc7452d4f0fd4b2ca62265fd8bca1263133196bf1a322cf57ea1e1",
     "packages/application/promo_historical_recovery.py": "9b97deeb91faa662cd89023b2dc197fabfc9a6ee17a519f92f30c57d167d6f55",
     "packages/application/fbs_accounting_historical_history.py": "b7176006b91d533bd1a20a984a2524d669254de69331441a61178caae8b6f067",
-    "packages/application/fbs_accounting_runtime.py": "8fb9f66cb37123497bc1657440198ceca7f26d7597e1b61c08b25e52254d17f5",
+    "packages/application/fbs_accounting_runtime.py": "1ae7087797c77e15611287428d00a12544df745911d1cf8d24b4077c8a02e81f",
     "packages/application/fbs_inventory_presentation.py": "9427990d86efc5ded27b0216816acd60b63aa76f19cdffda4f57c0d46b3d06f9",
     "packages/application/inventory_quantity.py": "88ad0b3374ca226771ee004fe45f30c34cbd13519353d9893bb1ac967c08bce5",
     "packages/application/operator_policy_history.py": "63aac9fc607bce9319f10ad6f499f90169c5c53be0115e875c9ea63ff4841065",
@@ -44,7 +44,7 @@
     "packages/application/wb_fbs_warehouse_registry.py": "42f7fcd62b16cc4d6e0a2ee5f4e3f6f4485248f4f4c34efdb9cf488eb0aacef8",
     "packages/application/historical_receipt_completion.py": "934beefa1078490bf08f75643ac5854e3caf2cddaef319a000e517ade0fae713",
     "packages/application/historical_publication_retirement.py": "55fc0d331a4896381956e026a945b78785f9555c41235bdb11d317f8518cb891",
-    "packages/application/vitrina_last_known_cost.py": "2b97c14d2c2778ca3735abdd316fcf95c2c15b483aadc19e715027cf7d68ab53"
+    "packages/application/vitrina_last_known_cost.py": "1776ff13ef1d9fdbae97fd604e64725f9caf512e5c7674dc4e6a0fb24d2bfb6c"
   },
   "group_migration_root": "/mnt/wb-core-extra100/web-vitrina-history-groups-candidate",
   "repair_code_hashes": {

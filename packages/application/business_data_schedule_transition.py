@@ -15,6 +15,7 @@ import tempfile
 
 from packages.application import business_data_maintenance_pause as pause
 from packages.application import business_data_schedule_profile as profile
+from packages.application.storage_registry import generation_pin
 from packages.application.business_data_write_barrier import (
     _atomic_write_private_json, _append_private_audit, _validate_actor, _BarrierLock,
     _validate_identifier, barrier_status, release_schedule_target_barrier,
@@ -233,7 +234,7 @@ def apply(runtime_dir: Path, *, reviewed_plan: dict, expected_fingerprint: str, 
         raise RuntimeError("audited schedule transition reason is required")
     _validate_plan(runtime, plan, expected_fingerprint, deployed_sha, unit_directory)
     fault = _fault or (lambda point: None)  # Private offline test hook, no CLI option.
-    with pause._ExclusiveRestoreLock(runtime):
+    with pause._ExclusiveRestoreLock(runtime), generation_pin(runtime, exclusive=True):
         state = profile.load_transition(runtime, plan["operation_id"])
         if state and state["plan"] != plan:
             raise RuntimeError("same operation has a different reviewed target")
@@ -334,7 +335,7 @@ def rollback(runtime_dir: Path, *, operation_id: str, actor: str, reason: str,
     if not str(reason).strip():
         raise RuntimeError("audited rollback reason is required")
     fault = _fault or (lambda point: None)
-    with pause._ExclusiveRestoreLock(runtime):
+    with pause._ExclusiveRestoreLock(runtime), generation_pin(runtime, exclusive=True):
         state = profile.load_transition(runtime, operation_id)
         if not state or state["phase"] in {"committed", "released"}:
             raise RuntimeError("schedule rollback is available only before commit")

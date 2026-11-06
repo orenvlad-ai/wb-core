@@ -933,7 +933,16 @@ class NativeCompletionTests(unittest.TestCase):
         rows['allocation']=deepcopy(book['state']['periods'][self.now.date().isoformat()]['document_valuation']['allocations'])
         return rows
 
+    def install_proof_schema(self):
+        from packages.application.dependency_proof import install_dependency_revisions
+        from contextlib import closing
+        authority=self.finance.store_registry.load()
+        for path in {self.finance.store_registry.resolve(store,manifest=authority) for store in ('operational','finance_raw')}:
+            with closing(sqlite3.connect(path)) as conn,conn:
+                install_dependency_revisions(conn)
+
     def proof_inputs(self):
+        self.install_proof_schema()
         captured=operations.capture_pending_completion(self.runtime,finance_block=self.finance)
         receipt=self.finance.recalculate_stale_cost_weeks()
         version=accounting.load(self.root)[1]
@@ -944,6 +953,7 @@ class NativeCompletionTests(unittest.TestCase):
         return operations.complete_current_cycle(self.runtime,captured,finance_block=self.finance,finance_receipt=receipt,economics_receipt=economics,now=self.now)
 
     def http_pass(self, *, fresh=False):
+        self.install_proof_schema()
         from types import SimpleNamespace
         from contextlib import closing
         from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
@@ -979,7 +989,7 @@ class NativeCompletionTests(unittest.TestCase):
         # This fixture owns source/posting/dated publication and T1 finalization;
         # bounded background rotation has its own real-schema smoke coverage.
         with heavy_admitted(self.root,operation='cycle'),warehouse_functional_job_lock(self.root) as owner, \
-             patch.object(accounting,'current_publication_receipt',side_effect=lambda runtime,now=None:actual_publication(runtime,now=now or self.now)), \
+             patch.object(accounting,'current_publication_receipt',side_effect=lambda runtime,now=None,**kwargs:actual_publication(runtime,now=now or self.now,**kwargs)), \
              patch.object(accounting,'refresh',side_effect=refresh), \
              patch('packages.application.warehouse_recovery_sync_retention.run_bounded_recovery_retention',return_value={'status':'ready'}), \
              patch('packages.application.operator_warehouse_documents.drain',return_value={'request_ids':[]}), \
@@ -1186,14 +1196,14 @@ class NativeCompletionTests(unittest.TestCase):
                 payload['manifest_sha256']=_sha256(payload)
                 atomic_write_manifest(self.finance.store_registry.manifest_path,parse_manifest(payload))
                 return original(service,*a,**kw)
-            with patch.object(FfPoolDocumentService,'_finalize_posted',changed),self.assertRaises(ValueError):self.complete(*args)
+            with patch.object(FfPoolDocumentService,'_finalize_posted',changed),self.assertRaises(BlockingIOError):self.complete(*args)
             self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
             self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'processing')
             # Durable queue flags do not let constructor/resume skip the saved proof.
             self.service._finalize_posted(self.identity)
             self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
             self.assertEqual(self.business_image(),self.before)
-            if manifest.implicit:self.finance.store_registry.manifest_path.unlink()
+            if manifest.implicit:self.finance.store_registry.manifest_path.unlink(missing_ok=True)
             else:atomic_write_manifest(self.finance.store_registry.manifest_path,manifest)
             self.assertEqual(self.complete(*self.proof_inputs())['processed_count'],1)
 
@@ -1282,35 +1292,23 @@ class NativeCompletionTests(unittest.TestCase):
             row.update(week_start='2026-09-14',week_end='2026-09-20',rrd_id=str(int(row['rrd_id'])+1000),row_hash='synthetic-new-applicable-week')
             conn.execute('INSERT INTO finance_raw_current_rows('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',list(row.values()))
 
-    def test_split_scope_insert_final_receipt_before_token_is_rejected(self):
-        import inspect
+    def test_split_final_receipt_reservation_blocks_raw_writer(self):
+        from packages.application.dependency_proof import DependencyProof
         self.old_tail();raw=self.split_finance_raw();injected=[]
-        original=operations._completion_split_tokens
-        def token(observer,identity):
-            frame=next((f.frame for f in inspect.stack() if f.function=='guard' and f.filename.endswith('operator_ff_overhead.py')),None)
-            conn=frame.f_locals.get('conn') if frame else None
-            if conn is not None and not injected:
+        original=DependencyProof.assert_current
+        def check(proof,conn):
+            result=original(proof,conn)
+            if conn.in_transaction and not injected:
                 state=conn.execute(f'SELECT state FROM {operations.TABLE} WHERE request_id=?',(self.identity,)).fetchone()[0]
-                if state=='completed':self.insert_split_week(raw);injected.append(True)
-            return original(observer,identity)
+                if state=='completed':
+                    with sqlite3.connect(raw,timeout=.01) as concurrent,self.assertRaises(sqlite3.OperationalError):
+                        concurrent.execute("UPDATE finance_raw_current_rows SET row_hash='racing-final-commit'")
+                    injected.append(True)
+            return result
         with warehouse_functional_job_lock(self.root):
             args=self.proof_inputs()
-            with patch.object(operations,'_completion_split_tokens',side_effect=token),self.assertRaises(ValueError):self.complete(*args)
-            self.assertEqual(injected,[True])
-            self.assertEqual(self.finance.plan_stale_cost_weeks()['stale_week_count'],1)
-        self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'processing')
-        proof=operations.read_acceptance(self.runtime.db_path,self.identity)['processing_receipt']['native_completion']
-        with warehouse_functional_job_lock(self.root):
-            operations.drain(self.runtime.db_path,self.root,timestamp_factory=self.stamp)
-            self.assertEqual(operations.reconcile(self.runtime,now=self.now)['processed_count'],0)
-            acceptance=operations.read_acceptance(self.runtime.db_path,self.identity)
-            self.assertEqual(acceptance['processing_receipt']['native_completion'],proof)
-            with self.assertRaises(ValueError):operations._finalize_confirmed(self.runtime,acceptance)
-            # Restore the intentionally malformed foreign-row fixture. Native Finance
-            # refuses that un-ingested week; never promote it with an invented proof.
-            with sqlite3.connect(raw) as conn:conn.execute("DELETE FROM finance_raw_current_rows WHERE week_start='2026-09-14'")
-            with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate')):
-                self.assertEqual(self.complete(*self.proof_inputs())['processed_count'],1)
+            with patch.object(DependencyProof,'assert_current',check):self.assertEqual(self.complete(*args)['processed_count'],1)
+        self.assertEqual(injected,[True]);self.assertEqual(self.native_terminal(self.identity),('complete','retained'))
         self.assertEqual(self.business_image(),self.before)
 
     def test_split_raw_foreign_commit_outside_nm_scope_keeps_original_token(self):
@@ -1333,18 +1331,17 @@ class NativeCompletionTests(unittest.TestCase):
         self.assertEqual(operations.read_acceptance(self.runtime.db_path,self.identity)['state'],'processing')
         self.assertEqual(self.business_image(),self.before)
 
-    def test_split_scope_insert_during_post_own_commit_seal_is_rejected(self):
-        self.old_tail();raw=self.split_finance_raw();calls=[]
-        original=operations._CompletionReadset.seal
-        def seal(reads):
-            result=original(reads);calls.append(True)
-            if len(calls)==3:self.insert_split_week(raw) # After ack, after scope read, before after-token.
-            return result
+    def test_split_scope_insert_between_native_commits_is_rejected(self):
+        from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
+        self.old_tail();raw=self.split_finance_raw();injected=[]
+        original=WarehouseRecoveryRegistry.retain
+        def retain(registry,*args,**kwargs):
+            self.insert_split_week(raw);injected.append(True)
+            return original(registry,*args,**kwargs)
         with warehouse_functional_job_lock(self.root):
             args=self.proof_inputs()
-            with patch.object(operations._CompletionReadset,'seal',seal),self.assertRaises(ValueError):self.complete(*args)
-        self.assertEqual(len(calls),3)
-        self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+            with patch.object(WarehouseRecoveryRegistry,'retain',retain),self.assertRaises(ValueError):self.complete(*args)
+        self.assertEqual(injected,[True]);self.assertEqual(self.native_terminal(self.identity),('replay','mutation_running'))
         self.assertEqual(self.business_image(),self.before)
 
     def test_two_payment_native_document_parity_and_shared_finance_readset(self):
@@ -1368,7 +1365,7 @@ class NativeCompletionTests(unittest.TestCase):
             def trace(sql):
                 upper=sql.lstrip().upper()
                 if upper.startswith('BEGIN IMMEDIATE'):active.add(id(conn));started[0]=monotonic()
-                if active and upper.startswith('SELECT') and any(t in sql for t in ('wb_finance_weekly_raw_rows','wb_finance_weekly_aggregates','wb_finance_weekly_sku_aggregates')):raw_under_writer.append(sql)
+                if active and upper.startswith('SELECT') and any('FROM '+t in sql for t in ('wb_finance_weekly_raw_rows','wb_finance_weekly_aggregates','wb_finance_weekly_sku_aggregates')):raw_under_writer.append(sql)
                 if upper.startswith(('COMMIT','ROLLBACK')):
                     active.discard(id(conn))
                     if started[0] is not None:holds.append(monotonic()-started[0]);started[0]=None
@@ -1385,7 +1382,7 @@ class NativeCompletionTests(unittest.TestCase):
             args=self.proof_inputs()
             with patch.object(sqlite3,'connect',connect),patch.object(self.finance,'_finance_source_dependency_fingerprint',side_effect=fingerprint),patch.object(operations._CompletionReadset,'seal',stream):
                 self.assertEqual(self.complete(*args)['processed_count'],2)
-        self.assertEqual(len(heavy),3) # Once native zero-stale plan, scoped cohort, actual applied receipt; independent of payment count.
+        self.assertEqual(len(heavy),3) # Shared Finance proof across the bounded two-document cohort.
         self.assertFalse(any(c['inside_writer'] for c in heavy));self.assertEqual(raw_under_writer,[])
         self.assertEqual(self.business_image(),before)
         self.assertEqual(self.native_terminal(second['request_id']),('complete','retained'))
@@ -1408,16 +1405,19 @@ class NativeCompletionTests(unittest.TestCase):
         with warehouse_functional_job_lock(self.root):
             block,plan=self.functional_plan();self.functional=block.apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'],backup_dir=self.root/'backups')
         self.publish(self.prepare());before=self.business_image()
-        actual=time.monotonic;started=[]
+        actual=time.monotonic;finished=[]
+        native_finalize=operations._finalize_confirmed
+        def finalize(*args,**kwargs):
+            result=native_finalize(*args,**kwargs);finished.append(True);return result
         def clock():
             caller=inspect.currentframe().f_back.f_code.co_name
-            if caller in {'complete_current_cycle','_complete_cohort'}:
-                started.append(True);return 0 if len(started)==1 else 31
-            return actual()
+            return actual()+operations.COMPLETION_PROOF_BUDGET_SECONDS+1 if finished and caller in {'complete_current_cycle','_complete_cohort_proof'} else actual()
         with warehouse_functional_job_lock(self.root):
             args=self.proof_inputs()
-            with patch.object(time,'monotonic',clock):result=self.complete(*args)
-            self.assertEqual(result,dict(processed_count=1,pending_count=1))
+            from packages.application.dependency_proof import CompletionProofError
+            with patch.object(time,'monotonic',clock),patch.object(operations,'_finalize_confirmed',finalize),self.assertRaises(CompletionProofError) as caught:self.complete(*args)
+            self.assertEqual(caught.exception.diagnostic()['processed_count'],1)
+            self.assertEqual(caught.exception.diagnostic()['pending_count'],1)
             self.assertEqual(self.native_terminal(args[0]['sources'][1]['request_id']),('posted','mutation_running'))
             with patch.object(FfPoolDocumentService,'_post_once_under_writer_lock',side_effect=AssertionError('duplicate')):
                 self.assertEqual(self.complete(*self.proof_inputs()),dict(processed_count=1,pending_count=0))
@@ -1429,8 +1429,9 @@ class NativeCompletionTests(unittest.TestCase):
         def finalize(runtime,acceptance,*,prepare_guard,finish):
             def prepare():
                 guard=prepare_guard();guard()
-                with closing(sqlite3.connect(self.runtime.db_path)) as conn:
+                with closing(sqlite3.connect(self.runtime.db_path,uri=True)) as conn:
                     conn.row_factory=sqlite3.Row
+                    guard.prepare_connection(conn)
                     changes=conn.total_changes;conn.execute('BEGIN IMMEDIATE')
                     conn.execute(f'UPDATE {operations.TABLE} SET actor=actor WHERE request_id=?',(self.identity,))
                     with self.assertRaises(ValueError):guard(conn,begin=True,initial_changes=changes)

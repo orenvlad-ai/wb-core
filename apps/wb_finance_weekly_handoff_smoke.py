@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from apps.wb_finance_weekly_cost_cutover_smoke import _row, _seed_sources
 from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock, FinanceStaleCostHandoffError
 from packages.application.storage_registry import atomic_write_manifest, build_manifest
+from packages.application.dependency_proof import CompletionProofError
 
 START, END = date(2026, 6, 29), date(2026, 7, 5)
 
@@ -86,10 +87,9 @@ class HandoffTests(unittest.TestCase):
         with self.block._connect_stale_cost_plan() as conn:
             before = self.block._finance_state_digest(conn, target_keys={('canonical', START.isoformat(), END.isoformat())}, target_only=False)
         result = self.run_apply(lambda n: self.commit('UPDATE unrelated_status SET value=1') if n == 1 else None)
-        self.assertEqual(self.calls, {'writer': 2, 'dml': 1})
-        self.assertEqual(result['handoff_revalidation_count'], 1)
-        self.assertEqual(result['handoff_guard']['changed_schemas'], ['main'])
-        self.assertEqual(result['handoff_guard']['classification'], 'unrelated_to_target')
+        self.assertEqual(self.calls, {'writer': 1, 'dml': 1})
+        self.assertEqual(result['handoff_revalidation_count'], 0)
+        self.assertIsNone(result['handoff_guard'])
         self.assertEqual(result['non_target_digest_after'], before)
         self.assertEqual(result['post_verify_stale_week_count'], 0)
 
@@ -105,43 +105,54 @@ class HandoffTests(unittest.TestCase):
                 case = HandoffTests(); case.setUp()
                 try:
                     before = case.image()
-                    with self.assertRaises(FinanceStaleCostHandoffError) as caught:
+                    with self.assertRaises(CompletionProofError) as caught:
                         case.run_apply(lambda n: case.commit(sql) if n == 1 else None)
-                    self.assertEqual(caught.exception.reason, reason)
+                    self.assertEqual(caught.exception.reason, 'dependency_revision_changed')
                     self.assertEqual(case.calls['dml'], 0)
                     if reason != 'finance_target_changed': self.assertEqual(case.image(), before)
                 finally: case.doCleanups()
 
-    def test_split_main_can_revalidate_but_any_raw_commit_is_terminal(self):
+    def test_unrelated_split_main_and_raw_commits_do_not_invalidate(self):
         self.split()
-        result = self.run_apply(lambda n: self.commit('UPDATE unrelated_status SET value=1') if n == 1 else None)
-        self.assertEqual(result['handoff_revalidation_count'], 1)
+        result = self.run_apply(lambda n: self.commit('UPDATE unrelated_status SET value=1'))
+        self.assertEqual(result['handoff_revalidation_count'], 0)
         self.assertEqual(self.calls['dml'], 1)
         self.commit("UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost SET wac_rub='203',fingerprint='next' WHERE as_of_date='2026-07-01' AND nm_id=101")
-        before = self.image()
-        with self.assertRaises(FinanceStaleCostHandoffError) as caught:
-            self.run_apply(lambda n: self.commit('UPDATE unrelated_status SET value=2', raw=True))
-        self.assertEqual(caught.exception.reason, 'finance_raw_handoff_changed')
-        self.assertEqual(caught.exception.diagnostic()['changed_schemas'], ['finance_raw_store'])
-        self.assertEqual(self.calls, {'writer': 1, 'dml': 0})
-        self.assertEqual(self.image(), before)
+        result = self.run_apply(lambda n: self.commit('UPDATE unrelated_status SET value=2', raw=True))
+        self.assertEqual(result['post_verify_stale_week_count'], 0)
+        self.assertEqual(self.calls, {'writer': 1, 'dml': 1})
 
-    def test_repeated_main_drift_exhausts_before_dml(self):
-        before = self.image()
-        with self.assertRaises(FinanceStaleCostHandoffError) as caught:
-            self.run_apply(lambda n: self.commit('UPDATE unrelated_status SET value=value+1'))
-        self.assertEqual(caught.exception.reason, 'finance_handoff_exhausted')
-        self.assertEqual(caught.exception.diagnostic()['attempt'], 2)
-        self.assertEqual(self.calls, {'writer': 2, 'dml': 0})
-        self.assertEqual(self.image(), before)
+    def test_continuous_unrelated_commits_do_not_starve_handoff(self):
+        original = self.block._finance_source_dependency_fingerprint
+        def observed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.commit('UPDATE unrelated_status SET value=value+1')
+            return result
+        with patch.object(self.block, '_finance_source_dependency_fingerprint', side_effect=observed):
+            result = self.run_apply(lambda n: self.commit('UPDATE unrelated_status SET value=value+1'))
+        self.assertEqual(result['post_verify_stale_week_count'], 0)
+        self.assertEqual(self.calls, {'writer': 1, 'dml': 1})
 
     def test_split_actual_raw_drift_fails_without_revalidation(self):
         self.split(); before = self.image()
-        with self.assertRaises(FinanceStaleCostHandoffError) as caught:
+        with self.assertRaises(CompletionProofError) as caught:
             self.run_apply(lambda n: self.commit("UPDATE finance_raw_current_rows SET raw_json='{}' WHERE rrd_id='1'", raw=True))
-        self.assertEqual(caught.exception.reason, 'finance_raw_handoff_changed')
+        self.assertEqual(caught.exception.reason, 'dependency_revision_changed')
         self.assertEqual(self.calls, {'writer':1, 'dml':0})
         self.assertEqual(self.image(), before)
+
+    def test_raw_writer_is_reserved_after_last_check_until_commit(self):
+        self.split()
+        native = self.block._replace_finance_target_images
+        def write(conn, **kwargs):
+            with closing(sqlite3.connect(self.raw_path, timeout=0)) as outsider:
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                    outsider.execute("UPDATE finance_raw_current_rows SET raw_json='{}'")
+            return native(conn, **kwargs)
+        with patch.object(self.block, '_replace_finance_target_images', side_effect=write):
+            result = self.run_apply()
+        self.assertEqual(result['post_verify_stale_week_count'], 0)
+        self.assertEqual(self.calls['dml'], 1)
 
     def test_writer_generation_identity_change_is_terminal(self):
         original = self.block._sqlite_persistent_identity
@@ -177,11 +188,12 @@ class HandoffTests(unittest.TestCase):
                         payload=manifest_payload(changed,include_digest=False)
                         payload['manifest_sha256']=_sha256(payload)
                         atomic_write_manifest(case.block.store_registry.manifest_path,parse_manifest(payload))
-                    with self.assertRaises(FinanceStaleCostHandoffError) as caught:case.run_apply(change)
-                    self.assertEqual(caught.exception.reason,'finance_handoff_identity_changed')
+                    with self.assertRaises(BlockingIOError): case.run_apply(change)
                     self.assertEqual(case.calls,{'writer':1,'dml':0})
-                    self.assertEqual(case.image(),before)
-                    self.assertNotIn('changed-generation',json.dumps(caught.exception.diagnostic()))
+                    with closing(sqlite3.connect(case.block.db_path)) as conn:
+                        conn.row_factory = sqlite3.Row
+                        self.assertEqual(case.block._finance_target_images(conn, {('canonical', START.isoformat(), END.isoformat())}), before)
+                    # The generation writer is denied while this proof owns the pin.
                 finally:case.doCleanups()
 
     def test_validation_is_bracketed_and_projection_is_not_repeated(self):
@@ -194,7 +206,7 @@ class HandoffTests(unittest.TestCase):
         with patch.object(self.block, '_finance_source_dependency_fingerprint', side_effect=dependency), \
              patch.object(self.block, '_build_week_target_projection', wraps=self.block._build_week_target_projection) as projection:
             result = self.run_apply()
-        self.assertEqual(result['handoff_revalidation_count'], 1)
+        self.assertEqual(result['handoff_revalidation_count'], 0)
         self.assertEqual(projection.call_count, 1)
         self.assertEqual(self.calls, {'writer': 1, 'dml': 1})
 
@@ -275,7 +287,7 @@ class HandoffTests(unittest.TestCase):
         phase = next(p for p in durable['phases'] if p['phase_key']=='dependent_replay_economics')
         self.assertEqual(phase['status'],'failed')
         self.assertEqual(phase['details']['finance_failure'],error.diagnostic())
-        self.assertEqual(phase['last_error'],'finance_handoff_exhausted')
+        self.assertEqual(phase['last_error'],'FinanceStaleCostHandoffError')
         self.assertNotIn('secret',json.dumps(durable))
 
 
@@ -367,6 +379,31 @@ class SharedBookHandoffTests(unittest.TestCase):
         failed = deepcopy(book); failed['publication_error']='fixture source unavailable'
         self.apply_september(lambda: accounting.save(self.root, failed, expected=version, operation_id='hide-open-period'))
 
+    def test_direct_book_blob_edit_before_handoff_is_rejected(self):
+        from packages.application import fbs_accounting_runtime as accounting
+        self.make_book()
+        def mutate(_):
+            with closing(sqlite3.connect(accounting.path(self.root))) as conn, conn:
+                conn.execute('UPDATE accounting_blobs SET payload=zeroblob(length(payload)) WHERE digest=(SELECT digest FROM accounting_blobs LIMIT 1)')
+        with self.assertRaises(CompletionProofError) as caught:
+            self.run_apply(mutate)
+        self.assertEqual(caught.exception.reason, 'finance_book_changed')
+        self.assertEqual(self.calls['dml'], 0)
+
+    def test_direct_book_writer_is_reserved_through_target_commit(self):
+        from packages.application import fbs_accounting_runtime as accounting
+        self.make_book()
+        native = self.block._replace_finance_target_images
+        def write(conn, **kwargs):
+            with closing(sqlite3.connect(accounting.path(self.root), timeout=0)) as outsider:
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                    outsider.execute('UPDATE accounting_blobs SET payload=payload')
+            return native(conn, **kwargs)
+        with patch.object(self.block, '_replace_finance_target_images', side_effect=write):
+            result = self.run_apply()
+        self.assertEqual(result['post_verify_stale_week_count'], 0)
+        self.assertEqual(self.calls['dml'], 1)
+
     def test_common_writer_owner_fences_real_book_save_through_finance_commit(self):
         from packages.application import fbs_accounting_runtime as accounting
         from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
@@ -390,11 +427,18 @@ class SharedBookHandoffTests(unittest.TestCase):
             self.assertTrue(started.wait(2));self.assertFalse(committed.is_set())
             owner_checked.set()
             return original(conn, **kwargs)
+        result = None
         with patch.object(self.block, '_replace_finance_target_images', side_effect=replace):
-            result = self.run_apply()
+            try:
+                result = self.run_apply()
+            except CompletionProofError as exc:
+                # A legitimate publisher may win after our commit but during
+                # post-readback. That outcome remains unconfirmed, never replayed.
+                self.assertEqual(exc.reason, 'finance_book_changed')
         for thread in threads: thread.join(3)
         self.assertEqual(errors,[]);self.assertTrue(owner_checked.is_set());self.assertTrue(committed.is_set())
-        self.assertEqual(result['recalculated_week_count'],1);self.assertEqual(self.calls['dml'],1)
+        if result is not None: self.assertEqual(result['recalculated_week_count'],1)
+        self.assertEqual(self.calls['dml'],1)
 
 
 if __name__ == '__main__': unittest.main()

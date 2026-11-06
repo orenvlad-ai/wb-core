@@ -17,6 +17,11 @@ from packages.application.warehouse_functional_lock import (
 )
 
 
+COMPLETION_PHASES = (
+    "fulfillment_completion", "overhead_completion", "supplier_completion",
+    "overhead_reconciliation", "operator_document_completion",
+)
+
 PHASES = (
     "recovery_retention_before",
     "wb_supply_registry",
@@ -26,6 +31,7 @@ PHASES = (
     "cost_materialization",
     "functional_publication",
     "dependent_replay_economics",
+    *COMPLETION_PHASES,
     "recovery_retention_after",
 )
 
@@ -39,11 +45,37 @@ PHASE_LABELS_RU = {
     "cost_materialization": "Материализация себестоимости",
     "functional_publication": "Публикация складов",
     "dependent_replay_economics": "Зависимый пересчёт и экономика",
+    "fulfillment_completion": "Завершение услуг фулфилмента",
+    "overhead_completion": "Проверка и завершение расходов",
+    "supplier_completion": "Завершение обработки поставщиков",
+    "overhead_reconciliation": "Сверка расходов",
+    "operator_document_completion": "Завершение документов оператора",
 }
 
 
 class WarehouseRequestConflict(ValueError):
     """The same scoped request key refers to a different request body."""
+
+
+def phase_error_details(exc: Exception, phase: str, run_id: str) -> dict[str, Any]:
+    """Use the cycle's allowlisted evidence, never a provider exception body."""
+    from packages.application.sheet_vitrina_v1_cycle import cycle_error_diagnostic
+    from packages.application.wb_finance_weekly import FinanceStaleCostHandoffError
+    from packages.application.dependency_proof import CompletionProofError
+    evidence = cycle_error_diagnostic(exc, {"current_stage": phase})
+    # The journal intentionally omits lists of arbitrary records. These records
+    # have already passed the cycle diagnostic's exact field allowlist.
+    exceptions = evidence.pop("exceptions")
+    for item in exceptions:
+        item["frames"] = {str(i): frame for i, frame in enumerate(item["frames"])}
+    evidence["exceptions"] = {str(i): item for i, item in enumerate(exceptions)}
+    evidence.update(durable_run_id=run_id, result_certainty="unknown")
+    details = {"error_diagnostic": evidence}
+    if isinstance(exc, FinanceStaleCostHandoffError):
+        details["finance_failure"] = exc.diagnostic()
+    if isinstance(exc, CompletionProofError):
+        details["completion_failure"] = exc.diagnostic()
+    return details
 
 
 def validate_warehouse_request(payload: Mapping[str, Any] | None, scope: str) -> tuple[str, str, str]:
@@ -180,7 +212,7 @@ class WarehouseUpdateJournal:
         )]
         for phase in phases:
             phase["details"] = json.loads(phase.pop("details_json") or "{}")
-            phase["label_ru"] = PHASE_LABELS_RU[phase["phase_key"]]
+            phase["label_ru"] = PHASE_LABELS_RU.get(phase["phase_key"], phase["phase_key"])
         return {"job_id": row["public_job_id"] or row["run_id"], "durable_run_id": row["run_id"],
                 "request_scope": row["request_scope"], "request_key": row["request_key"],
                 "payload_fingerprint": row["payload_fingerprint"], "attempt_id": row["attempt_id"],
@@ -253,7 +285,7 @@ class WarehouseUpdateJournal:
             # An accepted run may predate these additive retention phases.
             # Only its fenced running owner may create the missing phase row;
             # readbacks and orphan recovery never resume a business mutation.
-            if phase_key in {"recovery_retention_before", "recovery_retention_after"}:
+            if phase_key in PHASES:
                 conn.execute(
                     "INSERT OR IGNORE INTO sheet_vitrina_v1_warehouse_update_phases "
                     "(run_id,phase_key,status,item_count,last_error,details_json) VALUES(?,?,'pending',0,'','{}')",
@@ -289,6 +321,11 @@ class WarehouseUpdateJournal:
         now = self.timestamp_factory()
         with _connect(self.db_path) as conn:
             self._fence(conn, run_id, owner)
+            conn.execute(
+                "INSERT OR IGNORE INTO sheet_vitrina_v1_warehouse_update_phases "
+                "(run_id,phase_key,status,item_count,last_error,details_json) VALUES(?,?,'pending',0,'','{}')",
+                (run_id, phase_key),
+            )
             row = conn.execute(
                 "SELECT started_at FROM sheet_vitrina_v1_warehouse_update_phases WHERE run_id=? AND phase_key=?",
                 (run_id, phase_key),

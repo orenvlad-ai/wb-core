@@ -1009,12 +1009,13 @@ def _recalculate_downstream_finance_cost(
     """
 
     from packages.application.fbs_accounting_runtime import load
-    from packages.application.fbs_accounting_runtime import writer_lock
-    with writer_lock(runtime.runtime_dir):
-        before=load(runtime.runtime_dir)[1]
-        finance_block=block_from_env(runtime.runtime_dir)
-        receipt=finance_block.recalculate_stale_cost_weeks()
-        after=load(runtime.runtime_dir)[1]
+    # Finance owns the short book reservation at its validated writer handoff.
+    # Holding that lock across planning would both block readers' producers and
+    # attempt to acquire the same non-reentrant lock again during application.
+    before=load(runtime.runtime_dir)[1]
+    finance_block=block_from_env(runtime.runtime_dir)
+    receipt=finance_block.recalculate_stale_cost_weeks()
+    after=load(runtime.runtime_dir)[1]
     from packages.application.operator_supplier_processing import reconcile as reconcile_supplier_operations
     supplier_completion=reconcile_supplier_operations(runtime,seller_id=getattr(finance_block,'seller_id','canonical'),now=now)
     return {**receipt,'accounting_version_before':before,'accounting_version':after,

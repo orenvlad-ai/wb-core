@@ -272,6 +272,8 @@ def approved_reporting_snapshot(exact, conn):
     if exact is None:
         return None
     from packages.application.web_vitrina_management_history import load_presentations
+    from packages.application.dependency_proof import check_deadline
+    check_deadline()
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if not {'registry_upload_current_state', 'sheet_vitrina_v1_ready_snapshots'} <= tables:
         return exact
@@ -281,10 +283,12 @@ def approved_reporting_snapshot(exact, conn):
     cells = load_presentations(conn, bundle_version=state[0], dates=None, cost_only=True)
     approved = {}
     for key, by_date in cells.items():
+        check_deadline()
         if not key.startswith('SKU:') or not key.endswith('|' + COST):
             continue
         nm = key[4:].split('|')[0]
         for day, cell in by_date.items():
+            check_deadline()
             if _approved_cost_cell(exact._days, nm=nm, day=day, cell=cell,
                                    invalid_from=getattr(exact, 'invalid_from_date', None)):
                 approved.setdefault(nm, {})[day] = cell

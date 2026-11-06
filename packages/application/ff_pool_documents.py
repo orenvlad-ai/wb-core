@@ -2013,6 +2013,7 @@ class FfPoolDocumentService:
         if completion_guard is not None: completion_guard()
         with _connect(self.db_path) as conn:
             if completion_guard is not None:
+                completion_guard.prepare_connection(conn,stage='S2')
                 initial_changes=conn.total_changes
                 conn.execute("BEGIN IMMEDIATE")
                 transaction=completion_guard(conn,begin=True,initial_changes=initial_changes)
@@ -2024,9 +2025,16 @@ class FfPoolDocumentService:
             ).fetchone()
             if request is None:
                 raise FfPoolDocumentError("request_not_found", "Document request was not found")
+            if completion_guard is not None:
+                from packages.application.operator_ff_overhead import assert_native_confirmation
+                assert_native_confirmation(conn, request)
+                if _is_guided_china_request(request) or self._guided_recovery_target(request):
+                    raise ValueError('overhead_completion_guided_replay_forbidden')
             state = str(request["state"])
             if state == "complete":
-                if completion_guard is not None: conn.commit()
+                if completion_guard is not None:
+                    completion_guard(conn,transaction=transaction)
+                    conn.commit()
                 return self.status(request_id=request_id)
             if state not in {"posted", "replay"}:
                 return self.status(request_id=request_id)
@@ -2081,6 +2089,7 @@ class FfPoolDocumentService:
                             request_id,
                         ),
                     )
+                    if completion_guard is not None: completion_guard(conn, transaction=transaction)
                     conn.commit()
                     return self.status(request_id=request_id)
             now = self._now()
@@ -2116,17 +2125,22 @@ class FfPoolDocumentService:
         lifecycle = str(operation["lifecycle"])
         if lifecycle == RecoveryState.MUTATION_RUNNING.value:
             try:
-                registry.retain(recovery_id, after_digest=_fingerprint(readback))
+                registry.retain(recovery_id, after_digest=_fingerprint(readback), completion_guard=completion_guard)
             except RecoveryPolicyError:
                 concurrent = registry.get_operation(recovery_id)
-                if concurrent is None or str(concurrent["lifecycle"]) != RecoveryState.RETAINED.value:
+                if (concurrent is None or str(concurrent["lifecycle"]) != RecoveryState.RETAINED.value
+                        or concurrent.get("after_digest") != _fingerprint(readback)):
                     raise
         elif lifecycle != RecoveryState.RETAINED.value:
             raise RecoveryPolicyError(
                 f"posted FF pool document recovery is not retainable: {lifecycle}"
             )
+        retained = registry.get_operation(recovery_id)
+        if retained is None or retained.get('after_digest') != _fingerprint(readback):
+            raise RecoveryPolicyError('retained operation after digest mismatch')
         if completion_guard is not None: completion_guard()
         with _connect(self.db_path) as conn:
+            if completion_guard is not None: completion_guard.prepare_connection(conn,stage='S4')
             initial_changes=conn.total_changes
             conn.execute("BEGIN IMMEDIATE")
             if completion_guard is not None: transaction=completion_guard(conn,begin=True,initial_changes=initial_changes)

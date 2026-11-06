@@ -3363,7 +3363,9 @@ class RegistryUploadHttpEntrypoint:
             current = conn.execute("SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1").fetchone()
             stocks = conn.execute("SELECT snapshot_id,pagination_complete,raw_rows_digest,snapshot_date FROM sheet_vitrina_v1_warehouse_wb_snapshots WHERE version_id=?", (active["version_id"],)).fetchall()
         expected_phases = {name: "success" for name in PHASES}
+        from packages.application.warehouse_update_journal import COMPLETION_PHASES
         expected_phases.update(functional_publication="degraded", dependent_replay_economics="skipped")
+        expected_phases.update({name: "skipped" for name in COMPLETION_PHASES})
         if (not run or run["status"] != "degraded" or run["functional_version_id"] != active["version_id"]
                 or phases != expected_phases or not current or current[0] != active["version_id"]
                 or len(stocks) != 1 or not stocks[0]["pagination_complete"] or not stocks[0]["raw_rows_digest"]
@@ -7957,14 +7959,14 @@ class RegistryUploadHttpEntrypoint:
             try:
                 value = operation()
             except Exception as exc:
-                from packages.application.wb_finance_weekly import FinanceStaleCostHandoffError
-                self.warehouse_update_journal.phase_finished(
-                    durable_run_id,
-                    phase_key,
-                    status="failed",
-                    error=str(exc),
-                    details={'finance_failure': exc.diagnostic()} if isinstance(exc, FinanceStaleCostHandoffError) else {},
-                )
+                # Optional terminal evidence must not replace the business error.
+                try:
+                    from packages.application.warehouse_update_journal import phase_error_details
+                    self.warehouse_update_journal.phase_finished(
+                        durable_run_id, phase_key, status="failed", error=type(exc).__name__,
+                        details=phase_error_details(exc, phase_key, durable_run_id))
+                except Exception:
+                    pass
                 raise
             item_count = 0
             if isinstance(value, Mapping):
@@ -8051,6 +8053,10 @@ class RegistryUploadHttpEntrypoint:
                 self.warehouse_update_journal.phase_finished(
                     durable_run_id, "dependent_replay_economics", status="skipped",
                     error=accounting["reason"], details={"accounting": accounting})
+                from packages.application.warehouse_update_journal import COMPLETION_PHASES
+                for phase in COMPLETION_PHASES:
+                    self.warehouse_update_journal.phase_finished(
+                        durable_run_id, phase, status="skipped", error=accounting["reason"])
                 retention_after = run_phase("recovery_retention_after",
                     lambda: run_bounded_recovery_retention(self.runtime))
                 payload = {"status": "degraded", "durable_run_id": durable_run_id,
@@ -8112,19 +8118,21 @@ class RegistryUploadHttpEntrypoint:
 
             dependent = run_phase("dependent_replay_economics", dependent_replay)
             from packages.application.operator_fulfillment_services import reconcile as reconcile_fulfillment
-            fulfillment_operations = reconcile_fulfillment(self.runtime, seller_id=self.wb_finance_weekly_block.seller_id, now=self.now_factory())
+            fulfillment_operations = run_phase("fulfillment_completion", lambda: reconcile_fulfillment(
+                self.runtime, seller_id=self.wb_finance_weekly_block.seller_id, now=self.now_factory()))
             from packages.application.operator_ff_overhead import complete_current_cycle
-            complete_current_cycle(self.runtime, overhead_completion,
-                finance_block=self.wb_finance_weekly_block,
+            overhead_completion_result = run_phase("overhead_completion", lambda: complete_current_cycle(
+                self.runtime, overhead_completion, finance_block=self.wb_finance_weekly_block,
                 finance_receipt=dependent['finance_cost_recalculation'],
-                economics_receipt=dependent['economics_publication'], now=self.now_factory())
+                economics_receipt=dependent['economics_publication'], now=self.now_factory()))
             from packages.application.operator_supplier_processing import reconcile as reconcile_supplier_operations
-            supplier_operation_completion = reconcile_supplier_operations(self.runtime,
-                seller_id=getattr(self.wb_finance_weekly_block, "seller_id", "canonical"))
-            reconcile_overheads(self.runtime)
-            reconcile_operator_documents(self.runtime,request_ids=operator_documents['request_ids'],
+            supplier_operation_completion = run_phase("supplier_completion", lambda: reconcile_supplier_operations(
+                self.runtime, seller_id=getattr(self.wb_finance_weekly_block, "seller_id", "canonical")))
+            run_phase("overhead_reconciliation", lambda: reconcile_overheads(self.runtime))
+            run_phase("operator_document_completion", lambda: reconcile_operator_documents(
+                self.runtime, request_ids=operator_documents['request_ids'],
                 finance_receipt=dict(dependent.get('finance_cost_recalculation') or {}),
-                economics_receipt=dict(dependent.get('economics_publication') or {}))
+                economics_receipt=dict(dependent.get('economics_publication') or {})))
             retention_after = run_phase("recovery_retention_after",
                 lambda: run_bounded_recovery_retention(self.runtime))
             sync = dict(supply_payload.get("sync") or {})
@@ -8140,6 +8148,7 @@ class RegistryUploadHttpEntrypoint:
                 "recovery_retention_before": retention_before,
                 "recovery_retention_after": retention_after,
                 "fulfillment_operations": fulfillment_operations,
+                "overhead_completion": overhead_completion_result,
                 "fbs_snapshot_accounting": result.get("fbs_snapshot_accounting"),
                 "wb_valuation": dict(plan.get("wb_valuation") or {}),
                 "durable_run_id": durable_run_id,
@@ -8176,11 +8185,16 @@ class RegistryUploadHttpEntrypoint:
 
         except Exception as exc:
             if durable_run_id:
-                self.warehouse_update_journal.finish(
-                    durable_run_id, status="failed",
-                    error=f"{active_phase}: {exc}" if active_phase else str(exc),
-                )
-                self.warehouse_functional_block.record_failed_sync(exc)
+                try:
+                    self.warehouse_update_journal.finish(
+                        durable_run_id, status="failed",
+                        error=f"{active_phase}: {type(exc).__name__}" if active_phase else type(exc).__name__)
+                except Exception:
+                    pass
+                try:
+                    self.warehouse_functional_block.record_failed_sync(exc)
+                except Exception:
+                    pass
             raise
 
     def handle_warehouse_manual_sync_start_request(

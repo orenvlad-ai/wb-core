@@ -28,6 +28,8 @@ from packages.application.wb_finance_weekly import (  # noqa: E402
     WbFinanceWeeklyBlock,
 )
 
+from packages.application.dependency_proof import CompletionProofError  # noqa: E402
+
 
 def main() -> None:
     with TemporaryDirectory(prefix="wb-finance-stale-safety-") as tmp:
@@ -235,11 +237,6 @@ def main() -> None:
                 "INSERT INTO ff_interactive_status_probe(probe_id,created_at) VALUES(?,?)",
                 ("ff-document-status", "2026-07-27T00:00:00Z"),
             )
-            interactive.execute(
-                "UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost "
-                "SET wac_rub='51',fingerprint='unrelated-nm-103' "
-                "WHERE as_of_date='2026-07-01' AND nm_id=103"
-            )
             interactive.commit()
         interactive_ms = int((time.monotonic() - interactive_started) * 1000)
         release_recalculation.set()
@@ -248,13 +245,64 @@ def main() -> None:
         _assert(not background.is_alive(), "stale Finance CAS did not terminate")
         _assert(
             not background_errors,
-            "unrelated status and canonical other-SKU writers must not "
-            f"invalidate exact Finance CAS: {background_errors}",
+            "an unrelated status-table writer must not "
+            f"invalidate the observed dependency proof: {background_errors}",
         )
         _assert(
             interactive_ms < 1_500,
             f"interactive document/status writer waited {interactive_ms}ms",
         )
+
+        # Revisions are deliberately conservative inside an observed table.
+        # Another SKU in that table must invalidate this proof even though the
+        # exact target dependency fingerprint can remain unchanged.
+        with sqlite3.connect(block.db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost "
+                "SET wac_rub='203',fingerprint='observed-table-test-before' "
+                "WHERE as_of_date='2026-07-01' AND nm_id=101"
+            )
+        plan = block.plan_stale_cost_weeks(
+            date_from=date(2026, 6, 29), date_to=date(2026, 7, 26)
+        )
+        other_sku_target_before = _target_images(block)
+        recalculation_entered.clear()
+        release_recalculation.clear()
+        calls = 0
+        background_errors = []
+        block._build_week_target_projection = pause_snapshot_recalculation  # type: ignore[method-assign]
+        background = threading.Thread(target=apply_in_background, daemon=True)
+        background.start()
+        _assert(recalculation_entered.wait(timeout=5), "observed-table projection did not start")
+        with sqlite3.connect(block.db_path, timeout=2) as concurrent_source:
+            concurrent_source.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost "
+                "SET wac_rub='51',fingerprint='observed-other-nm-103' "
+                "WHERE as_of_date='2026-07-01' AND nm_id=103"
+            )
+        release_recalculation.set()
+        background.join(timeout=5)
+        block._build_week_target_projection = original  # type: ignore[method-assign]
+        _assert(not background.is_alive(), "observed-table proof did not terminate")
+        _assert(
+            len(background_errors) == 1
+            and isinstance(background_errors[0], CompletionProofError)
+            and background_errors[0].reason == 'dependency_revision_changed',
+            f"other-SKU observed-table change must invalidate proof: {background_errors}",
+        )
+        _assert(
+            _target_images(block) == other_sku_target_before,
+            "observed-table rejection changed Finance target images",
+        )
+        fresh = block.plan_stale_cost_weeks(
+            date_from=date(2026, 6, 29), date_to=date(2026, 7, 26)
+        )
+        retry = block.apply_stale_cost_weeks(
+            expected_fingerprint=fresh['fingerprint'],
+            date_from=date(2026, 6, 29), date_to=date(2026, 7, 26),
+        )
+        _assert(retry['status'] == 'applied' and retry['non_target_preserved'],
+                f"fresh proof after observed-table rejection failed: {retry}")
 
         # A change to an actual canonical cost dependency during the same
         # lock-free projection still fails closed before target replacement.
@@ -268,6 +316,7 @@ def main() -> None:
         plan = block.plan_stale_cost_weeks(
             date_from=date(2026, 6, 29), date_to=date(2026, 7, 26)
         )
+        exact_target_before = _target_images(block)
         exact_entered = threading.Event()
         release_exact = threading.Event()
         calls = 0
@@ -301,10 +350,14 @@ def main() -> None:
         block._build_week_target_projection = original  # type: ignore[method-assign]
         _assert(not background.is_alive(), "exact dependency CAS did not terminate")
         _assert(
-            background_errors
+            len(background_errors) == 1
             and isinstance(background_errors[0], FinanceStaleCostHandoffError)
             and background_errors[0].reason == 'finance_dependency_changed',
             f"canonical source drift must fail closed: {background_errors}",
+        )
+        _assert(
+            _target_images(block) == exact_target_before,
+            "actual source drift rejection changed Finance target images",
         )
         plan = block.plan_stale_cost_weeks(
             date_from=date(2026, 6, 29), date_to=date(2026, 7, 26)
@@ -441,6 +494,14 @@ def main() -> None:
     print(
         "wb_finance_weekly_stale_cost_safety: ok -> dry-run, fingerprint, backup, atomic rollback, non-target digest, zero-change repeat"
     )
+
+
+def _target_images(block: WbFinanceWeeklyBlock) -> dict:
+    with block._connect_stale_cost_plan() as conn:
+        return block._finance_target_images(conn, {
+            (block.seller_id, "2026-06-29", "2026-07-05"),
+            (block.seller_id, "2026-07-20", "2026-07-26"),
+        })
 
 
 def _metrics(block: WbFinanceWeeklyBlock, week_start: str) -> dict:

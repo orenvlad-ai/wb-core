@@ -404,8 +404,7 @@ def _finance_authority_case(applied,seam,drift,after_open):
         def ack(*args,**kwargs):calls['ack']+=1;return native_ack(*args,**kwargs)
         with patch.object(block,'_connect_stale_cost_plan',side_effect=reader),patch.object(block,'_connect',side_effect=writer),patch.object(block,'_replace_finance_target_images',side_effect=target),patch.object(op,'acknowledge_finance',side_effect=ack):
             if drift:
-                with case.assertRaises(FinanceStaleCostHandoffError) as rejected:block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'])
-                case.assertEqual(rejected.exception.reason,'finance_handoff_identity_changed')
+                with case.assertRaises(BlockingIOError):block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'])
             else:
                 result=block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'])
                 case.assertIn(identity,result['operator_nomenclature_acks']);case.assertEqual(result['status'],'applied' if applied else 'already_current')
@@ -418,7 +417,8 @@ def _finance_authority_case(applied,seam,drift,after_open):
                 receipt=op.read(path,identity,actor='tester');case.assertEqual(receipt['state'],'processing');case.assertFalse(receipt['processing_receipt']['cost'])
             # Original target commit is preserved; rejection does not roll back or retry that earlier transaction.
             original_manifest=block.store_registry.load() if drift=='same_path_generation' else initial
-            with block.store_registry.connect('operational',mode='ro',operation='synthetic_original_target_proof',manifest=original_manifest) as conn:
+            with sqlite3.connect('file:'+str(origin)+'?mode=ro',uri=True) as conn:
+                conn.row_factory=sqlite3.Row;conn.execute('PRAGMA query_only=ON')
                 after_target=block._json_digest(block._finance_target_images(conn,target_keys))
             case.assertNotEqual(before_target,after_target) if applied else case.assertEqual(before_target,after_target)
         else:

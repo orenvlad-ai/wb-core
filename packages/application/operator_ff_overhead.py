@@ -18,6 +18,8 @@ REPLACEMENTS = "sheet_vitrina_v1_ff_pool_overhead_replacements"
 PREFIX = "/v1/sheet-vitrina-v1/operations"
 NATIVE = "/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/requests/"
 COMPLETION_REQUEST_COLUMNS = 'request_id,document_kind,request_payload_json,idempotency_epoch,business_date,source_revision,source_sha256,request_identity,posted_document_id,posted_manifest_sha256,actor,recovery_operation_id'
+COMPLETION_PROOF_BUDGET_SECONDS = 1800
+
 STATES = ("accepted", "processing", "completed", "delayed", "needs_attention", "cancelled")
 
 
@@ -503,9 +505,10 @@ def assert_day_can_close(conn, day):
 
 def _update(db_path, identity, state, reason, receipt=None, *, guard=None):
     if guard is not None: guard()
-    with closing(sqlite3.connect(db_path, timeout=2)) as conn, conn:
+    with closing(sqlite3.connect(Path(db_path).resolve().as_uri()+"?mode=rw", uri=True, timeout=2)) as conn, conn:
         conn.row_factory=sqlite3.Row
         if guard is not None:
+            guard.prepare_connection(conn,stage='S5')
             initial_changes=conn.total_changes
             conn.execute("BEGIN IMMEDIATE")
             transaction=guard(conn,begin=True,initial_changes=initial_changes)
@@ -659,7 +662,8 @@ def _finalize_confirmed(runtime, acceptance, *, prepare_guard=None, finish=None)
     identity = acceptance["request_id"]
     if prepare_guard is None and requires_current_completion(runtime.db_path,identity):
         raise ValueError("overhead_completion_current_guard_required")
-    with (Path(runtime.runtime_dir) / ".ff-pool-document-posting.lock").open("a+b") as handle:
+    from packages.application.storage_registry import generation_pin
+    with generation_pin(runtime.runtime_dir), (Path(runtime.runtime_dir) / ".ff-pool-document-posting.lock").open("a+b") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5):
@@ -775,10 +779,29 @@ def _completion_source(conn, identity):
             or scope.get('document_kind') != 'pool_overhead' or recovery['lifecycle_state'] not in ('mutation_running','retained')
             or not str(recovery['checkpoint_digest']).startswith('sha256:')):
         raise ValueError('overhead_completion_recovery_unbound')
+    expected_after=_fingerprint(dict(document_id=document['document_id'],root_document_id=document['root_document_id'],
+        operation_id=document['operation_id'],manifest_sha256=document['posted_manifest_sha256']))
+    if recovery['lifecycle_state']=='retained' and recovery['after_digest']!=expected_after:
+        raise ValueError('overhead_completion_retained_digest_changed')
+    native_state=conn.execute(f'SELECT state FROM {REQUESTS_TABLE} WHERE request_id=?',(identity,)).fetchone()[0]
+    if native_state not in ('posted','replay','complete'):
+        raise ValueError('overhead_completion_native_state_invalid')
+    if native_state in ('replay','complete'):
+        from packages.application.ff_pool_documents import WORKFLOW_EVENTS_TABLE
+        if not conn.execute(f"SELECT 1 FROM {WORKFLOW_EVENTS_TABLE} WHERE action_type='facility_pool_document' AND identity=? AND stage='replay' AND status='running' LIMIT 1",(identity,)).fetchone():
+            raise ValueError('overhead_completion_replay_event_unproven')
+    if native_state=='complete':
+        from packages.application.ff_pool_documents import WORKFLOW_EVENTS_TABLE
+        events=conn.execute(f"SELECT details_json FROM {WORKFLOW_EVENTS_TABLE} WHERE action_type='facility_pool_document' AND identity=? AND stage='replay' AND status='complete'",(identity,)).fetchall()
+        if recovery['lifecycle_state']!='retained' or not any(_fingerprint(json.loads(event[0]))==expected_after for event in events):
+            raise ValueError('overhead_completion_native_event_unproven')
     from packages.application.fbs_snapshot_cost_sources import _documents
-    native=next((d for d in _documents(conn, document_id=document['document_id']) if d['document_id']==document['document_id']),None)
+    native=next((d for d in _documents(conn, document_id=document['document_id'],native_only=True) if d['document_id']==document['document_id']),None)
     if native is None: raise ValueError('overhead_completion_native_document_missing')
-    return dict(native_document_fingerprint=native['fingerprint'],request_id=identity,source_digest=row['source_digest'],source_json=row['source_json'],actor=row['actor'],
+    recovery_mutable={'lifecycle_state','state_version','next_action','after_digest','writer_state','timer_state','rollback_available','updated_at','last_heartbeat_at'}
+    recovery_immutable={key:recovery[key] for key in recovery.keys() if key not in recovery_mutable}
+    native_after_image=dict(document_id=document['document_id'],root_document_id=document['root_document_id'],operation_id=document['operation_id'],manifest_sha256=document['posted_manifest_sha256'])
+    return dict(recovery_immutable=recovery_immutable,native_after_image=native_after_image,native_document_fingerprint=native['fingerprint'],request_id=identity,source_digest=row['source_digest'],source_json=row['source_json'],actor=row['actor'],
         posted_manifest=posted,materials=materials,recovery_operation_id=request['recovery_operation_id'],
         queue_id=queue_id,stable_source_id=stable,source_revision=revision,effective_date=queue['effective_date'],affected_nm_ids=nm_ids)
 
@@ -834,6 +857,7 @@ class _CompletionReadset:
         return cursor
 
     def seal(self):
+        from packages.application.dependency_proof import check_deadline
         import hashlib
         digest=hashlib.sha256()
         rows=0;size=0
@@ -842,30 +866,65 @@ class _CompletionReadset:
             encoded=json.dumps([sql,parameters,cursor.description],default=lambda value:{'sqlite_blob_hex':value.hex()},separators=(',',':')).encode()
             digest.update(encoded);size+=len(encoded)
             for row in cursor:
+                check_deadline()
                 encoded=json.dumps(list(row),ensure_ascii=False,default=lambda value:{'sqlite_blob_hex':value.hex()},separators=(',',':')).encode()+b'\n'
                 digest.update(encoded);size+=len(encoded);rows+=1
         return dict(digest='sha256:'+digest.hexdigest(),rows=rows,bytes=size,queries=len(self.queries))
 
 
-def complete_current_cycle(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None):
+def complete_current_cycle(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None, proof_budget_seconds=COMPLETION_PROOF_BUDGET_SECONDS, cohort_size=8):
     """Oldest first, bounded coherent groups, without interrupting a begun finalizer."""
     from time import monotonic
-    deadline=monotonic()+30
+    import math
+    if not isinstance(proof_budget_seconds,(int,float)) or not math.isfinite(proof_budget_seconds) or proof_budget_seconds<=0:
+        raise ValueError('overhead_completion_invalid_proof_budget')
+    if type(cohort_size) is not int or not 1<=cohort_size<=8:
+        raise ValueError('overhead_completion_invalid_cohort_size')
+    deadline=monotonic()+proof_budget_seconds
     completed=0
     sources=captured['sources']
-    for offset in range(0,len(sources),8):
-        if completed and monotonic()>=deadline:break
-        cohort=sources[offset:offset+8]
-        result=_complete_cohort(runtime,{**captured,'sources':cohort},finance_block=finance_block,
-            finance_receipt=finance_receipt,economics_receipt=economics_receipt,now=now,deadline=deadline)
+    for offset in range(0,len(sources),cohort_size):
+        if monotonic()>=deadline:break
+        cohort=sources[offset:offset+cohort_size]
+        from packages.application.dependency_proof import CompletionProofError
+        try:
+            result=_complete_cohort(runtime,{**captured,'sources':cohort},finance_block=finance_block,
+                finance_receipt=finance_receipt,economics_receipt=economics_receipt,now=now,deadline=deadline)
+        except CompletionProofError as exc:
+            completed+=exc.processed_count or 0
+            exc.processed_count=completed;exc.pending_count=len(sources)-completed
+            exc.business_write_started=exc.business_write_started or completed>0
+            raise
         completed+=result['processed_count']
         if result['processed_count']!=len(cohort):break
-    return dict(processed_count=completed,pending_count=len(sources)-completed)
+    if completed!=len(sources):
+        from packages.application.dependency_proof import CompletionProofError
+        error=CompletionProofError('overhead_completion_pending',classification='budget_exhausted',business_write_started=completed>0)
+        error.processed_count=completed;error.pending_count=len(sources)-completed
+        raise error
+    return dict(processed_count=completed,pending_count=0)
 
 
 def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None, deadline=None):
+    from packages.application.dependency_proof import CompletionProofError
+    state={'business_write_started':False,'completed_count':0}
+    try:
+        return _complete_cohort_proof(runtime,captured,finance_block=finance_block,finance_receipt=finance_receipt,
+            economics_receipt=economics_receipt,now=now,deadline=deadline,write_state=state)
+    except CompletionProofError as exc:
+        exc.business_write_started=state['business_write_started']
+        exc.processed_count=state['completed_count']
+        raise
+    except ValueError as exc:
+        error=CompletionProofError('overhead_completion_unproven',business_write_started=state['business_write_started'])
+        error.processed_count=state['completed_count']
+        raise error from exc
+
+
+def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt, economics_receipt, now=None, deadline=None, write_state):
     """One coherent bounded cohort proof, then short guarded native handoffs."""
     from contextlib import ExitStack
+    from packages.application.dependency_proof import DependencyProof, CompletionProofError, readonly_deadline, check_deadline, DetachedReadConnection, verify_registry_rows
     from datetime import date
     from packages.application import fbs_accounting_runtime as accounting
     from packages.application.fbs_overhead_presentation import OverheadAccountingView
@@ -883,8 +942,11 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
         raise ValueError('overhead_completion_finance_unproven')
     completed=0
     with ExitStack() as scope:
+        proof_budget=ExitStack()
+        scope.push(proof_budget)
+        proof_budget.enter_context(readonly_deadline(None,deadline))
         authority=[]
-        observer=scope.enter_context(closing(finance_block._connect_stale_cost_plan(storage_authority=authority)))
+        observer=scope.enter_context(closing(finance_block._connect_stale_cost_plan(storage_authority=authority,proof_read=True)))
         registry=finance_block.store_registry
         if authority != [captured['authority']] or registry.load()!=captured['authority']:
             raise ValueError('overhead_completion_storage_changed')
@@ -893,34 +955,44 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
             return tuple((name,path,Path(path).stat().st_dev,Path(path).stat().st_ino) for name,path in finance_block._sqlite_persistent_identity(connection))
         files=files_identity(observer)
         # BEFORE every scope/source read, on this same live, non-transactional observer.
+        dependencies=DependencyProof.capture(observer)
         before=finance_block._sqlite_data_version_token(observer)
         book_observer=scope.enter_context(closing(sqlite3.connect(accounting.path(runtime.runtime_dir).as_uri()+'?mode=ro',uri=True)))
         book_observer.execute('PRAGMA query_only=ON')
         book_before=finance_block._sqlite_data_version_token(book_observer)
+        from packages.application.business_data_schedule_profile import load_selector
+        policy_selector=load_selector(Path(runtime.runtime_dir))
         book_identity=finance_block._sqlite_persistent_identity(book_observer)
         book_files=files_identity(book_observer)
-        plan=finance_block._plan_stale_cost_weeks_in_connection(observer,
+        scope.push(proof_budget) # Also covers partial deadline-context entry before either connection closes.
+        proof_budget.enter_context(readonly_deadline(observer,deadline))
+        proof_budget.enter_context(readonly_deadline(book_observer,deadline))
+        detached=DetachedReadConnection(observer)
+        book,version=accounting.load_detached(runtime.runtime_dir,book_observer)
+        from packages.application.vitrina_last_known_cost import approved_reporting_snapshot
+        observed=dependencies.observe()
+        observed.__enter__()
+        scope.callback(observed.__exit__, None, None, None)
+        verify_registry_rows(detached,registry,captured['authority'])
+        finance_block._shared_cost_snapshot=approved_reporting_snapshot(accounting.load_shared(runtime.runtime_dir,bound_book=(book,version)),detached)
+        finance_block._canonical_cost_snapshot_connection=None
+        finance_block._nomenclature_cache_connection=None
+        plan=finance_block._plan_stale_cost_weeks_in_connection(detached,
             date_from=date.fromisoformat(finance_block.shared_cost_snapshot.effective_date),date_to=None)
         if plan['stale_week_count']!=0: raise ValueError('overhead_completion_finance_stale')
-        reads=_CompletionReadset(observer)
+        reads=_CompletionReadset(detached)
         aliases,ambiguous,_,_=_nomenclature_identity_index(reads)
         nm_ids=sorted({str(nm) for frozen in captured['sources'] for nm in frozen['affected_nm_ids']})
         # The provider's operation date need not lie inside its report week.
         # Use the exact native planner's candidate bounds, then native dates below.
         date_from,date_to=plan['date_from'],plan['date_to']
-        # Exclude only canonical ASCII positive decimal IDs outside the source
-        # cohort. Native Python str(...).strip() also accepts Unicode whitespace;
-        # SQLite trim/casts must never decide that such rows are irrelevant.
-        # Noncanonical, absent and zero forms are a conservative superset,
-        # resolved below by the existing native resolver (including aliases).
-        # Whole selected weeks retain every native aggregate operand.
-        direct_nm="coalesce(CAST(json_extract(raw_json,'$.nmId') AS TEXT),'')"
-        canonical_nm=f"({direct_nm} GLOB '[1-9]*' AND {direct_nm} NOT GLOB '*[^0-9]*')"
-        candidates=reads.execute("SELECT week_start,week_end,raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_end>=? AND (? IS NULL OR week_start<=?) AND ("+direct_nm+" IN ("+
-            ','.join('?' for _ in nm_ids)+") OR NOT "+canonical_nm+") ORDER BY week_start,report_id,rrd_id",
-            (finance_block.seller_id,date_from,date_to,date_to,*nm_ids))
+        # All candidate rows use the native Python resolver. SQL casts/trim must
+        # never suppress noncanonical IDs or rows whose aliases can change.
+        candidates=reads.execute("SELECT week_start,week_end,raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_end>=? AND (? IS NULL OR week_start<=?) ORDER BY week_start,report_id,rrd_id",
+            (finance_block.seller_id,date_from,date_to,date_to))
         keys=set()
         for row in candidates:
+            check_deadline()
             operation=json.loads(row['raw_json'])
             nm,_,problem=_resolve_finance_nm_id(operation,alias_to_nm=aliases,ambiguous_aliases=ambiguous)
             if problem:
@@ -940,12 +1012,12 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
                 raise ValueError('overhead_completion_finance_foreign')
         else:
             targets={(finance_block.seller_id,str(w['week_start']),str(w['week_end'])) for w in finance_receipt.get('weeks',[])}
-            actual=finance_block._finance_source_dependency_fingerprint(observer,target_keys=targets,force_reload=True)
+            actual=finance_block._finance_source_dependency_fingerprint(detached,target_keys=targets,force_reload=True)
             if (not targets or finance_receipt.get('source_dependency')!=actual
                     or finance_receipt.get('post_source_dependency')!=actual
-                    or finance_receipt.get('target_image_digest')!=finance_block._json_digest(finance_block._finance_target_images(observer,targets))):
+                    or finance_receipt.get('target_image_digest')!=finance_block._json_digest(finance_block._finance_target_images(detached,targets))):
                 raise ValueError('overhead_completion_finance_foreign')
-        publication=accounting.current_publication_receipt(runtime,now=now)
+        publication=accounting.current_publication_receipt(runtime,now=now,connection=detached,bound_book=(book,version))
         if (not publication or economics_receipt.get('accounting_publication')!=publication
                 or finance_receipt.get('accounting_version')!=publication['accounting_version']
                 or finance_receipt.get('accounting_version_before')!=publication['accounting_version']
@@ -954,13 +1026,12 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
         # Seal Ready's actual bytes without re-parsing/re-rendering all cells at each handoff.
         reads.execute('SELECT p.operation_id,p.attempt_id,p.after_digest,p.book_version,p.state,p.ready_required,ready.plan_json,current.bundle_version FROM sheet_vitrina_v1_ready_publications p JOIN sheet_vitrina_v1_ready_snapshots ready ON ready.bundle_version=p.bundle_version AND ready.as_of_date=p.as_of_date JOIN registry_upload_current_state current ON current.bundle_version=ready.bundle_version AND current.slot=1 WHERE p.operation_id=? AND p.attempt_id=?',
             (publication['operation_id'],publication['attempt_id'])).fetchall()
-        book,version=accounting.load(runtime.runtime_dir)
         allocations={}
         with closing(readonly(runtime.db_path)) as conn:
             for frozen in captured['sources']:
                 if _completion_source(conn,frozen['request_id'])!=frozen:raise ValueError('overhead_completion_source_changed')
                 acceptance=_public(conn,conn.execute(f'SELECT * FROM {TABLE} WHERE request_id=?',(frozen['request_id'],)).fetchone())
-                allocation=OverheadAccountingView(runtime.runtime_dir,runtime.db_path,now=now).resolve(
+                allocation=OverheadAccountingView(runtime.runtime_dir,runtime.db_path,now=now,bound_book=(book,version)).resolve(
                     acceptance['summary'],day=acceptance['business_date'],document_id=acceptance['document']['document_id'],posted=True)
                 if (version!=publication['accounting_version'] or book['state']['periods'].get(frozen['effective_date'],{}).get('applied_documents',{}).get(frozen['posted_manifest']['document_id'])!=frozen['native_document_fingerprint']):
                     raise ValueError('overhead_completion_dated_document_changed')
@@ -968,76 +1039,83 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
                     raise ValueError('overhead_completion_allocation_unproven')
                 allocations[frozen['request_id']]=allocation
         seal=reads.seal()
-        if (observer.in_transaction or before!=finance_block._sqlite_data_version_token(observer)
-                or book_before!=finance_block._sqlite_data_version_token(book_observer)):
-            raise ValueError('overhead_completion_readback_changed')
-        fence=before
-        def refresh_fence():
-            nonlocal fence
-            # Own native commits change main.data_version. Never reset the fence
-            # until actual retained source/target/scope bytes have been streamed.
-            start=finance_block._sqlite_data_version_token(observer)
-            # This completion never writes attached raw stores. Only main's own
-            # commits may advance after an exact outside-writer semantic seal.
-            if (any(start[name]!=before[name] for name,_ in identity if name!='main')
-                    or registry.load()!=captured['authority'] or finance_block._sqlite_persistent_identity(observer)!=identity
-                    or files_identity(observer)!=files
-                    or finance_block._sqlite_persistent_identity(book_observer)!=book_identity
+        observed.__exit__(None,None,None)
+        dependency_receipt=dependencies.seal()
+        proof_budget.close()
+        if book_before!=finance_block._sqlite_data_version_token(book_observer):
+            raise CompletionProofError('overhead_completion_book_changed')
+        def refresh_fence(connection=observer):
+            if (registry.load()!=captured['authority'] or load_selector(Path(runtime.runtime_dir))!=policy_selector or files_identity(observer)!=files
                     or files_identity(book_observer)!=book_files
-                    or finance_block._sqlite_data_version_token(book_observer)!=book_before
-                    or reads.seal()!=seal):
-                raise ValueError('overhead_completion_cohort_changed')
-            if start!=finance_block._sqlite_data_version_token(observer) or registry.load()!=captured['authority']:
-                raise ValueError('overhead_completion_readback_changed')
-            fence=start
+                    or finance_block._sqlite_data_version_token(book_observer)!=book_before):
+                raise CompletionProofError('overhead_completion_authority_changed',classification='authority_changed')
+            dependencies.assert_current(connection)
         for frozen in captured['sources']:
             from time import monotonic
-            if completed and deadline is not None and monotonic()>=deadline:break
+            if deadline is not None and monotonic()>=deadline:break
+            from packages.application.operator_ff_overhead_completion_state import NativeProgressFence
+            progress=NativeProgressFence(frozen)
             transactions={}
+            transaction_images={}
+            transaction_stages={}
+            def prepare_connection(conn, *, stage='readback'):
+                if conn.in_transaction:
+                    raise CompletionProofError('overhead_completion_prepare_before_begin_required')
+                paths={str(Path(r[2]).resolve()) for r in conn.execute('PRAGMA database_list') if r[1]!='temp'}
+                wanted=[store['path'] for store in dependencies.stores.values()]+[str(accounting.path(runtime.runtime_dir))]
+                for index,path in enumerate(dict.fromkeys(wanted)):
+                    if path not in paths:
+                        conn.execute('ATTACH DATABASE ? AS completion_reservation_'+str(index),(Path(path).as_uri()+'?mode=rw',))
+                        paths.add(path)
+                conn.execute('CREATE TEMP TABLE IF NOT EXISTS completion_transaction_nonce(token TEXT)')
+                transaction_stages[conn]=stage
             def guard(conn=None, *, begin=False, initial_changes=None, transaction=None):
                 if conn is None:
                     refresh_fence()
-                    with closing(readonly(runtime.db_path)) as opened: return guard(opened)
+                    with closing(readonly(runtime.db_path)) as opened:
+                        if progress.expected is not None:progress.check(opened)
+                        if _completion_source(opened,frozen['request_id'])!=frozen:
+                            raise CompletionProofError('overhead_completion_source_changed',classification='immutable_source_changed')
+                    return
                 writer=bool(conn.in_transaction and conn.execute('PRAGMA query_only').fetchone()[0]!=1)
                 if begin:
                     if not writer or initial_changes!=conn.total_changes:
-                        raise ValueError('overhead_completion_pre_dml_fence_required')
-                    transaction=object()
+                        raise CompletionProofError('overhead_completion_pre_dml_fence_required')
+                    from uuid import uuid4
+                    transaction=uuid4().hex
                     transactions[conn]=transaction
-                elif writer and (transaction is None or transactions.get(conn) is not transaction):
-                    raise ValueError('overhead_completion_transaction_unbound')
-                # Only a caller-bound BEGIN may avoid the main observer after own DML.
-                # Rollback-mode blob row updates can hold EXCLUSIVE cache-spill locks.
-                post_dml=bool(writer and not begin)
-                def token():
-                    return (_completion_split_tokens(observer,identity) if post_dml
-                            else finance_block._sqlite_data_version_token(observer))
-                expected={k:v for k,v in fence.items() if not post_dml or k!='main'}
-                if (registry.load()!=captured['authority']
-                        or Path(conn.execute('PRAGMA database_list').fetchone()[2]).resolve()!=registry.resolve('operational',manifest=captured['authority'])
-                        or finance_block._sqlite_persistent_identity(observer)!=identity
-                        or token()!=expected or files_identity(observer)!=files
-                        or finance_block._sqlite_persistent_identity(book_observer)!=book_identity
-                        or files_identity(book_observer)!=book_files
-                        or finance_block._sqlite_data_version_token(book_observer)!=book_before):
-                    raise ValueError('overhead_completion_authority_or_readback_changed')
+                    transaction_images[conn]=progress.begin(conn,transaction_stages.get(conn,'readback'))
+                    conn.execute('DELETE FROM completion_transaction_nonce')
+                    conn.execute('INSERT INTO completion_transaction_nonce VALUES(?)',(transaction,))
+                elif writer:
+                    nonce=conn.execute('SELECT token FROM completion_transaction_nonce').fetchone()
+                    if (transaction is None or transactions.get(conn)!=transaction or nonce is None or nonce[0]!=transaction):
+                        raise CompletionProofError('overhead_completion_transaction_unbound')
+                refresh_fence(conn)
                 if _completion_source(conn,frozen['request_id'])!=frozen:
-                    raise ValueError('overhead_completion_source_changed')
-                if token()!=expected or registry.load()!=captured['authority']:
-                    raise ValueError('overhead_completion_readback_changed')
+                    raise CompletionProofError('overhead_completion_source_changed',classification='immutable_source_changed')
+                if writer and not begin:
+                    progress.finish(conn,transaction_stages.get(conn,'readback'),transaction_images.pop(conn))
+                    conn.execute('DELETE FROM completion_transaction_nonce')
+                    transactions.pop(conn,None)
                 return transaction
+            guard.prepare_connection=prepare_connection
             def prepare_guard():
                 guard() # Expensive streaming outside any operational writer.
                 from packages.application.storage_registry import manifest_payload
-                proof=dict(contract='confirmed_overhead_native_completion_v2',source=frozen,allocation=allocations[frozen['request_id']],
+                from packages.application.wb_finance_weekly import CLASSIFIER_VERSION, COST_METHOD_VERSION, PROFIT_METHOD_VERSION
+                proof=dict(classifier_version=CLASSIFIER_VERSION,cost_policy_version=COST_METHOD_VERSION,profit_method_version=PROFIT_METHOD_VERSION,contract='confirmed_overhead_native_completion_v3',dependency_proof=dependency_receipt,source=frozen,allocation=allocations[frozen['request_id']],
                     storage_authority={**manifest_payload(captured['authority']),'implicit':captured['authority'].implicit},
                     storage_manifest_sha256=captured['authority'].manifest_sha256,accounting_publication=publication,economics_publication=economics_receipt,
                     finance_publication=dict(receipt=finance_receipt,zero_stale_plan_fingerprint=plan['fingerprint'],applicable_weeks=sorted(keys),cohort_seal=seal,**image))
+                progress.bind_proof(proof,finance_receipt['fingerprint'])
                 with closing(registry.connect('operational',mode='rw',operation='operator_overhead_completion',manifest=captured['authority'])) as writer:
+                    prepare_connection(writer,stage='S1')
                     initial_changes=writer.total_changes
                     writer.execute('BEGIN IMMEDIATE')
                     try:
                         transaction=guard(writer,begin=True,initial_changes=initial_changes)
+                        write_state['business_write_started']=True
                         changed=writer.execute(f"UPDATE {TARGETED_RECALC_QUEUE_TABLE} SET economics_status='complete',economics_finished_at=?,economics_error='',finance_status='complete',finance_finished_at=?,finance_error='',finance_source_fingerprint=? WHERE queue_id=? AND stable_source_id=? AND source_revision=? AND effective_date=? AND affected_nm_ids_json=? AND status='complete'",
                             (datetime.now(timezone.utc).isoformat(),datetime.now(timezone.utc).isoformat(),finance_receipt['fingerprint'],frozen['queue_id'],frozen['stable_source_id'],frozen['source_revision'],frozen['effective_date'],json.dumps(frozen['affected_nm_ids'],separators=(',',':')))).rowcount
                         if changed!=1:raise ValueError('overhead_completion_queue_cas_failed')
@@ -1055,4 +1133,5 @@ def _complete_cohort(runtime, captured, *, finance_block, finance_receipt, econo
                 _update(runtime.db_path,frozen['request_id'],'completed','',receipt,guard=guard)
             _finalize_confirmed(runtime,acceptance,prepare_guard=prepare_guard,finish=finish)
             completed+=1
+            write_state['completed_count']=completed
     return dict(processed_count=completed)
