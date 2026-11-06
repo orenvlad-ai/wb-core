@@ -587,7 +587,9 @@ def _prove_failed_stage(
                 "unit": "wb-core-autoanswers-worker.service"}
     required = ("deploy_current_checkout", 'run_stage("readback", root_storage_commands["status_artifact_readback"])',
                 "apps/root_storage_policy.py", "status-readback", "returned non-zero exit status 3")
-    if any(item not in text for item in required) or not _storage_tail_gate_argument_matches(text, gate_run_id):
+    gate_bound = any(_storage_tail_gate_argument_matches(text, gate_run_id, runner_path=path)
+                     for path in ("apps/github_release_runner.py", "ci/github_release_runner.py"))
+    if any(item not in text for item in required) or not gate_bound:
         raise RecoveryError("failed-stage-not-root-storage-readback-exit3")
     failures = re.findall(r"subprocess\.CalledProcessError: Command .*?returned non-zero exit status (\d+)", text, re.DOTALL)
     if failures != ["3"] or "exit status 255" in text:
