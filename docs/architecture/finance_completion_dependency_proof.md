@@ -148,3 +148,11 @@ roll back the application blindly and do not delete journal evidence.
 Generation/table-renaming migrations
 must explicitly migrate the trigger contract or will fail closed; dropping or
 resetting counters during normal operation is not a rollback procedure.
+
+This release updates the governed history source hashes and the matching literal
+formula epoch in the finished-snapshot service (deadline checkpoints and book
+reader ownership; accounting formula semantics are unchanged). Maintenance must
+remain held after deployment. A later separately authorized resume must use the
+[exact formula resume](../runbooks/business_data_formula_resume.md) proof for this
+installed epoch; ordinary exact-prior resume cannot accept that unit pin change.
+The original maintenance baseline must never be edited.
