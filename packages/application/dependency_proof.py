@@ -1,0 +1,184 @@
+"""Transactional dependency revisions for optimistic, detached SQLite proofs.
+
+All persistent tables are instrumented by the explicit installer. A proof records
+only tables actually READ, including reads through views, and schema membership.
+Consequently direct SQL and old application writers participate automatically.
+No reader transaction or writer reservation is kept during expensive Python work.
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+import hashlib
+import json
+from pathlib import Path
+import sqlite3
+import time
+
+CONTRACT = 'sqlite_dependency_proof_v1'
+REVISIONS = 'wbc_dependency_revisions'
+PREFIX = 'wbc_dependency_revision_'
+
+
+class CompletionProofError(ValueError):
+    def __init__(self, reason, *, phase='proof', classification='relevant_dependency_changed', business_write_started=False):
+        super().__init__(reason)
+        self.reason, self.phase, self.classification = reason, phase, classification
+        self.business_write_started = business_write_started
+
+    def diagnostic(self):
+        return dict(contract_version=CONTRACT, reason=self.reason, phase=self.phase,
+                    classification=self.classification, business_write_started=self.business_write_started,
+                    result_certainty='unknown' if self.business_write_started else 'not_started')
+
+
+def quote(value):
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _trigger(table, event):
+    name = PREFIX + hashlib.sha256(table.encode()).hexdigest()[:24] + '_' + event.lower()
+    literal = "'" + table.replace("'", "''") + "'"
+    sql = (f'CREATE TRIGGER {quote(name)} AFTER {event} ON {quote(table)} BEGIN '
+           f'UPDATE {quote(REVISIONS)} SET revision=revision+1 WHERE table_name={literal}; END')
+    return name, sql
+
+
+def install_dependency_revisions(conn):
+    """Explicit schema migration; caller owns commit. Never resets a revision.
+
+    This must run on each physical main/raw store, never on accounting. Existing
+    triggers must match exactly; a damaged installed contract is not auto-repaired.
+    """
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+    if tables & {'accounting_current', 'accounting_revisions', 'accounting_blobs'}:
+        raise CompletionProofError('dependency_installer_accounting_forbidden')
+    conn.execute(f'CREATE TABLE IF NOT EXISTS {quote(REVISIONS)} (table_name TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(typeof(revision)=\'integer\' AND revision>=0))')
+    installed = {r[0] for r in conn.execute(f'SELECT table_name FROM {quote(REVISIONS)}')}
+    triggers = dict(conn.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger'"))
+    for table in sorted(tables - {REVISIONS}):
+        for event in ('INSERT', 'UPDATE', 'DELETE'):
+            name, sql = _trigger(table, event)
+            if table in installed:
+                if triggers.get(name) != sql:
+                    raise CompletionProofError('dependency_trigger_contract_changed')
+            else:
+                conn.execute(sql)
+        conn.execute(f'INSERT OR IGNORE INTO {quote(REVISIONS)} VALUES (?,0)', (table,))
+
+
+class DependencyProof:
+    def __init__(self, conn):
+        if conn.in_transaction:
+            raise CompletionProofError('dependency_proof_requires_autocommit')
+        self.conn = conn
+        self.reads = {}
+        self.stores = {}
+        self.sealed = False
+        for _, schema, filename in conn.execute('PRAGMA database_list'):
+            if schema == 'temp':
+                continue
+            path = Path(filename).resolve(strict=True)
+            stat = path.stat()
+            schema_version = conn.execute(f'PRAGMA {quote(schema)}.schema_version').fetchone()[0]
+            master = list(conn.execute(f'SELECT type,name,sql FROM {quote(schema)}.sqlite_master'))
+            tables = {r[1] for r in master if r[0] == 'table' and not r[1].startswith('sqlite_')}
+            if REVISIONS not in tables:
+                raise CompletionProofError('dependency_revision_migration_required')
+            revisions = dict(conn.execute(f'SELECT table_name,revision FROM {quote(schema)}.{quote(REVISIONS)}'))
+            triggers = {r[1]:r[2] for r in master if r[0] == 'trigger'}
+            for table in tables - {REVISIONS}:
+                if table not in revisions:
+                    raise CompletionProofError('dependency_table_uncovered')
+                for event in ('INSERT', 'UPDATE', 'DELETE'):
+                    name, sql = _trigger(table, event)
+                    if triggers.get(name) != sql:
+                        raise CompletionProofError('dependency_trigger_contract_changed')
+            self.stores[schema] = dict(path=str(path), device=stat.st_dev, inode=stat.st_ino,
+                                      schema_version=schema_version, revisions=revisions)
+        self.assert_current(conn)
+
+    @classmethod
+    def capture(cls, conn):
+        return cls(conn)
+
+    @contextmanager
+    def observe(self):
+        if self.sealed:
+            raise CompletionProofError('dependency_proof_already_sealed')
+        def authorizer(action, table, column, schema, source):
+            if action == sqlite3.SQLITE_READ and schema != 'temp' and table not in ('sqlite_master', 'sqlite_schema'):
+                if schema not in self.stores or table not in self.stores[schema]['revisions'] or table == REVISIONS:
+                    return sqlite3.SQLITE_DENY
+                self.reads.setdefault((schema, table), set()).add(column)
+            return sqlite3.SQLITE_OK
+        self.conn.set_authorizer(authorizer)
+        try:
+            yield self
+        finally:
+            self.conn.set_authorizer(None)
+
+    def seal(self):
+        self.assert_current(self.conn)
+        self.sealed = True
+        return self.receipt()
+
+    def assert_current(self, conn):
+        """Fresh short check. Caller must reserve all stores until its commit.
+
+        Names may differ on a writer; physical path identities bind the mapping.
+        There is deliberately no 'ignore tables' or baseline reset operation.
+        """
+        attached = {str(Path(r[2]).resolve()): r[1] for r in conn.execute('PRAGMA database_list') if r[1] != 'temp'}
+        for original, store in self.stores.items():
+            schema = attached.get(store['path'])
+            if schema is None:
+                raise CompletionProofError('dependency_store_not_bound', classification='authority_changed')
+            stat = Path(store['path']).stat()
+            if (stat.st_dev, stat.st_ino) != (store['device'], store['inode']):
+                raise CompletionProofError('dependency_file_replaced', classification='authority_changed')
+            if conn.execute(f'PRAGMA {quote(schema)}.schema_version').fetchone()[0] != store['schema_version']:
+                raise CompletionProofError('dependency_schema_changed', classification='authority_changed')
+            selected = [table for name, table in self.reads if name == original]
+            if not selected:
+                continue
+            values = dict(conn.execute(f'SELECT table_name,revision FROM {quote(schema)}.{quote(REVISIONS)} WHERE table_name IN ({",".join("?" for _ in selected)})', selected))
+            if any(values.get(table) != store['revisions'][table] for table in selected):
+                raise CompletionProofError('dependency_revision_changed')
+
+    def receipt(self):
+        vector = [dict(schema=schema, table=table, columns=sorted(columns),
+                       revision=self.stores[schema]['revisions'][table])
+                  for (schema, table), columns in sorted(self.reads.items())]
+        body = dict(contract_version=CONTRACT, dependencies=vector,
+                    stores={k:{x:v for x,v in s.items() if x != 'revisions'} for k,s in self.stores.items()})
+        body['digest'] = 'sha256:' + hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        return body
+
+
+@contextmanager
+def readonly_deadline(conn, deadline):
+    """Cooperative SQL and Python budget. Never wrap a business transaction.
+
+    Python trace checks at function/line boundaries cover JSON dispatch/allocation
+    loops. C primitives remain indivisible; report their duration separately.
+    """
+    import sys
+    if deadline is None:
+        yield
+        return
+    def check():
+        if time.monotonic() >= deadline:
+            raise CompletionProofError('dependency_proof_budget_exhausted', classification='budget_exhausted')
+    def trace(frame, event, arg):
+        check()
+        return trace
+    previous = sys.gettrace()
+    check()
+    conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+    sys.settrace(trace)
+    try:
+        yield
+        check()
+    finally:
+        sys.settrace(previous)
+        conn.set_progress_handler(None, 0)
