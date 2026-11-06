@@ -9,6 +9,8 @@ import math
 import multiprocessing
 import os
 import random
+import select
+import socket
 import ssl
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -29,6 +31,15 @@ from packages.contracts.stocks_block import StocksRequest
 WB_OTHER_WAREHOUSE_NAME = "остальные"
 WB_AGGREGATE_WAREHOUSE_ID = -999999
 WB_AGGREGATE_WAREHOUSE_NAME = "склад wb"
+
+# Unix datagrams are atomic, so an interrupted child cannot leave the parent
+# blocked halfway through a frame. Larger records are assembled with a hard cap.
+_STOCKS_IPC_FRAME_BYTES = 1024
+_STOCKS_IPC_RECORD_BYTES = 16 * 1024
+_STOCKS_IPC_RESULT_BYTES = 256 * 1024 * 1024
+_STOCKS_IPC_RESULT_ITEMS = 1_000_000
+_STOCKS_HTTP_TOTAL_BYTES = 128 * 1024 * 1024
+_STOCKS_SOURCE_TOTAL_ROWS = 499_000
 
 
 class StocksSource(Protocol):
@@ -79,10 +90,12 @@ class StocksFetchIncompleteError(RuntimeError):
     """The full inventory was not proven inside its resource budget."""
 
 
-@dataclass(frozen=True)
+@dataclass
 class _StocksDeadline:
     expires_at: float
     clock: Callable[[], float] = time.monotonic
+    body_bytes: int = 0
+    source_rows: int = 0
 
     def remaining(self) -> float:
         remaining = self.expires_at - self.clock()
@@ -91,7 +104,22 @@ class _StocksDeadline:
         return remaining
 
 
-def _stocks_inventory_worker(connection: Any, config: dict[str, Any], kwargs: dict[str, Any], expires_at: float) -> None:
+def _stocks_ipc_send(channel: socket.socket, record: Mapping[str, Any], deadline: _StocksDeadline) -> None:
+    encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > _STOCKS_IPC_RECORD_BYTES:
+        raise StocksFetchIncompleteError("official stocks fetch incomplete: result record size limit exceeded")
+    for offset in range(0, len(encoded), _STOCKS_IPC_FRAME_BYTES - 1):
+        deadline.remaining()
+        chunk = encoded[offset:offset + _STOCKS_IPC_FRAME_BYTES - 1]
+        final = offset + len(chunk) == len(encoded)
+        channel.send((b"F" if final else b"C") + chunk)
+        # One outstanding frame provides portable backpressure. macOS Unix
+        # datagrams may report ENOBUFS instead of blocking on a full queue.
+        if channel.recv(2) != b"A":
+            raise StocksFetchIncompleteError("official stocks worker transfer cancelled")
+
+
+def _stocks_inventory_worker(connection: socket.socket, config: dict[str, Any], kwargs: dict[str, Any], expires_at: float) -> None:
     """Spawn target: readonly HTTP/parse work; never owns cache or business writes."""
     try:
         captured_now = config.pop("_captured_now", None)
@@ -101,19 +129,30 @@ def _stocks_inventory_worker(connection: Any, config: dict[str, Any], kwargs: di
         deadline = _StocksDeadline(expires_at)
 
         def slot(seller_key: str, retry_wait: float, reserve: bool) -> None:
-            connection.send(("slot" if reserve else "cooldown", seller_key, retry_wait))
-            if connection.recv() != "go":
+            _stocks_ipc_send(connection, {"type": "slot" if reserve else "cooldown", "seller_key": seller_key, "wait": retry_wait}, deadline)
+            if connection.recv(2) != b"G":
                 raise StocksFetchIncompleteError("official stocks worker cancelled")
             deadline.remaining()
 
         source._slot_gate = slot
         payload = source._fetch_current_inventory(**kwargs, deadline=deadline)
         deadline.remaining()
-        connection.send(("result", payload))
+        data = payload["data"]
+        header = {key: value for key, value in data.items() if key not in {"rows", "raw_rows", "page_offsets", "batch_requested_nm_ids"}}
+        _stocks_ipc_send(connection, {"type": "header", "snapshot_date": payload["snapshot_date"], "data": header}, deadline)
+        for field in ("raw_rows", "rows"):
+            for item in data[field]:
+                _stocks_ipc_send(connection, {"type": field, "item": item}, deadline)
+        for offset in data["page_offsets"]:
+            _stocks_ipc_send(connection, {"type": "offset", "offset": offset}, deadline)
+        _stocks_ipc_send(connection, {"type": "complete"}, deadline)
     except Exception as exc:
-        # Exceptions contain no request headers/token. Preserve the error class
-        # where pickle supports it; status errors have already been translated.
-        connection.send(("error", exc))
+        # Only bounded error text crosses IPC; never pickle an exception with
+        # a potentially huge response body/document attached to it.
+        try:
+            _stocks_ipc_send(connection, {"type": "error", "class": type(exc).__name__, "message": str(exc)[:512]}, _StocksDeadline(expires_at))
+        except Exception:
+            pass
     finally:
         connection.close()
 
@@ -258,7 +297,8 @@ class HttpBackedStocksSource:
 
     def _fetch_isolated(self, kwargs: dict[str, Any], deadline: _StocksDeadline) -> Mapping[str, Any]:
         context = multiprocessing.get_context("spawn")
-        parent, child = context.Pipe()
+        parent, child = socket.socketpair(type=socket.SOCK_DGRAM)
+        parent.setblocking(False)
         config = dict(
             page_limit=self._page_limit,
             min_request_interval_seconds=self._min_request_interval_seconds,
@@ -270,56 +310,104 @@ class HttpBackedStocksSource:
         if self._has_custom_now_factory:
             config["_captured_now"] = self._now_factory()
         process = context.Process(target=_stocks_inventory_worker, args=(child, config, kwargs, deadline.expires_at), daemon=True)
-        done = threading.Event()
-        cancelled = threading.Event()
-        outcome: dict[str, Any] = {}
-
-        def relay() -> None:
-            # recv/unpickle is itself inside the caller's deadline. A slow or
-            # stalled child cannot trap the fetch thread in Connection.recv().
-            try:
-                while True:
-                    message = parent.recv()
-                    if cancelled.is_set():
-                        raise StocksFetchIncompleteError("official stocks worker cancelled")
-                    if message[0] in {"slot", "cooldown"}:
-                        if message[2] > 0:
-                            self._mark_next_request_after(message[1], message[2])
-                        if message[0] == "slot":
-                            self._wait_for_request_slot(message[1], deadline=deadline, cancelled=cancelled)
-                        parent.send("go")
-                    elif message[0] == "error":
-                        outcome["error"] = message[1]
-                        break
-                    elif message[0] == "result":
-                        outcome["payload"] = message[1]
-                        break
-                    else:
-                        raise RuntimeError("official stocks worker returned invalid outcome")
-            except (EOFError, OSError):
-                outcome["error"] = StocksFetchIncompleteError("official stocks fetch incomplete: readonly worker ended without complete result")
-            except Exception as exc:
-                outcome["error"] = exc
-            finally:
-                done.set()
-
         started = False
-        relay_thread: threading.Thread | None = None
+        record_bytes = bytearray()
+        total_bytes = 0
+        total_items = 0
+        payload: dict[str, Any] | None = None
+        seller_key = _seller_cache_key(base_url=kwargs["base_url"], token=kwargs["token"])
         try:
             deadline.remaining()
             process.start()
             started = True
             child.close()
-            relay_thread = threading.Thread(target=relay, name="stocks-readonly-relay", daemon=True)
-            relay_thread.start()
-            if not done.wait(deadline.remaining()):
-                raise StocksFetchIncompleteError("official stocks fetch incomplete: total deadline exhausted")
-            deadline.remaining()
-            if "error" in outcome:
-                raise outcome["error"]
-            return outcome["payload"]
+            while True:
+                # No receiver thread and no pickle.loads: only bounded atomic
+                # datagrams are read, so a stalled partial result stays cancellable.
+                readable, _, _ = select.select([parent], [], [], min(0.05, deadline.remaining()))
+                deadline.remaining()
+                if not readable:
+                    if not process.is_alive():
+                        raise StocksFetchIncompleteError("official stocks fetch incomplete: readonly worker ended without complete result")
+                    continue
+                packet = parent.recv(_STOCKS_IPC_FRAME_BYTES + 1)
+                if not packet or len(packet) > _STOCKS_IPC_FRAME_BYTES or packet[:1] not in {b"C", b"F"}:
+                    raise StocksFetchIncompleteError("official stocks fetch incomplete: invalid result frame")
+                total_bytes += len(packet)
+                if total_bytes > _STOCKS_IPC_RESULT_BYTES:
+                    raise StocksFetchIncompleteError("official stocks fetch incomplete: aggregate result byte limit exceeded")
+                record_bytes.extend(packet[1:])
+                if len(record_bytes) > _STOCKS_IPC_RECORD_BYTES:
+                    raise StocksFetchIncompleteError("official stocks fetch incomplete: result record size limit exceeded")
+                parent.send(b"A")
+                if packet[:1] == b"C":
+                    continue
+                # Each indivisible decode is <=16KiB, never a whole inventory.
+                # Check both sides: a late decode cannot publish/cache success.
+                deadline.remaining()
+                message = json.loads(record_bytes)
+                deadline.remaining()
+                record_bytes.clear()
+                if not isinstance(message, dict):
+                    raise StocksFetchIncompleteError("official stocks fetch incomplete: invalid result record")
+                kind = message.get("type")
+                if kind in {"slot", "cooldown"}:
+                    if payload is not None or message.get("seller_key") != seller_key:
+                        raise StocksFetchIncompleteError("official stocks fetch incomplete: invalid rate-slot identity")
+                    retry_wait = message["wait"]
+                    if not isinstance(retry_wait, (int, float)) or not math.isfinite(retry_wait) or retry_wait < 0:
+                        raise StocksFetchIncompleteError("official stocks fetch incomplete: invalid rate-slot wait")
+                    if retry_wait > 0:
+                        self._mark_next_request_after(seller_key, retry_wait)
+                    if kind == "slot":
+                        self._wait_for_request_slot(seller_key, deadline=deadline)
+                    deadline.remaining()
+                    parent.send(b"G")
+                elif kind == "error":
+                    text = str(message.get("message", "readonly worker failed"))[:512]
+                    if message.get("class") == "StocksFetchIncompleteError":
+                        raise StocksFetchIncompleteError(text)
+                    if message.get("class") in {"ValueError", "JSONDecodeError", "UnicodeDecodeError"}:
+                        raise ValueError(text)
+                    raise RuntimeError(text)
+                elif kind == "header":
+                    if payload is not None or not isinstance(message.get("data"), dict):
+                        raise StocksFetchIncompleteError("official stocks fetch incomplete: invalid result header")
+                    data = message["data"]
+                    data.update(rows=[], raw_rows=[], page_offsets=[])
+                    nm_ids = kwargs["requested_nm_ids"]
+                    data["batch_requested_nm_ids"] = [nm_ids[index:index + self._max_nm_ids_per_request] for index in range(0, len(nm_ids), self._max_nm_ids_per_request)] or [[]]
+                    payload = {"snapshot_date": message["snapshot_date"], "requested_nm_ids": nm_ids, "data": data}
+                elif kind in {"raw_rows", "rows", "offset"}:
+                    if payload is None:
+                        raise StocksFetchIncompleteError("official stocks fetch incomplete: result item before header")
+                    total_items += 1
+                    if total_items > _STOCKS_IPC_RESULT_ITEMS:
+                        raise StocksFetchIncompleteError("official stocks fetch incomplete: aggregate result item limit exceeded")
+                    if kind == "offset":
+                        value = message["offset"]
+                        if not isinstance(value, int) or value < 0:
+                            raise StocksFetchIncompleteError("official stocks fetch incomplete: invalid page offset")
+                        payload["data"]["page_offsets"].append(value)
+                    else:
+                        if not isinstance(message.get("item"), dict):
+                            raise StocksFetchIncompleteError("official stocks fetch incomplete: invalid result item")
+                        payload["data"][kind].append(message["item"])
+                elif kind == "complete":
+                    if payload is None:
+                        raise StocksFetchIncompleteError("official stocks fetch incomplete: result missing header")
+                    data = payload["data"]
+                    if (data.get("pagination_complete") is not True
+                        or len(data["raw_rows"]) != data.get("raw_row_count")
+                        or len(data["rows"]) != data.get("normalization", {}).get("normalized_row_count")
+                        or len(data["page_offsets"]) != data.get("page_count")
+                        or len(data["batch_requested_nm_ids"]) != data.get("batch_count")):
+                        raise StocksFetchIncompleteError("official stocks fetch incomplete: result count mismatch")
+                    deadline.remaining()
+                    return payload
+                else:
+                    raise StocksFetchIncompleteError("official stocks fetch incomplete: unknown result record")
         finally:
-            cancelled.set()
             child.close()
             if started:
                 if process.is_alive():
@@ -331,8 +419,6 @@ class HttpBackedStocksSource:
                 if not process.is_alive():
                     process.close()
             parent.close()
-            if relay_thread is not None:
-                relay_thread.join(timeout=0.2)
 
     def fetch_warehouse_region_map(self, nm_ids: list[int]) -> Mapping[str, str]:
         deadline = _StocksDeadline(self._monotonic() + self._total_timeout_seconds, self._monotonic)
@@ -355,7 +441,9 @@ class HttpBackedStocksSource:
         payload = self._fetch_isolated(kwargs, deadline) if self._isolate_fetch else self._fetch_current_inventory(**kwargs, deadline=deadline)
         items = payload["data"]["raw_rows"]
         mapping: dict[str, str] = {}
-        for item in items:
+        for index, item in enumerate(items):
+            if index % 256 == 0:
+                deadline.remaining()
             warehouse_id = item.get("warehouseId")
             if (
                 not isinstance(warehouse_id, int)
@@ -549,6 +637,9 @@ class HttpBackedStocksSource:
             deadline.remaining()
             if len(page_items) > self._page_limit:
                 raise RuntimeError("official stocks request returned more rows than the page limit")
+            deadline.source_rows += len(page_items)
+            if deadline.source_rows > _STOCKS_SOURCE_TOTAL_ROWS:
+                raise StocksFetchIncompleteError("official stocks fetch incomplete: aggregate source row limit exceeded")
             for index, item in enumerate(page_items):
                 if index % 256 == 0:
                     deadline.remaining()
@@ -746,6 +837,9 @@ class HttpBackedStocksSource:
             if not chunk:
                 return b"".join(chunks)
             size += len(chunk)
+            deadline.body_bytes += len(chunk)
+            if deadline.body_bytes > _STOCKS_HTTP_TOTAL_BYTES:
+                raise StocksFetchIncompleteError("official stocks fetch incomplete: aggregate response byte limit exceeded")
             if size > limit:
                 raise StocksFetchIncompleteError("official stocks fetch incomplete: response body size limit exceeded")
             chunks.append(chunk)

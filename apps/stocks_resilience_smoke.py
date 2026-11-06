@@ -1,11 +1,12 @@
 """Deterministic resilience fixtures plus real spawn/urllib deadline checks."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import multiprocessing
+from multiprocessing.reduction import ForkingPickler
 import os
 from pathlib import Path
 import ssl
@@ -38,6 +39,47 @@ def _slow_parse_worker(connection, config, kwargs, expires_at):
 
 def _crash_worker(connection, config, kwargs, expires_at):
     os._exit(7)
+
+
+def _result_fixture_worker(connection, config, kwargs, expires_at):
+    deadline = stocks._StocksDeadline(expires_at)
+    stock = item()
+    if kwargs.get("_large_record"):
+        stock["warehouseName"] = "Я" * 4000
+    records = [
+        {"type": "header", "snapshot_date": "2026-11-06", "data": {"pagination_complete": True, "raw_row_count": 1, "page_count": 1, "batch_count": 1, "normalization": {"normalized_row_count": 1}}},
+        {"type": "raw_rows", "item": stock},
+        {"type": "rows", "item": stock},
+        {"type": "offset", "offset": 0},
+        {"type": "complete"},
+    ]
+    try:
+        for record in records:
+            stocks._stocks_ipc_send(connection, record, deadline)
+    finally:
+        connection.close()
+
+
+def _large_result_worker(connection, config, kwargs, expires_at):
+    kwargs["_large_record"] = True
+    _result_fixture_worker(connection, config, kwargs, expires_at)
+
+
+def _partial_record_worker(connection, config, kwargs, expires_at):
+    connection.send(b'C{"type":')
+    time.sleep(5)
+
+
+def _oversize_frame_worker(connection, config, kwargs, expires_at):
+    connection.send(b"F" + b" " * stocks._STOCKS_IPC_FRAME_BYTES)
+    time.sleep(5)
+
+
+def _oversize_record_worker(connection, config, kwargs, expires_at):
+    for _ in range(20):
+        connection.send(b"C" + b" " * (stocks._STOCKS_IPC_FRAME_BYTES - 1))
+        connection.recv(2)
+    time.sleep(5)
 
 
 def item(chrt=10):
@@ -166,6 +208,14 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(result["data"]["raw_rows"], [item()])
         self.assertEqual([call[2] for call in opener.calls], [25, 5])
 
+    def test_aggregate_source_limits_apply_across_pages_before_accumulation(self):
+        source, _ = self.source([body([item()]), body([item(20)])], page_limit=1)
+        with patch.object(stocks, "_STOCKS_SOURCE_TOTAL_ROWS", 1):
+            self.assert_incomplete(source)
+        source, _ = self.source([body([item()]), body()], page_limit=1)
+        with patch.object(stocks, "_STOCKS_HTTP_TOTAL_BYTES", len(body([item()]))):
+            self.assert_incomplete(source)
+
     def test_concurrent_distinct_keys_reserve_distinct_rate_slots(self):
         source = stocks.HttpBackedStocksSource(token_env_var=TOKEN_ENV, min_request_interval_seconds=0.03)
         deadline = stocks._StocksDeadline(time.monotonic() + 1)
@@ -186,7 +236,7 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(len(grants), 2)
         self.assertGreaterEqual(max(grants) - min(grants), 0.025)
 
-    def test_cancelled_parent_relay_wakes_rate_wait_promptly(self):
+    def test_cancelled_wait_wakes_promptly(self):
         source = stocks.HttpBackedStocksSource(token_env_var=TOKEN_ENV)
         source._mark_next_request_after("cancelled-seller", 60)
         cancelled = threading.Event()
@@ -360,6 +410,64 @@ class ResilienceTests(unittest.TestCase):
         source = self.real_source("http://127.0.0.1:1")
         with patch.object(stocks, "_stocks_inventory_worker", _crash_worker):
             self.assert_incomplete(source)
+
+    def test_result_does_not_unpickle_or_create_receiver_threads(self):
+        source = self.real_source("http://127.0.0.1:1", budget=0.4)
+        before = {thread.ident for thread in threading.enumerate()}
+        real_loads = ForkingPickler.loads
+
+        def slow_unpickle(*args, **kwargs):
+            # Regression for the former unkillable daemon relay.
+            time.sleep(2)
+            return real_loads(*args, **kwargs)
+
+        started = time.monotonic()
+        with patch.object(ForkingPickler, "loads", slow_unpickle), patch.object(stocks, "_stocks_inventory_worker", _result_fixture_worker):
+            result = source.fetch(self.request)
+        self.assertTrue(result["data"]["pagination_complete"])
+        self.assertLess(time.monotonic() - started, 0.7)
+        self.assertEqual({thread.ident for thread in threading.enumerate()}, before)
+
+    def test_multiframe_unicode_record_reconstructs_exactly(self):
+        source = self.real_source("http://127.0.0.1:1")
+        with patch.object(stocks, "_stocks_inventory_worker", _large_result_worker):
+            result = source.fetch(self.request)
+        self.assertEqual(result["data"]["raw_rows"][0]["warehouseName"], "Я" * 4000)
+        self.assertEqual(result["data"]["rows"][0]["warehouseName"], "Я" * 4000)
+
+    def test_incomplete_frames_and_aggregate_caps_leave_no_receiver_thread(self):
+        before = {thread.ident for thread in threading.enumerate()}
+        children = {child.pid for child in multiprocessing.active_children()}
+        for worker, limit_patch in [
+            (_partial_record_worker, {}),
+            (_oversize_frame_worker, {}),
+            (_oversize_record_worker, {}),
+            (_result_fixture_worker, {"_STOCKS_IPC_RESULT_BYTES": 128}),
+            (_result_fixture_worker, {"_STOCKS_IPC_RESULT_ITEMS": 1}),
+        ]:
+            source = self.real_source("http://127.0.0.1:1", budget=0.3)
+            with patch.object(stocks, "_stocks_inventory_worker", worker), (patch.multiple(stocks, **limit_patch) if limit_patch else nullcontext()):
+                self.assert_incomplete(source)
+            self.assertEqual({thread.ident for thread in threading.enumerate()}, before)
+            self.assertEqual({child.pid for child in multiprocessing.active_children()}, children)
+
+    def test_late_bounded_parent_decode_rejects_result_and_leaves_no_thread(self):
+        source = self.real_source("http://127.0.0.1:1", budget=0.3)
+        before = {thread.ident for thread in threading.enumerate()}
+        original_loads = json.loads
+        decoded_sizes = []
+
+        def late_decode(encoded, *args, **kwargs):
+            if isinstance(encoded, bytearray):
+                decoded_sizes.append(len(encoded))
+                time.sleep(0.4)
+            return original_loads(encoded, *args, **kwargs)
+
+        with patch.object(stocks.json, "loads", late_decode), patch.object(stocks, "_stocks_inventory_worker", _result_fixture_worker):
+            self.assert_incomplete(source)
+        self.assertTrue(decoded_sizes)
+        self.assertLessEqual(max(decoded_sizes), stocks._STOCKS_IPC_RECORD_BYTES)
+        self.assertEqual({thread.ident for thread in threading.enumerate()}, before)
 
     def test_expired_follower_does_not_cancel_leader_and_inflight_is_cleared(self):
         with server(trickle=True) as (url, entered, _):

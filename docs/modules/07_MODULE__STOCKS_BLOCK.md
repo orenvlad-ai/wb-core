@@ -104,7 +104,7 @@ three-hour cycle cadence. This is a bounded failure policy, not a proven latency
 SLA. Production fetch/page distributions still need observation after release.
 An identical local HTTP fixture (one page, 1000 rows, 157914 response bytes), five
 uncached runs per version on 2026-11-06, measured baseline median/max
-0.0057/0.0092s and isolated candidate 0.0802/0.0851s. This measures spawn/IPC
+0.0056/0.0093s and isolated candidate 0.1027/0.1062s. This measures spawn/IPC
 overhead for that fixture only; it is not a representative production percentile.
 
 Production urllib work runs in one isolated, spawn-created process per leader
@@ -119,16 +119,35 @@ cancel its leader. Its result must match the seller/date/nmID key and carry
 `pagination_complete=true`; zero cache TTL also supports successful followers.
 
 A response is read in bounded chunks, with explicit local safety ceilings of
-128MiB for a successful page and 1MiB for an error body. Exceeding a ceiling is
+128MiB for a successful page and 1MiB for an error body; the entire fetch is also
+limited to 128MiB of received bodies across all pages/retries and 499000 source
+rows. Exceeding a ceiling is
 an incomplete fetch, never a truncated success. The endpoint's existing contract
 caps page rows at 250000 but supplies no byte/string-length guarantee; these byte
 ceilings are local resource policy, not an assertion about an upstream maximum.
 The process deadline cancels stalled reads and slowly arriving 200/500 bodies,
 as well as CPU parsing/hashing, instead of treating a socket timeout as a total
-HTTP timeout. The parent receives/deserializes results in a separate relay thread
-and rejects a late result before cache publication. Explicit injected opener or
-fake-clock/sleep dependencies are cooperative fixture paths; production uses the
-default isolated transport.
+HTTP timeout. Result transfer uses Unix datagrams: atomic frames are <=1024
+bytes, an assembled JSON record is <=16KiB, and the aggregate result is capped at
+256MiB / 1000000 row-or-offset records. Per-frame acknowledgement keeps one frame
+outstanding and avoids macOS `ENOBUFS` queue overflow. The parent reads using
+nonblocking `select`/`recv`, incrementally reconstructs the known payload schema,
+and verifies row/page/batch counts on the terminal record. A partial/oversized
+record or an absent terminal record never becomes a complete result. No receiver
+thread is created and result transfer never invokes pickle deserialization.
+
+Each parent decode has a maximum input of 16KiB and checks the deadline both
+before and after decoding. Two local bounded-record fixtures (16047-byte string
+record and 11806-byte/1000-field record), 2000 decodes each on 2026-11-06, observed
+maximum native decode times of 0.0175ms and 0.101ms. These observations are not an
+OS scheduling guarantee. One bounded native decode and bounded process cleanup
+are indivisible; an artificially delayed decode can return after the deadline,
+but is rejected before success/cache, with no decoder thread surviving the
+fetch. The regression injects both the formerly problematic slow
+`ForkingPickler.loads` (no longer called) and a late bounded JSON decode, and
+checks thread/child cleanup. Explicit injected opener or fake-clock/sleep
+dependencies remain cooperative fixture paths; production uses the default
+isolated transport.
 
 Each page has at most **three sends total** across all reasons. Retry admission
 is restricted to HTTP500/502/503/504, existing bounded429 handling and classified
