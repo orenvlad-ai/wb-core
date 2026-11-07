@@ -153,6 +153,38 @@ class WarehouseCatalogTests(warehouse_fixture.OwnedRetentionTests):
             self.assertEqual(publication['status'], 'failed')
             self.assertTrue(publication['details']['completed_effects']['functional_version'].startswith('fixture-'))
             self.assertEqual(publication['details']['fbs_source_failure'], failure.diagnostic())
+            self.assertNotIn('accounting_publication_not_started', publication['details']['completed_effects'])
+            self.assertEqual(publication['details']['completed_effects']['accounting_result'], 'not_inferred_from_exception')
+
+    def test_prepare_failure_recording_does_not_claim_accounting_write_absence(self):
+        from packages.application import fbs_accounting_runtime as runtime
+        actual_refresh = runtime.refresh
+        for recording_error in (None, sqlite3.OperationalError('synthetic uncertain write')):
+            failure = FbsSourceCaptureError({'documents_complete': True,
+                'quantity_snapshot': {'reason': 'displayed_sku_outside_complete_catalog'}})
+            with self.subTest(recording_error=recording_error), ExitStack() as stack:
+                self.ports(stack)
+                stack.enter_context(patch.object(runtime, 'load', return_value=({'active': True}, 'prior-book')))
+                stack.enter_context(patch.object(runtime, 'prepare', side_effect=failure))
+                recorded = stack.enter_context(patch.object(runtime, '_record_prepare_failure',
+                    return_value='invalidated-book', side_effect=recording_error))
+                accounting = stack.enter_context(patch('apps.warehouse_functional_runner._publish_fbs_snapshot_accounting',
+                    side_effect=lambda _: actual_refresh(self.root)))
+                stack.enter_context(heavy_admitted(self.root, operation='cycle'))
+                owner = stack.enter_context(warehouse_functional_job_lock(self.root))
+                with self.assertRaises(FbsSourceCaptureError) as caught:
+                    Entry._handle_owned_warehouse_manual_sync_request(self.entry, owner_token=owner['owner_token'])
+                self.assertIs(caught.exception, failure)
+                if recording_error is not None:
+                    self.assertIs(caught.exception.__cause__, recording_error)
+                recorded.assert_called_once_with(self.root, expected='prior-book', error=failure)
+                accounting.assert_called_once()
+            journal = self.journal.public_status()
+            phase = next(p for p in journal['phases'] if p['phase_key'] == 'functional_publication')
+            effects = phase['details']['completed_effects']
+            self.assertTrue(effects['functional_version'].startswith('fixture-'))
+            self.assertNotIn('accounting_publication_not_started', effects)
+            self.assertEqual(effects['accounting_result'], 'not_inferred_from_exception')
 
 
 class ReceiptTests(cycle_fixture.CycleTests):
@@ -164,7 +196,7 @@ class ReceiptTests(cycle_fixture.CycleTests):
         failure = FbsSourceCaptureError({'documents_complete': True,
             'quantity_snapshot': {'reason': 'displayed_sku_outside_complete_catalog'}})
         failure.completed_effects = {'functional_version': 'committed-fixture',
-                                    'accounting_publication_not_started': True}
+                                    'accounting_result': 'not_inferred_from_exception'}
         def warehouse(store, receipt, fbs):
             # Mutating the active binding must not rewrite the completed stage.
             fbs['fbs_generation_fixture'] = 'refreshed-fixture'
@@ -185,6 +217,7 @@ class ReceiptTests(cycle_fixture.CycleTests):
 if __name__ == '__main__':
     suite = unittest.TestLoader().loadTestsFromTestCase(CatalogTests)
     suite.addTest(WarehouseCatalogTests('test_partial_functional_commit_is_preserved_without_accounting_retry'))
+    suite.addTest(WarehouseCatalogTests('test_prepare_failure_recording_does_not_claim_accounting_write_absence'))
     suite.addTest(ReceiptTests('test_typed_capture_terminal_preserves_original_stage_and_functional_commit'))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     sys.exit(not result.wasSuccessful())

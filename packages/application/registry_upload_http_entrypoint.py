@@ -8093,7 +8093,9 @@ class RegistryUploadHttpEntrypoint:
                         from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
                         raise CycleStageFailure('cycle_rollover_functional_proof_missing') from exc
                     exc.completed_effects = {'functional_version': version,
-                        'plan_fingerprint': str(plan['plan_fingerprint']), 'accounting_publication_not_started': True}
+                        'plan_fingerprint': str(plan['plan_fingerprint']),
+                        **({'accounting_publication_not_started': True} if isinstance(exc, CycleDateRollover)
+                           else {'accounting_result': 'not_inferred_from_exception'})}
                     raise
                 except FbsAccountingUnavailable as exc:
                     # The functional commit is proven; this exact book quality
