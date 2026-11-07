@@ -16,6 +16,7 @@ import sqlite3
 import time
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from packages.application.sqlite_schema import ensure_schema_definition
 from packages.application.storage_registry import (
     OPERATIONAL_SCHEMA_REVISION,
     RAW_SCHEMA_REVISION,
@@ -111,6 +112,58 @@ def _table_names(conn: sqlite3.Connection) -> set[str]:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
+
+
+RAW_CURRENT_ROWS_SQL = """CREATE VIEW finance_raw_current_rows AS
+        SELECT
+               rows.seller_id,rows.report_id,rows.rrd_id,rows.report_type,
+               rows.week_start,rows.week_end,rows.nm_id,rows.vendor_code,
+               rows.barcode,rows.doc_type_name,rows.seller_oper_name,
+               rows.row_hash,rows.raw_json,rows.first_seen_at,
+               COALESCE(
+                   batch.committed_at,rows.first_seen_at
+               ) AS updated_at
+          FROM finance_raw_batch_rows AS links
+          JOIN finance_raw_rows AS rows
+            ON rows.raw_row_id=links.raw_row_id
+          JOIN finance_raw_ingest_batches AS batch
+            ON batch.batch_id=links.batch_id
+          LEFT JOIN finance_raw_outbox AS event
+            ON event.batch_id=batch.batch_id
+         WHERE batch.status='committed'
+           AND NOT EXISTS(
+               SELECT 1
+                 FROM finance_raw_ingest_batches AS newer
+                 LEFT JOIN finance_raw_outbox AS newer_event
+                   ON newer_event.batch_id=newer.batch_id
+                WHERE newer.status='committed'
+                  AND newer.seller_id IN ('*',rows.seller_id)
+                  AND newer.week_start<=rows.week_start
+                  AND newer.week_end>=rows.week_end
+                  AND (
+                      COALESCE(newer_event.sequence_no,0)
+                        > COALESCE(event.sequence_no,0)
+                      OR (
+                          COALESCE(newer_event.sequence_no,0)
+                            = COALESCE(event.sequence_no,0)
+                          AND (
+                              COALESCE(
+                                  newer.committed_at,newer.created_at
+                              ) > COALESCE(
+                                  batch.committed_at,batch.created_at
+                              )
+                              OR (
+                                  COALESCE(
+                                      newer.committed_at,newer.created_at
+                                  ) = COALESCE(
+                                      batch.committed_at,batch.created_at
+                                  )
+                                  AND newer.batch_id>batch.batch_id
+                              )
+                          )
+                      )
+                  )
+           )"""
 
 
 def ensure_raw_schema(conn: sqlite3.Connection) -> None:
@@ -216,7 +269,8 @@ def ensure_raw_schema(conn: sqlite3.Connection) -> None:
             1,'{RAW_SCHEMA_REVISION}','finance_raw','unbound','unbound','',
             '{_utc_now()}'
         )
-        ON CONFLICT(singleton) DO UPDATE SET schema_revision=excluded.schema_revision;
+        ON CONFLICT(singleton) DO UPDATE SET schema_revision=excluded.schema_revision
+        WHERE finance_raw_schema_meta.schema_revision IS NOT excluded.schema_revision;
         """
     )
     batch_columns = {
@@ -238,59 +292,11 @@ def ensure_raw_schema(conn: sqlite3.Connection) -> None:
             status,seller_id,week_start,week_end,
             committed_at,created_at,batch_id
         );
-        DROP VIEW IF EXISTS finance_raw_current_rows;
-        CREATE VIEW finance_raw_current_rows AS
-        SELECT
-               rows.seller_id,rows.report_id,rows.rrd_id,rows.report_type,
-               rows.week_start,rows.week_end,rows.nm_id,rows.vendor_code,
-               rows.barcode,rows.doc_type_name,rows.seller_oper_name,
-               rows.row_hash,rows.raw_json,rows.first_seen_at,
-               COALESCE(
-                   batch.committed_at,rows.first_seen_at
-               ) AS updated_at
-          FROM finance_raw_batch_rows AS links
-          JOIN finance_raw_rows AS rows
-            ON rows.raw_row_id=links.raw_row_id
-          JOIN finance_raw_ingest_batches AS batch
-            ON batch.batch_id=links.batch_id
-          LEFT JOIN finance_raw_outbox AS event
-            ON event.batch_id=batch.batch_id
-         WHERE batch.status='committed'
-           AND NOT EXISTS(
-               SELECT 1
-                 FROM finance_raw_ingest_batches AS newer
-                 LEFT JOIN finance_raw_outbox AS newer_event
-                   ON newer_event.batch_id=newer.batch_id
-                WHERE newer.status='committed'
-                  AND newer.seller_id IN ('*',rows.seller_id)
-                  AND newer.week_start<=rows.week_start
-                  AND newer.week_end>=rows.week_end
-                  AND (
-                      COALESCE(newer_event.sequence_no,0)
-                        > COALESCE(event.sequence_no,0)
-                      OR (
-                          COALESCE(newer_event.sequence_no,0)
-                            = COALESCE(event.sequence_no,0)
-                          AND (
-                              COALESCE(
-                                  newer.committed_at,newer.created_at
-                              ) > COALESCE(
-                                  batch.committed_at,batch.created_at
-                              )
-                              OR (
-                                  COALESCE(
-                                      newer.committed_at,newer.created_at
-                                  ) = COALESCE(
-                                      batch.committed_at,batch.created_at
-                                  )
-                                  AND newer.batch_id>batch.batch_id
-                              )
-                          )
-                      )
-                  )
-           );
         """
     )
+
+    ensure_schema_definition(conn, kind="view", name="finance_raw_current_rows",
+                             sql=RAW_CURRENT_ROWS_SQL)
 
 
 def ensure_operational_schema(conn: sqlite3.Connection) -> None:

@@ -19,6 +19,7 @@ import re
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
 from packages.business_time import business_date_from_timestamp
+from packages.application.sqlite_schema import ensure_schema_definition
 
 from packages.application.canonical_rub_money import (
     RUB_MINOR_UNIT as RUB_QUANTUM,
@@ -88,6 +89,28 @@ GUIDED_RECOVERIES_TABLE = "sheet_vitrina_v1_ff_guided_acceptance_recoveries"
 OVERHEAD_PAYMENT_EVIDENCE_TABLE = "sheet_vitrina_v1_ff_pool_overhead_payment_evidence"
 OVERHEAD_PAYMENT_RENEWALS_TABLE = "sheet_vitrina_v1_ff_pool_overhead_payment_renewals"
 TARGETED_RECALC_QUEUE_TABLE = "sheet_vitrina_v1_warehouse_targeted_recalc_queue"
+
+OVERHEAD_RENEWAL_SOURCE_GUARD_SQL = f"""CREATE TRIGGER ff_pool_overhead_payment_renewal_source_guard
+        BEFORE INSERT ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}
+        WHEN NOT EXISTS(
+            SELECT 1 FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE} evidence
+            JOIN {REQUESTS_TABLE} predecessor ON predecessor.request_id=NEW.predecessor_request_id
+            JOIN {REQUESTS_TABLE} successor ON successor.request_id=NEW.successor_request_id
+            WHERE evidence.request_id=NEW.anchor_request_id AND evidence.payment_fingerprint=NEW.payment_fingerprint
+              AND (predecessor.request_id=evidence.request_id OR EXISTS(
+                  SELECT 1 FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} previous
+                  WHERE previous.successor_request_id=predecessor.request_id AND previous.anchor_request_id=evidence.request_id)
+                  OR EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_overhead_replacements replacement
+                    WHERE replacement.successor_request_id=predecessor.request_id AND replacement.anchor_request_id=evidence.request_id))
+              AND predecessor.business_date=NEW.previous_business_date AND successor.business_date=NEW.business_date
+              AND predecessor.business_date<successor.business_date
+              AND predecessor.idempotency_epoch=successor.idempotency_epoch
+              AND predecessor.request_payload_json=successor.request_payload_json
+              AND predecessor.source_sha256=successor.source_sha256 AND predecessor.source_file_blob=successor.source_file_blob
+              AND predecessor.posted_document_id='' AND predecessor.posted_at='' AND predecessor.recovery_operation_id=''
+              AND NOT EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_overhead_confirmations WHERE request_id=predecessor.request_id)
+              AND NOT EXISTS(SELECT 1 FROM {DOCUMENTS_TABLE} WHERE request_id=predecessor.request_id))
+        BEGIN SELECT RAISE(ABORT,'overhead payment renewal requires an unconfirmed original source'); END"""
 
 WORKFLOW_STATES = (
     "accepted",
@@ -382,28 +405,6 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
         ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}(anchor_request_id,business_date DESC);
         CREATE UNIQUE INDEX IF NOT EXISTS ff_pool_overhead_payment_renewals_by_payment_day
         ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}(payment_fingerprint,business_date);
-        DROP TRIGGER IF EXISTS ff_pool_overhead_payment_renewal_source_guard;
-        CREATE TRIGGER ff_pool_overhead_payment_renewal_source_guard
-        BEFORE INSERT ON {OVERHEAD_PAYMENT_RENEWALS_TABLE}
-        WHEN NOT EXISTS(
-            SELECT 1 FROM {OVERHEAD_PAYMENT_EVIDENCE_TABLE} evidence
-            JOIN {REQUESTS_TABLE} predecessor ON predecessor.request_id=NEW.predecessor_request_id
-            JOIN {REQUESTS_TABLE} successor ON successor.request_id=NEW.successor_request_id
-            WHERE evidence.request_id=NEW.anchor_request_id AND evidence.payment_fingerprint=NEW.payment_fingerprint
-              AND (predecessor.request_id=evidence.request_id OR EXISTS(
-                  SELECT 1 FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} previous
-                  WHERE previous.successor_request_id=predecessor.request_id AND previous.anchor_request_id=evidence.request_id)
-                  OR EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_overhead_replacements replacement
-                    WHERE replacement.successor_request_id=predecessor.request_id AND replacement.anchor_request_id=evidence.request_id))
-              AND predecessor.business_date=NEW.previous_business_date AND successor.business_date=NEW.business_date
-              AND predecessor.business_date<successor.business_date
-              AND predecessor.idempotency_epoch=successor.idempotency_epoch
-              AND predecessor.request_payload_json=successor.request_payload_json
-              AND predecessor.source_sha256=successor.source_sha256 AND predecessor.source_file_blob=successor.source_file_blob
-              AND predecessor.posted_document_id='' AND predecessor.posted_at='' AND predecessor.recovery_operation_id=''
-              AND NOT EXISTS(SELECT 1 FROM sheet_vitrina_v1_ff_pool_overhead_confirmations WHERE request_id=predecessor.request_id)
-              AND NOT EXISTS(SELECT 1 FROM {DOCUMENTS_TABLE} WHERE request_id=predecessor.request_id))
-        BEGIN SELECT RAISE(ABORT,'overhead payment renewal requires an unconfirmed original source'); END;
         CREATE TRIGGER IF NOT EXISTS ff_pool_overhead_predecessor_cannot_post
         BEFORE INSERT ON {DOCUMENTS_TABLE}
         WHEN EXISTS(SELECT 1 FROM {OVERHEAD_PAYMENT_RENEWALS_TABLE} WHERE predecessor_request_id=NEW.request_id)
@@ -516,6 +517,10 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
         BEGIN SELECT RAISE(ABORT,'overhead payment evidence is append-only'); END;
         """
     )
+
+    ensure_schema_definition(conn, kind="trigger",
+        name="ff_pool_overhead_payment_renewal_source_guard",
+        sql=OVERHEAD_RENEWAL_SOURCE_GUARD_SQL)
 
     from packages.application.operator_ff_overhead import ensure_schema
     ensure_schema(conn)
