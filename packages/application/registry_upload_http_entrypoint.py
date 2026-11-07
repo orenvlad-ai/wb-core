@@ -3283,6 +3283,7 @@ class RegistryUploadHttpEntrypoint:
             raise FbsGenerationFailure(latest, 'generation_binding_mismatch')
         return StageProof({'fbs_generation': stock['generation_id'], 'fbs_digest': stock['generation_digest'],
             'fbs_business_date': snapshot_day,
+            'fbs_active_scope': generation['catalog_scope']['active_scope_digest'],
             'fbs_catalog': digest(canonical({key: value for key, value in generation['catalog_scope'].items()
                 if key != 'generation_diagnostics'})),
             'fbs_mapping': digest(canonical([{key: row[key] for key in ('seller_warehouse_id', 'facility_id', 'mapping_id')}
@@ -3301,6 +3302,8 @@ class RegistryUploadHttpEntrypoint:
         from packages.application.ready_publication import readonly
         from packages.application.fbs_accounting_runtime import load
         from packages.application.warehouse_update_journal import PHASES
+        from packages.application.cycle_fbs_catalog import CycleFbsCatalogGuard
+        catalog_guard = CycleFbsCatalogGuard(self, store, receipt, fbs)
         with warehouse_functional_job_lock(self.runtime.runtime_dir) as metrics:
             token = str(metrics['owner_token'])
             self._cycle_drain_facility_activations(token)
@@ -3310,7 +3313,7 @@ class RegistryUploadHttpEntrypoint:
             store.write(receipt)  # Persist domain association before effects.
             try:
                 result = self._handle_owned_warehouse_manual_sync_request(owner_token=token, durable_run_id=run_id,
-                    before_capture=lambda now: require_cycle_business_date(receipt['business_date'], now))
+                    before_capture=catalog_guard.check, before_plan=catalog_guard.before_plan)
             except BaseException as exc:
                 if not isinstance(exc, Exception):
                     self.warehouse_update_journal.finish(run_id, status='interrupted', error='cycle_cancelled', owner_token=token)
@@ -7967,7 +7970,7 @@ class RegistryUploadHttpEntrypoint:
         return payload
 
     def _handle_owned_warehouse_manual_sync_request(self, *, owner_token: str, durable_run_id: str = "",
-                                                  before_capture=None) -> dict[str, Any]:
+                                                  before_capture=None, before_plan=None) -> dict[str, Any]:
         require_heavy_owner(self.runtime.runtime_dir)
         require_warehouse_job_owner(self.runtime.runtime_dir, owner_token)
         active_phase = ""
@@ -7985,8 +7988,10 @@ class RegistryUploadHttpEntrypoint:
                 try:
                     from packages.application.warehouse_update_journal import phase_error_details
                     from packages.application.sheet_vitrina_v1_cycle import CycleDateRollover
+                    from packages.application.cycle_fbs_catalog import CycleFbsCatalogChanged
+                    from packages.application.fbs_snapshot_cost import FbsSourceCaptureError
                     details = phase_error_details(exc, phase_key, durable_run_id)
-                    if isinstance(exc, CycleDateRollover) and hasattr(exc, 'completed_effects'):
+                    if isinstance(exc, (CycleDateRollover, CycleFbsCatalogChanged, FbsSourceCaptureError)) and hasattr(exc, 'completed_effects'):
                         details['completed_effects'] = exc.completed_effects
                     self.warehouse_update_journal.phase_finished(
                         durable_run_id, phase_key, status="failed", error=type(exc).__name__,
@@ -8051,10 +8056,14 @@ class RegistryUploadHttpEntrypoint:
             drain_overheads(self.runtime.db_path, self.runtime.runtime_dir)
             from packages.application.operator_warehouse_documents import drain as drain_operator_documents, reconcile as reconcile_operator_documents
             operator_documents = drain_operator_documents(self.runtime)
+            def build_warehouse_plan():
+                if before_plan is not None:
+                    before_plan()
+                return (self.warehouse_functional_block.build_sync_plan(before_capture=before_capture)
+                        if before_capture is not None else self.warehouse_functional_block.build_sync_plan())
             plan = run_phase(
                 "official_complete_wb_stocks",
-                (lambda: self.warehouse_functional_block.build_sync_plan(before_capture=before_capture))
-                if before_capture is not None else self.warehouse_functional_block.build_sync_plan,
+                build_warehouse_plan,
             )
             def publish_functional() -> dict[str, Any]:
                 from apps.warehouse_functional_runner import _publish_fbs_snapshot_accounting
@@ -8069,12 +8078,14 @@ class RegistryUploadHttpEntrypoint:
                         before_capture(self.now_factory())
                     raise
                 from packages.application.fbs_accounting_runtime import FbsAccountingUnavailable
+                from packages.application.cycle_fbs_catalog import CycleFbsCatalogChanged
+                from packages.application.fbs_snapshot_cost import FbsSourceCaptureError
                 try:
                     if before_capture is not None:
                         before_capture(self.now_factory())
                     accounting = (_publish_fbs_snapshot_accounting(self.runtime, before_capture=before_capture)
                                   if before_capture is not None else _publish_fbs_snapshot_accounting(self.runtime))
-                except CycleDateRollover as exc:
+                except (CycleDateRollover, CycleFbsCatalogChanged, FbsSourceCaptureError) as exc:
                     # Mandatory journal evidence survives a subsequent epoch;
                     # the committed functional version is never inferred.
                     version = (result.get('active_version') or {}).get('version_id')

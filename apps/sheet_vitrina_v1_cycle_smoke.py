@@ -1097,6 +1097,10 @@ class BoundWarehouseTests(unittest.TestCase):
             with sqlite3.connect(db) as conn:
                 conn.execute('CREATE TABLE sheet_vitrina_v1_warehouse_functional_active(slot INTEGER,version_id TEXT)')
                 conn.execute('CREATE TABLE sheet_vitrina_v1_warehouse_wb_snapshots(snapshot_id TEXT,version_id TEXT,pagination_complete INTEGER,raw_rows_digest TEXT,snapshot_date TEXT)')
+                conn.execute('CREATE TABLE sheet_vitrina_v1_nomenclature_items(item_id,nm_id,is_active,is_hidden,updated_at)')
+                conn.execute("INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES('fixture',101,1,0,'today')")
+                from packages.application.stock_catalog_scope import read_stock_catalog_scope, active_catalog_digest
+                fbs_scope = active_catalog_digest(read_stock_catalog_scope(conn))
             entry=Entry.__new__(Entry)
             entry.runtime=SimpleNamespace(runtime_dir=root,db_path=db,finalize_completed_wb_transit_cost_recalculations=Mock(return_value={}))
             entry.activated_at_factory=lambda:STAMP
@@ -1146,7 +1150,8 @@ class BoundWarehouseTests(unittest.TestCase):
                  patch('packages.application.operator_warehouse_documents.reconcile',return_value={}) as operator_reconcile, \
                  patch('packages.application.operator_fulfillment_services.reconcile',wraps=fulfillment_receipts.reconcile) as fulfillment_reconcile, \
                  heavy_admitted(root, operation='cycle'):
-                proof=entry._cycle_warehouse(store,receipt,{'fbs_generation':'fbs','fbs_digest':'fbs-digest'})
+                proof=entry._cycle_warehouse(store,receipt,{'fbs_generation':'fbs','fbs_digest':'fbs-digest',
+                    'fbs_active_scope': fbs_scope})
             self.assertEqual(proof.versions['fbs_book'],'book')
             if unavailable:
                 self.assertEqual(proof.versions['fbs_accounting_status'], 'unavailable')

@@ -221,6 +221,8 @@ def cycle_summary(receipt):
         'complete' if ready.get('status') == 'complete' else 'unknown')
     return {'schema_version': 1, 'cycle_id': receipt['cycle_id'],
         **({'rollover': dict(receipt['rollover'])} if receipt.get('rollover') else {}),
+        **({'fbs_source_failure': dict(receipt['fbs_source_failure'])} if receipt.get('fbs_source_failure') else {}),
+        **({'fbs_catalog_refresh': dict(receipt['fbs_catalog_refresh'])} if receipt.get('fbs_catalog_refresh') else {}),
         'execution': receipt['status'], 'failed_stage': receipt.get('current_stage') or
             ('initialization' if receipt['status'] in {'failed', 'interrupted'} else ''),
         'started_at': receipt.get('started_at'), 'finished_at': receipt.get('finished_at'),
@@ -350,7 +352,7 @@ class CycleReceiptStore:
         receipt.update(business_date=observed_date, rollover=rollover, status='running', current_stage='',
                        finished_at=None, error_code='', final_versions={},
                        stages=[dict(stage=name, status='pending', versions={}, warnings=[]) for name in STAGES])
-        for key in ('summary', 'error_diagnostic', 'history_failure', 'fbs_failure', 'epoch_transition'):
+        for key in ('summary', 'error_diagnostic', 'history_failure', 'fbs_failure', 'fbs_source_failure', 'epoch_transition'):
             receipt.pop(key, None)
         self.write(receipt)
 
@@ -615,7 +617,7 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
     def fbs_generation():
         nonlocal fbs
         proof = entrypoint._cycle_fbs_generation()
-        fbs = proof.versions
+        fbs = dict(proof.versions)
         return proof
     def final_ready():
         nonlocal ready
@@ -745,6 +747,9 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
     except BaseException as exc:
         # Small codes only: exception text can contain a provider response/secret.
         from packages.application.owned_history_worker_capability import HistoryDelegationError
+        from packages.application.cycle_fbs_catalog import CycleFbsCatalogChanged
+        from packages.application.fbs_snapshot_cost import FbsSourceCaptureError
+        fbs_source_failure = exc.diagnostic() if isinstance(exc, (CycleFbsCatalogChanged, FbsSourceCaptureError)) else None
         history_failure = exc.diagnostic() if isinstance(exc, HistoryDelegationError) else None
         fbs_failure = exc.diagnostic() if isinstance(exc, FbsGenerationFailure) else None
         code = history_failure["error_code"] if history_failure else str(exc) if isinstance(exc, CycleStageFailure) else type(exc).__name__
@@ -752,6 +757,11 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
             receipt['history_failure'] = history_failure
         if fbs_failure:
             receipt['fbs_failure'] = fbs_failure
+        if fbs_source_failure:
+            receipt['fbs_source_failure'] = fbs_source_failure
+            code = fbs_source_failure['error_code']
+            if hasattr(exc, 'completed_effects'):
+                receipt['completed_effects'] = dict(exc.completed_effects)
         receipt.update(status='failed' if isinstance(exc, Exception) else 'interrupted',
             error_code=code[:256], finished_at=store.timestamp_factory())
         for item in receipt['stages']:
@@ -761,6 +771,10 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
                     item['history_failure'] = dict(history_failure)
                 if fbs_failure:
                     item['fbs_failure'] = dict(fbs_failure)
+                if fbs_source_failure:
+                    item['fbs_source_failure'] = dict(fbs_source_failure)
+                    if hasattr(exc, 'completed_effects'):
+                        item['completed_effects'] = dict(exc.completed_effects)
         _observe_terminal(receipt, exc)
         store.write(receipt)
         raise
