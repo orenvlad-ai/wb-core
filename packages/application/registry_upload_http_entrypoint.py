@@ -3530,7 +3530,8 @@ class RegistryUploadHttpEntrypoint:
             raise CycleStageFailure('cycle_derived_owner_mismatch')
         return dict(job_id=job_id, operation='cycle', pid=os.getpid(), identity=identity)
 
-    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None, historical_receipt=None):
+    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None, historical_receipt=None,
+                       before_child=None):
         from apps.web_vitrina_history_candidate_build import build_owned_cycle_history
         from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
         owner = RegistryUploadHttpEntrypoint._cycle_owned_worker_identity(self, receipt)
@@ -3553,6 +3554,11 @@ class RegistryUploadHttpEntrypoint:
             yesterday = (datetime.fromisoformat(current_business_date_iso(self.now_factory())) - timedelta(days=1)).date().isoformat()
             backfill_dates = tuple(sorted(set(backfill_dates) | {day for day in dated_receipt.publication_dates() if day < yesterday}))
             dated_options['policy_receipt' if policy_receipt is not None else 'supplier_receipt'] = dated_receipt
+        if before_child is not None:
+            # Ready/receipt validation above may allocate large temporary
+            # operands again. Reclaim them after validation, before overlap
+            # with the fixed child; the existing cycle owns persistence.
+            before_child()
         proof = build_owned_cycle_history(runtime=self.runtime, config=config, cycle_owner=owner, now=self.now_factory(),
             backfill_dates=backfill_dates, closed_receipt=closed_receipt, historical_receipt=historical_receipt, **dated_options)
         if dated_receipt is None:

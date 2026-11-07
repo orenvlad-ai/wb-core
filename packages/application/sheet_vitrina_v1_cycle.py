@@ -679,7 +679,15 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
         from packages.application.fbs_accounting_historical_history import pending_receipt
         historical = (None if receipt['final_versions'].get('fbs_accounting_status') == 'unavailable'
                       else pending_receipt(entrypoint.runtime))
-        kwargs=dict(backfill_dates=backfill_dates,closed_receipt=closed if backfill_dates else None)
+        def before_child():
+            from packages.application.cycle_memory import release_cycle_memory
+            receipt['history_memory_before_child'] = {
+                'business_date': receipt['business_date'], **release_cycle_memory()}
+            # The actual cycle owns this store and receipt. Persist telemetry
+            # before the child starts so a later OOM cannot erase the sample.
+            store.write(receipt)
+        kwargs=dict(backfill_dates=backfill_dates,closed_receipt=closed if backfill_dates else None,
+                    before_child=before_child)
         if historical is not None:
             historical.freeze_scope(entrypoint.now_factory())
             from datetime import datetime,timedelta
@@ -727,6 +735,17 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
                 versions=proof.versions, warnings=list(proof.warnings))
             receipt['final_versions'].update(proof.versions)
             store.write(receipt)
+            if item['stage'] == 'final_ready':
+                # Closed and final Ready have durably consumed this collection.
+                # History reads native published sources and needs only their
+                # small proofs. Dropping the opaque weak-key handle releases
+                # its provider payloads before a second process starts. A date
+                # rollover creates a new epoch with a fresh collection.
+                handle = summary = None
+                from packages.application.cycle_memory import release_cycle_memory
+                # Bounded resource telemetry; never part of a source proof.
+                receipt['history_memory_release'] = {
+                    'business_date': receipt['business_date'], **release_cycle_memory()}
             # A new epoch is authorized only by an already validated, durable
             # completed proof, never by the clock masking a bad/unknown result.
             require_cycle_business_date(receipt['business_date'], entrypoint.now_factory())

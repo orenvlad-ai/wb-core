@@ -93,9 +93,10 @@ class CycleFake:
     def _cycle_publish_ready(self, plan):
         assert plan=='plan'
         return {'snapshot_id':'ready'},self.mark('final_ready')
-    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None):
+    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None, before_child=None):
         assert ready['snapshot_id']=='ready'
         assert backfill_dates == () and closed_receipt is None
+        if before_child is not None:before_child()
         return self.mark('rolling14')
 
 
@@ -228,7 +229,7 @@ class CycleTests(unittest.TestCase):
                     fake.backlog.value['dates']['2026-09-27']['state']='ready'
                     return {},StageProof({'ready':'committed'})
                 fake._cycle_publish_dated_ready=dated
-                def history(config,receipt,ready,*,backfill_dates,closed_receipt):
+                def history(config,receipt,ready,*,backfill_dates,closed_receipt,before_child=None):
                     self.assertEqual(backfill_dates,('2026-09-25','2026-09-27') if prior_ready else ('2026-09-27',))
                     for day in backfill_dates:closed_receipt.value['dates'][day]['state']='acknowledged'
                     return fake.mark('rolling14')

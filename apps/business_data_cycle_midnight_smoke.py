@@ -65,7 +65,8 @@ class AdvancingEntry(wiring.FixedDomainEntry):
         assert fbs == {'fbs_generation_fixture_version': digest('fbs_generation:' + day)}
         assert material['warehouse_fixture_version'] == digest('warehouse:' + day)
 
-    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None):
+    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None, before_child=None):
+        if before_child is not None:before_child()
         from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter, update_live_history
         self.events.append('rolling14')
         _, store, _ = self.case.native()
