@@ -75,6 +75,10 @@ def phase_error_details(exc: Exception, phase: str, run_id: str) -> dict[str, An
         details["finance_failure"] = exc.diagnostic()
     if isinstance(exc, CompletionProofError):
         details["completion_failure"] = exc.diagnostic()
+    from packages.application.cycle_fbs_catalog import CycleFbsCatalogChanged
+    from packages.application.fbs_snapshot_cost import FbsSourceCaptureError
+    if isinstance(exc, (CycleFbsCatalogChanged, FbsSourceCaptureError)):
+        details['fbs_source_failure'] = exc.diagnostic()
     return details
 
 

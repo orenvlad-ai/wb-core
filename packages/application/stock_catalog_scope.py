@@ -22,6 +22,14 @@ class StockCatalogScopeError(ValueError):
     pass
 
 
+def active_catalog_digest(scope: dict[str, Any]) -> str:
+    """Exact quantity scope identity; metadata timestamps do not alter stock scope."""
+    rows = sorted(({key: row[key] for key in ('nm_id', 'is_active', 'is_hidden')}
+                   for row in scope['identities']), key=lambda row: row['nm_id'] or 0)
+    return 'sha256:' + hashlib.sha256(json.dumps(
+        rows, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
 def read_stock_catalog_scope(conn: sqlite3.Connection) -> dict[str, Any]:
     """Read the current catalog afresh; absent/ambiguous identities stay explicit."""
     if conn.execute(

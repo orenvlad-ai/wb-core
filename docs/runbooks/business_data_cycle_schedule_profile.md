@@ -63,6 +63,26 @@ Technical publication failures and native history guards still fail the cycle.
 Old dated publication and exact closed-date/native acknowledgement retain their
 stricter existing proofs; current report degradation cannot acknowledge old debt.
 
+### Catalog changes during a live cycle
+
+After warehouse source/document phases and before building its functional plan,
+the cycle compares the exact active/retained-hidden catalog identity to its bound
+complete FBS generation. A changed scope permits one fresh complete FBS collection
+under the existing owner. This repairs source coverage only: no warehouse or
+accounting business phase is replayed. The receipt durably records collection
+intent, the original generation and its replacement; the original completed FBS
+stage remains unchanged. Unchanged scope, including metadata-only timestamp
+updates, performs no additional provider collection.
+
+Incomplete replacement, a second scope change, lost ownership or unknown outcome
+fails closed. Later capture/publication fences retain the exact catalog check and
+the existing transaction-local full-catalog quantity admission. A late missing SKU
+is a typed source-capture failure, never zero stock. If the functional commit already
+completed, its exact version remains in the failed phase/cycle evidence; accounting
+is not retried. After terminal failure, a separately admitted fresh full cycle may
+recover through the existing durable contracts. This is distinct from the business
+date rollover below; its calendar guards and one-rollover limit are unchanged.
+
 ### Crossing business midnight
 
 One live owning request may start one fresh epoch when the actual canonical

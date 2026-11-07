@@ -93,9 +93,10 @@ class CycleFake:
     def _cycle_publish_ready(self, plan):
         assert plan=='plan'
         return {'snapshot_id':'ready'},self.mark('final_ready')
-    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None):
+    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None, before_child=None):
         assert ready['snapshot_id']=='ready'
         assert backfill_dates == () and closed_receipt is None
+        if before_child is not None:before_child()
         return self.mark('rolling14')
 
 
@@ -228,7 +229,7 @@ class CycleTests(unittest.TestCase):
                     fake.backlog.value['dates']['2026-09-27']['state']='ready'
                     return {},StageProof({'ready':'committed'})
                 fake._cycle_publish_dated_ready=dated
-                def history(config,receipt,ready,*,backfill_dates,closed_receipt):
+                def history(config,receipt,ready,*,backfill_dates,closed_receipt,before_child=None):
                     self.assertEqual(backfill_dates,('2026-09-25','2026-09-27') if prior_ready else ('2026-09-27',))
                     for day in backfill_dates:closed_receipt.value['dates'][day]['state']='acknowledged'
                     return fake.mark('rolling14')
@@ -1097,6 +1098,10 @@ class BoundWarehouseTests(unittest.TestCase):
             with sqlite3.connect(db) as conn:
                 conn.execute('CREATE TABLE sheet_vitrina_v1_warehouse_functional_active(slot INTEGER,version_id TEXT)')
                 conn.execute('CREATE TABLE sheet_vitrina_v1_warehouse_wb_snapshots(snapshot_id TEXT,version_id TEXT,pagination_complete INTEGER,raw_rows_digest TEXT,snapshot_date TEXT)')
+                conn.execute('CREATE TABLE sheet_vitrina_v1_nomenclature_items(item_id,nm_id,is_active,is_hidden,updated_at)')
+                conn.execute("INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES('fixture',101,1,0,'today')")
+                from packages.application.stock_catalog_scope import read_stock_catalog_scope, active_catalog_digest
+                fbs_scope = active_catalog_digest(read_stock_catalog_scope(conn))
             entry=Entry.__new__(Entry)
             entry.runtime=SimpleNamespace(runtime_dir=root,db_path=db,finalize_completed_wb_transit_cost_recalculations=Mock(return_value={}))
             entry.activated_at_factory=lambda:STAMP
@@ -1146,7 +1151,8 @@ class BoundWarehouseTests(unittest.TestCase):
                  patch('packages.application.operator_warehouse_documents.reconcile',return_value={}) as operator_reconcile, \
                  patch('packages.application.operator_fulfillment_services.reconcile',wraps=fulfillment_receipts.reconcile) as fulfillment_reconcile, \
                  heavy_admitted(root, operation='cycle'):
-                proof=entry._cycle_warehouse(store,receipt,{'fbs_generation':'fbs','fbs_digest':'fbs-digest'})
+                proof=entry._cycle_warehouse(store,receipt,{'fbs_generation':'fbs','fbs_digest':'fbs-digest',
+                    'fbs_active_scope': fbs_scope})
             self.assertEqual(proof.versions['fbs_book'],'book')
             if unavailable:
                 self.assertEqual(proof.versions['fbs_accounting_status'], 'unavailable')

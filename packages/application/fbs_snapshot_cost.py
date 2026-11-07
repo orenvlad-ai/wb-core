@@ -27,6 +27,23 @@ class FbsSnapshotCostError(ValueError):
         self.invalid_from_date = invalid_from_date
 
 
+class FbsSourceCaptureError(FbsSnapshotCostError):
+    """Preserve bounded source evidence without exposing provider exception text."""
+    def __init__(self, capture):
+        super().__init__('incomplete_source_capture')
+        reason = capture.get('quantity_snapshot', {}).get('reason', '')
+        allowed = {'current_stock_catalog_changed', 'displayed_sku_outside_complete_catalog',
+            'current_stock_catalog_scope_incomplete', 'complete_official_generation_unavailable',
+            'official_snapshot_not_fresh_current_day', 'mapping_changed', 'incomplete_scope',
+            'dense_identity_mismatch', 'unsupported_stock_evidence', 'invalid_omission_zero'}
+        self.source_reason = reason if reason in allowed else (
+            'documents_incomplete' if capture.get('documents_complete') is not True else 'source_capture_invalid')
+
+    def diagnostic(self):
+        return {'error_code': 'incomplete_source_capture', 'source_reason': self.source_reason,
+                'recovery_policy': 'fresh_full_cycle_after_terminal'}
+
+
 def canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -90,7 +107,7 @@ def _capture(capture: dict) -> tuple[str, dict[str, dict], dict[str, dict]]:
             or not snapshot.get("id") or not snapshot.get("digest")
             or not snapshot.get("captured_at") or not capture.get("source_digest")
             or capture.get("documents_complete") is not True):
-        raise FbsSnapshotCostError("incomplete_source_capture")
+        raise FbsSourceCaptureError(capture)
     _timestamp(snapshot["captured_at"])
     if _timestamp(snapshot["captured_at"]) > _timestamp(capture["captured_at"]):
         raise FbsSnapshotCostError("snapshot_after_document_capture")

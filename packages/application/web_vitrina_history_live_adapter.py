@@ -36,6 +36,7 @@ from packages.application.calculation_parameters import PROXY_BLOCK_KEY
 from packages.application.calculation_parameters_v4 import PROXY_V4_BLOCK_KEY
 from packages.application import ff_pool_fbs_lifecycle as lifecycle
 from packages.application.web_vitrina_fbs_lifecycle_last_good import load_owner_paused_fallback
+from packages.application.owned_history_mismatch_diagnostics import capture_diagnostics
 from packages.business_time import current_business_date_iso
 
 PREFIX = "sheet_vitrina_v1_"
@@ -151,6 +152,7 @@ class LiveNativeAdapter:
         self.max_cache_bytes = max_cache_bytes
         self.context = self.availability = None
         self.fence = None
+        self.capture_diagnostics = None
         self.stats = {}
         self.capture_calls = 0
         self.lifecycle_quality_resolver = None
@@ -168,6 +170,7 @@ class LiveNativeAdapter:
         return rows
 
     def capture(self) -> dict:
+        self.capture_diagnostics = None
         self.capture_calls += 1
         self.stats = {"bytes": 0, "queries": 0, "plans_loaded": 0,
                       "dated_days_loaded": 0, "component_captures_loaded": 0,
@@ -331,9 +334,10 @@ class LiveNativeAdapter:
                     (" WHERE bundle_version=? ORDER BY 1" if name.startswith("registry_upload_") else " ORDER BY 1"),
                     (current[0][0],) if name.startswith("registry_upload_") else ())) for name in sorted(STATIC_TABLES & tables)}
                 policies = {name: digest((context.read_file_once(self.runtime_dir / name) or b"").hex()) for name in POLICIES}
-                epoch = digest({"formula": self.formula_epoch, "static": static, "policies": policies,
+                epoch_parts = {"formula": self.formula_epoch, "static": static, "policies": policies,
                                 "labels": labels, "facilities": facilities, "identities": history_identities,
-                                "scopes": sorted(scope_ids), "legacy": any(nodes[k]["legacy"] for k in keys)})
+                                "scopes": sorted(scope_ids), "legacy": any(nodes[k]["legacy"] for k in keys)}
+                epoch = digest(epoch_parts)
                 self.context = {"template_rows": labels, "facilities": list(facilities.values()),
                     "history_scope_keys": sorted(scope_ids), "history_scope_identities": history_identities,
                     "inventory_catalog_present": bool(captures), "legacy_wb_present": any(nodes[k]["legacy"] for k in keys),
@@ -354,6 +358,11 @@ class LiveNativeAdapter:
                         path.unlink()
                 conn.set_progress_handler(None, 0)
                 check_pinned_authority(conn, authority)
+                try:
+                    self.capture_diagnostics = capture_diagnostics(per_day=per_day, epoch_parts=epoch_parts,
+                        alarms=alarms, ready=identities, authority=authority)
+                except Exception:
+                    self.capture_diagnostics = None  # Diagnostic-only; vector/fence stay authoritative.
                 return vector
         except sqlite3.OperationalError as exc:
             raise LiveSourceUnavailable("live_source_read_incomplete") from exc

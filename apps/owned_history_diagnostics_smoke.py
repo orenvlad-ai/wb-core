@@ -16,6 +16,9 @@ from packages.application import owned_history_worker as supervisor
 from packages.application.owned_history_worker_capability import (
     HistoryDelegationError, history_child_failure,
 )
+from packages.application.owned_history_mismatch_diagnostics import (
+    anchor_mismatch, capture_diagnostics, safe_mismatch, MAX_ENTRIES,
+)
 from packages.application.web_vitrina_history_live_adapter import LiveSourceUnavailable
 from packages.application.web_vitrina_history_store import HistoryUnavailable
 from packages.application.sheet_vitrina_v1_cycle import CycleReceiptStore, run_cycle
@@ -48,6 +51,57 @@ class DiagnosticsTests(unittest.TestCase):
             self.fail("unexpected portion replay")
         worker._invoke = invoke
         return worker, calls
+
+    def mismatch(self, *, fence_only=False):
+        vector = {"epoch": "a" * 64, "dates": {"2026-10-08": "b" * 64}}
+        old = capture_diagnostics(per_day={"2026-10-08": {"ready": SECRET}},
+            epoch_parts={"static": SECRET}, alarms={"sheet_vitrina_v1_ready_snapshots": 1},
+            ready=[[SECRET, "2026-10-08", SECRET]], authority={"secret": SECRET})
+        new = capture_diagnostics(per_day={"2026-10-08": {"ready": SECRET + "changed"}},
+            epoch_parts={"static": SECRET}, alarms={"sheet_vitrina_v1_ready_snapshots": 2},
+            ready=[[SECRET, "2026-10-08", SECRET + "changed"]], authority={"secret": SECRET})
+        anchor = {"vector": vector, "fence": "old", "capture_diagnostics": old}
+        observed = vector if fence_only else {**vector, "dates": {"2026-10-08": "c" * 64}}
+        return anchor_mismatch(anchor, observed, "new", new)
+
+    def test_vector_and_fence_have_separate_bounded_hash_diffs(self):
+        for fence_only in (False, True):
+            detail = self.mismatch(fence_only=fence_only)
+            self.assertIs(detail["vector_changed"], not fence_only)
+            self.assertTrue(detail["fence_changed"])
+            self.assertEqual(detail["groups"]["dates"]["changed_count"], 0 if fence_only else 1)
+            self.assertEqual(detail["groups"]["components"]["changes"][0]["key"], "ready")
+            self.assertEqual(detail["groups"]["revisions"]["changes"][0]["key"], "sheet_vitrina_v1_ready_snapshots")
+            self.assertNotIn(SECRET, json.dumps(detail))
+        detail["groups"]["components"]["changes"] *= 1000
+        detail["groups"][SECRET] = SECRET
+        detail[SECRET] = SECRET
+        detail["groups"]["components"]["changes"].insert(0, {"key": SECRET, "expected": SECRET})
+        sanitized = safe_mismatch(detail)
+        self.assertLessEqual(len(sanitized["groups"]["components"]["changes"]), MAX_ENTRIES)
+        self.assertTrue(sanitized["groups"]["components"]["truncated"])
+        self.assertNotIn(SECRET, json.dumps(sanitized))
+        self.assertLess(len(json.dumps(sanitized)), 48000)
+        unknown = anchor_mismatch({'vector': {'dates': {}}, 'fence': 'old'},
+                                  {'dates': {}}, 'new', {'components': {'ready': 'a' * 64}})
+        self.assertFalse(unknown['groups']['components']['expected_available'])
+        self.assertIsNone(unknown['groups']['components']['changed_count'])
+
+    def test_mismatch_survives_child_supervisor_and_receipt_boundaries(self):
+        detail = self.mismatch()
+        error = HistoryDelegationError("history_worker_anchor_changed", mismatch=detail)
+        failure = history_child_failure(error, mode="verify")
+        worker, calls = self.worker(("verify", {"status": "complete", "result": failure}))
+        with self.assertRaises(HistoryDelegationError) as caught:
+            worker.complete(NOW)
+        self.assertEqual(caught.exception.diagnostic()["anchor_mismatch"], detail)
+        self.assertEqual(calls, ["capture", "verify"])
+        worker._invoke_owned = Mock(side_effect=caught.exception)
+        with self.assertRaises(HistoryDelegationError) as wrapped:
+            supervisor._OwnedHistoryWorker._invoke(worker, "verify", NOW, None)
+        self.assertEqual(wrapped.exception.diagnostic()["anchor_mismatch"], detail)
+        error.mismatch["groups"]["components"]["changes"][0]["observed"] = SECRET
+        self.assertNotIn(SECRET, json.dumps(error.diagnostic()))
 
     def test_child_source_reason_reaches_completion_without_payload(self):
         cap = {"mode": "capture", "invocation": "fixture"}
@@ -178,7 +232,7 @@ class DiagnosticsTests(unittest.TestCase):
         receipt, lock = fixture.accepted()
         fake = cycle_fixture.CycleFake(fixture.root)
         error = HistoryDelegationError("history_completion_capture_unproven", mode="capture",
-                                       reason_code="live_source_read_incomplete")
+                                       reason_code="live_source_read_incomplete", mismatch=self.mismatch())
         try:
             with patch.object(fake, "_cycle_history", side_effect=error), \
                  heavy_admitted(fixture.root, operation="cycle"), self.assertRaises(HistoryDelegationError):

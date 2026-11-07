@@ -74,7 +74,8 @@ class FixedDomainEntry:
         return {'snapshot_id': plan.snapshot_id}, StageProof({'ready_' + plan.as_of_date: plan.snapshot_id})
     def _cycle_publish_dated_ready(self, plan, **kwargs):return self._publish(plan)
     def _cycle_publish_ready(self, plan):return self._publish(plan)
-    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None):
+    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None, before_child=None):
+        if before_child is not None:before_child()
         self.events.append('rolling14')
         self.backfill = backfill_dates
         assert type(backfill_dates) is tuple and len(backfill_dates) <= 2
