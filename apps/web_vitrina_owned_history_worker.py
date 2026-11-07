@@ -130,7 +130,12 @@ def execute(cap):
             _bound(cap)
             vector = super().capture()
             if anchor is not None and (vector != anchor["vector"] or self.fence != anchor["fence"]):
-                raise HistoryDelegationError("history_worker_anchor_changed")
+                from packages.application.owned_history_mismatch_diagnostics import anchor_mismatch
+                try:
+                    mismatch = anchor_mismatch(anchor, vector, self.fence, self.capture_diagnostics)
+                except Exception:
+                    mismatch = None  # Explanations never replace the original refusal.
+                raise HistoryDelegationError("history_worker_anchor_changed", mismatch=mismatch)
             return vector
 
     adapter = AnchoredAdapter(db_path=runtime.db_path, runtime_dir=runtime_dir,
@@ -147,7 +152,7 @@ def execute(cap):
         old = store.edition() if pointer else None
         catalog = store.day_catalogs(old)[max(old["days"])] if old and old["days"] else None
         value = {"now": cap["now"], "window_from": first, "window_to": today,
-                 "vector": vector, "fence": adapter.fence, "base": pointer["current"] if pointer else None,
+                 "vector": vector, "fence": adapter.fence, "capture_diagnostics": adapter.capture_diagnostics, "base": pointer["current"] if pointer else None,
                  "existing_catalog": catalog, "catalog_context": digest({**adapter.context, "group_blocks": True}),
                  "source": cap["source"], "runtime_contract_digest": cap["runtime_contract_digest"],
                  "formula_epoch": cap["formula_epoch"], "source_dates": source_dates,

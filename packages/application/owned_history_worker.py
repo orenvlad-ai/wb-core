@@ -378,7 +378,8 @@ class _OwnedHistoryWorker:
         except HistoryDelegationError as exc:
             diagnostic = exc.diagnostic(mode=mode)
             raise HistoryDelegationError(diagnostic["error_code"], mode=diagnostic["mode"],
-                reason_code=diagnostic["reason_code"], outcome=diagnostic["outcome"]) from None
+                reason_code=diagnostic["reason_code"], outcome=diagnostic["outcome"],
+                mismatch=diagnostic.get("anchor_mismatch")) from None
 
     def _invoke_owned(self, mode, now, anchor):
         self._check()

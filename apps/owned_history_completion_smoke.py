@@ -322,9 +322,63 @@ conn.close()
                             self.assertEqual(conn.execute('SELECT * FROM sheet_vitrina_v1_ready_snapshots ORDER BY bundle_version,as_of_date').fetchall(), rows)
                             self.assertGreater(conn.execute('SELECT revision FROM sheet_vitrina_v1_ready_revisions WHERE bundle_version=? AND as_of_date=?', old[:2]).fetchone()[0], revision)
                 hook, calls = self.during_first_object(change)
-                with hook, self.assertRaisesRegex(HistoryDelegationError, 'history_worker_anchor_changed'):
+                with hook, self.assertRaisesRegex(HistoryDelegationError, 'history_worker_anchor_changed') as caught:
                     child.execute(cap)
+                detail = caught.exception.diagnostic()['anchor_mismatch']
+                self.assertTrue(detail['vector_changed'])
+                self.assertTrue(detail['fence_changed'])
+                self.assertIn('ready', [item['key'] for item in detail['groups']['components']['changes']])
+                self.assertEqual(detail['groups']['ready_dates']['changed_count'], 1)
                 self.assertEqual(len(calls), 14)
+                self.assertEqual((root / 'history' / 'CURRENT.json').read_bytes(), pointer)
+
+    def test_capture_diagnostic_failure_does_not_change_verification(self):
+        from apps import web_vitrina_owned_history_worker as child
+        with patch('packages.application.web_vitrina_history_live_adapter.capture_diagnostics', side_effect=ValueError('diagnostic-only')):
+            runtime, root, cap = self.fixture()
+            self.assertIsNone(cap['anchor']['capture_diagnostics'])
+            self.assertTrue(child.execute(cap)['terminal'])
+
+    def test_diagnostic_failure_preserves_original_anchor_refusal(self):
+        from apps import web_vitrina_owned_history_worker as child
+        runtime, root, cap = self.fixture()
+        with closing(sqlite3.connect(runtime.db_path)) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET after_digest='changed'")
+            conn.commit()
+        with patch('packages.application.owned_history_mismatch_diagnostics.anchor_mismatch', side_effect=ValueError('diagnostic-only')), self.assertRaisesRegex(HistoryDelegationError, 'history_worker_anchor_changed') as caught:
+            child.execute(cap)
+        self.assertNotIn('anchor_mismatch', caught.exception.diagnostic())
+
+    def test_revision_fence_only_mismatch_is_distinct_from_vector(self):
+        from apps import web_vitrina_owned_history_worker as child
+        runtime, root, cap = self.fixture()
+        pointer = (root / 'history' / 'CURRENT.json').read_bytes()
+        with closing(sqlite3.connect(runtime.db_path)) as conn:
+            result = conn.execute("UPDATE sheet_vitrina_v1_ready_input_revisions SET revision=revision+1 WHERE source_table='registry_upload_config_v2'")
+            self.assertEqual(result.rowcount, 1)
+            conn.commit()
+        with self.assertRaisesRegex(HistoryDelegationError, 'history_worker_anchor_changed') as caught:
+            child.execute(cap)
+        detail = caught.exception.diagnostic()['anchor_mismatch']
+        self.assertFalse(detail['vector_changed'])
+        self.assertTrue(detail['fence_changed'])
+        self.assertEqual(detail['groups']['dates']['changed_count'], 0)
+        self.assertEqual([item['key'] for item in detail['groups']['revisions']['changes']], ['registry_upload_config_v2'])
+        self.assertEqual((root / 'history' / 'CURRENT.json').read_bytes(), pointer)
+
+    def test_missing_or_malformed_sidecar_never_hides_source_mismatch(self):
+        from apps import web_vitrina_owned_history_worker as child
+        for sidecar in (None, {"groups": "invalid"}):
+            with self.subTest(sidecar=sidecar):
+                runtime, root, cap = self.fixture()
+                cap['anchor']['capture_diagnostics'] = sidecar
+                pointer = (root / 'history' / 'CURRENT.json').read_bytes()
+                with closing(sqlite3.connect(runtime.db_path)) as conn:
+                    conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET after_digest='changed'")
+                    conn.commit()
+                with self.assertRaisesRegex(HistoryDelegationError, 'history_worker_anchor_changed') as caught:
+                    child.execute(cap)
+                self.assertTrue(caught.exception.diagnostic()['anchor_mismatch']['vector_changed'])
                 self.assertEqual((root / 'history' / 'CURRENT.json').read_bytes(), pointer)
 
     def test_unalarmed_consumed_publication_change_refuses(self):

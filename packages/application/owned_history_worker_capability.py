@@ -18,6 +18,8 @@ import stat
 import struct
 import sys
 
+from packages.application.owned_history_mismatch_diagnostics import safe_mismatch
+
 CONTRACT = "owned_history_portion_fd_v1"
 MAX_MESSAGE = 256 * 1024
 MAX_JSON_FILE = 16 * 1024 * 1024
@@ -263,19 +265,24 @@ def safe_history_reason(value):
 
 class HistoryDelegationError(RuntimeError):
     """Payload-free typed diagnostics, revalidated at the durable boundary."""
-    def __init__(self, code, *, mode="parent", reason_code=None, outcome="failed"):
+    def __init__(self, code, *, mode="parent", reason_code=None, outcome="failed", mismatch=None):
         self.code = code if isinstance(code, str) and code in HISTORY_ERROR_CODES else "history_failure_unknown"
         self.mode = mode if isinstance(mode, str) and mode in HISTORY_MODES else "parent"
         self.reason_code = safe_history_reason(self.code if reason_code is None else reason_code)
         self.outcome = "outcome_unknown" if outcome == "outcome_unknown" else "failed"
+        self.mismatch = safe_mismatch(mismatch)
         super().__init__(self.code)
 
     def diagnostic(self, *, mode=None):
         # Do not trust mutable exception attributes or a deserialized child dict.
-        return {"error_code": self.code if isinstance(self.code, str) and self.code in HISTORY_ERROR_CODES else "history_failure_unknown",
+        result = {"error_code": self.code if isinstance(self.code, str) and self.code in HISTORY_ERROR_CODES else "history_failure_unknown",
                 "mode": mode if isinstance(mode, str) and mode in HISTORY_MODES else self.mode if isinstance(self.mode, str) and self.mode in HISTORY_MODES else "parent",
                 "reason_code": safe_history_reason(self.reason_code),
                 "outcome": "outcome_unknown" if self.outcome == "outcome_unknown" else "failed"}
+        mismatch = safe_mismatch(self.mismatch)
+        if mismatch is not None:
+            result["anchor_mismatch"] = mismatch
+        return result
 
 
 def history_result_error(code, result, *, mode):
@@ -287,7 +294,8 @@ def history_result_error(code, result, *, mode):
     diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
     reason = "history_transport_outcome_unknown" if unknown else diagnostic.get("reason_code", payload.get("reason", code))
     return HistoryDelegationError(code, mode=mode, reason_code=reason,
-                                  outcome="outcome_unknown" if unknown else "failed")
+                                  outcome="outcome_unknown" if unknown else "failed",
+                                  mismatch=None if unknown else diagnostic.get("anchor_mismatch"))
 
 
 def history_child_failure(exc, *, mode, source_error=False):
