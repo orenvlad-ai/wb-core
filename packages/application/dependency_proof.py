@@ -52,6 +52,8 @@ class CompletionProofError(ValueError):
         self.after_vector_digest=None
         self.processed_count=None
         self.pending_count=None
+        self.before_schema_version=None
+        self.after_schema_version=None
 
     def diagnostic(self):
         return dict(contract_version=CONTRACT, reason=self.reason, phase=self.phase,
@@ -61,6 +63,8 @@ class CompletionProofError(ValueError):
                     pending_count=self.pending_count if type(self.pending_count) is int and self.pending_count>=0 else None,
                     changed_schemas=[s for s in self.changed_schemas if s in {'main','raw','book'}],
                     changed_dependency_count=self.changed_dependency_count if type(self.changed_dependency_count) is int and self.changed_dependency_count>=0 else None,
+                    before_schema_version=self.before_schema_version if type(self.before_schema_version) is int else None,
+                    after_schema_version=self.after_schema_version if type(self.after_schema_version) is int else None,
                     before_vector_digest=self.before_vector_digest if _safe_digest(self.before_vector_digest) else None,
                     after_vector_digest=self.after_vector_digest if _safe_digest(self.after_vector_digest) else None)
 
@@ -263,8 +267,13 @@ class DependencyProof:
             stat = Path(store['path']).stat()
             if (stat.st_dev, stat.st_ino) != (store['device'], store['inode']):
                 raise CompletionProofError('dependency_file_replaced', classification='authority_changed')
-            if conn.execute(f'PRAGMA {quote(schema)}.schema_version').fetchone()[0] != store['schema_version']:
-                raise CompletionProofError('dependency_schema_changed', classification='authority_changed')
+            schema_version = conn.execute(f'PRAGMA {quote(schema)}.schema_version').fetchone()[0]
+            if schema_version != store['schema_version']:
+                error = CompletionProofError('dependency_schema_changed', classification='authority_changed')
+                error.changed_schemas = ['main' if original == 'main' else 'raw']
+                error.before_schema_version = store['schema_version']
+                error.after_schema_version = schema_version
+                raise error
             selected = [table for name, table in self.reads if name == original]
             if not selected:
                 continue

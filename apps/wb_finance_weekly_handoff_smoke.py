@@ -257,6 +257,86 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(self.calls, {'writer':1, 'dml':1})
         self.assertNotEqual(self.image(), before)
 
+    def native_raw_split(self):
+        from packages.application.finance_raw_storage import ensure_raw_schema, FinanceRawIngestor
+        self.split(persistent_view=True)
+        with closing(sqlite3.connect(self.raw_path)) as raw, raw:
+            raw.row_factory = sqlite3.Row
+            rows = raw.execute('SELECT week_start,week_end,raw_json FROM finance_fixture_rows').fetchall()
+            raw.execute('DROP VIEW finance_raw_current_rows')
+            ensure_raw_schema(raw)
+            for row in rows:
+                FinanceRawIngestor(self.block.store_registry).ingest_batch(
+                    [json.loads(row['raw_json'])], source_identity=row['week_start'],
+                    source_sha256='fixture-only', week_start=row['week_start'],
+                    week_end=row['week_end'], connection=raw)
+
+    def assert_postcommit_initializer(self, *, raw):
+        from packages.application.finance_raw_storage import ensure_raw_schema
+        from packages.application.ff_pool_documents import ensure_ff_pool_document_schema
+        if raw:
+            self.native_raw_split()
+        ensure = ensure_raw_schema if raw else ensure_ff_pool_document_schema
+        path = self.raw_path if raw else self.block.db_path
+        with closing(sqlite3.connect(path)) as writer, writer:
+            ensure(writer)
+        original, initialized = self.block._finance_state_digest, []
+        def readback(conn, **kwargs):
+            if getattr(self, 'calls', {}).get('dml') and not initialized:
+                with closing(sqlite3.connect(path)) as writer, writer:
+                    ensure(writer)
+                initialized.append(True)
+            return original(conn, **kwargs)
+        with patch.object(self.block, '_finance_state_digest', side_effect=readback):
+            result = self.run_apply()
+        self.assertEqual(initialized, [True])
+        self.assertEqual(self.calls, {'writer': 1, 'dml': 1})
+        self.assertEqual(result['post_verify_stale_week_count'], 0)
+        # A subsequent cycle plans the committed state anew; it must not replay
+        # the previous week's target replacement, even after a schema reopen.
+        image = self.image()
+        plan = self.block.plan_stale_cost_weeks(date_from=START, date_to=END)
+        self.assertEqual(plan['stale_week_count'], 0)
+        with patch.object(self.block, '_replace_finance_target_images', side_effect=AssertionError('duplicate DML')):
+            result = self.block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'], date_from=START, date_to=END)
+        self.assertEqual(result['status'], 'already_current')
+        self.assertEqual(self.image(), image)
+
+    def test_postcommit_main_initializer_then_fresh_cycle_no_duplicate_dml(self):
+        self.assert_postcommit_initializer(raw=False)
+
+    def test_postcommit_raw_initializer_then_fresh_cycle_no_duplicate_dml(self):
+        self.assert_postcommit_initializer(raw=True)
+
+    def test_postcommit_real_schema_change_still_fails_without_replay(self):
+        self.split(persistent_view=True)
+        original, changed = self.block._finance_state_digest, []
+        def readback(conn, **kwargs):
+            if getattr(self, 'calls', {}).get('dml') and not changed:
+                self.commit('CREATE VIEW genuine_new_definition AS SELECT * FROM finance_fixture_rows', raw=True)
+                changed.append(True)
+            return original(conn, **kwargs)
+        before = self.image()
+        with patch.object(self.block, '_finance_state_digest', side_effect=readback):
+            with self.assertRaisesRegex(CompletionProofError, 'dependency_schema_changed') as caught:
+                self.run_apply()
+        self.assertEqual(self.calls, {'writer': 1, 'dml': 1})
+        self.assertNotEqual(self.image(), before)
+        diagnostic = caught.exception.diagnostic()
+        self.assertTrue(diagnostic['business_write_started'])
+        self.assertEqual(diagnostic['result_certainty'], 'unknown')
+        self.assertEqual(diagnostic['changed_schemas'], ['raw'])
+        self.assertEqual(diagnostic['after_schema_version']-diagnostic['before_schema_version'], 1)
+        # Recovery reads the committed result and obtains a new plan; it never
+        # retries the uncertain operation or reuses its stale fingerprint.
+        committed = self.image()
+        plan = self.block.plan_stale_cost_weeks(date_from=START, date_to=END)
+        self.assertEqual(plan['stale_week_count'], 0)
+        with patch.object(self.block, '_replace_finance_target_images', side_effect=AssertionError('replayed committed write')):
+            result = self.block.apply_stale_cost_weeks(expected_fingerprint=plan['fingerprint'], date_from=START, date_to=END)
+        self.assertEqual(result['status'], 'already_current')
+        self.assertEqual(self.image(), committed)
+
     def test_diagnostics_whitelist_no_secret_or_database_paths(self):
         error = FinanceStaleCostHandoffError('secret-response-body', phase='secret', classification='secret',
             attempt=999, before={'main':1, 'authorization':'secret'}, after={'main':2, 'finance_raw_store':'secret'})
