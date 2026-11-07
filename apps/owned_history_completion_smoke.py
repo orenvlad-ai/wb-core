@@ -3,7 +3,9 @@ from contextlib import ExitStack, closing
 from copy import deepcopy
 from pathlib import Path
 import json
+import select
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,6 +19,115 @@ from packages.application import owned_history_worker as supervisor
 from packages.application.owned_history_worker_capability import HistoryDelegationError
 from packages.application.web_vitrina_history_store import HistoryStore
 from packages.application.business_data_heavy_admission import heavy_admission_status, current_heavy_owner
+
+
+def source_family_bytes(path):
+    return {item.name: (item.read_bytes(), item.stat().st_mtime_ns)
+            for item in path.parent.glob(path.name + '*') if item.is_file()}
+
+
+def leave_hot_journal(path):
+    # Owned fixture only: force real dirty pages to disk, then crash before
+    # commit/rollback. Unlike an invented journal header this needs recovery.
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute('CREATE TABLE journal_fixture(value BLOB)')
+        conn.executemany('INSERT INTO journal_fixture VALUES(?)', [(b'a' * 8192,)] * 128)
+        conn.commit()
+    subprocess.run([sys.executable, '-c', """
+import os, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute('PRAGMA cache_size=5')
+conn.execute("UPDATE journal_fixture SET value=zeroblob(8192)")
+os._exit(0)
+""", str(path)], check=True, timeout=10)
+    assert Path(str(path) + '-journal').read_bytes()[:8] == bytes.fromhex('d9d505f920a163d7')
+
+
+class RollbackJournalGuardTests(unittest.TestCase):
+    def test_exclusive_writer_waits_boundedly_or_fails_closed(self):
+        from packages.application.web_vitrina_history_live_adapter import _require_live_sqlite_family, LiveSourceUnavailable
+        for commits in (True, False):
+            with self.subTest(commits=commits), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'exclusive.sqlite3'
+                with closing(sqlite3.connect(path)) as conn:
+                    conn.execute('CREATE TABLE owned(value)')
+                    conn.execute('INSERT INTO owned VALUES(1)')
+                    conn.commit()
+                writer = subprocess.Popen([sys.executable, '-c', """
+import sqlite3, sys, time
+conn = sqlite3.connect(sys.argv[1])
+conn.execute('BEGIN EXCLUSIVE')
+conn.execute('UPDATE owned SET value=2')
+print('ready', flush=True)
+if sys.argv[2] == 'True':
+    time.sleep(1.7)
+else:
+    sys.stdin.readline()
+conn.commit()
+conn.close()
+""", str(path), str(commits)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                try:
+                    self.assertTrue(select.select([writer.stdout], [], [], 10)[0])
+                    self.assertEqual(writer.stdout.readline().strip(), 'ready')
+                    before = source_family_bytes(path)
+                    if commits:
+                        _require_live_sqlite_family(path)
+                    else:
+                        with self.assertRaisesRegex(LiveSourceUnavailable, 'live_sqlite_journal_unknown') as failure:
+                            _require_live_sqlite_family(path)
+                        self.assertEqual(failure.exception.__cause__.sqlite_errorcode, sqlite3.SQLITE_BUSY)
+                        self.assertEqual(source_family_bytes(path), before)
+                    writer.communicate('\n', timeout=10)
+                    self.assertEqual(writer.returncode, 0)
+                finally:
+                    if writer.poll() is None:
+                        writer.kill()
+                    writer.communicate(timeout=10)
+
+    def test_journal_disappearing_at_stat_is_a_completed_commit(self):
+        from packages.application.web_vitrina_history_live_adapter import _require_live_sqlite_family
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'committed.sqlite3'
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute('PRAGMA journal_mode=PERSIST')
+                conn.execute('CREATE TABLE owned(value)')
+                conn.commit()
+            journal = Path(str(path) + '-journal')
+            native_stat = Path.stat
+            def stat(item, *args, **kwargs):
+                if item == journal:
+                    item.unlink()
+                return native_stat(item, *args, **kwargs)
+            with patch.object(Path, 'stat', stat):
+                _require_live_sqlite_family(path)
+            self.assertFalse(journal.exists())
+
+    def test_zeroed_persist_journal_is_readable_without_source_writes(self):
+        from packages.application.web_vitrina_history_live_adapter import _require_live_sqlite_family
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'persist.sqlite3'
+            with closing(sqlite3.connect(path)) as conn:
+                self.assertEqual(conn.execute('PRAGMA journal_mode=PERSIST').fetchone()[0], 'persist')
+                conn.execute('CREATE TABLE owned(value)')
+                conn.execute('INSERT INTO owned VALUES(1)')
+                conn.commit()
+            journal = Path(str(path) + '-journal')
+            self.assertGreater(journal.stat().st_size, 512)
+            self.assertEqual(journal.read_bytes()[:8], bytes(8))
+            before = source_family_bytes(path)
+            _require_live_sqlite_family(path)
+            self.assertEqual(source_family_bytes(path), before)
+
+    def test_real_hot_journal_refuses_without_recovery(self):
+        from packages.application.web_vitrina_history_live_adapter import _require_live_sqlite_family, LiveSourceUnavailable
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'hot.sqlite3'
+            leave_hot_journal(path)
+            before = source_family_bytes(path)
+            with self.assertRaisesRegex(LiveSourceUnavailable, 'live_sqlite_journal_unknown') as failure:
+                _require_live_sqlite_family(path)
+            self.assertEqual(failure.exception.__cause__.sqlite_errorcode, sqlite3.SQLITE_READONLY_ROLLBACK)
+            self.assertEqual(source_family_bytes(path), before)
 
 
 class DerivedReadbackFenceTests(unittest.TestCase):
@@ -92,6 +203,71 @@ class DerivedReadbackFenceTests(unittest.TestCase):
                 VALUES('fixture-event','fixture','fixture','self_service_finished',?,'{}')""", (NOW.isoformat(),))
             writer.execute("UPDATE cleaner_runs SET state='finished',phase='finished' WHERE run_id='fixture'")
             writer.commit()
+
+    def test_capture_with_active_rollback_writer_preserves_source_and_last_good(self):
+        from apps import web_vitrina_owned_history_worker as child
+        runtime, root, cap = self.fixture()
+        pointer = (root / 'history' / 'CURRENT.json').read_bytes()
+        writer = subprocess.Popen([sys.executable, '-c', """
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("UPDATE cleaner_runs SET phase='uncommitted' WHERE run_id='fixture'")
+print('ready', flush=True)
+sys.stdin.readline()
+conn.commit()
+conn.close()
+""", str(runtime.db_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertTrue(select.select([writer.stdout], [], [], 10)[0])
+            self.assertEqual(writer.stdout.readline().strip(), 'ready')
+            self.assertGreater(Path(str(runtime.db_path) + '-journal').stat().st_size, 512)
+            before = source_family_bytes(runtime.db_path)
+            anchor = cap['anchor']
+            captured = child.execute({**cap, 'mode': 'capture', 'anchor': None, 'invocation': 'writer-capture'})
+            self.assertEqual(captured['status'], 'captured')
+            self.assertEqual(captured['anchor']['vector'], anchor['vector'])
+            self.assertEqual(captured['anchor']['fence'], anchor['fence'])
+            verified = child.execute(cap)
+            self.assertEqual(verified['status'], 'verified')
+            self.assertTrue(verified['terminal'])
+            self.assertEqual(source_family_bytes(runtime.db_path), before)
+            self.assertEqual((root / 'history' / 'CURRENT.json').read_bytes(), pointer)
+            with closing(sqlite3.connect(runtime.db_path.as_uri() + '?mode=ro', uri=True)) as conn:
+                conn.execute('PRAGMA query_only=ON')
+                self.assertEqual(conn.execute("SELECT phase FROM cleaner_runs WHERE run_id='fixture'").fetchone()[0], 'scan')
+            writer.communicate('\n', timeout=10)
+            self.assertEqual(writer.returncode, 0)  # Reader did not retain SH.
+        finally:
+            if writer.poll() is None:
+                writer.kill()
+            writer.communicate(timeout=10)
+
+    def test_hot_journal_before_capture_and_after_preflight_retains_last_good(self):
+        from apps import web_vitrina_owned_history_worker as child
+        from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter, LiveSourceUnavailable
+        for after_preflight in (False, True):
+            with self.subTest(after_preflight=after_preflight):
+                runtime, root, cap = self.fixture()
+                pointer = (root / 'history' / 'CURRENT.json').read_bytes()
+                native = LiveNativeAdapter.require_source_families
+                before = None
+                def crash():
+                    nonlocal before
+                    leave_hot_journal(runtime.db_path)
+                    before = source_family_bytes(runtime.db_path)
+                def preflight(adapter):
+                    native(adapter)
+                    crash()
+                if not after_preflight:
+                    crash()
+                with ExitStack() as stack:
+                    if after_preflight:
+                        stack.enter_context(patch.object(LiveNativeAdapter, 'require_source_families', preflight))
+                    reason = 'live_source_read_incomplete' if after_preflight else 'live_sqlite_journal_unknown'
+                    with self.assertRaisesRegex(LiveSourceUnavailable, reason):
+                        child.execute({**cap, 'mode': 'capture', 'anchor': None, 'invocation': 'hot-capture'})
+                self.assertEqual(source_family_bytes(runtime.db_path), before)
+                self.assertEqual((root / 'history' / 'CURRENT.json').read_bytes(), pointer)
 
     def during_first_object(self, mutation):
         from packages.application import owned_history_native_ack as ack

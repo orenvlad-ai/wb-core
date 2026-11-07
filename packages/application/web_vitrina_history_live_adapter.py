@@ -72,10 +72,30 @@ def _require_live_sqlite_family(path: Path) -> None:
             header = source.read(100)
         if header[:16] != b"SQLite format 3\x00" or len(header) != 100:
             raise LiveSourceUnavailable("live_sqlite_header_unknown:" + path.name)
-        journal = Path(str(path) + "-journal")
-        if journal.exists() and journal.stat().st_size:
-            raise LiveSourceUnavailable("live_sqlite_journal_unknown:" + path.name)
         versions = tuple(header[18:20])
+        journal = Path(str(path) + "-journal")
+        try:
+            journal_size = journal.stat().st_size
+        except FileNotFoundError:
+            journal_size = 0  # A concurrent commit may remove its journal.
+        if journal_size:
+            if versions != (1, 1):
+                raise LiveSourceUnavailable("live_sqlite_journal_unknown:" + path.name)
+            # A live rollback writer (RESERVED lock) or a zeroed PERSIST
+            # journal is not a hot journal. Let SQLite prove readability using
+            # its own locks/recovery check, never by guessing from file bytes.
+            # mode=ro refuses hot-journal recovery (SQLITE_READONLY_ROLLBACK).
+            try:
+                with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro",
+                                             uri=True, timeout=5)) as probe:
+                    probe.execute("PRAGMA query_only=ON")
+                    if probe.execute("PRAGMA query_only").fetchone()[0] != 1:
+                        raise LiveSourceUnavailable("live_sqlite_journal_unknown:" + path.name)
+                    probe.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            except sqlite3.Error as exc:
+                raise LiveSourceUnavailable("live_sqlite_journal_unknown:" + path.name) from exc
+            # This probe grants no snapshot/authority: the actual window also
+            # opens mode=ro/query_only and pins again, so later recovery fails.
         if versions == (1, 1):
             return
         if versions != (2, 2):
