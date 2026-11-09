@@ -82,6 +82,10 @@ def capture_request(conn: sqlite3.Connection, upload_id: str, *, requested_at: s
     if upload["validation_status"] != "ok":
         return {"status": "not_eligible", "reason": "fulfillment_document_not_confirmed"}
     revision = source_revision(upload)
+    from packages.application import fbo_forward_costs
+    routed = fbo_forward_costs.route_request(conn, upload_id, revision, requested_at)
+    if routed is not None and not routed.get("ordinary_scope"):
+        return routed
     existing = conn.execute(f"SELECT 1 FROM {TABLE} WHERE upload_id=? AND source_revision=?", (upload_id, revision)).fetchone()
     if existing is None:
         scope: dict[str, Any] = {}
@@ -125,6 +129,10 @@ def deliver_request(conn: sqlite3.Connection, upload_id: str, revision: str) -> 
 
 
 def read_request(conn: sqlite3.Connection, upload_id: str, revision: str) -> dict[str, Any]:
+    from packages.application import fbo_forward_costs
+    routed = fbo_forward_costs.read_request(conn, upload_id, revision)
+    if routed is not None:
+        return routed
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone() is None:
         return {"status": "not_tracked", "reason": "document_predates_atomic_delivery"}
     request = conn.execute(f"SELECT * FROM {TABLE} WHERE upload_id=? AND source_revision=?", (upload_id, revision)).fetchone()

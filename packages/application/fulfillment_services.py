@@ -465,6 +465,8 @@ class FulfillmentServicesBlock:
             "pdf_available": False,
             "message": "Документ удалён. Данные услуг ФФ удалены из overlay WB-поставок.",
         }
+        if recalculation.get("policy") == "fbo_forward_cost_v1" and recalculation.get("status") == "pending":
+            result["message"] = "Документ удалён. Корректировка ранее учтённого расхода ожидает отдельной проверки."
         self._attach_acceptance(result, normalized_id, action="delete", source_revision="deleted:" + deleted_at)
         return result
 
@@ -489,6 +491,8 @@ class FulfillmentServicesBlock:
             """,
             (VALIDATION_OK, MATCH_OK),
         ).fetchall()
+        from packages.application.fbo_forward_costs import ordinary_overlay_lines
+        rows = ordinary_overlay_lines(conn, rows)
         grouped: dict[str, dict[str, Any]] = {}
         by_canonical: dict[str, dict[str, Any]] = {}
         for row in rows:
