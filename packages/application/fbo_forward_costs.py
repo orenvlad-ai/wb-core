@@ -50,6 +50,14 @@ def ensure_schema(conn):
         posted_at TEXT,snapshot_json TEXT NOT NULL,
         UNIQUE(upload_id,source_revision,supply_id,nm_id))''')
 
+    for action in ('UPDATE','DELETE'):
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS fbo_forward_cost_terminal_{action.lower()}
+            BEFORE {action} ON {EFFECTS} WHEN OLD.status IN ('posted','unallocated')
+            BEGIN SELECT RAISE(ABORT,'immutable_fbo_forward_cost_effect'); END""")
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS fbo_forward_cost_config_{action.lower()}
+            BEFORE {action} ON {CONFIG}
+            BEGIN SELECT RAISE(ABORT,'immutable_fbo_forward_cost_policy'); END""")
+
 
 def active(conn):
     return exists(conn, CONFIG) and conn.execute(f'SELECT 1 FROM {CONFIG} WHERE slot=1').fetchone() is not None
@@ -299,14 +307,20 @@ def apply_pending(lines, state, *, snapshot, posted_at, business_date=None):
     by_nm = {line.nm_id:index for index,line in enumerate(result) if line.warehouse_key=='wb'}
     quantities = {int(row['nm_id']):sum((number(row.get(k)) for k in ('quantity','in_way_to_client','in_way_from_client')),ZERO) for row in snapshot['items']}
     updates = []
+    retryable = {'', 'forward_order_boundary_not_current', 'current_wb_cost_basis_missing', 'current_wb_quantity_missing'}
+    def pending(effect, reason):
+        if effect['reason'] != reason:
+            updates.append({**effect,'reason':reason})
+    posting_sequence = max((int(json.loads(effect['snapshot_json']).get('posting_sequence') or 0) for effect in state.get('effects',[]) if effect['status']=='posted'), default=0)
     for effect in state.get('effects',[]):
-        if effect['status'] != 'pending' or effect['reason']:
+        if effect['status'] != 'pending' or effect['reason'] not in retryable:
             continue
         nm = int(effect['nm_id'])
         amount = number(effect['amount_rub'])
         if nm not in quantities:
             # Only complete requested SKU coverage proves zero, sparse omission doesn't.
             if nm not in {int(v) for v in snapshot.get('requested_nm_ids',[])}:
+                pending(effect,'current_wb_quantity_missing')
                 continue
             quantity = ZERO
         else:
@@ -314,6 +328,7 @@ def apply_pending(lines, state, *, snapshot, posted_at, business_date=None):
         saved = json.loads(effect['snapshot_json'])
         boundary = state.get('order_boundaries',{}).get(str(nm))
         if quantity > ZERO and (not boundary or boundary.get('business_date') != (business_date or posted_at[:10]) or boundary.get('status') != 'ready'):
+            pending(effect,'forward_order_boundary_not_current')
             continue
         if boundary:
             saved['order_boundary'] = boundary
@@ -323,12 +338,14 @@ def apply_pending(lines, state, *, snapshot, posted_at, business_date=None):
             continue
         line = result[by_nm[nm]] if nm in by_nm else None
         if line is None or line.wac is None or line.quantity != quantity:
+            pending(effect,'current_wb_cost_basis_missing')
             continue
         before = line.capital
         after = before + amount
         if after <= ZERO:
             continue
-        saved.update(before_capital_rub=str(before),after_capital_rub=str(after),before_wac_rub=str(line.wac),after_wac_rub=str(after/quantity))
+        posting_sequence += 1
+        saved.update(posting_sequence=posting_sequence,before_capital_rub=str(before),after_capital_rub=str(after),before_wac_rub=str(line.wac),after_wac_rub=str(after/quantity))
         result[by_nm[nm]] = replace(line,capital=after,provenance={**line.provenance,'fbo_forward_cost_effect_ids':list(line.provenance.get('fbo_forward_cost_effect_ids',[]))+[effect['effect_id']]})
         updates.append({**effect,'status':'posted','reason':'','posted_at':posted_at,'snapshot_json':dumps(saved)})
     return result,updates
@@ -345,7 +362,8 @@ def commit_updates(conn,updates):
 def load_posted_effects(conn):
     if not active(conn):
         return []
-    return [{**dict(r),'snapshot':json.loads(r['snapshot_json'])} for r in conn.execute(f"SELECT * FROM {EFFECTS} WHERE status='posted' ORDER BY posted_at,effect_id")]
+    rows = [{**dict(r),'snapshot':json.loads(r['snapshot_json'])} for r in conn.execute(f"SELECT * FROM {EFFECTS} WHERE status='posted' ORDER BY posted_at,requested_at,effect_id")]
+    return sorted(rows,key=lambda r:(r['posted_at'],int(r['snapshot'].get('posting_sequence') or 0),r['effect_id']))
 
 
 def doprinato_events(audit, state, *, posted_at, business_date, accepted_events=()):
@@ -406,6 +424,9 @@ def notification_items(conn):
         labels={
             'no_current_wb_stock':'У этого артикула нет остатка в контуре WB. Сумма не распределена и не будет перенесена на будущие поступления.',
             'negative_revision_requires_review':'Уменьшение ранее учтённого расхода требует отдельной проверки; прежняя себестоимость сохранена.',
+            'forward_order_boundary_not_current':'Ожидается подтверждённая граница уже учтённых заказов текущего дня. Прежняя прибыль сохранена.',
+            'current_wb_cost_basis_missing':'Не подтверждена стоимость текущего остатка этого артикула на WB.',
+            'current_wb_quantity_missing':'В текущем полном снимке не подтверждён остаток этого артикула на WB.',
             'current_wb_posting_pending':'Ожидается актуальный остаток WB с подтверждённой стоимостью и границей уже учтённых заказов за день.',
             'original_packed_composition_missing':'Не подтверждён исходный состав упакованной поставки.',
             'matched_supply_missing':'Связанная поставка пока не найдена.',

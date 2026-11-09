@@ -6595,7 +6595,8 @@ class WarehouseFunctionalBlock:
                 )
 
         forward_state = capture.get("fbo_forward_cost_policy") or {}
-        forward_supply_ids = {str(row["supply_id"]) for row in forward_state.get("lifecycle", [])}
+        forward_supply_ids = {str(value) for row in forward_state.get("lifecycle", [])
+            for value in (row.get("supply_id"),row.get("cache_key"),_loads(row.get("state_json"),{}).get("wb_supply_id")) if value}
         downstream_components = _supply_downstream_component_index(
             capture["downstream_cost_rows"], forward_supply_ids=forward_supply_ids)
         active_reservations = _active_ff_reservation_index(
@@ -8907,6 +8908,8 @@ def _supply_downstream_component_index(
 ) -> dict[tuple[str, int], dict[str, Any]]:
     """Return validated non-FF supply components using Decimal arithmetic."""
 
+    forward_supply_ids = {alias for identity in (forward_supply_ids or set())
+        for alias in (str(identity),str(identity).removeprefix("supply:"))}
     result: dict[tuple[str, int], dict[str, Any]] = {}
     for row in rows:
         supply_id = str(row.get("wb_supply_id") or "")

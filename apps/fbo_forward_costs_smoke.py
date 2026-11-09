@@ -65,7 +65,8 @@ def test_late_invoice():
             assert conn.execute(f'SELECT COUNT(*) FROM {f.EFFECTS}').fetchone()[0]==2
             # Missing today operation boundary blocks positive stock; zero is terminal.
             blocked,updates=f.apply_pending(lines(),{'effects':effects},snapshot=snapshot(),posted_at=NOW)
-            assert blocked==lines() and [r['status'] for r in updates]==['unallocated']
+            assert blocked==lines() and sorted(r['status'] for r in updates)==['pending','unallocated']
+            assert next(r for r in updates if r['status']=='pending')['reason']=='forward_order_boundary_not_current'
             valued,updates=f.apply_pending(lines(),state(conn),snapshot=snapshot(),posted_at=NOW)
             assert valued[0].quantity==D(40) and valued[0].capital==D(5260) and valued[0].wac==D('131.5')
             assert sorted(r['status'] for r in updates)==['posted','unallocated']
@@ -76,6 +77,12 @@ def test_late_invoice():
             conn.execute('ROLLBACK TO rollback_money')
             assert all(r['status']=='pending' for r in state(conn)['effects'])
             f.commit_updates(conn,updates)
+            try:
+                conn.execute(f"UPDATE {f.EFFECTS} SET amount_rub='999' WHERE status='posted'")
+            except sqlite3.IntegrityError as exc:
+                assert 'immutable_fbo_forward_cost_effect' in str(exc)
+            else:
+                raise AssertionError('posted effect was mutable')
             posted=f.load_posted_effects(conn)
             assert len(posted)==1 and posted[0]['snapshot']['order_boundary']['order_count']=='5'
             valued2,updates2=f.apply_pending(valued,state(conn),snapshot=snapshot(),posted_at=NOW)
@@ -148,6 +155,22 @@ def test_frozen_selected_pool_chain():
     assert sum(D(e['quantity']) for e in ordinary+offset)==0 and sum(D(e['capital_rub']) for e in ordinary+offset)==0
 
 
+def test_posting_sequence():
+    effects=[]
+    for effect_id,amount,requested in [('z-first','400','09:00'),('a-second','800','09:30')]:
+        effects.append({'effect_id':effect_id,'nm_id':1,'amount_rub':amount,'status':'pending','reason':'',
+                        'requested_at':'2026-11-09T'+requested+':00Z','snapshot_json':'{}'})
+    candidate={'effects':effects,'order_boundaries':{'1':{'status':'ready','business_date':NOW[:10]}}}
+    valued,updates=f.apply_pending(lines(),candidate,snapshot=snapshot(),posted_at=NOW)
+    assert valued[0].wac==D(130)
+    assert [json.loads(e['snapshot_json'])['posting_sequence'] for e in updates]==[1,2]
+    assert [json.loads(e['snapshot_json'])['after_wac_rub'] for e in updates]==['110','130']
+    # Continuation is monotonic even when a later effect id sorts before both.
+    candidate['effects']=updates+[{'effect_id':'0-next','nm_id':1,'amount_rub':'400','status':'pending','reason':'','snapshot_json':'{}'}]
+    later,updates2=f.apply_pending(valued,candidate,snapshot=snapshot(),posted_at='2026-11-09T11:00:00Z')
+    assert json.loads(updates2[0]['snapshot_json'])['posting_sequence']==3 and later[0].wac==140
+
+
 def test_semantic_invoice_duplicate():
     from io import BytesIO
     from zipfile import ZipFile
@@ -207,6 +230,7 @@ def test_independent_known_fees():
     known=_supply_downstream_component_index([row],forward_supply_ids={'forward'})[('forward',1)]
     assert known['pre_acceptance_addon']==D(18) and known['acceptance_addon']==0
     assert known['missing_cost_components']==['wb_transit','wb_paid_acceptance']
+    assert _supply_downstream_component_index([row],forward_supply_ids={'supply:forward'})=={('forward',1):known}
 
 
 def test_real_warehouse_publication():
@@ -269,5 +293,5 @@ def test_real_warehouse_publication():
 
 
 if __name__=='__main__':
-    test_independent_known_fees();test_doprinato();test_frozen_selected_pool_chain();test_mixed_invoice();test_semantic_invoice_duplicate();test_late_invoice();test_real_warehouse_publication()
+    test_independent_known_fees();test_doprinato();test_frozen_selected_pool_chain();test_mixed_invoice();test_semantic_invoice_duplicate();test_posting_sequence();test_late_invoice();test_real_warehouse_publication()
     print('FBO forward costs: known fees independent; matched buffer capital; full invoice/current contour; zero stock terminal; repeat/corrections/legacy baseline protected: OK')
