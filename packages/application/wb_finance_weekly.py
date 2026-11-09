@@ -116,6 +116,8 @@ def _cost_economic_buckets(detail_rows: Iterable[Mapping[str, Any]]) -> list[dic
                 "projection_quality", "selection_method", "formula_version",
             )
         ) + (_signature_decimal_text(raw_unit_cost),)
+        if detail.get("forward_cost_epoch"):
+            key += (str(detail["forward_cost_epoch"]), str(detail["cost_effective_at"]))
         item = grouped.setdefault(
             key,
             {
@@ -127,6 +129,7 @@ def _cost_economic_buckets(detail_rows: Iterable[Mapping[str, Any]]) -> list[dic
                 "unit_cost_rub": key[11],
                 "sales_qty": 0, "returns_qty": 0, "signed_qty": 0,
                 "signed_cogs_rub": ZERO,
+                **({"forward_cost_epoch": key[12], "cost_effective_at": key[13]} if len(key) > 12 else {}),
             },
         )
         qty = int(detail.get("quantity") or 0)
@@ -1890,6 +1893,9 @@ class WbFinanceWeeklyBlock:
                             "projection_quality",
                             "selection_method",
                             "formula_version",
+                            "forward_cost_epoch",
+                            "cost_effective_at",
+                            "valuation_time_precision",
                         )
                     },
                 )
@@ -3027,12 +3033,22 @@ class WbFinanceWeeklyBlock:
         operation_date: date,
         operation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        from packages.application.fbo_forward_cost_consumers import load_effects, epoch_cache_key
+        if getattr(self, "_forward_cost_connection", None) is not conn:
+            self._forward_cost_connection = conn
+            self._forward_cost_effects = load_effects(conn)
+        effects = self._forward_cost_effects
+        epoch_key = epoch_cache_key(effects, nm_id=nm_id,
+            day=operation_date.isoformat(), operation=operation)
         shared = self.shared_cost_snapshot
         if shared is not None and shared.applies_to(operation_date):
             key = (shared.version_id, str(nm_id), operation_date.isoformat(), "shared")
+            if epoch_key:
+                key += (epoch_key,)
             if key not in self._canonical_cost_resolution_cache:
-                self._canonical_cost_resolution_cache[key] = shared.resolve(
-                    nm_id=nm_id, operation_date=operation_date,
+                self._canonical_cost_resolution_cache[key] = resolve_channel_location_cost(
+                    conn, nm_id=nm_id, operation_date=operation_date, operation=operation,
+                    shared_cost_snapshot=shared, forward_effects=effects,
                 )
             return dict(self._canonical_cost_resolution_cache[key])
         snapshot = self._canonical_channel_snapshot(conn)
@@ -3046,6 +3062,8 @@ class WbFinanceWeeklyBlock:
             operation_date.isoformat(),
             channel_classification,
         )
+        if epoch_key:
+            cache_key += (epoch_key,)
         cached = self._canonical_cost_resolution_cache.get(cache_key)
         if cached is None:
             cached = resolve_channel_location_cost(
@@ -3054,6 +3072,7 @@ class WbFinanceWeeklyBlock:
                 operation_date=operation_date,
                 operation=raw,
                 snapshot=snapshot,
+                forward_effects=effects,
             )
             self._canonical_cost_resolution_cache[cache_key] = cached
         return cached
@@ -3085,6 +3104,7 @@ class WbFinanceWeeklyBlock:
         cogs = ZERO
         estimated_sales_rub = ZERO
         estimated_units = 0
+        forward_date_only_units = 0
         matched_units = 0
         unmatched_units = 0
         problem_rows: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -3331,8 +3351,10 @@ class WbFinanceWeeklyBlock:
                 problem["unmatched_units"] += gross_qty
                 problem["net_units"] += signed_qty
                 continue
-            if resolution.get("quality") == "management_estimate":
+            if resolution.get("quality") == "management_estimate" or resolution.get("valuation_time_precision") == "date_only_frozen":
                 estimated_units += gross_qty
+                if resolution.get("valuation_time_precision") == "date_only_frozen":
+                    forward_date_only_units += gross_qty
                 if sign > 0:
                     estimated_sales_rub += revenue
             unit_cost = _decimal(resolution["unit_cost_rub"])
@@ -3383,6 +3405,8 @@ class WbFinanceWeeklyBlock:
                         # Keep exact Decimal economics for freshness. Display
                         # fields above remain at MONEY_QUANT by contract.
                         "economic_unit_cost_rub": _signature_decimal_text(unit_cost),
+                        **({key: resolution[key] for key in ("cost_effective_at", "forward_cost_epoch", "valuation_time_precision", "valuation_time_reason")
+                            if key in resolution}),
                         "cost_source": "shared_sku_daily_cost" if shared_applies else "canonical_our_wb_cost",
                         "channel": str(resolution.get("channel") or ""),
                         "facility_id": str(resolution.get("facility_id") or ""),
@@ -3493,6 +3517,10 @@ class WbFinanceWeeklyBlock:
                 "projection from the same SKU canonical cost on 2026-07-01."
             ),
         }
+        if forward_date_only_units:
+            quality.update(forward_cost_time_precision="date_only_frozen",
+                forward_date_only_units=forward_date_only_units,
+                forward_cost_time_reason="Время продажи неизвестно; COGS предварительно сохранён на стоимости до позднего расхода.")
         if shared_used:
             quality.update(
                 cost_method_version=self.shared_cost_snapshot.formula_version,
@@ -7210,6 +7238,7 @@ class WbFinanceWeeklyBlock:
             self._shared_cost_snapshot = approved_reporting_snapshot(self._shared_cost_base, conn)
         # A new observed scope must not reuse a cache filled before its authorizer.
         self._canonical_cost_snapshot_connection = None
+        self._forward_cost_connection = None
         self._nomenclature_cache_connection = None
 
     @contextmanager

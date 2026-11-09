@@ -131,6 +131,7 @@ MATERIAL_TABLES = (
         "ff_pool_document_expense_lines", "ff_pool_document_relations", "ff_pool_balances",
         "warehouse_functional_active", "warehouse_functional_versions", "warehouse_functional_balances",
         "warehouse_functional_cutovers", "warehouse_functional_events", "warehouse_wb_daily_cost",
+        "fbo_forward_cost_effects", "fbo_forward_cost_config",
         "warehouse_archival_estimate_versions", "warehouse_archival_estimate_rows", "warehouse_archival_estimate_active",
         "warehouse_functional_read_models", "warehouse_wb_snapshots", "warehouse_business_projection_current_rows",
         "calculation_parameter_versions", "proxy_v4_parameter_versions",
