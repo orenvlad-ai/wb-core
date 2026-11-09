@@ -7376,6 +7376,11 @@ class RegistryUploadHttpEntrypoint:
     def handle_ff_pool_capabilities_request(self) -> dict[str, Any]:
         return self.ff_pool_surface.capabilities(aggregate_revision=self._ff_aggregate_revision())
 
+    def handle_fbo_notifications_request(self) -> dict[str, Any]:
+        # Domain read opens SQLite read-only and never bootstraps lifecycle schema.
+        from packages.application.fbo_supply_lifecycle import FboSupplyLifecycle
+        return FboSupplyLifecycle(db_path=self.runtime.db_path).notifications()
+
     def handle_ff_wb_supply_origins_request(self, **filters: Any) -> dict[str, Any]:
         return self.ff_wb_supply_origins.assignments_page(
             aggregate_revision=self._ff_aggregate_revision(), **filters

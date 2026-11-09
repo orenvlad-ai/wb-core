@@ -5602,7 +5602,7 @@
                 <div class="block-header">
                   <div>
                     <h4 id="wbSupplyFfOriginTitle" class="block-title">Источник FF</h4>
-                    <p class="field-note">Склад, с которого отправлена эта FBW-поставка. Назначение фиксируется только как аудит и не списывает остатки.</p>
+                    <p class="field-note">Источник относится к пулу FBO. Фактический резерв и списание показаны ниже.</p>
                   </div>
                   <span class="wb-supplies-chip">Пул FBO</span>
                 </div>
@@ -5620,6 +5620,7 @@
                   <div class="field">
                     <label>&nbsp;</label>
                     <button id="wbSupplyFfOriginSaveButton" class="action-button primary-button" type="button" disabled>Сохранить источник</button>
+                    <button id="wbSupplyFfOriginCheckButton" class="action-button" type="button" hidden>Проверить результат</button>
                   </div>
                 </div>
                 <p id="wbSupplyFfOriginMessage" class="wb-supplies-message">Назначение ещё не загружено.</p>
@@ -6338,6 +6339,17 @@
       let wbSupplyFfOriginSaving = false;
       let wbSupplyFfOriginSupplyId = "";
       let wbSupplyFfOriginPayload = null;
+      let wbSupplyFfOriginError = "";
+      const wbSupplyFfOriginCheckButton = document.getElementById("wbSupplyFfOriginCheckButton");
+      const wbSupplyOriginPendingKey = "wbc:fbo-origin-pending:v1:" + String(config.user_config_key || "local_operator");
+      let wbSupplyOriginPending = {};
+      try { const pending = JSON.parse(localStorage.getItem(wbSupplyOriginPendingKey) || "{}"); if (pending && typeof pending === "object" && !Array.isArray(pending)) wbSupplyOriginPending = pending; } catch (_) {}
+      function persistWbSupplyOriginPending() {
+        try { localStorage.setItem(wbSupplyOriginPendingKey, JSON.stringify(wbSupplyOriginPending)); } catch (_) {}
+      }
+      function notifyFboNotificationsChanged() {
+        if (window.parent !== window) window.parent.postMessage({type: "wbc_fbo_notifications_changed"}, window.location.origin);
+      }
       let wbSupplyOverlayLoading = false;
       let wbSupplyOverlayOptionsPayload = null;
       let selectedWbSupplyIds = [];
@@ -13619,10 +13631,16 @@
           ? wbSupplyFfOriginPayload.current_assignment
           : null;
         const selected = wbSupplyFfOriginSelect ? String(wbSupplyFfOriginSelect.value || "") : "";
-        const unchanged = Boolean(current && String(current.facility_id || "") === selected);
+        const lifecycle = (wbSupplyFfOriginPayload || {}).fbo_lifecycle || {};
+        const retryReserve = lifecycle.status === "shortage";
+        const unchanged = Boolean(current && String(current.facility_id || "") === selected) && !retryReserve;
         wbSupplyFfOriginSaveButton.disabled = wbSupplyFfOriginLoading || wbSupplyFfOriginSaving ||
           !Boolean(wbSupplyFfOriginPayload && wbSupplyFfOriginPayload.assignment_allowed) ||
-          !facilities.length || !selected || unchanged;
+          !facilities.length || !selected || unchanged || Boolean(wbSupplyOriginPending[wbSupplyFfOriginSupplyId]);
+        if (wbSupplyFfOriginCheckButton) {
+          wbSupplyFfOriginCheckButton.hidden = !wbSupplyOriginPending[wbSupplyFfOriginSupplyId] && !wbSupplyFfOriginError;
+          wbSupplyFfOriginCheckButton.disabled = wbSupplyFfOriginLoading || wbSupplyFfOriginSaving;
+        }
       }
 
       function renderWbSupplyFfOrigin(payload) {
@@ -13643,7 +13661,7 @@
           facilities.forEach((facility) => {
             const option = document.createElement("option");
             option.value = String(facility.facility_id || "");
-            option.textContent = [facility.code, facility.name].filter(Boolean).join(" · ") || option.value;
+            option.textContent = ([facility.code, facility.name].filter(Boolean).join(" · ") || option.value) + " / FBO";
             wbSupplyFfOriginSelect.appendChild(option);
           });
           if (current && !facilities.some((facility) => String(facility.facility_id || "") === String(current.facility_id || ""))) {
@@ -13660,9 +13678,32 @@
           wbSupplyFfOriginReason.disabled = wbSupplyFfOriginLoading || wbSupplyFfOriginSaving || !allowed;
         }
         if (wbSupplyFfOriginSaveButton) {
-          wbSupplyFfOriginSaveButton.textContent = wbSupplyFfOriginSaving ? "Сохраняем..." : "Сохранить источник";
+          const lifecycle = (wbSupplyFfOriginPayload || {}).fbo_lifecycle || {};
+          wbSupplyFfOriginSaveButton.textContent = wbSupplyFfOriginSaving ? "Сохраняем..." : lifecycle.status === "shortage" ? "Проверить резерв" : lifecycle.status === "missing_source" ? "Сохранить и зарезервировать" : "Сохранить источник";
         }
         updateWbSupplyFfOriginSaveState();
+        if (wbSupplyFfOriginError) {
+          setWbSupplyFfOriginMessage(wbSupplyFfOriginError, "error");
+          return;
+        }
+        if (wbSupplyOriginPending[wbSupplyFfOriginSupplyId]) {
+          setWbSupplyFfOriginMessage("Результат сохранения пока не подтверждён. Повторная отправка отключена. Нажмите «Проверить результат».", "warning");
+          return;
+        }
+        const lifecycle = (wbSupplyFfOriginPayload || {}).fbo_lifecycle || {};
+        const lifecycleStatus = String(lifecycle.status || "");
+        if (["reserved", "debited", "shortage", "needs_correction", "missing_goods"].includes(lifecycleStatus)) {
+          const shortages = Array.isArray(lifecycle.shortages) ? lifecycle.shortages : [];
+          const shortageText = shortages.map((row) => "SKU " + String(row.nm_id || row.vendor_code || "—") + ": не хватает " + formatWbNumber(row.missing) + " шт.").join("; ");
+          const source = current ? [current.facility_code, current.facility_name].filter(Boolean).join(" · ") + " / FBO. " : "";
+          const copy = lifecycleStatus === "reserved"
+            ? "Товар зарезервирован: " + formatWbNumber(lifecycle.reserved_qty) + " шт. Списание — при статусе «Отгружено на воротах»."
+            : lifecycleStatus === "debited" ? "Списание FBO подтверждено." + (lifecycle.debited_qty !== undefined ? " " + formatWbNumber(lifecycle.debited_qty) + " шт." : "")
+            : lifecycleStatus === "shortage" ? "Резерв не создан полностью. " + shortageText + " Товар из FBS автоматически не используется."
+            : "Резерв требует проверки. " + shortageText;
+          setWbSupplyFfOriginMessage(source + copy, ["reserved", "debited"].includes(lifecycleStatus) ? "success" : "warning");
+          return;
+        }
         if (!wbSupplyFfOriginPayload || wbSupplyFfOriginPayload.status !== "ready") {
           setWbSupplyFfOriginMessage("Назначение источника FF недоступно.", "warning");
           return;
@@ -13670,8 +13711,8 @@
         if (current) {
           setWbSupplyFfOriginMessage(
             "Текущий источник: " + [current.facility_code, current.facility_name].filter(Boolean).join(" · ") +
-              ". Изменение добавит новую запись аудита; движение товара не создаётся.",
-            allowed ? "success" : "warning"
+              ". Состояние резерва не подтверждено.",
+            "warning"
           );
           return;
         }
@@ -13696,6 +13737,7 @@
         }
         const requestSupplyId = String(supplyId);
         wbSupplyFfOriginSupplyId = requestSupplyId;
+        wbSupplyFfOriginError = "";
         wbSupplyFfOriginLoading = true;
         renderWbSupplyFfOrigin(wbSupplyFfOriginPayload);
         setWbSupplyFfOriginMessage("Читаем назначение источника FF...", "");
@@ -13712,13 +13754,18 @@
             return;
           }
           wbSupplyFfOriginPayload = payload;
+          const pending = wbSupplyOriginPending[requestSupplyId];
+          const assignment = payload.current_assignment || {};
+          const history = Array.isArray(payload.history) ? payload.history : [];
+          if (pending && [assignment].concat(history).some((row) => row.request_id === pending.request_id)) {
+            delete wbSupplyOriginPending[requestSupplyId];
+            persistWbSupplyOriginPending();
+            notifyFboNotificationsChanged();
+          }
         } catch (error) {
           if (wbSupplyFfOriginSupplyId === requestSupplyId) {
             wbSupplyFfOriginPayload = null;
-            setWbSupplyFfOriginMessage(
-              "Назначение источника не загружено: " + (error instanceof Error ? error.message : String(error)),
-              "error"
-            );
+            wbSupplyFfOriginError = "Назначение источника не загружено. Повторите проверку результата.";
           }
         } finally {
           if (wbSupplyFfOriginSupplyId === requestSupplyId) {
@@ -13733,49 +13780,43 @@
         const basePath = String(config.wb_supply_ff_origins_path || "").replace(/\/$/, "");
         const supplyId = String(wbSupplyFfOriginSupplyId || "");
         const facilityId = wbSupplyFfOriginSelect ? String(wbSupplyFfOriginSelect.value || "") : "";
-        if (!basePath || !supplyId || !facilityId || wbSupplyFfOriginSaving || !wbSupplyFfOriginPayload) {
-          return;
-        }
+        if (!basePath || !supplyId || !facilityId || wbSupplyFfOriginSaving || !wbSupplyFfOriginPayload || wbSupplyOriginPending[supplyId]) return;
         const current = wbSupplyFfOriginPayload.current_assignment || null;
-        if (current && String(current.facility_id || "") === facilityId) {
-          setWbSupplyFfOriginMessage("Этот склад FF уже назначен источником поставки.", "warning");
-          return;
-        }
         const randomPart = window.crypto && typeof window.crypto.randomUUID === "function"
-          ? window.crypto.randomUUID()
-          : String(Date.now()) + "-" + Math.random().toString(16).slice(2);
-        wbSupplyFfOriginSaving = true;
+          ? window.crypto.randomUUID() : String(Date.now()) + "-" + Math.random().toString(16).slice(2);
+        const request = {
+          request_id: "wbff:" + randomPart, facility_id: facilityId,
+          expected_assignment_id: current ? String(current.assignment_id || "") : "",
+          reason: wbSupplyFfOriginReason ? String(wbSupplyFfOriginReason.value || "") : ""
+        };
+        wbSupplyOriginPending[supplyId] = request;
+        persistWbSupplyOriginPending();
+        wbSupplyFfOriginSaving = true; wbSupplyFfOriginError = "";
         renderWbSupplyFfOrigin(wbSupplyFfOriginPayload);
-        setWbSupplyFfOriginMessage("Сохраняем источник FF...", "");
+        setWbSupplyFfOriginMessage("Сохраняем источник FF и проверяем резерв…", "");
         try {
           const response = await fetch(basePath + "/" + encodeURIComponent(supplyId), {
-            method: "POST",
-            headers: {
-              "Accept": "application/json",
-              "Content-Type": "application/json",
-              "X-WB-FF-Pool-CSRF": "1"
-            },
-            body: JSON.stringify({
-              request_id: "wbff:" + randomPart,
-              facility_id: facilityId,
-              expected_assignment_id: current ? String(current.assignment_id || "") : "",
-              reason: wbSupplyFfOriginReason ? String(wbSupplyFfOriginReason.value || "") : ""
-            })
+            method: "POST", headers: {"Accept": "application/json", "Content-Type": "application/json", "X-WB-FF-Pool-CSRF": "1"},
+            body: JSON.stringify(request)
           });
           const payload = await readJson(response);
           if (!response.ok) {
-            throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
+            // A server-side validation refusal is conclusive; transport/server failure is not.
+            if (response.status >= 400 && response.status < 500) {
+              delete wbSupplyOriginPending[supplyId]; persistWbSupplyOriginPending();
+              wbSupplyFfOriginError = "Источник не изменён. " + (payload.code === "fbo_stock_shortage" ? "Для смены склада не хватает товара FBO." : "Проверьте склад и актуальное состояние поставки.");
+            }
+          } else {
+            delete wbSupplyOriginPending[supplyId]; persistWbSupplyOriginPending();
+            if (wbSupplyFfOriginReason) wbSupplyFfOriginReason.value = "";
           }
-          if (wbSupplyFfOriginReason) {
-            wbSupplyFfOriginReason.value = "";
-          }
+          const saveError = wbSupplyFfOriginError;
           await loadWbSupplyFfOrigin(supplyId);
-          setWbSupplyFfOriginMessage("Источник FF сохранён. Движение товара не создавалось.", "success");
-        } catch (error) {
-          setWbSupplyFfOriginMessage(
-            "Источник FF не сохранён: " + (error instanceof Error ? error.message : String(error)),
-            "error"
-          );
+          wbSupplyFfOriginError = saveError;
+          notifyFboNotificationsChanged();
+        } catch (_) {
+          await loadWbSupplyFfOrigin(supplyId);
+          if (wbSupplyOriginPending[supplyId]) wbSupplyFfOriginError = "Результат сохранения неизвестен. Повторная отправка отключена; проверьте результат.";
         } finally {
           wbSupplyFfOriginSaving = false;
           renderWbSupplyFfOrigin(wbSupplyFfOriginPayload);
@@ -13783,11 +13824,25 @@
         }
       }
 
+      async function openNotificationSupply(supplyId) {
+        if (!supplyId || wbSupplyFfOriginSaving) return;
+        activateTab("factory-order"); activateSupplyMode("wildberries");
+        await openWbSupplyDetail(String(supplyId));
+        const target = document.getElementById("wbSupplyFfOriginPanel");
+        if (target) { target.scrollIntoView({block: "center"}); if (wbSupplyFfOriginSelect) wbSupplyFfOriginSelect.focus(); }
+      }
+      window.addEventListener("message", function(event) {
+        if (event.origin !== window.location.origin || event.source !== window.parent || window.parent === window) return;
+        if ((event.data || {}).type === "wbc_open_notification_supply") void openNotificationSupply(String(event.data.supply_id || ""));
+      });
+
       async function openWbSupplyDetail(supplyId) {
-        if (!config.wb_supplies_path || !supplyId || wbSuppliesDetailLoading) {
+        if (!config.wb_supplies_path || !supplyId || wbSuppliesDetailLoading || wbSupplyFfOriginSaving) {
           return;
         }
         wbSuppliesDetailLoading = true;
+        wbSupplyFfOriginPayload = null; wbSupplyFfOriginSupplyId = ""; wbSupplyFfOriginError = "";
+        renderWbSupplyFfOrigin(null);
         if (wbSuppliesDetailPanel) {
           wbSuppliesDetailPanel.hidden = false;
         }
@@ -13892,6 +13947,7 @@
       }
 
       function closeWbSupplyDetail() {
+        if (wbSupplyFfOriginSaving) return;
         if (wbSuppliesDetailPanel) {
           wbSuppliesDetailPanel.hidden = true;
         }
@@ -16498,6 +16554,7 @@
       if (wbSupplyFfOriginSelect) {
         wbSupplyFfOriginSelect.addEventListener("change", updateWbSupplyFfOriginSaveState);
       }
+      if (wbSupplyFfOriginCheckButton) wbSupplyFfOriginCheckButton.addEventListener("click", () => loadWbSupplyFfOrigin(wbSupplyFfOriginSupplyId));
       stockReportSelectAllButton.addEventListener("click", () => {
         setStockReportDraftSelection(allStockReportSkuIds);
         writePersistedOperatorUiState({
@@ -16572,6 +16629,9 @@
         });
       });
 
+      if (window.parent !== window) window.parent.postMessage({type: "wbc_notification_supply_ready"}, window.location.origin);
+      const notificationSupplyId = String(operatorQuery.get("notification_supply_id") || "");
+      if (notificationSupplyId) window.setTimeout(() => openNotificationSupply(notificationSupplyId), 0);
       setupOperatorFloatingControlListeners();
       restorePlanReportInputs(persistedOperatorUiState);
       renderRegionalDistrictSelector();

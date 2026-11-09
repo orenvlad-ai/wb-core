@@ -5863,6 +5863,26 @@
     .block-sku-page button { min-height: 30px; padding: 5px 9px; font-size: 12px; }
     .block-filters-modal .ads-modal-actions { flex-shrink: 0; margin-top: 14px; }
     @media(max-width: 650px) { .table-heading-row, .table-heading-row.is-history { grid-template-columns: minmax(0, 1fr); } .table-heading-right { margin-left: 0; width: 100%; justify-content: flex-start; }  }
+
+    .operational-notifications { position: relative; margin-left: auto; }
+    .notification-bell { position: relative; display: grid; place-items: center; width: 38px; height: 38px; padding: 0; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--control-bg); cursor: pointer; }
+    .notification-bell[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent-border); }
+    .notification-bell:focus-visible, .notification-panel button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .notification-dot { position: absolute; top: 5px; right: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--error-text); border: 2px solid var(--control-bg); }
+    .notification-panel { position: absolute; top: calc(100% + 8px); right: 0; width: min(464px, calc(100vw - 36px)); max-height: min(660px, 78vh); overflow: auto; z-index: 130; background: var(--panel-bg); color: var(--text); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); text-align: left; }
+    .notification-heading { padding: 18px 20px 14px; display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); }
+    .notification-heading h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+    .notification-heading p, .notification-detail, .notification-footer, .notification-feedback { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .notification-heading p { margin: 0; }
+    .notification-close { background: transparent; color: var(--muted); border: 0; font: inherit; font-size: 24px; cursor: pointer; align-self: flex-start; }
+    .notification-item { padding: 18px 20px; border-bottom: 1px solid var(--border); }
+    .notification-title { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+    .notification-detail { margin: 0 0 14px; white-space: pre-line; }
+    .notification-item button { padding: 7px 14px; border-radius: 7px; color: var(--text); border: 1px solid var(--border-strong); background: var(--control-bg); font: inherit; cursor: pointer; }
+    .notification-feedback { margin: 0; padding: 16px 20px; }
+    .notification-feedback:empty { display: none; }
+    .notification-footer { margin: 0; padding: 12px 20px; background: var(--panel-subtle); }
+    .operational-notifications[hidden], .operational-notifications [hidden] { display: none !important; }
   </style>
 <!-- FACILITY_ACCEPTANCE_ASSET -->
 <!-- OPERATOR_POLICY_ASSET -->
@@ -5888,6 +5908,18 @@
         <button class="shell-logout-link" type="button" data-unified-tab-button="instructions" hidden disabled aria-selected="false" aria-disabled="true">Инструкции</button>
         <button class="shell-logout-link" type="button" data-unified-tab-button="settings" hidden disabled aria-selected="false" aria-disabled="true">Настройки</button>
         <a class="shell-logout-link" data-logout-link href="/logout">Выйти</a>
+        <div class="operational-notifications" data-notifications hidden>
+          <button class="notification-bell" data-notification-bell type="button" aria-label="Уведомления" aria-expanded="false" aria-controls="operational-notification-panel">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="notification-dot" data-notification-dot hidden aria-hidden="true"></span>
+          </button>
+          <section id="operational-notification-panel" class="notification-panel" data-notification-panel hidden aria-labelledby="notification-panel-title">
+            <div class="notification-heading"><div><h2 id="notification-panel-title">Уведомления</h2><p data-notification-count></p></div><button class="notification-close" type="button" data-notification-close aria-label="Закрыть уведомления">×</button></div>
+            <p class="notification-feedback" data-notification-feedback role="status"></p>
+            <div data-notification-list></div>
+            <p class="notification-footer">Просмотр не закрывает задачу — нужно устранить причину.</p>
+          </section>
+        </div>
       </div>
     </header>
 
@@ -30016,5 +30048,120 @@
 <script>
 /* BUYER_SUPPORT_SCRIPT */
 </script>
+
+  <script>
+  (function operationalNotifications() {
+    const root = document.querySelector("[data-notifications]");
+    const endpoint = WEB_VITRINA_CONFIG.fbo_notifications_path;
+    const allowed = Array.isArray(WEB_VITRINA_CONFIG.allowed_tabs) && WEB_VITRINA_CONFIG.allowed_tabs.includes("factory-order");
+    if (!root || !endpoint || !allowed) return;
+    root.hidden = false;
+    const bell = root.querySelector("[data-notification-bell]");
+    const panel = root.querySelector("[data-notification-panel]");
+    const dot = root.querySelector("[data-notification-dot]");
+    const list = root.querySelector("[data-notification-list]");
+    const feedback = root.querySelector("[data-notification-feedback]");
+    const readKey = "wbc:operational-notifications:seen:v1:" + String(WEB_VITRINA_CONFIG.user_config_key || "local_operator");
+    let items = [], seen = [], loading = false, available = false;
+    try { const saved = JSON.parse(localStorage.getItem(readKey) || "[]"); if (Array.isArray(saved)) seen = saved; } catch (_) {}
+    function marker(item) { return JSON.stringify([String(item.id || ""), String(item.reason_revision || "")]); }
+    function markSeen() {
+      seen = Array.from(new Set(seen.concat(items.map(marker)))).slice(-1000);
+      try { localStorage.setItem(readKey, JSON.stringify(seen)); } catch (_) {}
+      dot.hidden = true;
+    }
+    function close(restoreFocus) {
+      panel.hidden = true; bell.setAttribute("aria-expanded", "false");
+      if (restoreFocus) bell.focus();
+    }
+    function number(value) { return value === null || value === undefined ? "—" : Number(value).toLocaleString("ru-RU"); }
+    function render() {
+      root.querySelector("[data-notification-count]").textContent = available ? "Требуют действия · " + items.length : "Состояние не загружено";
+      list.replaceChildren();
+      items.forEach(function(item) {
+        const article = document.createElement("article"); article.className = "notification-item";
+        article.dataset.notificationId = String(item.id || "");
+        const title = document.createElement("h3"); title.className = "notification-title";
+        const kind = String(item.type || item.status || item.reason || "");
+        title.textContent = item.title || (kind === "missing_source" ? "Укажите склад отгрузки" : kind === "shortage" ? "Не хватает товара для резерва" : kind === "fbo_cost_unallocated" ? "Уточните распределение стоимости" : "Поставка требует проверки");
+        article.appendChild(title);
+        const supply = item.supply || {};
+        const detail = document.createElement("p"); detail.className = "notification-detail";
+        const destination = item.warehouse_display || item.destination || supply.warehouse_display;
+        const qty = item.quantity_added ?? item.quantity ?? supply.quantity_added;
+        const facts = ["Поставка № " + String(item.number_label || supply.number_label || item.supply_id || "—"), destination].filter(Boolean).join(" · ");
+        const shortages = Array.isArray(item.shortages) ? item.shortages : [];
+        const shortageText = shortages.map(function(row) { return "SKU " + String(row.nm_id || row.vendor_code || "—") + ": не хватает " + number(row.missing) + " шт."; }).join("\n");
+        detail.textContent = [facts, qty !== undefined && qty !== null ? number(qty) + " шт." : "", item.detail || (kind === "missing_source" ? "Товар ещё не зарезервирован." : ""), shortageText].filter(Boolean).join("\n");
+        article.appendChild(detail);
+        if (item.supply_id) {
+          const action = document.createElement("button"); action.type = "button";
+          action.textContent = kind === "fbo_cost_unallocated" ? "Открыть" : "Уточнить";
+          action.addEventListener("click", function() { openSupply(String(item.supply_id)); });
+          article.appendChild(action);
+        }
+        list.appendChild(article);
+      });
+      dot.hidden = !items.some(function(item) { return !seen.includes(marker(item)); });
+      if (!panel.hidden) markSeen();
+    }
+    async function load() {
+      if (loading) return;
+      loading = true;
+      feedback.textContent = "Читаем уведомления…";
+      try {
+        const response = await fetch(endpoint, {headers: {Accept: "application/json"}, cache: "no-store"});
+        const payload = await response.json();
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const rows = Array.isArray(payload.notifications) ? payload.notifications : [];
+        const unique = new Map();
+        rows.forEach(function(item) { if (item && item.id) unique.set(String(item.id), item); });
+        items = Array.from(unique.values()); available = true;
+        feedback.textContent = items.length ? "" : ["disabled", "schema_absent"].includes(payload.status) ? "Уведомления FBO пока недоступны." : "Нет уведомлений, требующих действия.";
+        render();
+      } catch (_) {
+        feedback.textContent = "Не удалось обновить уведомления. Откройте панель ещё раз для проверки.";
+        // Keep the last known unresolved work visible on a read failure.
+        render();
+      } finally { loading = false; }
+    }
+    function openSupply(supplyId) {
+      const button = document.querySelector('[data-unified-tab-button="factory-order"]');
+      const frame = document.querySelector('[data-operator-embed-frame="factory-order"]');
+      if (!button || !frame) { feedback.textContent = "Раздел поставок недоступен."; return; }
+      close(false); button.click();
+      if (frame.dataset.notificationReady === "true" && frame.contentWindow) {
+        frame.contentWindow.postMessage({type: "wbc_open_notification_supply", supply_id: supplyId}, location.origin);
+      } else {
+        const url = new URL(WEB_VITRINA_CONFIG.operator_path, location.origin);
+        url.searchParams.set("embedded_tab", "factory-order"); url.searchParams.set("supply_mode", "wildberries");
+        url.searchParams.set("notification_supply_id", supplyId);
+        frame.dataset.notificationReady = "false";
+        frame.setAttribute("src", url.toString());
+      }
+    }
+    bell.addEventListener("click", function() {
+      if (!panel.hidden) { close(false); return; }
+      panel.hidden = false; bell.setAttribute("aria-expanded", "true"); markSeen(); render(); void load();
+    });
+    root.querySelector("[data-notification-close]").addEventListener("click", function() { close(true); });
+    document.addEventListener("pointerdown", function(event) { if (!root.contains(event.target)) close(false); });
+    document.addEventListener("keydown", function(event) { if (event.key === "Escape" && !panel.hidden) { close(true); event.preventDefault(); } });
+    window.addEventListener("message", function(event) {
+      const frame = document.querySelector('[data-operator-embed-frame="factory-order"]');
+      if (event.origin !== location.origin || !frame || event.source !== frame.contentWindow) return;
+      if ((event.data || {}).type === "wbc_notification_supply_ready") frame.dataset.notificationReady = "true";
+      if ((event.data || {}).type === "wbc_fbo_notifications_changed") void load();
+      if ((event.data || {}).type === "sheet_vitrina_v1_operator_embed_pointerdown") close(false);
+    });
+    window.addEventListener("storage", function(event) {
+      if (event.key !== readKey) return;
+      try { const value = JSON.parse(event.newValue || "[]"); if (Array.isArray(value)) seen = value; } catch (_) {}
+      render();
+    });
+    window.addEventListener("focus", function() { void load(); });
+    void load();
+  }());
+  </script>
 </body>
 </html>
