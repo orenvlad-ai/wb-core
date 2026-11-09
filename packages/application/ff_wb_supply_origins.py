@@ -450,7 +450,7 @@ class FfWbSupplyOriginAssignments:
             before_lifecycle = evaluate_owned(connection, _record(connection, reference))
             if before_lifecycle.get("operation_id"):
                 raise FfWbSupplyOriginError("origin_change_requires_explicit_correction", "Источник проведённой поставки меняется только корректировкой", http_status=409)
-            retry_same_origin = bool(current is not None and str(current["facility_id"]) == facility_id and before_lifecycle.get("status") in {"shortage", "reserved"})
+            retry_same_origin = bool(current is not None and str(current["facility_id"]) == facility_id and before_lifecycle.get("status") in {"shortage", "reserved", "reservation_pending"})
             if current is not None and str(current["facility_id"]) == facility_id and not retry_same_origin:
                 raise FfWbSupplyOriginError(
                     "origin_assignment_unchanged", "Selected FF origin is already current", http_status=409

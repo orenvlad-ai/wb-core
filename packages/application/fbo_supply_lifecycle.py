@@ -23,6 +23,7 @@ CONTRACT = 'fbo_supply_lifecycle_v1'
 CURRENT = 'sheet_vitrina_v1_fbo_supply_lifecycle_current'
 EVENTS = 'sheet_vitrina_v1_fbo_supply_lifecycle_events'
 CONFIG = 'sheet_vitrina_v1_fbo_supply_lifecycle_config'
+BASELINE = 'sheet_vitrina_v1_fbo_supply_lifecycle_baseline'
 SUPPLIES = 'sheet_vitrina_v1_wb_supplies'
 AGGREGATE = 'sheet_vitrina_v1_ff_stock_operations'
 AGGREGATE_LINES = 'sheet_vitrina_v1_ff_stock_operation_lines'
@@ -41,6 +42,8 @@ def ensure_schema(conn):
     conn.execute(f'''CREATE TABLE IF NOT EXISTS {CONFIG}(
         slot INTEGER PRIMARY KEY CHECK(slot=1), cutoff_at TEXT NOT NULL,
         plan_digest TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL)''')
+    conn.execute(f'''CREATE TABLE IF NOT EXISTS {BASELINE}(
+        cache_key TEXT NOT NULL, supply_id TEXT PRIMARY KEY, wb_supply_id TEXT NOT NULL, preorder_id TEXT NOT NULL)''')
     conn.execute(f'''CREATE TABLE IF NOT EXISTS {CURRENT}(
         cache_key TEXT PRIMARY KEY, supply_id TEXT NOT NULL, admitted_at TEXT NOT NULL,
         admission TEXT NOT NULL, state_json TEXT NOT NULL)''')
@@ -48,6 +51,8 @@ def ensure_schema(conn):
         sequence INTEGER PRIMARY KEY AUTOINCREMENT, cache_key TEXT NOT NULL,
         state_revision TEXT NOT NULL, state_json TEXT NOT NULL, occurred_at TEXT NOT NULL)''')
     for verb in ('UPDATE', 'DELETE'):
+        conn.execute(f'''CREATE TRIGGER IF NOT EXISTS fbo_lifecycle_baseline_no_{verb.lower()}
+            BEFORE {verb} ON {BASELINE} BEGIN SELECT RAISE(ABORT,'FBO baseline is immutable'); END''')
         conn.execute(f'''CREATE TRIGGER IF NOT EXISTS fbo_lifecycle_events_no_{verb.lower()}
             BEFORE {verb} ON {EVENTS} BEGIN SELECT RAISE(ABORT,'FBO lifecycle evidence is append-only'); END''')
         conn.execute(f'''CREATE TRIGGER IF NOT EXISTS fbo_lifecycle_config_no_{verb.lower()}
@@ -147,35 +152,56 @@ def _goods(conn, record):
     return dict(sorted(result.items(), key=lambda p:int(p[0])))
 
 
+def _creation_timestamp(record):
+    """Creation evidence only: planned delivery/actual acceptance are not age."""
+    from packages.application.ff_stock_ledger import _parse_datetime_like
+    sources=[record.get('normalized') or {},record,record.get('raw_list') or {},record.get('raw_detail') or {}]
+    candidates=[_parse_datetime_like(source.get(field)) for field in ('source_created_at','createDate','createdAt') for source in sources if isinstance(source,dict)]
+    candidates=[value for value in candidates if value is not None]
+    # Conflicting genuine creation evidence never promotes an old source.
+    return min(candidates) if candidates else None
+
+
+def _cache_baseline(conn):
+    return [dict(row) for row in conn.execute(f"SELECT COALESCE(NULLIF(cache_key,''),supply_id) cache_key,supply_id,COALESCE(wb_supply_id,'') wb_supply_id,COALESCE(preorder_id,'') preorder_id FROM {SUPPLIES} ORDER BY cache_key,supply_id")]
+
+
 def _scope(conn, record):
-    cache, _ = _identity(record)
+    cache, sid = _identity(record)
     real=str(record.get('wb_supply_id') or '')
     if not real.isdigit() or int(real)<=0 or int(record['normalized'].get('virtual_type_id') or 0)==5 or str(record['normalized'].get('type_label') or '')=='Допринято':
         return False
     if _prior(conn, cache) is not None:
         return True
-    if CONFIG not in _tables(conn):
+    if not {CONFIG,BASELINE} <= _tables(conn):
         return False
     config = conn.execute(f'SELECT * FROM {CONFIG} WHERE slot=1').fetchone()
     if not config:
         return False
-    from packages.application.ff_stock_ledger import _wb_supply_business_timestamp, _parse_datetime_like, _wb_supply_checkpoint_match_fields
-    dt, _ = _wb_supply_business_timestamp(record=record, normalized=record['normalized'])
-    cutoff = _parse_datetime_like(config['cutoff_at'])
-    if dt is None or cutoff is None or dt <= cutoff:
+    # A persisted all-cache before-image is the admission boundary. Existing
+    # history never becomes new because a date or source alias was refreshed.
+    if conn.execute(f'SELECT 1 FROM {BASELINE} WHERE cache_key=? OR supply_id=? OR wb_supply_id=?',(cache,sid,real)).fetchone():
         return False
-    # New-source admission also retains the legacy checkpoint/activation fence.
+    from packages.application.ff_stock_ledger import _parse_datetime_like, _wb_supply_checkpoint_match_fields
+    dt = _creation_timestamp(record)
+    cutoff = _parse_datetime_like(config['cutoff_at'])
+    if cutoff is None or (dt is not None and dt <= cutoff):
+        return False
+    # Date-less sources seen for the first time in shipping-permitted status
+    # are genuinely new work. Late discovered acceptance/history needs proof.
+    if dt is None and int(record['normalized'].get('status_id') or 0)!=3:
+        return False
     checkpoint = conn.execute('SELECT * FROM sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint WHERE slot=\'current\'').fetchone()
     if checkpoint is None:
         return False
     from packages.application.registry_upload_db_backed_runtime import _ff_stock_wb_auto_writeoff_checkpoint_to_dict
     checkpoint = _ff_stock_wb_auto_writeoff_checkpoint_to_dict(checkpoint)
-    cache, sid = _identity(record)
     if _wb_supply_checkpoint_match_fields(checkpoint=checkpoint,cache_key=cache,supply_id=sid,source_key=f'wb_supply_debit:{cache}'):
         return False
     checkpoint_dt = _parse_datetime_like(checkpoint['created_at'])
     activation = conn.execute(f"SELECT created_at FROM {AGGREGATE} WHERE source_type <> 'wb_supply' AND total_quantity_delta > 0 ORDER BY created_at,operation_id LIMIT 1").fetchone()
-    return bool(checkpoint_dt and dt > checkpoint_dt and activation and dt >= _parse_datetime_like(activation[0]))
+    boundary=dt or cutoff
+    return bool(checkpoint_dt and boundary >= checkpoint_dt and activation and boundary >= _parse_datetime_like(activation[0]))
 
 
 def _origin(conn, cache):
@@ -183,31 +209,40 @@ def _origin(conn, cache):
     return _current_assignment(conn, cache)
 
 
+def reservation_summary(conn, facility_id, *, exclude_cache_key=''):
+    """Authoritative addressed obligations, counted once from the legacy ledger.
+
+    CURRENT supplies the durable address, not another quantity operand. Pending
+    availability is never a reservation and unresolved origins stay unassigned.
+    """
+    required={'sheet_vitrina_v1_ff_stock_reservation_operations','sheet_vitrina_v1_ff_stock_reservation_lines',
+              'sheet_vitrina_v1_wb_supply_ff_origin_assignments'}
+    if not required <= _tables(conn):
+        return dict(quantity=0,by_nm_id={},updated_at='')
+    states={}
+    if CURRENT in _tables(conn):
+        for row in conn.execute(f'SELECT cache_key,state_json FROM {CURRENT}'):
+            states[str(row['cache_key']).removeprefix('supply:')]=json.loads(row['state_json'])
+    totals={};updated=''
+    for row in conn.execute('''SELECT operation.supply_id,line.nm_id,SUM(line.quantity_delta) quantity,MAX(operation.created_at) updated_at
+        FROM sheet_vitrina_v1_ff_stock_reservation_operations operation JOIN sheet_vitrina_v1_ff_stock_reservation_lines line USING(operation_id)
+        GROUP BY operation.supply_id,line.nm_id HAVING SUM(line.quantity_delta)>0'''):
+        real=str(row['supply_id']).removeprefix('supply:')
+        if exclude_cache_key and real==str(exclude_cache_key).removeprefix('supply:'):continue
+        state=states.get(real) or {}
+        origin=state.get('reservation_origin') or _origin(conn,'supply:'+real) or state.get('origin') or {}
+        if origin.get('facility_id')!=facility_id:continue
+        quantity=Decimal(str(row['quantity']))
+        if quantity!=int(quantity):raise ValueError('fractional_fbo_reservation_requires_review')
+        nm=int(row['nm_id']);totals[nm]=totals.get(nm,0)+int(quantity)
+        updated=max(updated,str(row['updated_at'] or ''),str(origin.get('assigned_at') or ''))
+    return dict(quantity=sum(totals.values()),by_nm_id=totals,updated_at=updated)
+
+
 def _available(conn, facility, nm, cache, epoch):
     row = conn.execute(f"SELECT * FROM {BALANCES_TABLE} WHERE facility_id=? AND pool='FBO' AND nm_id=? AND projection_epoch=?", (facility, nm, epoch)).fetchone()
     physical = int(row['quantity']) if row else 0
-    reserved = 0
-    if CURRENT in _tables(conn):
-        for other in conn.execute(f'SELECT state_json FROM {CURRENT} WHERE cache_key<>?', (cache,)):
-            state = json.loads(other[0])
-            reservation_origin=state.get('reservation_origin') or state.get('origin') or {}
-            if reservation_origin.get('facility_id') == facility:
-                if state.get('reservation'):
-                    reserved += int(state['reservation'].get(str(nm), 0))
-                else:
-                    # Admission never drops an earlier addressed obligation.
-                    reserved += int(sum(values.get(nm,0) for values in _legacy(conn,state['supply_id']).values()))
-    # Existing unscoped obligations with a known origin remain authoritative.
-    # Scoped supplies are excluded above/below exactly once.
-    for r in conn.execute('''SELECT o.supply_id,SUM(l.quantity_delta) quantity FROM sheet_vitrina_v1_ff_stock_reservation_operations o
-        JOIN sheet_vitrina_v1_ff_stock_reservation_lines l USING(operation_id) WHERE l.nm_id=? GROUP BY o.supply_id HAVING SUM(l.quantity_delta)>0''', (nm,)):
-        alias = str(r['supply_id'])
-        scoped = conn.execute(f'SELECT 1 FROM {CURRENT} WHERE supply_id IN (?,?) OR cache_key=?', (alias, alias.removeprefix('supply:'), 'supply:'+alias.removeprefix('supply:'))).fetchone() if CURRENT in _tables(conn) else None
-        if scoped or alias in {cache, cache.removeprefix('supply:')}:
-            continue
-        origin = _origin(conn, 'supply:'+alias.removeprefix('supply:'))
-        if origin and origin['facility_id'] == facility:
-            reserved += int(r['quantity'])
+    reserved=reservation_summary(conn,facility,exclude_cache_key=cache)['by_nm_id'].get(nm,0)
     return max(0, physical-reserved), dict(row) if row else None
 
 
@@ -264,7 +299,14 @@ def evaluate_owned(conn, record, *, origin_override=None):
         available,_ = _available(conn,origin['facility_id'],int(nm),cache,epoch)
         if available < qty:
             shortages.append(dict(nm_id=int(nm),required=qty,available=available,missing=qty-available))
-    state.update(status='shortage' if shortages else 'reserved',reason='insufficient_fbo_stock' if shortages else 'ready_for_dispatch' if status in {4,5,6} else 'awaiting_gate_shipment',shortages=shortages,composition=goods)
+    # A read can detect availability, but only a committed reservation is a
+    # reservation. Keep pending work actionable until the write reconciles it.
+    durable=state['reservation']==goods and (state.get('reservation_origin') or {}).get('facility_id')==origin['facility_id']
+    actual={}
+    for quantities in _legacy(conn,sid).values():
+        for nm,qty in quantities.items(): actual[str(nm)]=actual.get(str(nm),0)+qty
+    durable=durable and actual==goods
+    state.update(status='shortage' if shortages else 'reserved' if durable else 'reservation_pending',reason='insufficient_fbo_stock' if shortages else 'reservation_reconciliation_required' if not durable else 'ready_for_dispatch' if status in {4,5,6} else 'awaiting_gate_shipment',shortages=shortages,composition=goods)
     return state
 
 
@@ -329,11 +371,11 @@ class FboSupplyLifecycle:
                 return dict(status='disabled',notifications=[],items=[])
             refs=[r[0] for r in conn.execute(f'SELECT cache_key FROM {CURRENT} ORDER BY cache_key')]
             # Newly admitted sources can produce a notice before the next writer tick.
-            refs += [r[0] for r in conn.execute(f'SELECT cache_key FROM {SUPPLIES} WHERE status_id IN (3,4,5,6)') if r[0] not in refs]
+            refs += [r[0] for r in conn.execute(f"SELECT COALESCE(NULLIF(cache_key,''),supply_id) FROM {SUPPLIES} WHERE status_id IN (3,4,5,6)") if r[0] not in refs]
             notices=[]
             for ref in refs:
                 state=evaluate_owned(conn,_record(conn,ref))
-                if state['status'] not in {'missing_source','shortage','needs_correction'}: continue
+                if state['status'] not in {'missing_source','shortage','reservation_pending','needs_correction'}: continue
                 state['id']='fbo:'+state['cache_key']+':'+state['reason']
                 state['reason_revision']=digest({**{k:state[k] for k in ('cache_key','status','reason','shortages','composition')},'facility_id':(state['origin'] or {}).get('facility_id')})
                 notices.append(state)
@@ -348,7 +390,7 @@ class FboSupplyLifecycle:
             for ref in sorted(set(map(str,supply_ids))):
                 record=_record(conn,ref);cache,sid=_identity(record)
                 effects.append(dict(cache_key=cache,supply_id=sid,record_digest=digest(record),composition=_goods(conn,record),legacy_reservations=_legacy(conn,sid),existing_debit=_existing(conn,record),origin=_origin(conn,cache)))
-            plan=dict(contract=CONTRACT,cutoff_at=cutoff_at,effects=effects)
+            plan=dict(contract=CONTRACT,cutoff_at=cutoff_at,effects=effects,cache_baseline=_cache_baseline(conn))
             return {**plan,'plan_digest':digest(plan)}
 
     def migration_apply(self, plan, *, actor, on_activate=None):
@@ -361,11 +403,14 @@ class FboSupplyLifecycle:
                 if existing['plan_digest'] != plan.get('plan_digest'): raise ValueError('lifecycle_cutover_already_applied')
                 return dict(status='applied',idempotent=True,plan_digest=plan['plan_digest'])
             if digest({k:v for k,v in plan.items() if k!='plan_digest'}) != plan.get('plan_digest'): raise ValueError('migration_plan_changed')
+            if _cache_baseline(conn)!=plan.get('cache_baseline'):
+                raise ValueError('migration_cache_baseline_changed')
             for effect in plan['effects']:
                 record=_record(conn,effect['cache_key'])
                 if digest(record)!=effect['record_digest'] or canonical(_legacy(conn,record['supply_id']))!=canonical(effect['legacy_reservations']) or _existing(conn,record)!=effect['existing_debit'] or _origin(conn,record['cache_key'])!=effect['origin']:
                     raise ValueError('migration_source_changed')
             conn.execute(f'INSERT INTO {CONFIG} VALUES(1,?,?,?,?)',(plan['cutoff_at'],plan['plan_digest'],actor,now))
+            conn.executemany(f'INSERT INTO {BASELINE} VALUES(?,?,?,?)',[(row['cache_key'],row['supply_id'],row['wb_supply_id'],row['preorder_id']) for row in plan['cache_baseline']])
             for effect in plan['effects']:
                 # Admission is a boundary only: no origin guessed, no physical replay.
                 initial=dict(status='missing_source',reason='needs_origin',reservation={},reservation_origin=None,composition=effect['composition'],operation_id=(effect['existing_debit'] or {}).get('operation_id',''),cache_key=effect['cache_key'],supply_id=effect['supply_id'])
@@ -396,10 +441,17 @@ class FboSupplyLifecycle:
             raise ValueError('origin_change_requires_explicit_correction')
         if origin_change and state['status']=='shortage' and state['reservation']:
             raise ValueError('origin_change_shortage_preserves_prior_reservation:'+canonical(state['shortages']))
-        if state['status']=='reserved':
+        if state['status'] in {'reserved','reservation_pending'}:
             _replace_reservation(conn,state,state['composition'],now)
+            state.update(status='reserved',reason='awaiting_gate_shipment')
             if int(record['normalized'].get('status_id') or 0) in {4,5,6}:
                 self._dispatch(conn,record,state,now)
+        elif state['status']=='shortage' and origin_change and not state.get('reservation_origin') and not state['reservation']:
+            # Explicit source selection completes the unscoped migration. A
+            # whole-supply shortage must not turn its old unscoped obligation
+            # into an over-reservation at the newly selected facility.
+            # The immutable release + unresolved shortage retain the evidence.
+            _replace_reservation(conn,state,{},now)
         elif state['status'] in {'cancelled','debited'}:
             _replace_reservation(conn,state,{},now)
         _save(conn,state,now)

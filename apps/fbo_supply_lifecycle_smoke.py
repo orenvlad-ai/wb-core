@@ -72,7 +72,24 @@ class LifecycleTests(unittest.TestCase):
         with self.conn() as conn: self.assertEqual(count,conn.execute(f'SELECT COUNT(*) FROM {core.EVENTS}').fetchone()[0])
         result=self.assign('1');self.assertEqual(result['fbo_lifecycle']['reserved_qty'],9)
         self.assertEqual(sum(r['quantity'] for r in self.runtime.list_ff_stock_reservations(supply_id='1')),9)
+        with self.conn() as conn:
+            summary=core.reservation_summary(conn,'facility-a')
+            self.assertEqual(summary['by_nm_id'],{101:6,102:3});self.assertEqual(summary['quantity'],9)
+            self.assertTrue(summary['updated_at'])
         self.assertEqual(self.balance(),(10,Decimal(100)))
+
+    def test_both_legacy_reserves_first_source_shortage_releases_unscoped_only(self):
+        for sid,goods in [('1',[(101,6),(102,3)]),('2',[(101,5),(102,1)])]:
+            self.runtime.create_ff_stock_reservation_operation(operation_id='legacy'+sid,source_key='legacy'+sid,supply_id=sid,supply_revision='legacy',operation_type='reserve',created_at=NOW,diagnostics={},lines=[dict(nm_id=nm,quantity_delta=q) for nm,q in goods],expected_current={})
+        self.cutover()
+        self.assertEqual(sum(r['quantity'] for r in self.runtime.list_ff_stock_reservations()),15)
+        self.assign('1');result=self.assign('2')['fbo_lifecycle']
+        self.assertEqual((result['status'],result['reserved_qty'],result['legacy_reserved_qty']),('shortage',0,0))
+        self.assertEqual(self.runtime.list_ff_stock_reservations(supply_id='2'),[])
+        self.assertEqual(self.service.detail('2')['origin']['facility_id'],'facility-a')
+        with self.conn() as conn:self.assertEqual(core.reservation_summary(conn,'facility-a')['quantity'],9)
+        self.assertEqual(self.balance(),(10,Decimal(100)))
+        self.assertEqual(len(self.service.notifications()['items']),1)
 
     def test_competing_reservation_and_failed_source_change(self):
         self.cutover();self.assign('1')
@@ -162,6 +179,51 @@ class LifecycleTests(unittest.TestCase):
         with self.conn() as conn:
             docs=capture_documents(conn)
         self.assertEqual(len(docs),1);self.assertEqual(docs[0]['cost_document']['lines'][0]['capital_delta_rub'],'-10')
+
+    def test_get_keeps_replenished_and_changed_composition_pending(self):
+        self.cutover();self.assign('1');self.assign('2')
+        self.seed('1',[(101,6),(102,3)],2,is_cancelled=True);self.service.reconcile('1')
+        state=self.service.detail('2')
+        self.assertEqual((state['status'],state['reserved_qty']),('reservation_pending',0))
+        self.assertEqual(self.runtime.list_ff_stock_reservations(supply_id='2'),[])
+        with self.conn() as conn:
+            self.assertEqual(core.reservation_summary(conn,'facility-a')['quantity'],0)
+        self.assertIn('2',[item['supply_id'] for item in self.service.notifications()['items']])
+        self.assertEqual(self.assign('2')['fbo_lifecycle']['status'],'reserved')
+        self.seed('2',[(101,4),(102,1)])
+        state=self.service.detail('2')
+        self.assertEqual((state['status'],state['reserved_qty']),('reservation_pending',6))
+        self.assertEqual(self.service.reconcile('2')['reserved_qty'],5)
+
+    def test_durable_baseline_and_dateless_new_shipping_source(self):
+        self.seed('3',[(101,1)],3)
+        plan=self.cutover()
+        self.assertEqual(len(plan['cache_baseline']),3)
+        self.assertEqual(self.service.detail('3')['status'],'out_of_scope')
+        for sid,status in [('4',3),('5',4),('6',5)]:
+            self.seed(sid,[(101,1)],status)
+            with self.conn() as conn:
+                row=conn.execute('SELECT normalized_row_json FROM sheet_vitrina_v1_wb_supplies WHERE supply_id=?',(sid,)).fetchone()
+                normalized=json.loads(row[0]);normalized.pop('source_created_at');normalized['supply_date']='2026-11-08'
+                conn.execute('UPDATE sheet_vitrina_v1_wb_supplies SET normalized_row_json=? WHERE supply_id=?',(json.dumps(normalized),sid))
+        self.assertEqual(self.service.reconcile('4')['status'],'missing_source')
+        self.assertEqual(self.service.detail('5')['status'],'out_of_scope')
+        self.assertEqual(self.service.detail('6')['status'],'out_of_scope')
+        # A later accepted observation of an admitted source remains scoped.
+        with self.conn() as conn:conn.execute('UPDATE sheet_vitrina_v1_wb_supplies SET status_id=5 WHERE supply_id=\'4\'')
+        self.assertEqual(self.service.detail('4')['status'],'missing_source')
+
+    def test_raw_creation_precedes_planned_date_and_baseline_drift(self):
+        plan=self.service.migration_preview(supply_ids=['1','2'],cutoff_at=NOW)
+        self.seed('9',[(101,1)],3)
+        with self.assertRaisesRegex(ValueError,'migration_cache_baseline_changed'):
+            self.service.migration_apply(plan,actor='fixture')
+        self.cutover();self.seed('4',[(101,1)],3)
+        with self.conn() as conn:
+            normalized=json.loads(conn.execute('SELECT normalized_row_json FROM sheet_vitrina_v1_wb_supplies WHERE supply_id=\'4\'').fetchone()[0])
+            normalized.pop('source_created_at');normalized['supply_date']='2026-11-08'
+            conn.execute('UPDATE sheet_vitrina_v1_wb_supplies SET normalized_row_json=?,raw_list_json=? WHERE supply_id=\'4\'',(json.dumps(normalized),json.dumps(dict(createDate='2026-11-10T00:00:00Z'))))
+        self.assertEqual(self.service.reconcile('4')['status'],'missing_source')
 
     def test_same_source_retry_has_durable_request_identity(self):
         self.cutover();self.assign('1');self.assign('2')
