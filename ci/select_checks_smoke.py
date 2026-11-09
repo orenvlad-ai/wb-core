@@ -1261,6 +1261,18 @@ def main() -> None:
     assert backend["commands"].index(install) < backend["commands"].index(settings_command)
     assert backend["commands"].index(install) < backend["commands"].index(
         ["python3", "apps/operator_balance_job_recovery_smoke.py"])
+    # A narrow FBO plan must bring its invoice PDF dependency itself, without
+    # relying on an unrelated broad group happening to select ReportLab.
+    for changed in ("packages/application/fbo_forward_costs.py",
+                    "packages/application/fbo_forward_cost_consumers.py",
+                    "apps/fbo_forward_costs_smoke.py"):
+        fbo_costs = build_plan_from_paths(
+            pull_request=1607, base=BASE, head=HEAD,
+            paths=[changed], file_exists=lambda *_: True,
+        )
+        verify_plan(fbo_costs)
+        assert ["python3", "apps/fbo_forward_costs_smoke.py"] in fbo_costs["commands"]
+        assert {"openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"} <= set(fbo_costs["pip"]), fbo_costs
     assert "playwright==1.58.0" not in finance["pip"]
     assert install not in docs["commands"]
 
