@@ -497,6 +497,7 @@ def patch_apply(
     activation_readback_status: int = 0,
     cleaner_status: int = 0,
     drift_after_claim: bool = False,
+    value: dict | None = None,
 ):
     originals = (
         recovery.build_stage_commands,
@@ -505,7 +506,8 @@ def patch_apply(
         recovery.prove_repo_only_descendant,
     )
     calls: list[str] = []
-    incomplete = preview()["prestate"]
+    selected = value or preview()
+    incomplete = selected["prestate"]
     complete = {
         **incomplete,
         "metadata": {**incomplete["metadata"], "deployment_complete": True},
@@ -528,7 +530,7 @@ def patch_apply(
     recovery.build_stage_commands = lambda *_args, **_kwargs: commands()
     recovery._run_stage = run
     recovery.collect_prestate = state
-    recovery.prove_repo_only_descendant = lambda *_args, **_kwargs: preview()["runner"]
+    recovery.prove_repo_only_descendant = lambda *_args, **_kwargs: selected["runner"]
     return calls, originals
 
 
@@ -2010,6 +2012,89 @@ subprocess.CalledProcessError: Command ['ssh', '{profile['operation_id']}', 'app
         expect_reason('cleaner-completion-started-owner-required', lambda: recovery.apply_recovery(CommentsClient(), value, FINGERPRINT, object()))
 
 
+def test_storage_tail_precomplete_preserves_activation_and_blocks_completion() -> None:
+    run_id = recovery.STORAGE_TAIL_PRECOMPLETE_RUN_ID
+    profile = recovery.STORAGE_TAIL_PRECOMPLETE_PROFILE
+    case = recovery.RecoveryCase.STORAGE_TAIL
+    assert recovery.recovery_case(run_id) is case
+    assert not recovery.cleaner_completion_case(case, run_id)
+    assert not recovery.storage_tail_precomplete_case(case, run_id + 1)
+    assert not recovery.storage_tail_precomplete_case(recovery.RecoveryCase.SQLITE_ACTIVATION, run_id)
+    receipt = {'schema': recovery.release.RECEIPT_SCHEMA, 'state': 'blocked', 'reason': 'CalledProcessError',
+               'release_kind': 'live_runtime', 'deployed_sha': None, **profile}
+    recovery._validate_original_receipt(receipt, case=case, release_run_id=run_id)
+    for key in profile:
+        changed = {**receipt, key: (receipt[key] + 1 if isinstance(receipt[key], int)
+                                  else 'a' * 40 if key.endswith('sha') else 'release-v3-other')}
+        expect_reason('original-receipt-not-exact-storage-precomplete', lambda:
+            recovery._validate_original_receipt(changed, case=case, release_run_id=run_id))
+    raw = failure_log().replace(b'"77"', ('"' + str(profile['gate_run_id']) + '"').encode())
+    prove = lambda log: recovery._prove_failed_stage(log, profile['gate_run_id'],
+        'One-shot deployed release', case=case, release_run_id=run_id)
+    assert prove(raw)['stage'] == 'root-storage-status-artifact-readback'
+    expect_reason('failed-stage-not-root-storage-readback-exit3', lambda: prove(raw.replace(b'exit status 3', b'exit status 1')))
+    expect_reason('failed-stage-not-definite-single-exit3', lambda:
+        prove(raw + b'\nsubprocess.CalledProcessError: Command X returned non-zero exit status 255.'))
+
+    from apps.registry_upload_http_entrypoint_hosted_runtime import load_hosted_runtime_target
+    target = load_hosted_runtime_target(recovery.TARGET_FILE)
+    built = recovery.build_stage_commands(target, profile['merge_sha'], 'a' * 64, 123, case=case, release_run_id=run_id)
+    assert 'activation' in built and 'normal_activation_tail' not in built
+    assert 'systemctl start wb-core-change-registry-activation@' + profile['merge_sha'] in built['activation'][-1]
+    probe = built['cleaner_precomplete_probe'][-1]
+    assert '--phase before_complete --expected-sha ' + profile['merge_sha'] in probe
+    assert '--runtime-dir /opt/wb-core-runtime/state' in probe
+    expect_reason('sqlite-activation-target-contract-invalid', lambda:
+        recovery.build_stage_commands(target, M, 'a' * 64, 123, case=case, release_run_id=run_id))
+    neighbor = recovery.build_stage_commands(target, M, 'a' * 64, 123, case=case, release_run_id=run_id + 1)
+    assert 'cleaner_precomplete_probe' not in neighbor and 'activation' in neighbor
+
+    value = preview()
+    value.update(release_run_id=run_id, recovery_case=case.value)
+    value['source'].update({k: v for k, v in profile.items() if k != 'operation_id'},
+                           original_operation_id=profile['operation_id'])
+    value['prestate']['runtime_sha'] = profile['merge_sha']
+    value['prestate']['metadata']['commit'] = profile['merge_sha']
+    owner = {'owner': {'phase': 'mutation_started', 'operation_id': profile['operation_id']},
+             'quiet': True, 'controls': {}, 'units': {}}
+    value['existing_started_owner'] = owner
+    evidence = {'original_receipt': receipt, 'recovery_case': case.value,
+                'failure': prove(raw), 'original_receipt_sha256': '3' * 64,
+                'gate_plan': {'plan_sha256': '4' * 64}}
+    with patch.object(recovery, 'collect_evidence', return_value=evidence), \
+            patch.object(recovery, 'prove_repo_only_descendant', return_value=value['runner']), \
+            patch.object(recovery, 'collect_prestate', return_value=value['prestate']), \
+            patch.object(recovery, 'collect_existing_started_owner', return_value=owner):
+        actual = recovery.build_preview(CommentsClient(), run_id, target)
+    stages = actual['stages']
+    assert stages[stages.index('change-registry-activation-exact-target') + 1:
+                  stages.index('deployment-metadata-cas-complete') + 1] == [
+                      'cleaner-before-complete-probe', 'deployment-metadata-cas-complete']
+    assert actual['preview_fingerprint'] == recovery.preview_fingerprint(actual)
+    changed = deepcopy(actual); changed['stages'].remove('cleaner-before-complete-probe')
+    assert recovery.preview_fingerprint(changed) != actual['preview_fingerprint']
+    assert 'restart' in actual['forbidden_stages']
+
+    for cleaner_status in (0, 1):
+        calls, originals = patch_apply(cleaner_status=cleaner_status, value=value)
+        client = CommentsClient()
+        try:
+            with patch.object(recovery, 'collect_existing_started_owner', return_value=owner), \
+                    patch.object(recovery, '_resume_started_deploy_protection', return_value=[]) as resume:
+                result = recovery.apply_recovery(client, value, FINGERPRINT, object())
+                resume.assert_called_once()
+                expect_reason('recovery-identity-already-claimed', lambda:
+                    recovery.apply_recovery(client, value, FINGERPRINT, object()))
+        finally:
+            restore_apply(originals)
+        assert calls == ['root-readback', 'status', 'auth', 'activation', 'cleaner-probe'] + ([] if cleaner_status else ['completion'])
+        assert result['state'] == ('ambiguous' if cleaner_status else 'complete'), result
+        assert not any('restart' in call or 'install' in call or 'sync' in call for call in calls)
+        if cleaner_status:
+            assert result['reason'] == 'cleaner-before-complete-probe-failed-1'
+            assert not any(recovery.RECEIPT_MARKER in body for body in client.values)
+
+
 def backup_capacity_fixture():
     gib = 1024**3
     available = 60 * gib
@@ -2201,6 +2286,7 @@ def test_buyer_chrome_native_reserve_and_unchanged_closure() -> None:
 
 
 def legacy_tail_regressions() -> None:
+    test_storage_tail_precomplete_preserves_activation_and_blocks_completion()
     test_buyer_chrome_exact_initial_reserve()
     test_buyer_chrome_native_reserve_and_unchanged_closure()
     test_predependency_previous_success_receipt(recovery.BUYER_CHROME_RELEASE_RUN_ID)

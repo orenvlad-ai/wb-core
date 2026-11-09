@@ -142,6 +142,25 @@ base/head/merge; immutable log обязан пройти те же провер�
 Успех подтверждают связанный recovery receipt, завершённая metadata, точная
 версия, сервисы и неизменный изолированный Finance pilot.
 
+Для выпуска 42687135829 (PR 1604, Gate 42622619635, head
+`d88aff18833213ae4be3d48bbe8d86d905359f2a`, merge
+`8f32cd7f6fbc436770d4d297b7fb4dbc3486b719`, operation
+`release-v3-2cc2ff1cbc3bc183ba33b5fd843ab352`) сохраняется обычный
+`storage-tail`: исходный immutable log обязан доказать единственный определённый
+exit 3 конечного `status-readback` после restart. До apply нужно устранить
+реальный недостаток резерва и штатно обновить derived storage status artifact
+под тем же deploy owner; сам generic tail артефакт не обновляет. Старые
+исключения для degraded backup health к этому выпуску не применяются.
+
+После оставшейся Change Registry activation этот точный хвост обязательно
+выполняет canonical cleaner `before_complete` probe с тем же merge SHA перед
+metadata CAS. Probe входит в fingerprint проверяемого preview; его отказ
+останавливает completion и оставляет уже принятый claim только для readback.
+Это не случай уже завершённой activation: первый запуск activation сохраняется.
+Merge, sync, зависимости и restart не повторяются. Все исходные owner,
+maintenance, storage, source и Finance pilot проверки сохраняются. После
+complete recovery штатный formula-resume исходного окна выполняется отдельно.
+
 
 ## Первый выпуск защиты deploy ownership
 

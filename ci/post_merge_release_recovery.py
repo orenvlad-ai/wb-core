@@ -108,6 +108,18 @@ CLEANER_PROFILES = {
     },
 }
 
+# This final storage readback failed before activation and the required cleaner
+# probe. Keep the ordinary storage tail, including its first activation, but do
+# not complete its metadata until the canonical before_complete probe passes.
+STORAGE_TAIL_PRECOMPLETE_RUN_ID = 42687135829
+STORAGE_TAIL_PRECOMPLETE_PROFILE = {
+    "pull_request": 1604, "gate_run_id": 42622619635,
+    "base_sha": "deb3c2922c93a1b321397bbe222762fe16d6fb2e",
+    "head_sha": "d88aff18833213ae4be3d48bbe8d86d905359f2a",
+    "merge_sha": "8f32cd7f6fbc436770d4d297b7fb4dbc3486b719",
+    "operation_id": "release-v3-2cc2ff1cbc3bc183ba33b5fd843ab352",
+}
+
 # Exact first storage-status refusal after sync/metadata, before dependencies.
 PREDEPENDENCY_RELEASE_RUN_ID = 37598234406
 PREDEPENDENCY_PROFILE = {
@@ -241,6 +253,10 @@ def recovery_case(release_run_id: int) -> RecoveryCase:
 
 def cleaner_completion_case(case: RecoveryCase, release_run_id: int) -> bool:
     return case is RecoveryCase.STORAGE_TAIL and release_run_id in CLEANER_PROFILES
+
+
+def storage_tail_precomplete_case(case: RecoveryCase, release_run_id: int) -> bool:
+    return case is RecoveryCase.STORAGE_TAIL and release_run_id == STORAGE_TAIL_PRECOMPLETE_RUN_ID
 
 
 def unchanged_dependency_tail_case(case: RecoveryCase) -> bool:
@@ -423,6 +439,10 @@ def _validate_original_receipt(
     if not operation.startswith("release-v3-"):
         raise RecoveryError("original-operation-invalid")
     normalized["operation_id"] = operation
+    if storage_tail_precomplete_case(case, release_run_id) and any(
+        normalized.get(key) != expected for key, expected in STORAGE_TAIL_PRECOMPLETE_PROFILE.items()
+    ):
+        raise RecoveryError("original-receipt-not-exact-storage-precomplete")
     if case is RecoveryCase.SELECTIVE_B9_ACTIVATION and (
         normalized["base_sha"] != EXPECTED_SELECTIVE_ORIGINAL_BASE_SHA
         or normalized["merge_sha"] != EXPECTED_SELECTIVE_MERGE_SHA
@@ -1743,8 +1763,8 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion": completion,
         "completion_input": completion_script,
     }
-    if ((case is RecoveryCase.SQLITE_ACTIVATION or unchanged_dependency_tail_case(case)) or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id)):
-        expected_merge = BACKUP_CAPACITY_MERGE_SHA if backup_capacity_case(case, release_run_id) else _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILES[release_run_id]["merge_sha"] if cleaner_completion_case(case, release_run_id) else _predependency_profile(release_run_id)["receipt"]["merge_sha"]
+    if ((case is RecoveryCase.SQLITE_ACTIVATION or unchanged_dependency_tail_case(case)) or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id) or storage_tail_precomplete_case(case, release_run_id)):
+        expected_merge = STORAGE_TAIL_PRECOMPLETE_PROFILE["merge_sha"] if storage_tail_precomplete_case(case, release_run_id) else BACKUP_CAPACITY_MERGE_SHA if backup_capacity_case(case, release_run_id) else _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILES[release_run_id]["merge_sha"] if cleaner_completion_case(case, release_run_id) else _predependency_profile(release_run_id)["receipt"]["merge_sha"]
         if target.target_id != "wb_core_eu_hosted_runtime_active" or runtime_dir != "/opt/wb-core-runtime/state" or merge != expected_merge:
             raise RecoveryError("sqlite-activation-target-contract-invalid")
         commands["cleaner_precomplete_probe"] = hosted._remote_shell_command(
@@ -2067,6 +2087,8 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         result['backup_capacity_proof'] = collect_backup_capacity_proof(target, result['source'], release_run_id)
         result['stages'][0] = 'exact-historical-backup-capacity-readback'
         result['stages'].insert(result['stages'].index('deployment-metadata-cas-complete'), 'cleaner-before-complete-probe')
+    if storage_tail_precomplete_case(case, release_run_id):
+        result['stages'].insert(result['stages'].index('deployment-metadata-cas-complete'), 'cleaner-before-complete-probe')
     result["preview_fingerprint"] = preview_fingerprint(result)
     return result
 
@@ -2384,7 +2406,7 @@ def apply_recovery(
                 stages.append({"stage": "activation-readback", "stdout_sha256": digest(readback.stdout.encode())})
             else:
                 stages.append({"stage": "activation", "stdout_sha256": digest(activation.stdout.encode())})
-        if ((case is RecoveryCase.SQLITE_ACTIVATION or unchanged_dependency_tail_case(case)) or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id)):
+        if ((case is RecoveryCase.SQLITE_ACTIVATION or unchanged_dependency_tail_case(case)) or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id) or storage_tail_precomplete_case(case, release_run_id)):
             stages.extend(buyer_reserve())
             stages.append(_must_succeed("cleaner-before-complete-probe", protected(commands["cleaner_precomplete_probe"])))
         before_completion = collect_prestate(
