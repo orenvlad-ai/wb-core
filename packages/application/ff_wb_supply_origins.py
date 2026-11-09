@@ -235,7 +235,9 @@ class FfWbSupplyOriginAssignments:
                     "pool": POOL,
                     "append_only": True,
                     "correction_requires_current_assignment": True,
-                    "creates_pool_movement": False,
+                    "creates_pool_movement": bool(allowed
+                        and lifecycle.get("status") in {"missing_source", "reservation_pending", "reserved", "shortage"}
+                        and int((lifecycle.get("supply") or {}).get("status_id") or 0) in {4, 5, 6}),
                     "mutates_wb": False,
                 },
                 "supply": supply,

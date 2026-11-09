@@ -122,6 +122,7 @@ class LifecycleTests(unittest.TestCase):
     def test_missed_gate_and_cancellation(self):
         self.seed('1',[(101,6)],4);self.cutover()
         self.assertEqual(self.service.reconcile('1')['status'],'missing_source')
+        self.assertTrue(self.origins.assignment_detail('1')['policy']['creates_pool_movement'])
         self.assertEqual(self.assign('1')['fbo_lifecycle']['status'],'debited')
         self.seed('1',[(101,6)],5,is_cancelled=True)
         self.assertEqual(self.service.reconcile('1')['reason'],'cancelled_after_debit')
