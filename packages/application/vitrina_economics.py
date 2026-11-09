@@ -123,7 +123,7 @@ def project_catalog_economics(plan, *, day, parameters, emit_row_ids=None):
             if pool_state == 'unknown' and not result['available']:
                 result['reason'] = pool_reason + ' ' + result['reason']
             results[version][scope] = result
-            result['partial'] = bool(partial_inputs)
+            result['partial'] = bool(partial_inputs) or basis.get('precision_pending', False)
             result['unknown_scope'] = unknown_scope
             profit = result.get('profit')
             revenue, qty = result.get('revenue'), result.get('quantity')
@@ -144,6 +144,11 @@ def project_catalog_economics(plan, *, day, parameters, emit_row_ids=None):
             if basis.get('evidence'):
                 evidence['evidence']['forward_cost_segments'] = basis['evidence']
                 evidence['reason'] += ' Ранее опубликованные заказы сохраняют прежнюю себестоимость; прирост объёма оценивается по новой.'
+                if basis.get('precision_pending'):
+                    evidence.update(quality_state='partial', quality_label='', completeness_state='partial')
+                    evidence['quality_reason'] = evidence['reason'] = (
+                        'Предварительная оценка: точное время новых наблюдённых заказов относительно расхода неизвестно. '
+                        + evidence['reason'])
             put(scope + f'|proxy_profit_{version}_rub', profit, evidence)
             put(scope + f'|proxy_margin_{version}_pct', profit / revenue if revenue else None, evidence)
             if version == 4:

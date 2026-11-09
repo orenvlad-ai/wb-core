@@ -843,7 +843,12 @@ def _assert_partial_cost_surface(block: PartnerReportBlock) -> None:
         or values["sales_without_cost_rub"] != "500.0000"
         or values["orders_without_cost"] != "1.0000"
         or values["units_without_cost"] != "1.0000"
-        or values["cogs"] != "100000.0000"
+        # The full COGS cell must not label its covered subset as a full
+        # amount. Module contract 50 keeps dependent cells absent when any
+        # sales cost is unknown; the covered amount remains daily evidence.
+        or values["cogs"] is not None
+        or any(values[key] is not None for key in (
+            "finance_margin", "replenishment_reserve", "net_profit", "dividends"))
         or values["estimated_tax"] != "12000.0000"
     ):
         raise AssertionError(f"Partner partial metrics are not coverage-bound: {partial}")
@@ -853,6 +858,7 @@ def _assert_partial_cost_surface(block: PartnerReportBlock) -> None:
         or cost["covered_sales_revenue_rub"] != "200000.0000"
         or cost["uncovered_sales_revenue_rub"] != "500.0000"
         or cost["uncovered_sales_order_count"] != 1
+        or cost["daily_rows"][0]["covered_sales_cogs_rub"] != "100000.0000"
     ):
         raise AssertionError(f"Partner coverage evidence missing: {partial}")
 

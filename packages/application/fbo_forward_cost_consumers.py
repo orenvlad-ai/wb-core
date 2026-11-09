@@ -55,7 +55,8 @@ def effects_for_day(effects, nm_id, day):
         return []
     return sorted((e for e in effects if int(e["nm_id"]) == int(nm_id)
         and _posted_at(e) and business_date_from_timestamp(_posted_at(e)) == day),
-        key=lambda e: (_moment(_posted_at(e)), str(e["effect_id"])))
+        key=lambda e: (_moment(_posted_at(e)), int(_snapshot(e).get("posting_sequence") or 0),
+                       str(e.get("requested_at") or ""), str(e["effect_id"])))
 
 
 def _moment(value):
@@ -68,7 +69,7 @@ def _moment(value):
 
 def operation_timestamp(operation, day):
     """Only source-proven aware time on the selected operation day is usable."""
-    for key in ("cost_effective_at", "rrDate", "saleDt", "orderDt"):
+    for key in ("cost_effective_at", "rrDate", "saleDt"):
         value = str((operation or {}).get(key) or "")
         if "T" not in value and " " not in value:
             continue
@@ -97,11 +98,15 @@ def capture_order_boundary(conn, nm_id, posted_at=None):
     result = dict(contract=CONTRACT, status="pending", business_date=day,
                   nm_id=int(nm_id), reason="current_published_order_boundary_missing")
     table = "sheet_vitrina_v1_ready_snapshots"
-    if not day or table not in tables:
+    if not day or table not in tables or "registry_upload_current_state" not in tables:
+        return result
+    active_bundle = conn.execute("SELECT bundle_version FROM registry_upload_current_state WHERE slot=1").fetchone()
+    if active_bundle is None:
         return result
     prior = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
     for row in conn.execute(f"SELECT snapshot_id,refreshed_at,plan_json FROM {table} "
-            "WHERE as_of_date IN (?,?) ORDER BY refreshed_at DESC,snapshot_id DESC LIMIT 1", (day, prior)):
+            "WHERE bundle_version=? AND as_of_date IN (?,?) ORDER BY refreshed_at DESC,snapshot_id DESC LIMIT 1",
+            (active_bundle[0], day, prior)):
         plan = json.loads(row[2])
         sheet = next((s for s in plan.get("sheets", [])
             if s.get("sheet_name", s.get("name")) == "DATA_VITRINA"), None)
@@ -126,6 +131,7 @@ def capture_order_boundary(conn, nm_id, posted_at=None):
         if quantity <= 0:
             return {**result, "reason": "published_common_cost_quantity_missing"}
         result.update(status="ready", reason="", ready_snapshot_id=row[0], refreshed_at=row[1],
+            bundle_version=active_bundle[0],
             operands={k: format(v, "f") for k, v in values.items()},
             common_quantity=format(quantity, "f"),
             included_effect_ids=[e["effect_id"] for e in plan.get("metadata", {}).get("fbo_forward_cost_epochs", [])
@@ -237,6 +243,8 @@ def order_cost_basis(effects, *, nm_id, day, count, order_sum, current_cost, ver
     if count > previous_count:
         cogs += (count - previous_count) * current_cost
     return dict(cost=cogs / count if count > 0 else current_cost,
+        precision_pending=count > previous_count,
         evidence=dict(contract=CONTRACT, effect_ids=[e["effect_id"] for e in selected],
             frozen_order_count=str(previous_count), current_order_count=str(count),
-            weighted_order_cost_rub=str(cogs), time_precision="published_order_count_segments"))
+            weighted_order_cost_rub=str(cogs), time_precision="published_order_count_segments",
+            precision_pending=count > previous_count))

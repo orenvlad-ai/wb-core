@@ -59,6 +59,7 @@ class ConsumerTests(unittest.TestCase):
         self.assertTrue(frozen["valuation_time_reason"])
         self.assertEqual(resolve({"rrDate": DAY.isoformat()+"T11:00:00"})["valuation_time_precision"], "date_only_frozen")
         self.assertEqual(resolve({"rrDate": DAY.isoformat()+"T00:00:00Z"})["valuation_time_precision"], "date_only_frozen")
+        self.assertEqual(resolve({"rrDate": DAY.isoformat(), "orderDt": DAY.isoformat()+"T11:00:00Z"})["valuation_time_precision"], "date_only_frozen")
         self.assertEqual(consumer.resolve_epoch_cost(base, effects=[effect()], nm_id=TARGET_NM,
             operation_date=DAY-timedelta(days=1), common=True), base)
         self.assertEqual(consumer.resolve_epoch_cost(base, effects=[effect()], nm_id=int(TARGET_NM)+1,
@@ -72,6 +73,9 @@ class ConsumerTests(unittest.TestCase):
         self.assertEqual(profit(projected(plan())), 800)
         result = projected(plan(count=3, revenue=1500))
         self.assertEqual(profit(result), 1190)
+        precision = result["metadata"]["server_cell_presentation"][f"SKU:{TARGET_NM}|proxy_profit_4_rub"][PROXY_DAY]
+        self.assertEqual(precision["quality_state"], "partial")
+        self.assertTrue(precision["evidence"]["forward_cost_segments"]["precision_pending"])
         self.assertEqual(projected(result), result)
         source = plan(count=3, revenue=1500, cost=120)
         source["metadata"]["fbo_forward_cost_epochs"].append(effect(identity="e2", after="1400", day=PROXY_DAY))
@@ -89,17 +93,38 @@ class ConsumerTests(unittest.TestCase):
             conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_active VALUES(1,'v')")
             conn.execute("CREATE TABLE sheet_vitrina_v1_warehouse_functional_balances(version_id,warehouse_key,nm_id,quantity,capital_rub,cost_covered_quantity)")
             conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_balances VALUES('v','ff',?,10,'1000',10)", (TARGET_NM,))
-            conn.execute("CREATE TABLE sheet_vitrina_v1_ready_snapshots(snapshot_id,refreshed_at,plan_json,as_of_date)")
+            conn.execute("CREATE TABLE registry_upload_current_state(slot,bundle_version)")
+            conn.execute("INSERT INTO registry_upload_current_state VALUES(1,'current-bundle')")
+            conn.execute("CREATE TABLE sheet_vitrina_v1_ready_snapshots(snapshot_id,refreshed_at,plan_json,as_of_date,bundle_version)")
             self.assertEqual(consumer.capture_order_boundary(conn,TARGET_NM)["status"], "pending")
             source = plan(cost=100, day=DAY.isoformat())
             source["metadata"] = {}
             source["sheets"][0]["rows"] += [["sku",f"SKU:{TARGET_NM}|own_capital_{stage}_qty",10] for stage in ("WB","FF")]
-            conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES('r','current',?,?)", (json.dumps(source),DAY.isoformat()))
+            conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES('r','current',?,?, 'current-bundle')", (json.dumps(source),DAY.isoformat()))
+            wrong = deepcopy(source)
+            wrong['sheets'][0]['rows'][0][2] = 999
+            conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES('wrong','zz-later',?,?, 'old-bundle')", (json.dumps(wrong),DAY.isoformat()))
             boundary = consumer.capture_order_boundary(conn,TARGET_NM)
             self.assertEqual(boundary["status"], "ready")
             self.assertEqual(boundary["ff_capital_rub"], "1000")
+            self.assertEqual(boundary["ready_snapshot_id"], "r")
+            self.assertEqual(boundary["bundle_version"], "current-bundle")
             self.assertEqual(boundary, consumer.capture_order_boundary(conn,TARGET_NM))
             self.assertEqual(boundary["proof_digest"], consumer.digest({k:v for k,v in boundary.items() if k!="proof_digest"}))
+
+    def test_same_timestamp_uses_immutable_posting_sequence(self):
+        first, second = effect(identity='z-first'), effect(identity='a-second', amount='400', after='1600')
+        first['snapshot']['posting_sequence'] = 1
+        second['snapshot']['posting_sequence'] = 2
+        second['snapshot']['before_wac_rub'] = '120'
+        result = consumer.resolve_epoch_cost(dict(status='resolved',unit_cost_rub='999'),
+            effects=[second,first],nm_id=TARGET_NM,operation_date=DAY,
+            operation={'rrDate':DAY.isoformat()+'T11:00:00Z'},common=True)
+        self.assertEqual(result['unit_cost_rub'],'130')
+        before = consumer.resolve_epoch_cost(dict(status='resolved',unit_cost_rub='999'),
+            effects=[second,first],nm_id=TARGET_NM,operation_date=DAY,
+            operation={'rrDate':DAY.isoformat()+'T09:00:00Z'},common=True)
+        self.assertEqual(before['unit_cost_rub'],'100')
 
     def test_finance_cache_and_partner_signature_share_intraday_epochs(self):
         fixture = fixtures.SharedCostReportTests()
