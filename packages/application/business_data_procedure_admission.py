@@ -46,13 +46,17 @@ def business_write_is_blocked(runtime_dir: Path) -> bool:
 class AdmissionLease:
     """One independent open-file description; transferable to a worker thread."""
 
-    def __init__(self, runtime_dir: Path, *, independent: bool = False, _held_history_completion: bool = False, _held_fbs_recovery: bool = False, _held_fbo_close: bool = False) -> None:
+    def __init__(self, runtime_dir: Path, *, independent: bool = False, _held_history_completion: bool = False, _held_fbs_recovery: bool = False, _held_fbo_close: bool = False, _held_fbo_activation: bool = False) -> None:
         self.runtime_dir = Path(runtime_dir).resolve()
         self.pid = os.getpid()
         self.fd: int | None = None
         held_binding = None
         held_validator = None
-        if _held_history_completion:
+        if _held_fbo_activation:
+            from packages.application.fbo_lifecycle_activation import require_held_activation
+            held_validator = require_held_activation
+            held_binding = held_validator(self.runtime_dir)
+        elif _held_history_completion:
             from packages.application.historical_receipt_completion import require_held_completion
             held_validator = require_held_completion
             held_binding = require_held_completion(self.runtime_dir)
@@ -103,6 +107,11 @@ class AdmissionLease:
     def held_current_fbo_close(cls, runtime_dir: Path):
         """Independent lease for the registered current FBO supply owner only."""
         return cls(runtime_dir, independent=True, _held_fbo_close=True)
+
+    @classmethod
+    def held_fbo_activation(cls, runtime_dir: Path):
+        """Only the bounded activation owner can initialize the new policy."""
+        return cls(runtime_dir, independent=True, _held_fbo_activation=True)
 
     def close(self) -> None:
         if self.fd is not None:

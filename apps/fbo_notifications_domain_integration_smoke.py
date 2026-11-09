@@ -56,6 +56,7 @@ def main():
             for sid in ("1", "2", "3", "4"):
                 conn.execute("UPDATE sheet_vitrina_v1_wb_supplies SET raw_detail_json='{}',raw_package_json='[]' WHERE supply_id=?", (sid,))
         fixture.runtime.create_ff_stock_reservation_operation(operation_id="legacy-first", source_key="legacy-first", supply_id="supply:1", supply_revision="legacy", operation_type="reserve", created_at=NOW, diagnostics={}, lines=[dict(nm_id=101, quantity_delta=13500)], expected_current={})
+        fixture.runtime.create_ff_stock_reservation_operation(operation_id="legacy-second", source_key="legacy-second", supply_id="2", supply_revision="legacy", operation_type="reserve", created_at=NOW, diagnostics={}, lines=[dict(nm_id=101, quantity_delta=14000)], expected_current={})
         baseline = physical(fixture)
         fixture.cutover()
         assert physical(fixture) == baseline
@@ -135,6 +136,34 @@ def main():
             page.keyboard.press("Escape"); page.reload()
             expect(page.locator("[data-notification-dot]")).to_be_hidden()
             bell.click(); expect(page.locator(".notification-item")).to_have_count(1)
+            # Stock becomes available after the other reservation is cancelled.
+            # A read must keep the task visible until a real retry reserves it.
+            fixture.seed("1", [(101, 13500)], status=2, is_cancelled=True)
+            fixture.service.reconcile("1")
+            pending = get(base, origin+"/2")[1]["fbo_lifecycle"]
+            assert pending["status"] == "reservation_pending" and pending["reserved_qty"] == 0
+            assert fixture.runtime.list_ff_stock_reservations(supply_id="2") == []
+            context.unroute("**/wb-supply-origins/2", lose)
+            page.reload(); bell.click()
+            expect(page.locator(".notification-item")).to_have_count(1)
+            expect(page.locator("[data-notification-panel]")).to_contain_text("Завершите резервирование")
+            page.locator(".notification-item").get_by_role("button", name="Уточнить").click()
+            expect(frame.locator("#wbSupplyFfOriginMessage")).to_contain_text("Товар доступен")
+            expect(save).to_be_enabled(); expect(save).to_have_text("Проверить резерв")
+            save.click()
+            expect(frame.locator("#wbSupplyFfOriginMessage")).to_contain_text("Товар зарезервирован: 14 000 шт.")
+            assert sum(row["quantity"] for row in fixture.runtime.list_ff_stock_reservations(supply_id="2")) == 14000
+            assert physical(fixture) == baseline
+            # Read the actual facility/pool models with the fixture reader enabled.
+            with patch.object(entry.ff_pool_surface, "_feature", return_value={"reader_effective": True, "epoch": 1}):
+                detail = entry.ff_pool_surface.facility_detail("facility-a")
+                fbo = next(pool for pool in detail["pools"] if pool["pool"] == "FBO")
+                assert fbo["reservation_quantity"] == 14000
+                assert fbo["available_quantity"] == fbo["physical_quantity"] - 14000
+                pool = entry.ff_pool_surface.pool_detail("facility-a", "FBO")
+                line = next(line for line in pool["balances"] if line["nm_id"] == 101)
+                assert line["reserved_quantity"] == 14000 and line["available_quantity"] == 13250
+                assert pool["reservation_quantity"] == 14000 and pool["reservation_status"] == "exact_lifecycle"
             assert not errors, errors
             context.close(); browser.close()
         # Repeated reads remain pure after the writes and have stable reason identity.

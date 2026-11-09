@@ -7379,7 +7379,16 @@ class RegistryUploadHttpEntrypoint:
     def handle_fbo_notifications_request(self) -> dict[str, Any]:
         # Domain read opens SQLite read-only and never bootstraps lifecycle schema.
         from packages.application.fbo_supply_lifecycle import FboSupplyLifecycle
-        return FboSupplyLifecycle(db_path=self.runtime.db_path).notifications()
+        from packages.application.fbo_forward_costs import notification_items
+        lifecycle = FboSupplyLifecycle(db_path=self.runtime.db_path)
+        result = lifecycle.notifications()
+        with lifecycle._connect(readonly=True) as conn:
+            costs = notification_items(conn)
+        if costs:
+            result["status"] = "ready"
+            result["notifications"] = [*result.get("notifications", []), *costs]
+            result["items"] = result["notifications"]
+        return result
 
     def handle_ff_wb_supply_origins_request(self, **filters: Any) -> dict[str, Any]:
         return self.ff_wb_supply_origins.assignments_page(

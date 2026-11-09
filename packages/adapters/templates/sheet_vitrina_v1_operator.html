@@ -13632,7 +13632,7 @@
           : null;
         const selected = wbSupplyFfOriginSelect ? String(wbSupplyFfOriginSelect.value || "") : "";
         const lifecycle = (wbSupplyFfOriginPayload || {}).fbo_lifecycle || {};
-        const retryReserve = lifecycle.status === "shortage";
+        const retryReserve = ["shortage", "reservation_pending"].includes(lifecycle.status);
         const unchanged = Boolean(current && String(current.facility_id || "") === selected) && !retryReserve;
         wbSupplyFfOriginSaveButton.disabled = wbSupplyFfOriginLoading || wbSupplyFfOriginSaving ||
           !Boolean(wbSupplyFfOriginPayload && wbSupplyFfOriginPayload.assignment_allowed) ||
@@ -13679,7 +13679,7 @@
         }
         if (wbSupplyFfOriginSaveButton) {
           const lifecycle = (wbSupplyFfOriginPayload || {}).fbo_lifecycle || {};
-          wbSupplyFfOriginSaveButton.textContent = wbSupplyFfOriginSaving ? "Сохраняем..." : lifecycle.status === "shortage" ? "Проверить резерв" : lifecycle.status === "missing_source" ? "Сохранить и зарезервировать" : "Сохранить источник";
+          wbSupplyFfOriginSaveButton.textContent = wbSupplyFfOriginSaving ? "Сохраняем..." : ["shortage", "reservation_pending"].includes(lifecycle.status) ? "Проверить резерв" : lifecycle.status === "missing_source" ? "Сохранить и зарезервировать" : "Сохранить источник";
         }
         updateWbSupplyFfOriginSaveState();
         if (wbSupplyFfOriginError) {
@@ -13692,13 +13692,14 @@
         }
         const lifecycle = (wbSupplyFfOriginPayload || {}).fbo_lifecycle || {};
         const lifecycleStatus = String(lifecycle.status || "");
-        if (["reserved", "debited", "shortage", "needs_correction", "missing_goods"].includes(lifecycleStatus)) {
+        if (["reserved", "debited", "shortage", "reservation_pending", "needs_correction", "missing_goods"].includes(lifecycleStatus)) {
           const shortages = Array.isArray(lifecycle.shortages) ? lifecycle.shortages : [];
           const shortageText = shortages.map((row) => "SKU " + String(row.nm_id || row.vendor_code || "—") + ": не хватает " + formatWbNumber(row.missing) + " шт.").join("; ");
           const source = current ? [current.facility_code, current.facility_name].filter(Boolean).join(" · ") + " / FBO. " : "";
           const copy = lifecycleStatus === "reserved"
             ? "Товар зарезервирован: " + formatWbNumber(lifecycle.reserved_qty) + " шт. Списание — при статусе «Отгружено на воротах»."
             : lifecycleStatus === "debited" ? "Списание FBO подтверждено." + (lifecycle.debited_qty !== undefined ? " " + formatWbNumber(lifecycle.debited_qty) + " шт." : "")
+            : lifecycleStatus === "reservation_pending" ? "Товар доступен. Нажмите «Проверить резерв», чтобы завершить резервирование."
             : lifecycleStatus === "shortage" ? "Резерв не создан полностью. " + shortageText + " Товар из FBS автоматически не используется."
             : "Резерв требует проверки. " + shortageText;
           setWbSupplyFfOriginMessage(source + copy, ["reserved", "debited"].includes(lifecycleStatus) ? "success" : "warning");
