@@ -31,6 +31,9 @@ from packages.application.warehouse_archival_estimate import (
     active_archival_estimates,
     archival_estimate_for_nm_id,
 )
+from packages.application.fbo_forward_cost_consumers import (
+    load_effects as _forward_effects, resolve_epoch_cost,
+)
 
 
 CANONICAL_COST_POLICY_DATE = date(2026, 7, 1)
@@ -146,6 +149,7 @@ class CanonicalChannelCostSnapshot:
     fbs_pooled_state_dates_by_nm: Mapping[str, tuple[str, ...]]
     fbs_pooled_states_by_nm: Mapping[str, tuple[Mapping[str, Any], ...]]
     common_inventory_cost_by_date_nm: Mapping[tuple[str, str], Mapping[str, Any]]
+    forward_effects: tuple[Mapping[str, Any], ...] = ()
 
     @classmethod
     def from_connection(cls, conn: sqlite3.Connection) -> "CanonicalChannelCostSnapshot":
@@ -252,6 +256,7 @@ class CanonicalChannelCostSnapshot:
             fbs_pooled_state_dates_by_nm=pooled_state_dates,
             fbs_pooled_states_by_nm=pooled_states,
             common_inventory_cost_by_date_nm=common_inventory_costs,
+            forward_effects=tuple(_forward_effects(conn)),
         )
 
 
@@ -697,6 +702,7 @@ def resolve_channel_location_cost(
     fbs_order_id: int | None = None,
     snapshot: CanonicalChannelCostSnapshot | None = None,
     shared_cost_snapshot: SharedSkuCostSnapshot | None = None,
+    forward_effects=None,
 ) -> dict[str, Any]:
     """Resolve one sale/return through the single channel-aware contract.
 
@@ -710,7 +716,10 @@ def resolve_channel_location_cost(
     # The opt-in daily source owns all channels after its boundary. Resolve
     # before loading any legacy value or Lifecycle classification evidence.
     if shared_cost_snapshot is not None and shared_cost_snapshot.applies_to(operation_date):
-        return shared_cost_snapshot.resolve(nm_id=nm_id, operation_date=operation_date)
+        effects = forward_effects if forward_effects is not None else (
+            snapshot.forward_effects if snapshot is not None else _forward_effects(conn))
+        return resolve_epoch_cost(shared_cost_snapshot.resolve(nm_id=nm_id, operation_date=operation_date),
+            effects=effects, nm_id=nm_id, operation_date=operation_date, operation=operation, common=True)
     state = snapshot or CanonicalChannelCostSnapshot.from_connection(conn)
     classification = classify_finance_channel(
         state,
@@ -809,14 +818,15 @@ def resolve_channel_location_cost(
         operation_date=operation_date,
         snapshot=state.wb,
     )
-    return {
+    return resolve_epoch_cost({
         **wb,
         "formula_version": CHANNEL_LOCATION_COST_FORMULA_VERSION,
         "channel": "WB",
         "pool": "FBO",
         "facility_id": "wb",
         "channel_classification": classification,
-    }
+    }, effects=forward_effects if forward_effects is not None else state.forward_effects,
+        nm_id=nm_id, operation_date=operation_date, operation=operation)
 
 
 def _identity_hash(value: Any) -> str:

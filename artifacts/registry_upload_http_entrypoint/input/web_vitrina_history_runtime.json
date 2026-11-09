@@ -2,16 +2,16 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:cb917419d510525a64890b60f1eddbe17db5a81a55e39b068b1cddb1f53d5248",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:2b021f8b1cf684beede13185b927ed866662cc214bfca6ec382b6c732e94d0ff",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
     "packages/application/sheet_vitrina_v1_web_vitrina.py": "426ca35dc0074d87c064df72cdfbb2e3798a725c75e374df9f6e6b2c9c4c1f13",
     "packages/application/sheet_vitrina_v1_inventory_planning.py": "379b513e50bc13c4c4bc616e9c17a6b7d37ec5253bc08c303964fcc6d5ec1701",
     "packages/application/management_inventory_history.py": "8fd19d91d31f8682da44cf7c87f38a5faf22d1c5430b7a81fb946ec01bd6cbd2",
     "packages/application/inventory_planning_read_model.py": "b2b3be72731af1a730c949683c85931241d7a995a9a44679ab67985da22341bf",
-    "packages/application/canonical_wb_cost_resolver.py": "cf91ff4f2c9ae01827b87181edd214338178464123f853b72d5a7bdaf9b3ca50",
+    "packages/application/canonical_wb_cost_resolver.py": "b968498c8a56cf820554d1c94f510c6806cab53ffe15ae53f4642da9827641b5",
     "packages/application/inventory_cost_blend.py": "e86949aef6462ca2244d8d6772d0f733dcaf781d2d1a1c5ac942854687c88218",
-    "packages/application/vitrina_economics.py": "84fd424d0f47f8f77ccbaff9a7a37cf159f9e0d885ea134756d6e487107bab5b",
+    "packages/application/vitrina_economics.py": "4cf564a552c955a9b238dbdf30130b04fa108ffc210bd4ff47e2172078b84653",
     "packages/application/web_vitrina_management_history.py": "e43d04b113baa805cfc8eb48a3cf884480aa1da938ddf683c123cd26fc01ed4b",
     "packages/application/ff_pool_fbs_lifecycle.py": "7bad6f5719158311e7fa5f85e57e422d79d26b6bfa0804ae9ad6dd9f597fb5f9",
     "packages/application/sheet_vitrina_v1_buyout_percent.py": "cfa65410f9a9cb41555bcb03967c1d8e62c7dfa3537eec258b40e022c1099628",
@@ -44,7 +44,9 @@
     "packages/application/wb_fbs_warehouse_registry.py": "42f7fcd62b16cc4d6e0a2ee5f4e3f6f4485248f4f4c34efdb9cf488eb0aacef8",
     "packages/application/historical_receipt_completion.py": "934beefa1078490bf08f75643ac5854e3caf2cddaef319a000e517ade0fae713",
     "packages/application/historical_publication_retirement.py": "55fc0d331a4896381956e026a945b78785f9555c41235bdb11d317f8518cb891",
-    "packages/application/vitrina_last_known_cost.py": "1776ff13ef1d9fdbae97fd604e64725f9caf512e5c7674dc4e6a0fb24d2bfb6c"
+    "packages/application/vitrina_last_known_cost.py": "1776ff13ef1d9fdbae97fd604e64725f9caf512e5c7674dc4e6a0fb24d2bfb6c",
+    "packages/application/fbo_forward_cost_consumers.py": "990c2b05895d53cbe0e059db6f453bf381ce57949c5e7e3daba6d281083f3cfa",
+    "packages/application/fbo_forward_costs.py": "f1cc8d85e933a731767d0aa9e617fee4a567dee5d6bd58001e6d8582b4017895"
   },
   "group_migration_root": "/mnt/wb-core-extra100/web-vitrina-history-groups-candidate",
   "repair_code_hashes": {

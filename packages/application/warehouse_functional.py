@@ -4231,6 +4231,37 @@ class WarehouseFunctionalBlock:
             cutover_mode=kind == "functional_cutover",
             allow_partial=kind == "hourly_wb_sync",
         )
+        forward_cost_updates = []
+        forward_state = capture.get("fbo_forward_cost_policy") or {}
+        if forward_state and kind != "functional_cutover":
+            from packages.application.fbo_forward_costs import apply_pending
+            if kind == "hourly_wb_sync":
+                lines, forward_cost_updates = apply_pending(lines, forward_state,
+                    snapshot=capture["wb_snapshot"], posted_at=captured_at, business_date=effective_date)
+            for effect in forward_cost_updates:
+                if effect["status"] == "posted":
+                    saved = _loads(effect["snapshot_json"], {})
+                    events.append({"event_id":effect["effect_id"],"event_type":"wb_late_fulfillment_cost",
+                        "source_id":effect["upload_id"],"source_fingerprint":effect["source_revision"],
+                        "business_date":effective_date,"nm_id":effect["nm_id"],"quantity":"0",
+                        "capital_rub":effect["amount_rub"],"provenance":saved})
+            # The current incremental pool is authoritative after activation.
+            # Historical rows remain exactly as published; no late fee enters replay.
+            with _connect(self.runtime.db_path) as forward_conn:
+                persisted = forward_conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_warehouse_wb_daily_cost WHERE cutover_id=? AND as_of_date<?",
+                    (FUNCTIONAL_CUTOVER_ID,effective_date)).fetchall()
+            frozen = {(str(row["as_of_date"]),int(row["nm_id"])):{
+                "as_of_date":str(row["as_of_date"]),"nm_id":int(row["nm_id"]),
+                "quantity":str(row["quantity"]),"wac_rub":str(row["wac_rub"]),
+                "capital_rub":str(row["capital_rub"]),"quality":str(row["quality"]),
+                "provenance":_loads(row["provenance_json"],{}),"fingerprint":str(row["fingerprint"])} for row in persisted}
+            post_cutover_wb_cost_projection = [frozen.get((row["as_of_date"],int(row["nm_id"])),row)
+                for row in post_cutover_wb_cost_projection if row["as_of_date"] != effective_date]
+            post_cutover_wb_cost_projection.extend(_daily_wb_cost_row(
+                day=effective_date,nm_id=line.nm_id,quantity=line.quantity,wac=line.wac,
+                quality=line.quality,provenance={**line.provenance,"forward_cost_policy":"fbo_forward_cost_v1"})
+                for line in lines if line.warehouse_key==STAGE_WB and line.wac is not None)
         historical_wb_cost_projection = (
             pre_cutover_wb_cost_projection + post_cutover_wb_cost_projection
         )
@@ -4283,6 +4314,8 @@ class WarehouseFunctionalBlock:
             "summaries": summaries,
             "unmatched_doprinato": unmatched,
             "new_events": events,
+            "fbo_forward_cost_updates": forward_cost_updates,
+            "fbo_forward_cost_policy_active": bool(forward_state),
             "movement_documents": movement_documents,
             "supplier_cost_states": supplier_cost_states,
             "targeted_recalc_requests": [
@@ -4714,9 +4747,11 @@ class WarehouseFunctionalBlock:
                     conn.execute(
                         """DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost
                            WHERE cutover_id=? AND as_of_date>=?""",
-                        (FUNCTIONAL_CUTOVER_ID, cutover_date),
+                        (FUNCTIONAL_CUTOVER_ID, str(normalized["effective_date"])[:10] if normalized.get("fbo_forward_cost_policy_active") else cutover_date),
                     )
                 for item in normalized.get("historical_wb_cost_projection") or []:
+                    if normalized.get("fbo_forward_cost_policy_active") and str(item.get("as_of_date") or "") < str(normalized["effective_date"])[:10]:
+                        continue
                     if cutover_date and str(item.get("as_of_date") or "")[:10] < cutover_date:
                         continue
                     conn.execute(
@@ -4857,6 +4892,8 @@ class WarehouseFunctionalBlock:
                             now,
                         ),
                     )
+                from packages.application.fbo_forward_costs import commit_updates as commit_forward_cost_updates
+                commit_forward_cost_updates(conn, normalized.get("fbo_forward_cost_updates") or [])
                 conn.execute(
                     """INSERT INTO sheet_vitrina_v1_warehouse_functional_active(slot,version_id,updated_at)
                        VALUES(1,?,?) ON CONFLICT(slot) DO UPDATE SET version_id=excluded.version_id,
@@ -6557,7 +6594,11 @@ class WarehouseFunctionalBlock:
                     provenance=provenance,
                 )
 
-        downstream_components = _supply_downstream_component_index(capture["downstream_cost_rows"])
+        forward_state = capture.get("fbo_forward_cost_policy") or {}
+        forward_supply_ids = {str(value) for row in forward_state.get("lifecycle", [])
+            for value in (row.get("supply_id"),row.get("cache_key"),_loads(row.get("state_json"),{}).get("wb_supply_id")) if value}
+        downstream_components = _supply_downstream_component_index(
+            capture["downstream_cost_rows"], forward_supply_ids=forward_supply_ids)
         active_reservations = _active_ff_reservation_index(
             capture.get("ff_reservation_operations") or [],
             capture.get("ff_reservation_lines") or [],
@@ -6862,6 +6903,9 @@ class WarehouseFunctionalBlock:
             doprinato=doprinato_rows,
             audit=doprinato_audit,
         )
+        from packages.application.fbo_forward_costs import doprinato_events
+        new_events.extend(doprinato_events(doprinato_audit, forward_state,
+            posted_at=captured_at, business_date=business_date_from_timestamp(captured_at), accepted_events=new_events))
         unmatched.extend(transitional_unmatched)
         if cutover_mode and discrepancy_balances:
             raise WarehouseFunctionalError("functional cutover discrepancy opening must be zero")
@@ -8192,6 +8236,10 @@ def _source_rows(
             # Included unchanged by _guarded_local_sources in capture/apply CAS.
             # Absent/empty receipt tables preserve legacy source digests.
             result["current_fbo_warehouse_closures"]=closures
+    from packages.application.fbo_forward_costs import capture as capture_forward_costs
+    forward_cost_state = capture_forward_costs(conn)
+    if forward_cost_state:
+        result["fbo_forward_cost_policy"] = forward_cost_state
     result["ff_operations"] = sorted(
         result["ff_operations"],
         key=_ff_operation_replay_sort_key,
@@ -8856,9 +8904,12 @@ def _active_ff_reservation_index(
 
 def _supply_downstream_component_index(
     rows: Iterable[Mapping[str, Any]],
+    *, forward_supply_ids: set[str] | None = None,
 ) -> dict[tuple[str, int], dict[str, Any]]:
     """Return validated non-FF supply components using Decimal arithmetic."""
 
+    forward_supply_ids = {alias for identity in (forward_supply_ids or set())
+        for alias in (str(identity),str(identity).removeprefix("supply:"))}
     result: dict[tuple[str, int], dict[str, Any]] = {}
     for row in rows:
         supply_id = str(row.get("wb_supply_id") or "")
@@ -8890,6 +8941,26 @@ def _supply_downstream_component_index(
                 "inputs_hash": str(row.get("inputs_hash") or ""), "missing_cost_components": missing,
                 "historical_ff_unit_cost_rub": abs(_decimal(historical["capital_delta_rub"]) / _decimal(historical["quantity_delta"])),
                 "historical_native_plan_digest": historical.get("plan_digest")}
+            continue
+        if supply_id in (forward_supply_ids or set()):
+            missing = []
+            known = {}
+            for field, label in (("ff_services_per_unit_rub", "ff_services"),
+                    ("ff_storage_per_unit_rub", "ff_storage"),
+                    ("transit_per_unit_rub", "wb_transit"),
+                    ("wb_acceptance_per_accepted_unit_rub", "wb_paid_acceptance")):
+                value = row.get(field)
+                if value is None or (label == "wb_transit" and transit_status not in {"transit_confirmed", "direct_zero_confirmed"}):
+                    missing.append(label)
+                    known[label] = ZERO
+                else:
+                    known[label] = _decimal(value)
+                    if known[label] < ZERO:
+                        raise WarehouseFunctionalError("negative known forward FBO fee")
+            result[(supply_id,nm_id)] = {
+                "pre_acceptance_addon": known["ff_services"] + known["ff_storage"] + known["wb_transit"],
+                "acceptance_addon": known["wb_paid_acceptance"],
+                "missing_cost_components": missing,"inputs_hash": str(row.get("inputs_hash") or "")}
             continue
         if transit_status not in {"transit_confirmed", "direct_zero_confirmed"}:
             continue

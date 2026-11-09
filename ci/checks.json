@@ -77,6 +77,8 @@
     },
     "playwright_chromium": {
       "scripts": [
+        "apps/fbo_notifications_ui_http_smoke.py",
+        "apps/fbo_notifications_domain_integration_smoke.py",
         "apps/stock_monitor_browser_smoke.py",
         "apps/operator_complaint_runs_browser_smoke.py",
         "apps/operator_settings_facilities_browser_smoke.py",
@@ -227,6 +229,16 @@
       "patterns": ["packages/application/fbs_overhead_presentation.py", "apps/fbs_overhead_presentation_smoke.py"],
       "commands": [["python3", "apps/fbs_overhead_presentation_smoke.py"]],
       "pip": []
+    },
+    "fbo_supply_lifecycle": {
+      "patterns": ["packages/application/fbo_supply_lifecycle.py", "packages/application/fbo_dispatch_cost_source.py", "packages/application/fbo_lifecycle_activation.py", "packages/application/ff_wb_supply_origins.py", "packages/application/ff_stock_ledger.py", "apps/fbo_supply_lifecycle_smoke.py", "apps/fbo_dispatch_cost_source_smoke.py", "apps/fbo_lifecycle_activation_smoke.py", "apps/fbo_notifications_ui_http_smoke.py", "apps/fbo_notifications_domain_integration_smoke.py"],
+      "commands": [["python3", "apps/fbo_supply_lifecycle_smoke.py"], ["python3", "apps/fbo_dispatch_cost_source_smoke.py"], ["python3", "apps/fbo_lifecycle_activation_smoke.py"], ["python3", "apps/fbo_notifications_ui_http_smoke.py"], ["python3", "apps/fbo_notifications_domain_integration_smoke.py"]],
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0", "pypdf==6.4.1"]
+    },
+    "fbo_forward_costs": {
+      "patterns": ["packages/application/fbo_forward_costs.py", "packages/application/fbo_forward_cost_consumers.py", "packages/application/fulfillment_recalc_intents.py", "packages/application/fulfillment_services.py", "packages/application/warehouse_functional.py", "packages/application/canonical_wb_cost_resolver.py", "packages/application/vitrina_economics.py", "apps/fbo_forward_costs_smoke.py", "apps/fbo_forward_cost_consumers_smoke.py"],
+      "commands": [["python3", "apps/fbo_forward_costs_smoke.py"], ["python3", "apps/fbo_forward_cost_consumers_smoke.py"]],
+      "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]
     },
     "current_fbo_supply_close": {
       "patterns": ["packages/application/current_fbo_supply_close.py", "packages/application/current_fbo_supply_close_apply.py", "packages/application/current_fbo_supply_cost_source.py", "apps/current_fbo_supply_close_smoke.py", "apps/current_fbo_supply_cost_source_smoke.py"],
@@ -1447,6 +1459,8 @@
         "packages/application/management_inventory_history.py",
         "packages/application/inventory_planning_read_model.py",
         "packages/application/canonical_wb_cost_resolver.py",
+        "packages/application/fbo_forward_cost_consumers.py",
+        "packages/application/fbo_forward_costs.py",
         "packages/application/inventory_cost_blend.py",
         "packages/application/vitrina_economics.py",
         "packages/application/web_vitrina_management_history.py",

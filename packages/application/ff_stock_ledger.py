@@ -574,6 +574,12 @@ class FfStockLedgerBlock:
             str(item.get("supply_id") or "") for item in reservation_rows
         }
         for supply_id in sorted(reservation_supply_ids - active_supply_ids):
+            # Partial/missing observations are not cancellation evidence. The
+            # addressed lifecycle releases only confirmed pre-debit cancels.
+            from packages.application.fbo_supply_lifecycle import feature_enabled, owns_supply
+            with sqlite3.connect(self.runtime.db_path) as fbo_conn:
+                if feature_enabled(fbo_conn) or owns_supply(fbo_conn, supply_id):
+                    continue
             supply_reservations = [
                 item
                 for item in reservation_rows
@@ -1050,6 +1056,13 @@ class FfStockLedgerBlock:
             or _first_present(record, "supply_id", "wb_supply_id")
             or ""
         ).strip()
+        from packages.application.fbo_supply_lifecycle import CURRENT, _tables
+        with sqlite3.connect(self.runtime.db_path) as fbo_conn:
+            if CURRENT in _tables(fbo_conn) and fbo_conn.execute(
+                f"SELECT 1 FROM {CURRENT} WHERE supply_id IN (?,?) OR cache_key=?",
+                (supply_id, supply_id.removeprefix("supply:"), "supply:" + supply_id.removeprefix("supply:")),
+            ).fetchone():
+                raise ValueError("addressed FBO cancellation requires explicit corrective document")
         _cache_key, _identity, current_source_key = _wb_supply_debit_identity(
             record=record,
             normalized=normalized,
@@ -1266,6 +1279,22 @@ class FfStockLedgerBlock:
 
     def record_wb_supply_debit(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
         normalized = dict(record.get("normalized") or record)
+        # Facility/FBO mode has one owner. Until explicit cutover, fail closed
+        # rather than falling back to historical aggregate-only writeoff.
+        from packages.application.fbo_supply_lifecycle import FboSupplyLifecycle, feature_enabled, owns_supply
+        reference = str(record.get("cache_key") or normalized.get("cache_key") or record.get("supply_id") or normalized.get("supply_id") or "")
+        with sqlite3.connect(self.runtime.db_path) as fbo_conn:
+            addressed = feature_enabled(fbo_conn) or owns_supply(fbo_conn, reference)
+        if addressed and _optional_int(normalized.get("virtual_type_id")) != WB_SKIP_VIRTUAL_TYPE_ID and str(normalized.get("type_label") or "").strip() != WB_SKIP_TYPE_LABEL:
+            result = FboSupplyLifecycle(db_path=self.runtime.db_path, timestamp_factory=self.timestamp_factory, runtime=self.runtime).reconcile(reference)
+            if result.get("status") == "debited" and result.get("operation_id"):
+                operation = self.runtime.load_ff_stock_operation(result["operation_id"])
+                if operation:
+                    operation["idempotent"] = bool(result.get("idempotent"))
+                    operation["fbo_lifecycle"] = result
+                    operation["own_product_capital"] = self._record_own_capital_wb_supply(record, normalized)
+                    return operation
+            return {"skip_reason": "fbo_lifecycle_" + result["status"], "supply_id": result.get("supply_id"), "fbo_lifecycle": result}
         status_id = _optional_int(normalized.get("status_id"))
         if status_id not in WB_DEBIT_STATUS_IDS:
             return None

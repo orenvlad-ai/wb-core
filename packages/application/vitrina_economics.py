@@ -109,14 +109,21 @@ def project_catalog_economics(plan, *, day, parameters, emit_row_ids=None):
         unknown_scope = any(c.get('completeness_state') == 'unknown_scope' for c in partial_inputs.values())
         for version, parameter in ((3, p3), (4, p4)):
             pool_state, pool_reason = pool[scope]
-            result = (calculate(operands, parameter, version=version, day=day)
+            from packages.application.fbo_forward_cost_consumers import order_cost_basis
+            basis = order_cost_basis(working['metadata'].get('fbo_forward_cost_epochs', []),
+                nm_id=int(scope.removeprefix('SKU:')), day=day,
+                count=number(operands['order_count']), order_sum=number(operands['order_sum']),
+                current_cost=number(operands['cost']), version=version, parameters=parameter)
+            result = (calculate({**operands, 'cost': basis['cost']}, parameter, version=version, day=day)
                       if pool_state != 'inactive' else {'available': False, 'reason': pool_reason})
+            if basis.get('reason') and pool_state != 'inactive':
+                result = {'available': False, 'reason': basis['reason']}
             # Known zero activity can establish the result without an inventory
             # signal; otherwise an unknown pool member remains an explicit gap.
             if pool_state == 'unknown' and not result['available']:
                 result['reason'] = pool_reason + ' ' + result['reason']
             results[version][scope] = result
-            result['partial'] = bool(partial_inputs)
+            result['partial'] = bool(partial_inputs) or basis.get('precision_pending', False)
             result['unknown_scope'] = unknown_scope
             profit = result.get('profit')
             revenue, qty = result.get('revenue'), result.get('quantity')
@@ -134,6 +141,14 @@ def project_catalog_economics(plan, *, day, parameters, emit_row_ids=None):
                 evidence.update(quality_state='partial', quality_label='', quality_reason=reason,
                                 reason=reason, completeness_state='unknown_scope' if unknown_scope else 'partial')
                 evidence['evidence']['partial_operands'] = sorted(partial_inputs)
+            if basis.get('evidence'):
+                evidence['evidence']['forward_cost_segments'] = basis['evidence']
+                evidence['reason'] += ' Ранее опубликованные заказы сохраняют прежнюю себестоимость; прирост объёма оценивается по новой.'
+                if basis.get('precision_pending'):
+                    evidence.update(quality_state='partial', quality_label='', completeness_state='partial')
+                    evidence['quality_reason'] = evidence['reason'] = (
+                        'Предварительная оценка: точное время новых наблюдённых заказов относительно расхода неизвестно. '
+                        + evidence['reason'])
             put(scope + f'|proxy_profit_{version}_rub', profit, evidence)
             put(scope + f'|proxy_margin_{version}_pct', profit / revenue if revenue else None, evidence)
             if version == 4:

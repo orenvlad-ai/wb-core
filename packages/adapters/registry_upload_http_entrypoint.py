@@ -469,6 +469,7 @@ DEFAULT_FF_POOL_FACILITY_PREVIEW_PATH = f"{DEFAULT_FF_POOL_FACILITIES_PATH}/prev
 DEFAULT_FF_POOL_DOCUMENTS_PATH = f"{DEFAULT_FF_POOL_PATH}/documents"
 DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH = f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/overhead/preview"
 DEFAULT_FF_POOL_REQUESTS_PATH = f"{DEFAULT_FF_POOL_PATH}/requests"
+DEFAULT_FBO_NOTIFICATIONS_PATH = f"{DEFAULT_FF_POOL_PATH}/notifications"
 DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH = f"{DEFAULT_FF_POOL_PATH}/wb-supply-origins"
 DEFAULT_FF_POOL_FBS_ORDERS_PATH = f"{DEFAULT_FF_POOL_PATH}/fbs-orders"
 DEFAULT_FF_POOL_WB_WAREHOUSES_PATH = f"{DEFAULT_FF_POOL_PATH}/wb-warehouses"
@@ -5425,7 +5426,10 @@ def _build_handler(
                         as_attachment=True,
                     )
                     return
-                _write_etag_json_response(self, HTTPStatus.OK, result)
+                if parsed.path.rstrip("/") == DEFAULT_FBO_NOTIFICATIONS_PATH:
+                    _write_json_response(self, HTTPStatus.OK, result, extra_headers={"Cache-Control": "private, no-store"})
+                else:
+                    _write_etag_json_response(self, HTTPStatus.OK, result)
                 return
 
             if parsed.path == DEFAULT_STOCK_MONITOR_PATH:
@@ -7551,6 +7555,8 @@ def _handle_ff_pool_get(
             business_date_to=str(params.get("business_date_to") or ""),
             search=str(params.get("search") or ""),
         )
+    if normalized == DEFAULT_FBO_NOTIFICATIONS_PATH:
+        return entrypoint.handle_fbo_notifications_request()
     if normalized == DEFAULT_FF_POOL_WB_SUPPLY_ORIGINS_PATH:
         current_only_value = str(params.get("current_only") or "1").strip().lower()
         if current_only_value not in {"0", "1", "false", "true", "no", "yes"}:
@@ -12053,6 +12059,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "read_path": read_path,
         "performance_path": DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH,
         "operator_path": operator_path,
+        "fbo_notifications_path": DEFAULT_FBO_NOTIFICATIONS_PATH,
         "supplier_view_path": "/sheet-vitrina-v1/supply-view" if os.environ.get("SUPPLIER_VIEW_ENABLED") == "1" else "",
         "auto_updates_path": DEFAULT_AUTO_UPDATES_MONITORING_PATH,
         "warehouses_path": DEFAULT_WAREHOUSES_PATH,

@@ -535,6 +535,8 @@ def command_dependency_checks():
         "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py",
         "apps/sku_inventory_balance_browser_smoke.py",
+        "apps/fbo_notifications_ui_http_smoke.py",
+        "apps/fbo_notifications_domain_integration_smoke.py",
     )
     install = ["python3", "-m", "playwright", "install", "--with-deps", "chromium"]
 

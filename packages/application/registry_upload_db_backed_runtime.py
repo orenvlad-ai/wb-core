@@ -530,6 +530,11 @@ class RegistryUploadDbBackedRuntime:
                 plan = materialize(plan, runtime_dir=self.runtime_dir, now=publication_now,
                                    book=book, book_version=(fingerprint(book) if _prepared_book else expected_book),
                                    ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
+                from packages.application.fbo_forward_cost_consumers import load_effects
+                forward_effects = load_effects(conn)
+                if forward_effects:
+                    plan = replace(plan, metadata={**plan.metadata,
+                        "fbo_forward_cost_epochs": forward_effects})
                 plan = recalculate_current_envelope(plan, business_date=publication_date,
                     parameters=dated_parameters(conn, publication_date) if estimate.get('available') or active_inventory is not None else None)
                 if management_cutoff is None or yesterday_date(publication_date) >= management_cutoff:
@@ -13733,6 +13738,8 @@ def _ensure_schema_uncached(
     ensure_ff_pool_document_schema(conn)
     ensure_ff_pool_fbs_applicability_schema(conn)
     ensure_ff_wb_supply_origin_schema(conn)
+    from packages.application.fbo_supply_lifecycle import ensure_schema as ensure_fbo_lifecycle_schema
+    ensure_fbo_lifecycle_schema(conn)
     ensure_wb_fbs_orders_schema(conn)
     ensure_wb_fbs_warehouse_registry_schema(conn)
     ensure_ff_pool_cutover_schema(conn)

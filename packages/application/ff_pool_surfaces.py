@@ -381,8 +381,8 @@ class FfPoolSurface:
                 else:
                     quantity, capital, balance_count = 0, Decimal("0"), 0
                 reservation = (
-                    _fbs_reservations(conn, facility_id=selected)
-                    if pool == "FBS" and feature["reader_effective"]
+                    _pool_reservations(conn, facility_id=selected, pool=pool)
+                    if feature["reader_effective"]
                     else {"quantity": 0, "by_nm_id": {}, "updated_at": ""}
                 )
                 reserved_quantity = int(reservation["quantity"])
@@ -408,12 +408,12 @@ class FfPoolSurface:
                         "document_count": document_count,
                         "physical_quantity": quantity if feature["reader_effective"] else None,
                         "reservation_quantity": (
-                            reserved_quantity if feature["reader_effective"] and pool == "FBS" else 0
+                            reserved_quantity if feature["reader_effective"] else 0
                         ),
                         "available_quantity": available_quantity,
                         "available_is_signed": pool == "FBS",
                         "reservation_status": (
-                            "exact_lifecycle" if pool == "FBS" else "not_applicable"
+                            reservation.get("status", "exact_lifecycle" if pool == "FBS" else "not_applicable")
                         ),
                     }
                 )
@@ -535,8 +535,8 @@ class FfPoolSurface:
                 ).fetchone()[0]
             )
             reservations = (
-                _fbs_reservations(conn, facility_id=selected)
-                if selected_pool == "FBS" and feature["reader_effective"]
+                _pool_reservations(conn, facility_id=selected, pool=selected_pool)
+                if feature["reader_effective"]
                 else {"quantity": 0, "by_nm_id": {}, "updated_at": ""}
             )
         balances = [
@@ -573,7 +573,7 @@ class FfPoolSurface:
             ),
             "reservation_quantity": (
                 int(reservations["quantity"])
-                if feature["reader_effective"] and selected_pool == "FBS"
+                if feature["reader_effective"]
                 else 0
             ),
             "available_quantity": (
@@ -583,7 +583,7 @@ class FfPoolSurface:
             ),
             "available_is_signed": selected_pool == "FBS",
             "reservation_status": (
-                "exact_lifecycle" if selected_pool == "FBS" else "not_applicable"
+                reservations.get("status", "exact_lifecycle" if selected_pool == "FBS" else "not_applicable")
             ),
             "document_context": {"facility_id": selected, "pool": selected_pool},
             "fbs_orders_context": (
@@ -3241,6 +3241,15 @@ def _date(value: Any, *, field: str, optional: bool = False) -> str:
     if parsed != token:
         raise FfPoolSurfaceError(f"invalid_{field}", f"{field} must be YYYY-MM-DD")
     return token
+
+
+def _pool_reservations(conn: sqlite3.Connection, *, facility_id: str, pool: str) -> dict[str, Any]:
+    if pool == "FBS":
+        return _fbs_reservations(conn, facility_id=facility_id)
+    from packages.application.fbo_supply_lifecycle import CONFIG, _tables, reservation_summary
+    summary = reservation_summary(conn, facility_id=facility_id)
+    activated = CONFIG in _tables(conn) and conn.execute(f'SELECT 1 FROM {CONFIG} WHERE slot=1').fetchone() is not None
+    return {**summary, "status": "exact_lifecycle" if activated else "not_applicable"}
 
 
 def _fbs_reservations(conn: sqlite3.Connection, *, facility_id: str) -> dict[str, Any]:

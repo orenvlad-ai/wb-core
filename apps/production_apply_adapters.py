@@ -18,6 +18,9 @@ class Adapter(Protocol):
 
 
 _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
+    "fbo_lifecycle_activation_v1": (
+        "packages.application.fbo_lifecycle_activation", "FboLifecycleActivationAdapter",
+    ),
     "change_registry_external_v1": (
         "packages.application.change_registry_external", "ExternalRegistryAdapter",
     ),

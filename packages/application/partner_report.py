@@ -1047,10 +1047,13 @@ class PartnerReportBlock:
                 return "", canonical_snapshot, "operation_date_invalid"
             channel = str(bucket.get("channel") or "")
             fbs_order_id = int(bucket.get("fbs_order_id") or 0) or None
+            operation = {"deliveryType": "FBS"} if channel == "FBS" else {}
+            if bucket.get("cost_effective_at"):
+                operation["cost_effective_at"] = bucket["cost_effective_at"]
             if shared is not None and shared.applies_to(operation_day):
                 current = resolve_channel_location_cost(
                     conn, nm_id=nm_id, operation_date=operation_day,
-                    operation={"deliveryType": "FBS"} if channel == "FBS" else None,
+                    operation=operation,
                     fbs_order_id=fbs_order_id, shared_cost_snapshot=shared,
                 )
             else:
@@ -1060,10 +1063,7 @@ class PartnerReportBlock:
                     conn, nm_id=nm_id, operation_date=operation_day,
                     # Match the historical routing rule exactly.  In particular,
                     # an inactive shared book must not turn a WB row into FBS.
-                    operation=(
-                        {"deliveryType": "FBS"}
-                        if shared is not None and channel == "FBS" else None
-                    ),
+                    operation=operation if shared is not None or bucket.get("cost_effective_at") else None,
                     fbs_order_id=fbs_order_id, snapshot=canonical_snapshot,
                     shared_cost_snapshot=shared,
                 )
@@ -1086,6 +1086,7 @@ class PartnerReportBlock:
                     "formula_version": str(current.get("formula_version") or COST_METHOD_VERSION),
                     "unit_cost_rub": _decimal_text(unit_cost),
                     "economic_unit_cost_rub": format(unit_cost.normalize(), "f") if unit_cost else "0",
+                    **({key: current[key] for key in ("forward_cost_epoch", "cost_effective_at") if key in current}),
                     "movement": "sale",
                     "quantity": int(bucket.get("sales_qty") or 0),
                     "signed_quantity": int(bucket.get("sales_qty") or 0),
