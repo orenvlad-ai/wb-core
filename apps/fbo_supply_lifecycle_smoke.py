@@ -225,6 +225,21 @@ class LifecycleTests(unittest.TestCase):
             conn.execute('UPDATE sheet_vitrina_v1_wb_supplies SET normalized_row_json=?,raw_list_json=? WHERE supply_id=\'4\'',(json.dumps(normalized),json.dumps(dict(createDate='2026-11-10T00:00:00Z'))))
         self.assertEqual(self.service.reconcile('4')['status'],'missing_source')
 
+    def test_first_import_after_cutover_does_not_hide_shipping_permitted_work(self):
+        self.cutover()
+        # Source existed before activation but was not in the last imported
+        # cache. The first observation must request a source without debiting.
+        self.seed('11', [(101, 1)], 3)
+        self.assertEqual(self.service.reconcile('11')['status'], 'missing_source')
+        self.assertEqual(self.balance(), (10, Decimal(100)))
+        self.assertIn('11', [row['supply_id'] for row in self.service.notifications()['items']])
+        self.assertEqual(self.assign('11')['fbo_lifecycle']['status'], 'reserved')
+        self.seed('11', [(101, 1)], 6)
+        self.assertEqual(self.service.reconcile('11')['status'], 'debited')
+        self.assertEqual(self.balance(), (9, Decimal(90)))
+        self.seed('12', [(101, 1)], 5)
+        self.assertEqual(self.service.reconcile('12')['status'], 'out_of_scope')
+
     def test_same_source_retry_has_durable_request_identity(self):
         self.cutover();self.assign('1');self.assign('2')
         self.seed('1',[(101,6),(102,3)],2,is_cancelled=True);self.service.reconcile('1')

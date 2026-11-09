@@ -185,11 +185,13 @@ def _scope(conn, record):
     from packages.application.ff_stock_ledger import _parse_datetime_like, _wb_supply_checkpoint_match_fields
     dt = _creation_timestamp(record)
     cutoff = _parse_datetime_like(config['cutoff_at'])
-    if cutoff is None or (dt is not None and dt <= cutoff):
+    shipping_permitted = int(record['normalized'].get('status_id') or 0) == 3
+    if cutoff is None:
         return False
-    # Date-less sources seen for the first time in shipping-permitted status
-    # are genuinely new work. Late discovered acceptance/history needs proof.
-    if dt is None and int(record['normalized'].get('status_id') or 0)!=3:
+    # A newly observed permitted supply may have been created between the last
+    # import and cutover. It still needs a manager-selected source and cannot
+    # debit at status 3. Already accepted history needs creation proof instead.
+    if not shipping_permitted and (dt is None or dt <= cutoff):
         return False
     checkpoint = conn.execute('SELECT * FROM sheet_vitrina_v1_ff_stock_wb_auto_writeoff_checkpoint WHERE slot=\'current\'').fetchone()
     if checkpoint is None:
@@ -200,7 +202,7 @@ def _scope(conn, record):
         return False
     checkpoint_dt = _parse_datetime_like(checkpoint['created_at'])
     activation = conn.execute(f"SELECT created_at FROM {AGGREGATE} WHERE source_type <> 'wb_supply' AND total_quantity_delta > 0 ORDER BY created_at,operation_id LIMIT 1").fetchone()
-    boundary=dt or cutoff
+    boundary=cutoff if shipping_permitted else dt
     return bool(checkpoint_dt and boundary >= checkpoint_dt and activation and boundary >= _parse_datetime_like(activation[0]))
 
 
