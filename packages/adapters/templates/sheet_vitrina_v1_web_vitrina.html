@@ -30130,7 +30130,16 @@
       const frame = document.querySelector('[data-operator-embed-frame="factory-order"]');
       if (!button || !frame) { feedback.textContent = "Раздел поставок недоступен."; return; }
       close(false); button.click();
-      if (frame.dataset.notificationReady === "true" && frame.contentWindow) {
+      let operatorReady = false;
+      try {
+        // A child redirect does not update the iframe's src attribute. Check
+        // the live document, which must also have advertised WB-detail support.
+        const current = new URL(frame.contentWindow.location.href);
+        const operator = new URL(WEB_VITRINA_CONFIG.operator_path, location.origin);
+        operatorReady = frame.dataset.notificationReady === "true" &&
+          current.origin === operator.origin && current.pathname === operator.pathname;
+      } catch (_) {}
+      if (operatorReady && frame.contentWindow) {
         frame.contentWindow.postMessage({type: "wbc_open_notification_supply", supply_id: supplyId}, location.origin);
       } else {
         const url = new URL(WEB_VITRINA_CONFIG.operator_path, location.origin);
@@ -30150,7 +30159,9 @@
     window.addEventListener("message", function(event) {
       const frame = document.querySelector('[data-operator-embed-frame="factory-order"]');
       if (event.origin !== location.origin || !frame || event.source !== frame.contentWindow) return;
-      if ((event.data || {}).type === "wbc_notification_supply_ready") frame.dataset.notificationReady = "true";
+      if ((event.data || {}).type === "wbc_notification_supply_ready") {
+        frame.dataset.notificationReady = event.data.can_open_notification_supply === true ? "true" : "false";
+      }
       if ((event.data || {}).type === "wbc_fbo_notifications_changed") void load();
       if ((event.data || {}).type === "sheet_vitrina_v1_operator_embed_pointerdown") close(false);
     });

@@ -52,7 +52,7 @@ class NotificationFixture:
 
 
 def main():
-    with TemporaryDirectory(prefix="fbo-notifications-ui-") as raw:
+    with TemporaryDirectory(prefix="fbo-notifications-ui-") as raw, patch.dict("os.environ", {"SUPPLIER_VIEW_ENABLED": "1"}):
         rt = RegistryUploadDbBackedRuntime(runtime_dir=Path(raw)/"runtime")
         rt.list_wb_supplies()
         fixture = NotificationFixture()
@@ -76,10 +76,23 @@ def main():
             with sync_playwright() as pw:
                 browser = pw.chromium.launch()
                 context = browser.new_context(viewport={"width": 1440, "height": 1000})
+                # Production routes this shell to the independent supplier
+                # listener. Use its exact renderer/configuration in this local
+                # single-listener HTTP fixture, keeping the real iframe URL.
+                supplier_shell = http._render_sheet_vitrina_operator_ui(
+                    daily_report_path=http.DEFAULT_SHEET_DAILY_REPORT_PATH,
+                    stock_report_path=http.DEFAULT_SHEET_STOCK_REPORT_PATH,
+                    plan_report_path=http.DEFAULT_SHEET_PLAN_REPORT_PATH,
+                    refresh_path=http.DEFAULT_SHEET_REFRESH_PATH,
+                    load_path=http.DEFAULT_SHEET_LOAD_PATH,
+                    status_path=http.DEFAULT_SHEET_STATUS_PATH,
+                    job_path=http.DEFAULT_SHEET_JOB_PATH,
+                    embedded_tab="factory-order", independent_supplier_read=True)
+                context.route("**/sheet-vitrina-v1/supply-view?*", lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=supplier_shell))
                 page = context.new_page(); errors = []; posts = []
                 page.on("pageerror", lambda err: errors.append(str(err)))
                 context.on("request", lambda req: posts.append(req.url) if req.method == "POST" else None)
-                page.goto(base+http.DEFAULT_SHEET_WEB_VITRINA_UI_PATH+"?tab=reports")
+                page.goto(base+http.DEFAULT_SHEET_WEB_VITRINA_UI_PATH+"?tab=factory-order")
                 bell = page.get_by_role("button", name="Уведомления", exact=True)
                 expect(bell).to_be_visible(); expect(page.locator("[data-notification-dot]")).to_be_visible()
                 bell.focus(); page.keyboard.press("Enter")
@@ -91,11 +104,42 @@ def main():
                 expect(page.locator("[data-notification-dot]")).to_be_hidden()
                 page.keyboard.press("Escape"); expect(panel).to_be_hidden(); expect(bell).to_be_focused()
                 page.reload(); expect(page.locator("[data-notification-dot]")).to_be_hidden()
+                # Production starts with an already initialized independent
+                # supplier frame. Its notification bridge must not consume and
+                # lose the first requested WB supply while redirecting.
+                initial_frame = page.frame_locator('[data-operator-embed-frame="factory-order"]')
+                expect(initial_frame.locator('[data-supply-mode-button="supplier"]')).to_have_attribute("aria-selected", "true")
+                assert "/supply-view?" in page.locator('[data-operator-embed-frame="factory-order"]').get_attribute("src")
+                expect(page.locator('[data-operator-embed-frame="factory-order"]')).not_to_have_attribute("data-notification-ready", "true")
                 bell.click(); expect(page.locator(".notification-item")).to_have_count(2)
                 page.locator('[data-notification-id="fbo:42000001"]').get_by_role("button", name="Уточнить").click()
                 frame = page.frame_locator('[data-operator-embed-frame="factory-order"]')
+                expect(frame.locator("#wbSupplyFfOriginPanel")).to_be_visible()
                 expect(frame.locator("#wbSupplyFfOriginSelect")).to_be_enabled()
                 expect(frame.locator("#wbSuppliesDetailTitle")).to_contain_text("42000001")
+                assert not any("/wb-supply-origins/" in url for url in posts), posts
+                # An already open legacy parent can still send the bridge into
+                # the supplier document. Its redirect must retain the target;
+                # after that redirect src remains /supply-view, but the live
+                # canonical operator capability supports subsequent clicks.
+                defence_page = context.new_page()
+                defence_page.on("pageerror", lambda err: errors.append(str(err)))
+                defence_page.goto(base+http.DEFAULT_SHEET_WEB_VITRINA_UI_PATH+"?tab=factory-order")
+                defence_frame = defence_page.frame_locator('[data-operator-embed-frame="factory-order"]')
+                expect(defence_frame.locator('[data-supply-mode-button="supplier"]')).to_have_attribute("aria-selected", "true")
+                defence_page.evaluate("document.querySelector('[data-operator-embed-frame=\"factory-order\"]').contentWindow.postMessage({type:'wbc_open_notification_supply',supply_id:'42000001'},location.origin)")
+                expect(defence_frame.locator("#wbSupplyFfOriginPanel")).to_be_visible()
+                expect(defence_frame.locator("#wbSuppliesDetailTitle")).to_contain_text("42000001")
+                expect(defence_frame.locator("#wbSupplyFfOriginSelect")).to_be_enabled()
+                assert "/supply-view?" in defence_page.locator('[data-operator-embed-frame="factory-order"]').get_attribute("src")
+                navigations = []
+                defence_child = next(child for child in defence_page.frames if "/sheet-vitrina-v1/operator?" in child.url)
+                defence_page.on("framenavigated", lambda navigated: navigations.append(navigated.url) if navigated == defence_child else None)
+                defence_page.get_by_role("button", name="Уведомления", exact=True).click()
+                defence_page.locator('[data-notification-id="fbo:42000002"]').get_by_role("button", name="Уточнить").click()
+                expect(defence_frame.locator("#wbSuppliesDetailTitle")).to_contain_text("42000002")
+                assert not navigations, navigations
+                defence_page.close()
                 frame.locator("#wbSupplyFfOriginSelect").select_option("moscow")
                 save = frame.locator("#wbSupplyFfOriginSaveButton")
                 expect(save).to_have_text("Сохранить и зарезервировать")

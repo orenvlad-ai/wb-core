@@ -13840,6 +13840,16 @@
 
       async function openNotificationSupply(supplyId) {
         if (!supplyId || wbSupplyFfOriginSaving) return;
+        if (config.independent_supplier_read) {
+          // This document cannot open WB details. Keep the target across its
+          // redirect, including messages from an already open older parent.
+          const target = new URL("/sheet-vitrina-v1/operator", window.location.origin);
+          target.searchParams.set("embedded_tab", "factory-order");
+          target.searchParams.set("supply_mode", "wildberries");
+          target.searchParams.set("notification_supply_id", String(supplyId));
+          window.location.replace(target.pathname + target.search);
+          return;
+        }
         activateTab("factory-order"); activateSupplyMode("wildberries");
         await openWbSupplyDetail(String(supplyId));
         const target = document.getElementById("wbSupplyFfOriginPanel");
@@ -16643,7 +16653,9 @@
         });
       });
 
-      if (window.parent !== window) window.parent.postMessage({type: "wbc_notification_supply_ready"}, window.location.origin);
+      if (window.parent !== window && !config.independent_supplier_read) {
+        window.parent.postMessage({type: "wbc_notification_supply_ready", can_open_notification_supply: true}, window.location.origin);
+      }
       const notificationSupplyId = String(operatorQuery.get("notification_supply_id") || "");
       if (notificationSupplyId) window.setTimeout(() => openNotificationSupply(notificationSupplyId), 0);
       setupOperatorFloatingControlListeners();
