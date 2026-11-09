@@ -46,6 +46,36 @@ PARAMETERS = SimpleNamespace(version_id="p", buyout_rate=Decimal(1),
 
 
 class ConsumerTests(unittest.TestCase):
+    def test_later_expense_preserves_prior_finance_and_proxy_results(self):
+        # Real consumers must keep the prior day's full result unchanged when
+        # a later expense exists, including evidence/quality and cache identity.
+        fixture = fixtures.SharedCostReportTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        block = fixture.candidate({DAY: "100"})
+        rows = [sale(94)]
+        future = effect(day=(DAY + timedelta(days=1)).isoformat())
+        def finance(effects):
+            with patch("packages.application.fbo_forward_cost_consumers.load_effects", return_value=effects), \
+                 patch("packages.application.canonical_wb_cost_resolver._forward_effects", return_value=effects), \
+                 closing(block.finance._connect()) as conn:
+                return block.finance._calculate_cogs(conn, rows, WEEK_ONE, include_details=True)
+        baseline = finance([])
+        self.assertEqual(baseline["cogs_rub"], "100.0000")
+        self.assertEqual(finance([future]), baseline)
+
+        source = plan(cost=100)
+        source["metadata"]["fbo_forward_cost_epochs"] = []
+        baseline = project_catalog_economics(source, day=PROXY_DAY,
+            parameters=(PARAMETERS, PARAMETERS))
+        source["metadata"]["fbo_forward_cost_epochs"] = [effect(
+            day=(date.fromisoformat(PROXY_DAY) + timedelta(days=1)).isoformat())]
+        observed = project_catalog_economics(source, day=PROXY_DAY,
+            parameters=(PARAMETERS, PARAMETERS))
+        self.assertEqual(observed["sheets"], baseline["sheets"])
+        self.assertEqual(observed["metadata"]["server_cell_presentation"],
+            baseline["metadata"]["server_cell_presentation"])
+
     def test_epoch_prices_and_date_only_disclosure(self):
         base = dict(status="resolved", unit_cost_rub="160", source_digest="new-shared")
         def resolve(operation):

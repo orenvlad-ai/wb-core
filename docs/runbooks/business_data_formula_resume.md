@@ -109,6 +109,12 @@ the already durable same-plan restoring/committed operation can prove it.
 
 The recovery independently pins the installed buyer CLI, procedure admission
 and barrier source bytes to reviewed base 678f6130fc6d3f86ee9a29562f29dc5284f468e3.
+The addressed FBO release updates only the exact admission-source hash for its
+reviewed optional `held_fbo_activation` lease. That constructor branch defaults
+to false and requires a typed activation owner; ordinary `guarded_cli` and
+`admitted_write` remain unchanged. Tests prove neither the initial guard nor
+the post-lock recheck can request that owner. Exact source equality remains
+mandatory; CLI/barrier hashes and all journal/configuration evidence are unchanged.
 It retains exact configuration/digests, original timer target, unchanged raw
 controls, completed owner/runtime/formula authority and original window/baseline.
 A fresh bounded native journal read must prove one complete start/guarded-skip/

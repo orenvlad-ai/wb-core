@@ -368,10 +368,14 @@ class FormulaResumeTests(unittest.TestCase):
         called = []
         output = io.StringIO()
         history_authority = Mock(side_effect=AssertionError('buyer must not request held-history admission'))
+        fbo_authority = Mock(side_effect=AssertionError('buyer must not request FBO activation admission'))
         with patch.dict(sys.modules, {'packages.application.historical_receipt_completion':
-                SimpleNamespace(require_held_completion=history_authority)}), redirect_stdout(output):
+                SimpleNamespace(require_held_completion=history_authority),
+                'packages.application.fbo_lifecycle_activation':
+                SimpleNamespace(require_held_activation=fbo_authority)}), redirect_stdout(output):
             self.assertEqual(guarded_cli(lambda: called.append('main'), argv=['--runtime-dir', str(self.runtime)]), 0)
         history_authority.assert_not_called()
+        fbo_authority.assert_not_called()
         self.assertEqual(called, [])
         self.assertEqual(output.getvalue().strip(), events[1]['MESSAGE'])
         with patch.object(formula, '_buyer_journal', return_value=self.buyer_journal_bytes(events)):
@@ -390,10 +394,13 @@ class FormulaResumeTests(unittest.TestCase):
         called = []
         output = io.StringIO()
         history_authority = Mock(side_effect=AssertionError('buyer must not request held-history admission'))
+        fbo_authority = Mock(side_effect=AssertionError('buyer must not request FBO activation admission'))
         # The pause becomes active between the ordinary precheck and the shared
         # lease acquisition. The new history-only factory cannot authorize this CLI.
         with patch.dict(sys.modules, {'packages.application.historical_receipt_completion':
-                SimpleNamespace(require_held_completion=history_authority)}), \
+                SimpleNamespace(require_held_completion=history_authority),
+                'packages.application.fbo_lifecycle_activation':
+                SimpleNamespace(require_held_activation=fbo_authority)}), \
                 patch.object(admission, 'barrier_status', side_effect=[{'active': False}, {'active': True}]) as status, \
                 redirect_stdout(output):
             self.assertEqual(admission.guarded_cli(lambda: called.append('main'),
@@ -401,6 +408,7 @@ class FormulaResumeTests(unittest.TestCase):
         self.assertEqual(status.call_count, 2)
         self.assertEqual(called, [])
         history_authority.assert_not_called()
+        fbo_authority.assert_not_called()
         self.assertEqual(json.loads(output.getvalue()),
             {'status': 'skipped_maintenance', 'reason': 'skipped_maintenance'})
         self.assertTrue(admission.admission_idle(self.runtime)['idle'])

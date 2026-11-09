@@ -39,12 +39,13 @@ CONFIG_PROPERTIES = ('FragmentPath', 'DropInPaths', 'ExecStart', 'Triggers', 'Pe
 
 BUYER_UNIT = 'wb-core-buyer-authenticated-collect.service'
 # Reviewed installed base 678f6130fc6d3f86ee9a29562f29dc5284f468e3.
-# Its explicit held-history lease does not change guarded_cli/admitted_write:
-# the buyer still uses the default lease and both ordinary barrier checks.
+# The reviewed FBO activation extension changes only an explicit default-False
+# lease branch. guarded_cli/admitted_write and both ordinary barrier checks are
+# unchanged; neither default CLI may request the typed FBO activation owner.
 # Formula pins alone do not prove that this CLI is guarded before main().
 BUYER_GUARD_SOURCES = {
     'apps/wb_buyer_authenticated_collect.py': '62b1cf880bcfb1ef1d027502fd8da3f605f9fa78c5aa65458a1cfbbfa2d4624a',
-    'packages/application/business_data_procedure_admission.py': '50fbb4ccfb09c9eeda7749970bcf2c9e693bddecd5b6ba6c8700d518487b1fb0',
+    'packages/application/business_data_procedure_admission.py': '2ba3dd96c2879bbece12e3133edffb4758bcb305d24663fbe133255a91d02096',
     'packages/application/business_data_write_barrier.py': 'f39e27d2c9f54812a565bc670fd79ea5132552caf8c82d9bc4360d2d408bb116',
 }
 
