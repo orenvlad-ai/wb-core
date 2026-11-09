@@ -351,7 +351,7 @@ class FboSupplyLifecycle:
             plan=dict(contract=CONTRACT,cutoff_at=cutoff_at,effects=effects)
             return {**plan,'plan_digest':digest(plan)}
 
-    def migration_apply(self, plan, *, actor):
+    def migration_apply(self, plan, *, actor, on_activate=None):
         now=self.timestamp_factory()
         with self._connect() as conn:
             conn.execute('BEGIN IMMEDIATE');ensure_schema(conn)
@@ -372,6 +372,8 @@ class FboSupplyLifecycle:
                 _save(conn,initial,now,admission='explicit_cutover')
                 state=evaluate_owned(conn,_record(conn,effect['cache_key']))
                 _save(conn,state,now,admission='explicit_cutover')
+            if on_activate is not None:
+                on_activate(conn, now)
             conn.commit()
             return dict(status='applied',idempotent=False,plan_digest=plan['plan_digest'],supply_count=len(plan['effects']))
 
