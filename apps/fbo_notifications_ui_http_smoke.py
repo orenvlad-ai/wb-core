@@ -36,18 +36,18 @@ class NotificationFixture:
         if self.disabled:
             return dict(status="disabled", notifications=[])
         rows = [dict(id="fbo:"+sid, reason_revision=self.revision+":"+self.states[sid], supply_id="supply:"+sid,
-                     supply=self.supplies[sid], **self.lifecycle(sid)) for sid in self.supplies if self.states[sid] != "reserved"]
+                     supply=self.supplies[sid], **self.lifecycle(sid)) for sid in self.supplies if self.states[sid] not in {"reserved", "debited"}]
         # Repeated source rows must not produce duplicate notifications.
         return dict(status="ready", notifications=rows+deepcopy(rows[:1]))
 
     def detail(self, sid):
         return dict(status="ready", assignment_allowed=True, current_assignment=self.assignments.get(sid), history=[],
-                    facilities=[dict(facility_id="moscow", code="FF-001", name="Москва"), dict(facility_id="orenburg", code="FF-002", name="Оренбург")], fbo_lifecycle=self.lifecycle(sid))
+                    facilities=[dict(facility_id="moscow", code="FF-001", name="Москва"), dict(facility_id="orenburg", code="FF-002", name="Оренбург")], fbo_lifecycle={**self.lifecycle(sid), "supply": self.supplies[sid]})
 
     def assign(self, sid, payload, *, actor):
         self.calls.append((sid, dict(payload), actor))
         self.assignments[sid] = dict(facility_id=payload["facility_id"], facility_code="FF-001", facility_name="Москва", assignment_id="assignment:"+str(len(self.calls)), request_id=payload["request_id"])
-        self.states[sid] = "reserved" if sid == "42000001" else "shortage"
+        self.states[sid] = ("debited" if self.supplies[sid]["status_id"] in {4, 5, 6} else "reserved") if sid == "42000001" else "shortage"
         return dict(status="saved", assignment=self.assignments[sid], fbo_lifecycle=self.lifecycle(sid))
 
 
@@ -98,6 +98,8 @@ def main():
                 expect(frame.locator("#wbSuppliesDetailTitle")).to_contain_text("42000001")
                 frame.locator("#wbSupplyFfOriginSelect").select_option("moscow")
                 save = frame.locator("#wbSupplyFfOriginSaveButton")
+                expect(save).to_have_text("Сохранить и зарезервировать")
+                expect(frame.locator("#wbSupplyFfOriginPolicyNote")).not_to_contain_text("Поставка уже отгружена")
                 save.evaluate("button=>{button.click();button.click();}")
                 expect(frame.locator("#wbSupplyFfOriginMessage")).to_contain_text("Товар зарезервирован")
                 assert len(fixture.calls) == 1, fixture.calls
@@ -165,6 +167,25 @@ def main():
                 page.screenshot(path=str(Path(raw)/"notifications-mobile.png"))
                 fixture.disabled = True; page.reload(); bell.click()
                 expect(panel).to_contain_text("Уведомления FBO пока недоступны")
+                # Selecting an origin for an already shipped supply immediately
+                # debits FBO; the existing action must disclose that before POST.
+                shipped_page = context.new_page()
+                shipped_page.on("pageerror", lambda err: errors.append(str(err)))
+                fixture.states["42000001"] = "missing_source"
+                fixture.assignments.pop("42000001", None)
+                calls_before_shipped = len(fixture.calls)
+                for shipped_status in (4, 5, 6):
+                    fixture.supplies["42000001"]["status_id"] = shipped_status
+                    shipped_page.goto(base+http.DEFAULT_SHEET_OPERATOR_UI_PATH+"?embedded_tab=factory-order&supply_mode=wildberries&notification_supply_id=42000001")
+                    shipped_save = shipped_page.locator("#wbSupplyFfOriginSaveButton")
+                    expect(shipped_save).to_have_text("Сохранить источник и списать")
+                    expect(shipped_page.locator("#wbSupplyFfOriginPolicyNote")).to_contain_text("Поставка уже отгружена")
+                    assert len(fixture.calls) == calls_before_shipped
+                shipped_page.locator("#wbSupplyFfOriginSelect").select_option("moscow")
+                shipped_save.click()
+                expect(shipped_page.locator("#wbSupplyFfOriginMessage")).to_contain_text("Списание FBO подтверждено")
+                assert len(fixture.calls) == calls_before_shipped + 1 and fixture.states["42000001"] == "debited"
+                shipped_page.close()
                 assert not errors, errors
                 context.close(); browser.close()
         finally:

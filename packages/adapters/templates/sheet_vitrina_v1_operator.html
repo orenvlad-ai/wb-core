@@ -5602,7 +5602,7 @@
                 <div class="block-header">
                   <div>
                     <h4 id="wbSupplyFfOriginTitle" class="block-title">Источник FF</h4>
-                    <p class="field-note">Источник относится к пулу FBO. Фактический резерв и списание показаны ниже.</p>
+                    <p id="wbSupplyFfOriginPolicyNote" class="field-note">Источник относится к пулу FBO. Фактический резерв и списание показаны ниже.</p>
                   </div>
                   <span class="wb-supplies-chip">Пул FBO</span>
                 </div>
@@ -13643,6 +13643,12 @@
         }
       }
 
+      function wbSupplyFfOriginAlreadyShipped(payload) {
+        const lifecycle = (payload || {}).fbo_lifecycle || {};
+        const supply = lifecycle.supply || (payload || {}).supply || {};
+        return [4, 5, 6].includes(Number(supply.status_id));
+      }
+
       function renderWbSupplyFfOrigin(payload) {
         wbSupplyFfOriginPayload = payload && typeof payload === "object" ? payload : null;
         const current = wbSupplyFfOriginPayload && wbSupplyFfOriginPayload.current_assignment
@@ -13652,6 +13658,11 @@
           ? wbSupplyFfOriginPayload.facilities
           : [];
         const allowed = Boolean(wbSupplyFfOriginPayload && wbSupplyFfOriginPayload.assignment_allowed);
+        const alreadyShipped = wbSupplyFfOriginAlreadyShipped(wbSupplyFfOriginPayload);
+        const policyNote = document.getElementById("wbSupplyFfOriginPolicyNote");
+        if (policyNote) policyNote.textContent = alreadyShipped
+          ? "Поставка уже отгружена. После выбора источника списание из FBO выполняется при достаточном остатке."
+          : "Источник относится к пулу FBO. Фактический резерв и списание показаны ниже.";
         if (wbSupplyFfOriginSelect) {
           wbSupplyFfOriginSelect.textContent = "";
           const placeholder = document.createElement("option");
@@ -13679,7 +13690,7 @@
         }
         if (wbSupplyFfOriginSaveButton) {
           const lifecycle = (wbSupplyFfOriginPayload || {}).fbo_lifecycle || {};
-          wbSupplyFfOriginSaveButton.textContent = wbSupplyFfOriginSaving ? "Сохраняем..." : ["shortage", "reservation_pending"].includes(lifecycle.status) ? "Проверить резерв" : lifecycle.status === "missing_source" ? "Сохранить и зарезервировать" : "Сохранить источник";
+          wbSupplyFfOriginSaveButton.textContent = wbSupplyFfOriginSaving ? "Сохраняем..." : ["shortage", "reservation_pending"].includes(lifecycle.status) ? "Проверить резерв" : lifecycle.status === "missing_source" ? (alreadyShipped ? "Сохранить источник и списать" : "Сохранить и зарезервировать") : "Сохранить источник";
         }
         updateWbSupplyFfOriginSaveState();
         if (wbSupplyFfOriginError) {
@@ -13794,7 +13805,9 @@
         persistWbSupplyOriginPending();
         wbSupplyFfOriginSaving = true; wbSupplyFfOriginError = "";
         renderWbSupplyFfOrigin(wbSupplyFfOriginPayload);
-        setWbSupplyFfOriginMessage("Сохраняем источник FF и проверяем резерв…", "");
+        setWbSupplyFfOriginMessage(wbSupplyFfOriginAlreadyShipped(wbSupplyFfOriginPayload)
+          ? "Сохраняем источник FF и проверяем списание…"
+          : "Сохраняем источник FF и проверяем резерв…", "");
         try {
           const response = await fetch(basePath + "/" + encodeURIComponent(supplyId), {
             method: "POST", headers: {"Accept": "application/json", "Content-Type": "application/json", "X-WB-FF-Pool-CSRF": "1"},
