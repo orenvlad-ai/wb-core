@@ -403,6 +403,10 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
         effects[doc["document_id"]] = []
         if kind == 'current_fbo_dispatch':
             continue  # exact owned current boundary was consumed before daily mass
+        if kind == 'fbo_lifecycle_dispatch':
+            from packages.application.fbo_dispatch_cost_source import apply_dispatch
+            apply_dispatch(doc, effect=effect, node=node, key=key)
+            continue
         if doc['document_id'] in companions:
             continue
         if kind == "china_acceptance":

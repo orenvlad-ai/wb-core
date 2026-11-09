@@ -1,8 +1,7 @@
-"""Default-off FBW supply to FF facility origin assignments.
+"""Append-only FF/FBO origins with atomic scoped reservation reconciliation.
 
-This Stage 4 service stores only append-only operator evidence.  It does not
-post an FF movement, change a WB supply cache row, materialize a pool balance,
-or switch any current warehouse producer/consumer.
+Outside the explicit lifecycle cutover these remain metadata-only assignments.
+Within it, assignment and reservation/dispatch commit as one transaction.
 """
 
 from __future__ import annotations
@@ -199,6 +198,8 @@ class FfWbSupplyOriginAssignments:
                     (MAX_PAGE_SIZE,),
                 ).fetchall()
             ]
+        from packages.application.fbo_supply_lifecycle import FboSupplyLifecycle
+        lifecycle = FboSupplyLifecycle(db_path=self.db_path).detail(reference)
         eligible = _is_real_fbw_supply(supply)
         facilities_truncated = facilities_total > MAX_PAGE_SIZE
         allowed = bool(
@@ -206,6 +207,8 @@ class FfWbSupplyOriginAssignments:
             and eligible
             and facilities
             and not facilities_truncated
+            and lifecycle.get("status") not in {"debited", "needs_correction"}
+            and not lifecycle.get("operation_id")
         )
         reason = (
             "assignment_available"
@@ -216,6 +219,10 @@ class FfWbSupplyOriginAssignments:
             if not eligible
             else "facility_options_truncated"
             if facilities_truncated
+            else "physical_debit_requires_correction"
+            if lifecycle.get("operation_id")
+            else "lifecycle_correction_required"
+            if lifecycle.get("status") == "needs_correction"
             else "no_active_facilities"
         )
         return _with_etag(
@@ -232,6 +239,7 @@ class FfWbSupplyOriginAssignments:
                     "mutates_wb": False,
                 },
                 "supply": supply,
+                "fbo_lifecycle": lifecycle,
                 "eligible": eligible,
                 "current_assignment": current,
                 "history": history,
@@ -425,6 +433,7 @@ class FfWbSupplyOriginAssignments:
                     "status": "ready",
                     "idempotent": True,
                     "assignment": _assignment_row(repeated),
+                    "fbo_lifecycle": self.assignment_detail(reference).get("fbo_lifecycle"),
                     "creates_pool_movement": False,
                 }
             current = _current_assignment(connection, supply["cache_key"])
@@ -436,7 +445,13 @@ class FfWbSupplyOriginAssignments:
                     details={"expected_assignment_id": expected_assignment_id, "current_assignment": current},
                     http_status=409,
                 )
-            if current is not None and str(current["facility_id"]) == facility_id:
+            from packages.application.fbo_supply_lifecycle import FboSupplyLifecycle, evaluate_owned, _record
+            lifecycle_service = FboSupplyLifecycle(db_path=self.db_path, timestamp_factory=lambda: assigned_at)
+            before_lifecycle = evaluate_owned(connection, _record(connection, reference))
+            if before_lifecycle.get("operation_id"):
+                raise FfWbSupplyOriginError("origin_change_requires_explicit_correction", "Источник проведённой поставки меняется только корректировкой", http_status=409)
+            retry_same_origin = bool(current is not None and str(current["facility_id"]) == facility_id and before_lifecycle.get("status") in {"shortage", "reserved"})
+            if current is not None and str(current["facility_id"]) == facility_id and not retry_same_origin:
                 raise FfWbSupplyOriginError(
                     "origin_assignment_unchanged", "Selected FF origin is already current", http_status=409
                 )
@@ -474,13 +489,19 @@ class FfWbSupplyOriginAssignments:
                     WHERE assignment.assignment_id=?""",
                 (assignment_id,),
             ).fetchone()
+            try:
+                lifecycle = lifecycle_service.reconcile_owned(connection, reference, origin_change=not retry_same_origin)
+            except ValueError as exc:
+                blocked = evaluate_owned(connection, _record(connection, reference))
+                raise FfWbSupplyOriginError("fbo_origin_reconciliation_blocked", str(exc), details={"fbo_lifecycle": blocked, "shortages": blocked.get("shortages", [])}, http_status=409) from exc
             connection.commit()
             return {
                 "contract_name": CONTRACT_NAME,
                 "status": "ready",
                 "idempotent": False,
                 "assignment": _assignment_row(row),
-                "creates_pool_movement": False,
+                "fbo_lifecycle": lifecycle,
+                "creates_pool_movement": lifecycle.get("status") == "debited",
             }
         except FfWbSupplyOriginError:
             connection.rollback()

@@ -13733,6 +13733,8 @@ def _ensure_schema_uncached(
     ensure_ff_pool_document_schema(conn)
     ensure_ff_pool_fbs_applicability_schema(conn)
     ensure_ff_wb_supply_origin_schema(conn)
+    from packages.application.fbo_supply_lifecycle import ensure_schema as ensure_fbo_lifecycle_schema
+    ensure_fbo_lifecycle_schema(conn)
     ensure_wb_fbs_orders_schema(conn)
     ensure_wb_fbs_warehouse_registry_schema(conn)
     ensure_ff_pool_cutover_schema(conn)

@@ -131,6 +131,8 @@ def _documents(conn: sqlite3.Connection, *, document_id: str | None = None, nati
     historical = capture_historical_fbo_documents(conn) if not native_only else []
     from packages.application.current_fbo_supply_cost_source import capture_documents as capture_current_dispatches
     historical += capture_current_dispatches(conn) if not native_only else []
+    from packages.application.fbo_dispatch_cost_source import capture_documents as capture_lifecycle_dispatches
+    historical += capture_lifecycle_dispatches(conn) if not native_only else []
     historical_ids = tuple(d["operation_id"] for d in historical)
     admitted = (" AND m.operation_id NOT IN (" + ",".join("?" for _ in historical_ids) + ")") if historical_ids else ""
     unmapped = conn.execute(
