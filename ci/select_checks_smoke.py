@@ -528,6 +528,8 @@ def command_dependency_checks():
     # not a filename heuristic or an unrelated changed-path group.
     future_script = "apps/finance_liquidity_browser_smoke.py"
     scripts = (
+        "apps/fbo_notifications_ui_http_smoke.py",
+        "apps/fbo_notifications_domain_integration_smoke.py",
         "apps/registry_upload_http_entrypoint_users_admin_smoke.py",
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",

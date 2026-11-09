@@ -77,6 +77,8 @@
     },
     "playwright_chromium": {
       "scripts": [
+        "apps/fbo_notifications_ui_http_smoke.py",
+        "apps/fbo_notifications_domain_integration_smoke.py",
         "apps/stock_monitor_browser_smoke.py",
         "apps/operator_complaint_runs_browser_smoke.py",
         "apps/operator_settings_facilities_browser_smoke.py",
