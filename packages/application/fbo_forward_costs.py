@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any
 
 PREFIX = 'sheet_vitrina_v1_fbo_forward_cost_'
@@ -142,28 +142,85 @@ def _packed_basis(conn, record):
     return {}
 
 
-def activate(conn: sqlite3.Connection, activated_at: str):
-    """Called once by the authorized lifecycle activation transaction; no commit."""
+def _sum_baseline_quantities(quantities):
+    """Sum finite Decimal source quantities without ambient-context rounding."""
+    if not quantities:
+        return ZERO
+    minimum_exponent = min(value.as_tuple().exponent for value in quantities)
+    maximum_adjusted = max(value.adjusted() for value in quantities)
+    with localcontext() as context:
+        context.prec = max(28, maximum_adjusted - minimum_exponent + len(str(len(quantities))) + 2)
+        return sum(quantities, ZERO)
+
+
+def baseline_preview(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Plan exactly the activation baseline using SELECTs only, with no writes.
+
+    Call inside the caller's coherent source-read transaction.  Both preview
+    admission and the owned activation transaction use these same rows, so
+    malformed historical inputs are rejected before an operation is claimed.
+    """
     from packages.application.warehouse_stocks import _normalized_wb_record, _validated_wb_goods, _is_doprinato
-    ensure_schema(conn)
+    rows = []
+    def append(kind, identity, payload):
+        rows.append({'kind':kind, 'identity':identity, 'payload_json':dumps(payload)})
+    uploads = conn.execute('SELECT upload_id FROM sheet_vitrina_v1_fulfillment_service_uploads ORDER BY upload_id').fetchall() if exists(conn,'sheet_vitrina_v1_fulfillment_service_uploads') else []
+    for row in uploads:
+        upload_id = str(row[0])
+        saved_lines = _lines(conn, upload_id)
+        append('upload', upload_id, saved_lines)
+        economic_identity = _economic_identity(saved_lines)
+        if economic_identity:
+            append('invoice_semantic', upload_id+':'+economic_identity,
+                {'upload_id':upload_id, 'economic_digest':economic_identity})
+    for raw in conn.execute('SELECT * FROM sheet_vitrina_v1_wb_supplies ORDER BY supply_id'):
+        record = _normalized_wb_record(dict(raw))
+        supply_id = str(record['supply_id'])
+        composition = _packed_basis(conn, record)
+        if composition:
+            append('supply_packed', supply_id, composition)
+        if _is_doprinato(record):
+            quantities_by_nm = {}
+            for good in _validated_wb_goods(record):
+                # Preserve the original per-barcode choice, then aggregate the
+                # chosen quantities at the actual baseline key (supply, SKU).
+                quantity = number(good.get('accepted_quantity')) or number(good.get('quantity'))
+                if quantity < ZERO:
+                    raise ValueError('negative_fbo_doprinato_baseline_quantity:'+supply_id+':'+str(good['nm_id']))
+                quantities_by_nm.setdefault(int(good['nm_id']), []).append(quantity)
+            for nm_id, quantities in sorted(quantities_by_nm.items()):
+                append('doprinato', f'{supply_id}:{nm_id}', {'quantity':str(_sum_baseline_quantities(quantities))})
+    rows.sort(key=lambda row:(row['kind'], row['identity']))
+    keys = [(row['kind'],row['identity']) for row in rows]
+    if len(keys) != len(set(keys)):
+        raise ValueError('duplicate_fbo_forward_cost_baseline_identity')
+    counts = {kind:sum(row['kind']==kind for row in rows)
+              for kind in ('upload','invoice_semantic','supply_packed','doprinato')}
+    plan = {'contract':'fbo_forward_cost_baseline_v1', 'rows':rows, 'counts':counts}
+    return {**plan, 'plan_digest':digest(plan)}
+
+
+def activate(conn: sqlite3.Connection, activated_at: str, *, expected_plan: dict[str, Any] | None = None):
+    """Apply a validated baseline in the caller's activation transaction; no commit."""
     if active(conn):
         return {'status': 'already_active', 'activated_at': conn.execute(f'SELECT activated_at FROM {CONFIG}').fetchone()[0]}
-    uploads = conn.execute('SELECT upload_id FROM sheet_vitrina_v1_fulfillment_service_uploads').fetchall() if exists(conn,'sheet_vitrina_v1_fulfillment_service_uploads') else []
-    for row in uploads:
-        saved_lines=_lines(conn,row[0])
-        conn.execute(f'INSERT INTO {BASELINES} VALUES(?,?,?)', ('upload', str(row[0]), dumps(saved_lines)))
-        _remember_economic_identity(conn,str(row[0]),saved_lines)
-    for raw in conn.execute('SELECT * FROM sheet_vitrina_v1_wb_supplies'):
-        record = _normalized_wb_record(dict(raw))
-        composition = _packed_basis(conn,record)
-        if composition:
-            conn.execute(f'INSERT INTO {BASELINES} VALUES(?,?,?)', ('supply_packed',str(record['supply_id']),dumps(composition)))
-        if _is_doprinato(record):
-            for good in _validated_wb_goods(record):
-                quantity = number(good.get('accepted_quantity')) or number(good.get('quantity'))
-                conn.execute(f'INSERT INTO {BASELINES} VALUES(?,?,?)', ('doprinato', f"{record['supply_id']}:{good['nm_id']}", dumps({'quantity': str(quantity)})))
+    plan = baseline_preview(conn)
+    if expected_plan is not None:
+        if (not isinstance(expected_plan, dict)
+                or expected_plan.get('contract') != plan['contract']
+                or expected_plan.get('plan_digest') != digest({key:value for key,value in expected_plan.items() if key!='plan_digest'})):
+            raise ValueError('invalid_fbo_forward_cost_baseline_plan')
+        if expected_plan['plan_digest'] != plan['plan_digest']:
+            raise ValueError('fbo_forward_cost_baseline_source_changed')
+    # Even schema creation follows validation and source-drift rejection.
+    if exists(conn, BASELINES) and conn.execute(f'SELECT 1 FROM {BASELINES} LIMIT 1').fetchone():
+        raise ValueError('fbo_forward_cost_inactive_baseline_not_empty')
+    ensure_schema(conn)
+    conn.executemany(f'INSERT INTO {BASELINES}(kind,identity,payload_json) VALUES(?,?,?)',
+        [(row['kind'],row['identity'],row['payload_json']) for row in plan['rows']])
     conn.execute(f'INSERT INTO {CONFIG} VALUES(1,?)', (activated_at,))
-    return {'status': 'active', 'activated_at': activated_at}
+    return {'status': 'active', 'activated_at': activated_at,
+            'baseline_plan_digest':plan['plan_digest'], 'baseline_counts':plan['counts']}
 
 
 def ordinary_overlay_lines(conn, rows):
@@ -366,6 +423,50 @@ def load_posted_effects(conn):
     return sorted(rows,key=lambda r:(r['posted_at'],int(r['snapshot'].get('posting_sequence') or 0),r['effect_id']))
 
 
+def _aggregate_doprinato_audit(audit):
+    """Match the SKU-level baseline key while retaining every barcode's proof."""
+    grouped = {}
+    for raw in audit:
+        row = dict(raw)
+        key = (str(row['source_id']), int(row['nm_id']))
+        grouped.setdefault(key, []).append(row)
+    result = []
+    ordered = sorted(grouped.items(), key=lambda item:(
+        min(str(row.get('business_date') or '') for row in item[1]), item[0]))
+    for (source_id, nm_id), source_rows in ordered:
+        source_rows.sort(key=dumps)
+        quantities = [number(row['matched_quantity']) for row in source_rows]
+        capitals = [number(row.get('matched_capital_rub')) for row in source_rows]
+        unmatched = [number(row.get('unmatched_quantity')) for row in source_rows]
+        if any(value < ZERO for value in quantities + capitals + unmatched):
+            raise ValueError('negative_fbo_doprinato_match')
+        matched_quantity = _sum_baseline_quantities(quantities)
+        matched_capital = _sum_baseline_quantities(capitals)
+        # Zero matched quantity has no cost operand. It must not suppress the
+        # priced part of a partially matched supply, but ANY positive unknown
+        # matched part prevents inventing a fully covered blended unit cost.
+        cost_known = all(quantity == ZERO or (
+            row.get('matched_wac_rub') is not None
+            and row.get('matched_capital_rub') is not None
+            and number(row['matched_wac_rub']) > ZERO
+            and capital > ZERO)
+            for row, quantity, capital in zip(source_rows, quantities, capitals))
+        first_provenance = source_rows[0].get('provenance') or {}
+        common_provenance = {key:value for key,value in first_provenance.items()
+            if all((row.get('provenance') or {}).get(key)==value for row in source_rows)}
+        provenance = dict(common_provenance)
+        if len(source_rows) > 1:
+            provenance['doprinato_barcode_matches'] = source_rows
+        result.append({'source_id':source_id, 'nm_id':nm_id,
+            'matched_quantity':str(matched_quantity),
+            'unmatched_quantity':str(_sum_baseline_quantities(unmatched)),
+            'matched_capital_rub':str(matched_capital),
+            'matched_wac_rub':str(matched_capital / matched_quantity)
+                if matched_quantity > ZERO and cost_known else None,
+            'provenance':provenance})
+    return result
+
+
 def doprinato_events(audit, state, *, posted_at, business_date, accepted_events=()):
     """Forward-only matched capital; old full quantities are an immutable floor."""
     baseline = {row['identity']:number(json.loads(row['payload_json'])['quantity']) for row in state.get('baselines',[]) if row['kind']=='doprinato'}
@@ -382,7 +483,7 @@ def doprinato_events(audit, state, *, posted_at, business_date, accepted_events=
     result = []
     if not state:
         return result
-    for row in audit:
+    for row in _aggregate_doprinato_audit(audit):
         source_id,nm = str(row['source_id']),int(row['nm_id'])
         matched = number(row['matched_quantity'])
         previously = posted.get((source_id,nm),ZERO)
