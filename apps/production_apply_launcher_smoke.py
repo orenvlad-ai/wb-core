@@ -125,6 +125,7 @@ builtins.__import__ = without_openpyxl
 
 from apps.production_apply_adapters import ADAPTERS
 expected = {"change_registry_external_v1",
+    "fbo_lifecycle_activation_v1",
     "current_fbo_supply_close_v1",
     "fbs_scoped_lifecycle_recovery_v1",
     "warehouse_reviewed_sync_v1",
@@ -151,6 +152,7 @@ assert set(ADAPTERS) == expected
 from apps import production_apply_launcher
 assert production_apply_launcher.ADAPTERS["search_cluster_cleaner_manual_v1"]
 assert "packages.application.fbs_accounting_apply" not in sys.modules
+assert "packages.application.fbo_lifecycle_activation" not in sys.modules
 '''
     completed = subprocess.run(
         [sys.executable, "-c", probe],
