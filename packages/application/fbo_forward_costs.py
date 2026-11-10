@@ -60,7 +60,8 @@ def ensure_schema(conn):
 
 
 def active(conn):
-    return exists(conn, CONFIG) and conn.execute(f'SELECT 1 FROM {CONFIG} WHERE slot=1').fetchone() is not None
+    # Read a stored column: a rowid-only probe emits a schema-less SQLite READ.
+    return exists(conn, CONFIG) and conn.execute(f'SELECT activated_at FROM {CONFIG} WHERE slot=1').fetchone() is not None
 
 
 def _lines(conn, upload_id):
