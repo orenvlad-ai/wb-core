@@ -8368,6 +8368,7 @@ class RegistryUploadDbBackedRuntime:
 
     def save_nomenclature_items_atomic(
         self, items: list[Mapping[str, Any]], *, preserve_staged_item_ids: Sequence[str] = (), operator_request=None,
+        defer_activation: bool = False,
     ) -> list[dict[str, Any]]:
         prepared_items: list[dict[str, Any]] = []
         for item in items:
@@ -8552,7 +8553,7 @@ class RegistryUploadDbBackedRuntime:
         # Source+intent committed together. Close the source writer before
         # heavy admission, then let the consumer revalidate its exact revision.
         continuation_error = None
-        if activation_items and operator_request is None:
+        if activation_items and operator_request is None and not defer_activation:
             try:
                 drain_nomenclature_activation_intents(
                     self, item_ids=[item["item_id"] for item in activation_items],

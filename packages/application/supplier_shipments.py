@@ -2105,6 +2105,7 @@ class SupplierShipmentsBlock:
         return self.update_sku_group(group_key, {"is_active": False}, operator_request=operator_request)
 
     def create_nomenclature_item(self, payload: Mapping[str, Any], *, operator_request=None) -> dict[str, Any]:
+        self._seed_nomenclature_from_current_config_if_empty()
         now = self.timestamp_factory()
         prepared_payload = _prepare_nomenclature_barcode_payload(
             existing=None,
@@ -2191,6 +2192,7 @@ class SupplierShipmentsBlock:
         }
 
     def sync_nomenclature_item_barcode(self, item_id: str, *, operator_request=None) -> dict[str, Any]:
+        self._seed_nomenclature_from_current_config_if_empty()
         existing = self.runtime.load_nomenclature_item(item_id)
         if existing is None:
             raise ValueError(f"nomenclature item not found: {item_id}")
@@ -2836,10 +2838,16 @@ class SupplierShipmentsBlock:
             raise ValueError(f"nomenclature group is inactive: {group_key}")
 
     def _seed_nomenclature_from_current_config_if_empty(self) -> None:
-        if self.runtime.list_nomenclature_items():
-            return
-        for item in self._seed_nomenclature_candidates():
-            self.runtime.save_nomenclature_item(_with_inferred_compatible_models(item))
+        from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+        with warehouse_functional_write_lock(self.runtime.runtime_dir):
+            if self.runtime.list_nomenclature_items():
+                return
+            items = [_with_inferred_compatible_models(item) for item in self._seed_nomenclature_candidates()]
+            if items:
+                self._ensure_sku_groups_ready()
+                # Materialize the complete legacy catalog in one source transaction.
+                # The existing owned consumer performs activation after acceptance.
+                self.runtime.save_nomenclature_items_atomic(items, defer_activation=True)
 
     def _seed_nomenclature_candidates(self) -> list[dict[str, Any]]:
         try:
