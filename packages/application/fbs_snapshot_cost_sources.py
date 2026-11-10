@@ -229,8 +229,9 @@ def _documents(conn: sqlite3.Connection, *, document_id: str | None = None, nati
 def _verify_typed_lines(document, posted, lines, movements):
     """The native saved bytes own W2 operands, before normalized hashing."""
     kind = document['document_kind']
+    from packages.application.ff_pool_documents import _EXACT_POOL_TRANSFER_POLICIES
     exact_transfer = kind == 'pool_reallocation' and any(
-        json.loads(line['metadata_json']).get('capital_policy') == 'exact_full_pool_transfer_v1' for line in lines)
+        json.loads(line['metadata_json']).get('capital_policy') in _EXACT_POOL_TRANSFER_POLICIES for line in lines)
     if not exact_transfer and kind not in {'correction', 'inventory_surplus', 'inventory_shortage', 'storno', 'late_expense', 'pool_inventory'} and posted.get('document_role')!='china_discrepancy':
         return
     saved = posted.get('lines')
@@ -247,7 +248,7 @@ def _verify_typed_lines(document, posted, lines, movements):
             raise ValueError('typed_document_saved_line_mismatch')
     if exact_transfer:
         from packages.application.ff_pool_documents import _validate_exact_pool_transfer
-        selected = [line for line in saved if line.get('metadata', {}).get('capital_policy') == 'exact_full_pool_transfer_v1']
+        selected = [line for line in saved if line.get('metadata', {}).get('capital_policy') in _EXACT_POOL_TRANSFER_POLICIES]
         nms = {line['nm_id'] for line in selected}
         typed = {'document_kind':kind, 'expenses':[],
             'lines':[{**line, 'capital_cents':0, 'expense_cents':0, 'capital_exact_rub':line['capital_rub']} for line in selected],

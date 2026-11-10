@@ -198,10 +198,11 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual((evidence['stage'], evidence['reason']), ('request', 'transport'))
 
     def test_exact_aggregate_regions_succeed_through_real_spawn(self):
-        for region in ('Склад WB', 'Россия'):
-            row = {**item(), 'warehouseId': -999999, 'warehouseName': 'Склад WB',
+        for name, region in (('Склад WB', 'Склад WB'), ('Склад WB', 'Россия'),
+                             ('Склад WB РФ', 'Россия')):
+            row = {**item(), 'warehouseId': -999999, 'warehouseName': name,
                 'regionName': region, 'quantity': 19, 'inWayToClient': 4, 'inWayFromClient': 2}
-            with self.subTest(region=region), loopback([(200, body([row]))]) as (url, received):
+            with self.subTest(name=name, region=region), loopback([(200, body([row]))]) as (url, received):
                 source = self.source(url)
                 payload = source.fetch(self.request)
                 data = payload['data']
@@ -212,6 +213,7 @@ class DiagnosticsTests(unittest.TestCase):
                 normalized = data['rows'][0]
                 self.assertEqual((normalized['warehouseId'], normalized['warehouseName']), (0, 'Остальные'))
                 self.assertEqual((normalized['sourceWarehouseId'], normalized['sourceRegionName']), (-999999, region))
+                self.assertEqual(normalized['sourceWarehouseName'], name)
                 self.assertEqual(normalized['normalizationReason'], 'exact_wb_aggregate_sentinel')
                 result = transform_legacy_payload(payload).result
                 self.assertEqual(result.kind, 'success')
@@ -221,6 +223,29 @@ class DiagnosticsTests(unittest.TestCase):
                 self.assertEqual((stock.stock_total, stock.in_way_to_client,
                     stock.in_way_from_client, stock.wb_contour_total), (19, 4, 2, 25))
                 self.assertFalse(source._single_flights)
+
+    def test_aggregate_aliases_cannot_double_count_one_size(self):
+        current = {**item(), 'warehouseId': -999999, 'warehouseName': 'Склад WB РФ',
+                   'regionName': 'Россия'}
+        for region in ('Склад WB', 'Россия'):
+            old = {**current, 'warehouseName': 'Склад WB', 'regionName': region}
+            with self.subTest(region=region), loopback([(200, body([old, current]))]) as (url, received):
+                evidence = self.persist_failure(self.source(url))
+                self.assertEqual(evidence['reason'], 'duplicate_row')
+                self.assertEqual(len(received), 1)
+
+    def test_rf_aggregate_acceptance_is_an_exact_tuple(self):
+        current = {**item(), 'warehouseId': -999999, 'warehouseName': 'Склад WB РФ',
+                   'regionName': 'Россия'}
+        variants = [{'warehouseId': '-999999'}, {'warehouseId': -999999.0},
+                    {'warehouseId': -999998}, {'warehouseId': True},
+                    {'warehouseName': 'Склад WB РФ неизвестный'},
+                    {'regionName': 'Склад WB'}, {'regionName': 'Беларусь'}]
+        for changed in variants:
+            with self.subTest(changed=changed), loopback([(200, body([{**current, **changed}]))]) as (url, received):
+                evidence = self.persist_failure(self.source(url))
+                self.assertEqual(evidence['reason'], 'invalid_warehouse_id')
+                self.assertEqual(len(received), 1)
 
     def test_decode_and_validation_errors_have_safe_codes_and_no_provider_data(self):
         invalid_row = {**item(), 'warehouseId': SECRET, 'warehouseName': SECRET}
