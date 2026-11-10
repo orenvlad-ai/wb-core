@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -46,6 +47,50 @@ PARAMETERS = SimpleNamespace(version_id="p", buyout_rate=Decimal(1),
 
 
 class ConsumerTests(unittest.TestCase):
+    def test_native_forward_effects_under_finance_dependency_proof(self):
+        from packages.application import fbo_forward_costs as forward
+        from packages.application.dependency_proof import (
+            DependencyProof, DetachedReadConnection, CompletionProofError, install_dependency_revisions,
+        )
+        for mode in ('DELETE', 'WAL'):
+            for enabled in (False, True):
+                with self.subTest(mode=mode, enabled=enabled), tempfile.TemporaryDirectory() as folder:
+                    path = Path(folder) / 'costs.sqlite3'
+                    with closing(sqlite3.connect(path)) as writer:
+                        writer.execute('PRAGMA journal_mode=' + mode)
+                        forward.ensure_schema(writer)
+                        if enabled:
+                            writer.execute(f'INSERT INTO {forward.CONFIG} VALUES(1, ?)', ('',))
+                        writer.execute(f'INSERT INTO {forward.EFFECTS} VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                            ('effect1', 'upload1', 'revision1', 'supply1', 123, '20',
+                             'posted', '', '2026-11-10T10:00:00Z', '2026-11-10T10:01:00Z', '{}'))
+                        writer.commit()
+                        install_dependency_revisions(writer)
+                        writer.commit()
+                    with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as live:
+                        live.row_factory = sqlite3.Row
+                        live.execute('PRAGMA query_only=ON')
+                        conn = DetachedReadConnection(live)
+                        proof = DependencyProof.capture(conn)
+                        with proof.observe():
+                            self.assertEqual(forward.active(conn), enabled)
+                            rows = consumer.load_effects(conn)
+                        self.assertEqual([r['effect_id'] for r in rows], ['effect1'] if enabled else [])
+                        dependencies = {(r['schema'], r['table']) for r in proof.seal()['dependencies']}
+                        self.assertIn(('main', forward.CONFIG), dependencies)
+                        if enabled:
+                            self.assertIn(('main', forward.EFFECTS), dependencies)
+                        with closing(sqlite3.connect(path)) as writer:
+                            if enabled:
+                                writer.execute(f'INSERT INTO {forward.EFFECTS} VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                                    ('effect2', 'upload2', 'revision2', 'supply2', 123, '5',
+                                     'posted', '', '2026-11-10T10:02:00Z', '2026-11-10T10:03:00Z', '{}'))
+                            else:
+                                writer.execute(f'INSERT INTO {forward.CONFIG} VALUES(1, ?)', ('now',))
+                            writer.commit()
+                        with self.assertRaisesRegex(CompletionProofError, 'dependency_revision_changed'):
+                            proof.assert_current(conn)
+
     def test_later_expense_preserves_prior_finance_and_proxy_results(self):
         # Real consumers must keep the prior day's full result unchanged when
         # a later expense exists, including evidence/quality and cache identity.
