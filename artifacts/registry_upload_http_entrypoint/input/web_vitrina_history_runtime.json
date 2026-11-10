@@ -2,7 +2,7 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:0c2c3945ab29e55674db813138fdd4a7337182fde750683bf771cdc274ec3c46",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:532a5900c95ab50e7a3153088ea5b4d1058e0c7c9a56dc51252092c5c676b5ce",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
     "packages/application/sheet_vitrina_v1_web_vitrina.py": "426ca35dc0074d87c064df72cdfbb2e3798a725c75e374df9f6e6b2c9c4c1f13",
@@ -46,7 +46,7 @@
     "packages/application/historical_publication_retirement.py": "55fc0d331a4896381956e026a945b78785f9555c41235bdb11d317f8518cb891",
     "packages/application/vitrina_last_known_cost.py": "1776ff13ef1d9fdbae97fd604e64725f9caf512e5c7674dc4e6a0fb24d2bfb6c",
     "packages/application/fbo_forward_cost_consumers.py": "990c2b05895d53cbe0e059db6f453bf381ce57949c5e7e3daba6d281083f3cfa",
-    "packages/application/fbo_forward_costs.py": "8a1de7080459e91f856d48eee2a7507f84d7d922e9ad0986ed08cef1d01f4992"
+    "packages/application/fbo_forward_costs.py": "5438eb87e6fa8eba737eacb16aa1f3df283f4c74e1ebab4d10701a6afbc00c97"
   },
   "group_migration_root": "/mnt/wb-core-extra100/web-vitrina-history-groups-candidate",
   "repair_code_hashes": {
