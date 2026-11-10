@@ -1274,6 +1274,18 @@ def main() -> None:
         assert ["python3", "apps/fbo_forward_costs_smoke.py"] in fbo_costs["commands"]
         assert {"openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"} <= set(fbo_costs["pip"]), fbo_costs
     assert "playwright==1.58.0" not in finance["pip"]
+    proof_scripts = ["apps/fulfillment_payment_proof" + suffix + "_smoke.py"
+                     for suffix in ("", "_http", "_browser")]
+    for changed in ["packages/application/fulfillment_payment_proof.py", *proof_scripts]:
+        proof_plan = build_plan_from_paths(
+            pull_request=1610, base=BASE, head=HEAD,
+            paths=[changed], file_exists=lambda *_: True,
+        )
+        verify_plan(proof_plan)
+        assert {"openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5", "playwright==1.58.0"} <= set(proof_plan["pip"])
+        for script in proof_scripts:
+            assert proof_plan["commands"].count(["python3", script]) == 1
+        assert proof_plan["commands"].index(install) < proof_plan["commands"].index(["python3", proof_scripts[-1]])
     assert install not in docs["commands"]
 
     try:

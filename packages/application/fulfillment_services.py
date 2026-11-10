@@ -259,9 +259,11 @@ class FulfillmentServicesBlock:
         uploads = [_upload_row_to_dict(row, include_links=True) for row in rows]
         if uploads:
             from packages.application.fbs_historical_fbo_documents import public_invoice
+            from packages.application.fulfillment_payment_proof import public_status
             with closing(operator_receipts.readonly(self.runtime.db_path)) as conn:
                 for upload in uploads:
                     upload.update(public_invoice(conn,runtime_dir=self.runtime.runtime_dir,upload_id=upload['upload_id']))
+                    upload.update(public_status(conn,upload['upload_id']))
         latest = uploads[0] if uploads else None
         return {
             "contract_name": CONTRACT_NAME,
@@ -311,8 +313,10 @@ class FulfillmentServicesBlock:
             recalculation = recalc_intents.read_request(conn, normalized_id, recalc_intents.source_revision(upload_row))
         upload = _upload_row_to_dict(upload_row, include_links=True)
         from packages.application.fbs_historical_fbo_documents import public_invoice
+        from packages.application.fulfillment_payment_proof import public_status
         with closing(operator_receipts.readonly(self.runtime.db_path)) as conn:
             upload.update(public_invoice(conn,runtime_dir=self.runtime.runtime_dir,upload_id=normalized_id))
+            upload.update(public_status(conn,normalized_id))
         lines = [_line_row_to_dict(row) for row in line_rows]
         return {
             "contract_name": CONTRACT_NAME,

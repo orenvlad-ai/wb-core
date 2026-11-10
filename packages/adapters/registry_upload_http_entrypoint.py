@@ -3354,6 +3354,42 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, result)
                 return
 
+            proof_route = _fulfillment_payment_proof_route(parsed.path)
+            if proof_route and proof_route[1] in {"preview", "confirm"}:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                if not _ensure_ff_pool_csrf(self, parsed.path, allowed_content_types={"application/json", "application/pdf"}):
+                    return
+                upload_id, action = proof_route
+                try:
+                    if action == "preview":
+                        length = int(self.headers.get("Content-Length", "0"))
+                        if length <= 0 or length > 16 * 1024**2:
+                            _write_json_response(self, HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "Выберите PDF не больше 16 МБ."})
+                            return
+                        if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/pdf":
+                            raise ValueError("Требуется PDF платёжного поручения.")
+                        result = entrypoint.handle_fulfillment_payment_proof_preview_request(
+                            upload_id, self.rfile.read(length),
+                            filename=urllib_parse.unquote(self.headers.get("X-Filename", "payment-order.pdf")),
+                            expected_invoice_number=urllib_parse.unquote(self.headers.get("X-Expected-Invoice-Number", "")),
+                            actor=_current_web_user_actor(self))
+                    else:
+                        payload = _load_request_payload(self, max_request_bytes=4096)
+                        result = entrypoint.handle_fulfillment_payment_proof_confirm_request(
+                            upload_id, payload, actor=_current_web_user_actor(self))
+                except FfPoolSurfaceError as exc:
+                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": str(exc), "code": exc.code})
+                    return
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, _fulfillment_payment_proof_error(exc))
+                    return
+                except Exception:
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Результат сохранения неизвестен. Проверьте ту же операцию."})
+                    return
+                _write_json_response(self, HTTPStatus.OK, result, extra_headers={"Cache-Control": "private, no-store"})
+                return
+
             if parsed.path == DEFAULT_FULFILLMENT_SERVICES_UPLOADS_PATH:
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -5638,6 +5674,26 @@ def _build_handler(
                     filename=filename,
                     as_attachment=True,
                 )
+                return
+
+            proof_route = _fulfillment_payment_proof_route(parsed.path)
+            if proof_route and proof_route[1] in {"read", "download"}:
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                upload_id, action = proof_route
+                try:
+                    if action == "download":
+                        data, filename, content_type = entrypoint.handle_fulfillment_payment_proof_download_request(upload_id)
+                    else:
+                        result = entrypoint.handle_fulfillment_payment_proof_read_request(upload_id,
+                            operation_id=_resolve_single_query_param(parsed.query, "operation_id") or "")
+                except (ValueError, OSError) as exc:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                if action == "download":
+                    _write_binary_response(self, HTTPStatus.OK, data, content_type=content_type, filename=filename, as_attachment=True, headers={"Cache-Control": "private, no-store"})
+                else:
+                    _write_json_response(self, HTTPStatus.OK, result, extra_headers={"Cache-Control": "private, no-store"})
                 return
 
             if _is_fulfillment_source_document_path(parsed.path):
@@ -8272,6 +8328,32 @@ def _resolve_ff_stock_operation_id_from_file_path(path: str) -> str:
     return urllib_parse.unquote(parts[0])
 
 
+def _fulfillment_payment_proof_error(exc: ValueError) -> dict[str, Any]:
+    code = str(exc)
+    messages = {
+        "fulfillment_payment_invoice_required": "Укажите номер оплаченного счёта.",
+        "fulfillment_payment_invoice_mismatch": "Номер счёта не совпадает с назначением платежа.",
+        "fulfillment_payment_amount_mismatch": "Сумма платежа не совпадает с суммой документа услуг ФФ.",
+        "fulfillment_payment_not_executed_or_unrecognized": "Не удалось подтвердить исполнение рублёвого платежа по этому PDF.",
+        "fulfillment_payment_original_pdf_already_retained": "Платёж уже проверен по другому PDF. Используйте исходный файл.",
+        "fulfillment_payment_already_used_for_overhead": "Этот платёж уже использован в накладных расходах FF.",
+        "fulfillment_payment_already_attached": "Этот платёж уже прикреплён к другому документу услуг ФФ.",
+        "fulfillment_payment_pdf_required": "Выберите платёжное поручение в формате PDF не больше 16 МБ.",
+        "fulfillment_payment_upload_not_accepted": "Документ услуг ФФ недоступен или удалён.",
+    }
+    return {"error": messages.get(code, "Подтверждение не сохранено. Данные документа изменились или не прошли проверку."),
+            "code": code, "source_not_saved": True}
+
+
+def _fulfillment_payment_proof_route(path: str) -> tuple[str, str] | None:
+    parts = _fulfillment_upload_path_parts(path)
+    if len(parts) == 2 and parts[0] and parts[1] in {"payment-proof", "payment-proof.pdf"}:
+        return urllib_parse.unquote(parts[0]), "read" if parts[1] == "payment-proof" else "download"
+    if len(parts) == 3 and parts[0] and parts[1] == "payment-proof" and parts[2] in {"preview", "confirm"}:
+        return urllib_parse.unquote(parts[0]), parts[2]
+    return None
+
+
 def _is_fulfillment_payment_validation_pdf_path(path: str) -> bool:
     parts = _fulfillment_upload_path_parts(path)
     return len(parts) == 2 and bool(parts[0]) and parts[1] == "payment-validation.pdf"
@@ -9605,7 +9687,7 @@ def _load_web_vitrina_performance_payload(
     return payload
 
 
-def _ensure_ff_pool_csrf(handler: BaseHTTPRequestHandler, path: str) -> bool:
+def _ensure_ff_pool_csrf(handler: BaseHTTPRequestHandler, path: str, *, allowed_content_types=None) -> bool:
     """Require an explicit same-origin marker for every FF facility/pool mutation."""
 
     content_type = str(handler.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()
@@ -9614,7 +9696,7 @@ def _ensure_ff_pool_csrf(handler: BaseHTTPRequestHandler, path: str) -> bool:
     request_origin = _request_origin(handler).rstrip("/")
     fetch_site = str(handler.headers.get("Sec-Fetch-Site", "") or "").strip().lower()
     valid = (
-        content_type in {"application/json", "multipart/form-data"}
+        content_type in (allowed_content_types or {"application/json", "multipart/form-data"})
         and marker == "1"
         and (not origin or hmac.compare_digest(origin, request_origin))
         and fetch_site not in {"cross-site", "same-site"}

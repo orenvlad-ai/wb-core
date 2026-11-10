@@ -5321,6 +5321,7 @@
             </div>
             <p id="fulfillmentServicesMessage" class="wb-supplies-message" hidden></p>
             <div id="fulfillmentAcceptance" hidden></div>
+            <section id="fulfillmentPaymentProof" class="fulfillment-errors-block" aria-label="Подтверждение оплаты услуг ФФ" hidden></section>
             <section class="fulfillment-errors-block" id="fulfillmentErrorsBlock" hidden>
               <div class="wb-supplies-table-wrap">
                 <table class="wb-supplies-table" aria-label="Ошибки загрузки услуг ФФ">
@@ -6309,6 +6310,12 @@
       let fulfillmentPending = null;
       try { fulfillmentPending = JSON.parse(localStorage.getItem(fulfillmentRecoveryKey) || "null"); } catch (_) {}
 
+      const fulfillmentProofPanel = document.getElementById("fulfillmentPaymentProof");
+      const fulfillmentProofKey = "fulfillment-payment-proof-v1:" + String(config.user_config_key || "local_operator");
+      let fulfillmentProofPending = null;
+      let fulfillmentProofPreview = null;
+      let fulfillmentProofBusy = false;
+      try { fulfillmentProofPending = JSON.parse(localStorage.getItem(fulfillmentProofKey) || "null"); } catch (_) {}
       let fulfillmentDeleteConfirmUploadId = "";
       let fulfillmentDeletingUploadId = "";
       let ffStockPayload = null;
@@ -7474,6 +7481,11 @@
         fulfillmentUploadsBody.addEventListener("click", (event) => {
           const target = event.target instanceof Element ? event.target : null;
           if (!target) {
+            return;
+          }
+          const proofButton = target.closest("[data-fulfillment-payment-proof]");
+          if (proofButton) {
+            openFulfillmentPaymentProof(proofButton.getAttribute("data-upload-id") || "");
             return;
           }
           const cancelButton = target.closest("[data-fulfillment-delete-cancel]");
@@ -12061,6 +12073,7 @@
         fulfillmentServicesInitialized = true;
         loadFulfillmentServices();
         if (fulfillmentPending) recoverFulfillmentOperation();
+        if (fulfillmentProofPending) recoverFulfillmentPaymentProof();
       }
 
       async function loadFulfillmentServices(options) {
@@ -12242,6 +12255,15 @@
           } else if (upload.original_invoice_status === "unavailable") {
             pdfCell = "<span>Оригинал счёта недоступен</span><br>" + pdfCell;
           }
+          const proof = upload.payment_proof;
+          if (proof && proof.status === "confirmed") {
+            pdfCell += '<br><a class="dataset-file-link" href="' + escapeHtml(proof.download_path) + '">Документ, подтверждающий оплату</a>'
+              + '<br><span>Оплата подтверждена документом · №' + escapeHtml(proof.payment_order_number) + ' от ' + escapeHtml(proof.payment_date) + '</span>';
+          } else if (upload.payment_proof_status === "unavailable") {
+            pdfCell += '<br><span>Документ подтверждения оплаты недоступен</span>';
+          } else {
+            pdfCell += '<br><button type="button" class="fulfillment-row-button" data-fulfillment-payment-proof data-upload-id="' + escapeHtml(upload.upload_id) + '">Подтвердить оплату</button>';
+          }
           const sourceName = upload.source_path
             ? "<a class=\"dataset-file-link\" href=\"" + escapeHtml(upload.source_path) + "\">" + escapeHtml(valueOrDash(upload.original_filename)) + "</a>"
             : escapeHtml(valueOrDash(upload.original_filename));
@@ -12260,6 +12282,133 @@
             "</tr>"
           ].join("");
         }).join("");
+      }
+
+      function fulfillmentProofUrl(uploadId, suffix) {
+        return config.fulfillment_services_uploads_path.replace(/\/$/, "") + "/" + encodeURIComponent(uploadId) + "/payment-proof" + (suffix || "");
+      }
+
+      function rememberFulfillmentProof(value) {
+        fulfillmentProofPending = value;
+        try { if (value) localStorage.setItem(fulfillmentProofKey, JSON.stringify(value)); else localStorage.removeItem(fulfillmentProofKey); } catch (_) {}
+      }
+
+      function proofParty(value) {
+        if (!value) return "—";
+        if (typeof value !== "object") return String(value);
+        return [value.name || value.title || value.company_name, value.inn ? "ИНН " + value.inn : ""].filter(Boolean).join(" · ") || JSON.stringify(value);
+      }
+
+      function proofInvoiceNumber(value) {
+        return String(value && typeof value === "object" ? value.number || "" : value || "");
+      }
+
+      function openFulfillmentPaymentProof(uploadId) {
+        if (fulfillmentProofPending) { recoverFulfillmentPaymentProof(); return; }
+        fulfillmentProofPanel.hidden = false;
+        fulfillmentProofPanel.innerHTML = '<h3>Подтверждение оплаты услуг ФФ</h3><p>Приложите исполненное платёжное поручение к выбранному расчёту услуг.</p>'
+          + '<label>Номер оплаченного счёта <input id="fulfillmentProofInvoice" class="input" autocomplete="off"></label> '
+          + '<label>Платёжное поручение PDF <input id="fulfillmentProofFile" type="file" accept=".pdf,application/pdf"></label> '
+          + '<button id="fulfillmentProofCheck" type="button" class="fulfillment-row-button">Проверить платёжку</button>';
+        document.getElementById("fulfillmentProofCheck").onclick = () => previewFulfillmentPaymentProof(uploadId);
+      }
+
+      function renderFulfillmentProofUnknown() {
+        fulfillmentProofPanel.hidden = false;
+        fulfillmentProofPanel.innerHTML = '<p>Результат сохранения пока неизвестен. Проверяем ту же операцию.</p><button id="fulfillmentProofRecover" type="button" class="fulfillment-row-button">Проверить сохранение</button>';
+        document.getElementById("fulfillmentProofRecover").onclick = recoverFulfillmentPaymentProof;
+      }
+
+      function renderFulfillmentProofPreview(preview) {
+        fulfillmentProofPreview = preview;
+        fulfillmentProofPanel.hidden = false;
+        const rows = (preview.supplies || []).map(row => '<li>Поставка WB ' + escapeHtml(row.wb_supply_id) + ' · ' + escapeHtml(valueOrDash(row.route)) + ' · коробов: ' + escapeHtml(valueOrDash(row.boxes_qty)) + '</li>').join("");
+        fulfillmentProofPanel.innerHTML = '<h3>Проверьте документ перед прикреплением</h3><ul>' + rows + '</ul><p>Сумма: ' + escapeHtml(formatWbRub(preview.amount))
+          + '<br>Платёжное поручение №' + escapeHtml(preview.payment_order_number) + ' от ' + escapeHtml(preview.payment_date)
+          + '<br>Оплаченный счёт: ' + escapeHtml(proofInvoiceNumber(preview.invoice_reference))
+          + '<br>Плательщик: ' + escapeHtml(proofParty(preview.payer)) + '<br>Получатель: ' + escapeHtml(proofParty(preview.beneficiary))
+          + '<br>Назначение платежа: ' + escapeHtml(preview.payment_purpose)
+          + '</p><p>Сверьте поставку, номер счёта, получателя и назначение платежа с исходным счётом.</p><p>Будет прикреплено подтверждение оплаты. Сумма расхода и расчёты себестоимости этим действием не меняются.</p>'
+          + '<button id="fulfillmentProofConfirm" type="button" class="fulfillment-row-button">Подтвердить и прикрепить</button> <button id="fulfillmentProofCancel" type="button" class="fulfillment-row-button">Отмена</button>';
+        document.getElementById("fulfillmentProofConfirm").onclick = confirmFulfillmentPaymentProof;
+        document.getElementById("fulfillmentProofCancel").onclick = () => {
+          if (fulfillmentProofBusy || !fulfillmentProofPending || fulfillmentProofPending.phase !== "preview") return;
+          rememberFulfillmentProof(null); fulfillmentProofPreview = null; fulfillmentProofPanel.hidden = true;
+        };
+      }
+
+      async function acceptFulfillmentProofResult(result) {
+        const ref = fulfillmentProofPending;
+        if (!ref || result.upload_id !== ref.upload_id || result.file_sha256 !== ref.file_sha256
+            || proofInvoiceNumber(result.invoice_reference).toLocaleLowerCase() !== ref.invoice_number.toLocaleLowerCase()
+            || (ref.operation_id && result.operation_id !== ref.operation_id)) return false;
+        if (result.status === "confirmed") {
+          rememberFulfillmentProof(null); fulfillmentProofPreview = null;
+          fulfillmentProofPanel.hidden = false;
+          fulfillmentProofPanel.innerHTML = '<p>Оплата подтверждена документом · №' + escapeHtml(result.payment_order_number) + ' от ' + escapeHtml(result.payment_date)
+            + '</p><a class="dataset-file-link" href="' + escapeHtml(result.download_path) + '">Документ, подтверждающий оплату</a>';
+          await loadFulfillmentServices({preserveMessage:true});
+          return true;
+        }
+        if (result.status === "preview" && ref.phase === "preview") {
+          rememberFulfillmentProof({...ref, operation_id:result.operation_id, preview_fingerprint:result.preview_fingerprint});
+          renderFulfillmentProofPreview(result); return true;
+        }
+        return false;
+      }
+
+      async function recoverFulfillmentPaymentProof() {
+        const ref = fulfillmentProofPending;
+        if (!ref || fulfillmentProofBusy) return;
+        fulfillmentProofBusy = true; renderFulfillmentProofUnknown();
+        try {
+          const response = await fetch(fulfillmentProofUrl(ref.upload_id) + (ref.operation_id ? "?operation_id=" + encodeURIComponent(ref.operation_id) : ""), {headers:{Accept:"application/json"},cache:"no-store"});
+          const result = await readJson(response);
+          if (response.ok && await acceptFulfillmentProofResult(result)) return;
+        } catch (_) {} finally { fulfillmentProofBusy = false; }
+      }
+
+      async function previewFulfillmentPaymentProof(uploadId) {
+        if (fulfillmentProofBusy || fulfillmentProofPending) return;
+        const invoice = document.getElementById("fulfillmentProofInvoice").value.trim();
+        const file = document.getElementById("fulfillmentProofFile").files[0];
+        if (!invoice || !file || !/\.pdf$/i.test(file.name) || !file.size || file.size > 16*1024*1024) {
+          setFulfillmentServicesMessage("Укажите номер оплаченного счёта и выберите PDF не больше 16 МБ.", "error"); return;
+        }
+        fulfillmentProofBusy = true;
+        try {
+          const bytes = await file.arrayBuffer();
+          const hash = await crypto.subtle.digest("SHA-256", bytes);
+          const sha = "sha256:" + Array.from(new Uint8Array(hash)).map(value => value.toString(16).padStart(2,"0")).join("");
+          rememberFulfillmentProof({upload_id:uploadId,file_sha256:sha,invoice_number:invoice,phase:"preview"});
+          renderFulfillmentProofUnknown();
+          const response = await fetch(fulfillmentProofUrl(uploadId,"/preview"), {method:"POST",headers:{Accept:"application/json","Content-Type":"application/pdf","X-WB-FF-Pool-CSRF":"1","X-Filename":encodeURIComponent(file.name),"X-Expected-Invoice-Number":encodeURIComponent(invoice)},body:bytes});
+          const result = await readJson(response);
+          if (response.ok) await acceptFulfillmentProofResult(result);
+          else if (response.status >= 400 && response.status < 500) {
+            rememberFulfillmentProof(null); openFulfillmentPaymentProof(uploadId);
+            setFulfillmentServicesMessage(result.error || "Платёжный документ не принят.","error");
+          }
+        } catch (_) {} finally { fulfillmentProofBusy = false; }
+        if (fulfillmentProofPending && !fulfillmentProofPreview) recoverFulfillmentPaymentProof();
+      }
+
+      async function confirmFulfillmentPaymentProof() {
+        const ref = fulfillmentProofPending;
+        if (!ref || !fulfillmentProofPreview || fulfillmentProofBusy || ref.phase !== "preview") return;
+        fulfillmentProofBusy = true;
+        rememberFulfillmentProof({...ref,phase:"confirm"}); renderFulfillmentProofUnknown();
+        try {
+          const response = await fetch(fulfillmentProofUrl(ref.upload_id,"/confirm"), {method:"POST",headers:{Accept:"application/json","Content-Type":"application/json","X-WB-FF-Pool-CSRF":"1"},body:JSON.stringify({operation_id:ref.operation_id,preview_fingerprint:ref.preview_fingerprint})});
+          const result = await readJson(response);
+          if (response.ok) await acceptFulfillmentProofResult(result);
+          else if (result.source_not_saved === true || result.code === "csrf_failed" || result.code === "business_data_maintenance") {
+            rememberFulfillmentProof({...ref,phase:"preview"});
+            renderFulfillmentProofPreview(fulfillmentProofPreview);
+            setFulfillmentServicesMessage(result.error || "Подтверждение не сохранено. Проверьте документ перед новой попыткой.","error");
+          }
+        } catch (_) {} finally { fulfillmentProofBusy = false; }
+        if (fulfillmentProofPending && fulfillmentProofPending.phase === "confirm") recoverFulfillmentPaymentProof();
       }
 
       function renderFulfillmentDeleteCell(upload) {
