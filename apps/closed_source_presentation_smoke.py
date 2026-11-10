@@ -10,7 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from apps.finance_daily_publication_smoke import source, plan, DAY, NMS
-from apps.web_vitrina_web_source_publication_smoke import observations, plan as portal_plan
+from apps.web_vitrina_web_source_publication_smoke import observations, plan as portal_plan, scoped_observations
 from apps.web_vitrina_web_source_publication import project as portal_project, source_result
 from packages.application.finance_daily_publication import assemble, project, native_presentation
 from packages.application.registry_upload_http_entrypoint import _preserve_closed_web_source_presentation
@@ -80,10 +80,12 @@ class PortalTests(unittest.TestCase):
         result = self.run_keep()
         cells = result.metadata['server_cell_presentation']
         self.assertEqual(result.sheets, self.new.sheets)
-        self.assertEqual(len(cells), 17)  # 16 portal cells and one inventory proof.
+        self.assertEqual(len(cells), 23)  # 22 portal cells and one inventory proof.
         self.assertNotIn('SKU:1|ctr', cells)
         self.assertEqual(cells['SKU:3|view_count']['2026-09-11']['missing_sku_count'], 1)
         self.assertEqual(cells['SKU:2|view_count']['2026-09-11']['missing_sku_count'], 0)
+        self.assertIn('SKU:1|orders_current', cells)
+        self.assertIn('SKU:3|position_avg', cells)
         for key in cells:
             if key != 'SKU:1|stock_total':
                 self.assertEqual(cells[key], self.old.metadata['server_cell_presentation'][key])
@@ -113,6 +115,51 @@ class PortalTests(unittest.TestCase):
         payload, stamp = self.sources['seller_funnel_snapshot']
         self.sources['seller_funnel_snapshot'] = replace(payload, items=payload.items[:1]), stamp
         self.assertNotIn('SKU:1|view_count', self.run_keep().metadata['server_cell_presentation'])
+
+    def test_historical_roster_uses_its_own_totals_from_union_source(self):
+        value = portal_plan()
+        value['sheets'][0]['rows'] = [r for r in value['sheets'][0]['rows'] if not r[1].startswith('SKU:2|')]
+        value, _ = portal_project(value, observations(), [1, 3], 'accepted-historical')
+        self.old = envelope(value)
+        self.new = replace(self.old, metadata={})
+        cells = self.run_keep().metadata['server_cell_presentation']
+        self.assertIn('SKU:1|orders_current', cells)
+        self.assertNotIn('SKU:2|orders_current', cells)
+        self.assertEqual(cells['TOTAL|total_views_current']['2026-09-11']['missing_sku_count'], 1)
+
+    def test_legacy_search_proof_retains_only_its_original_metrics(self):
+        for key in list(self.old.metadata['server_cell_presentation']):
+            if key.split('|')[-1] in {'orders_current', 'position_avg'}:
+                del self.old.metadata['server_cell_presentation'][key]
+        cells = self.run_keep().metadata['server_cell_presentation']
+        self.assertIn('SKU:1|views_current', cells)
+        self.assertNotIn('SKU:1|orders_current', cells)
+
+    def test_search_order_or_position_drift_rejects_all_extended_proof(self):
+        for metric in ('orders_current', 'position_avg'):
+            old = deepcopy(self.old)
+            next(r for r in old.sheets[0].rows if r[1] == 'SKU:1|' + metric)[2] += 1
+            cells = self.run_keep(old).metadata['server_cell_presentation']
+            self.assertNotIn('SKU:1|views_current', cells)
+            self.assertNotIn('SKU:1|' + metric, cells)
+
+    def test_scoped_union_proof_stays_scoped_for_current_and_historical_rosters(self):
+        obs = scoped_observations()
+        self.sources = {o['source_key']: (source_result(o, [1, 2, 3]), o['source_fetched_at']) for o in obs}
+        for roster in ([1, 2, 3], [1, 3]):
+            value = portal_plan()
+            value['sheets'][0]['rows'] = [r for r in value['sheets'][0]['rows']
+                if not r[1].startswith('SKU:') or int(r[1].split('|')[0][4:]) in roster]
+            value, _ = portal_project(value, obs, roster, 'accepted-scoped')
+            self.old = envelope(value)
+            self.new = replace(self.old, metadata={})
+            cells = self.run_keep().metadata['server_cell_presentation']
+            proof = cells['SKU:1|orders_current']['2026-09-11']
+            self.assertEqual(proof['source_completeness'], 'scoped_complete')
+            self.assertEqual(proof['search_scope'], obs[1]['search_scope'])
+            self.assertEqual(cells['SKU:3|position_avg']['2026-09-11']['completeness_state'], 'partial')
+            self.old.metadata['server_cell_presentation']['SKU:1|orders_current']['2026-09-11']['search_scope']['count_difference'] = 999
+            self.assertNotIn('SKU:1|views_current', self.run_keep().metadata.get('server_cell_presentation', {}))
 
 
 if __name__ == '__main__':

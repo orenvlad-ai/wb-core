@@ -10,6 +10,7 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import math
 from urllib.parse import urlsplit
 
 PORTAL = "https://seller.wildberries.ru"
@@ -20,6 +21,7 @@ ROUTES = {
 MAX_DETAIL_PAGES = 200
 SEARCH_BATCH_SIZE = 40
 MAX_SEARCH_UNIVERSE = 400
+SEARCH_SCOPED_MODE = 'bounded_nm_scope_v1'
 
 
 class CollectorError(RuntimeError):
@@ -123,6 +125,125 @@ def _search_group_totals_match(groups, rows):
     return True
 
 
+def _scoped_search_rows(report):
+    """Validate the raw evidence used by bounded-scope certification."""
+    if not isinstance(report, dict):
+        raise CollectorError('search_scope_response_invalid')
+    additional = report.get('additionalErrors')
+    errors = additional.get('errors') if isinstance(additional, dict) and set(additional) == {'errors'} else additional
+    data = report.get('data')
+    if report.get('error') or errors or not isinstance(data, dict):
+        raise CollectorError('search_scope_response_invalid')
+    groups = data.get('groups')
+    if (not isinstance(groups, list) or any(not isinstance(g, dict)
+        or not isinstance(g.get('items'), list) or not isinstance(g.get('metrics'), dict) for g in groups)):
+        raise CollectorError('search_scope_groups_invalid')
+    rows = [row for group in groups for row in group['items']]
+    if any(not isinstance(row, dict) for row in rows):
+        raise CollectorError('search_scope_rows_invalid')
+    items = _dedupe(_search_items(rows))
+    if len(items) != len(rows) or any(item['nm_id'] <= 0 for item in items):
+        raise CollectorError('search_scope_duplicate_or_invalid_id')
+    # The accepted search payload and PostgreSQL columns require integers for
+    # these four fields. Reject incompatible values before any source write.
+    if any(type(item[key]) is not int or item[key] < 0
+           for item in items for key in ('views_current', 'ctr_current', 'orders_current', 'position_avg')):
+        raise CollectorError('search_scope_metric_invalid')
+    common = data.get('commonInfo')
+    count = common.get('totalProducts') if isinstance(common, dict) else None
+    if type(count) is not int or count < 0:
+        raise CollectorError('search_scope_reported_count_invalid')
+    return groups, rows, items, count
+
+
+def _scoped_search_totals(groups, rows):
+    """Require every supplied additive current metric, including zero rows."""
+    for key in ('views', 'openCard', 'addToCart', 'orders'):
+        totals = [_current(group['metrics'].get(key)) for group in groups]
+        values = [_current(row.get(key)) for row in rows]
+        if (any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                for value in totals + values) or sum(totals) != sum(values)):
+            raise CollectorError('search_scope_additive_totals_incomplete')
+
+
+def validate_scoped_search_evidence(*, report, batches, scope_nm_ids):
+    """Reconstruct bounded SKU-scope evidence, never account-wide completeness.
+
+    WB can return a real row with totalProducts=0. Its count is retained as a
+    diagnostic, with a conservative count>rows alarm; it is not row cardinality.
+    Missing requested IDs remain missing, even when every additive sum matches.
+    The caller must independently bind this scope to its reviewed catalog.
+    """
+    if (not isinstance(scope_nm_ids, list) or not 1 <= len(scope_nm_ids) <= MAX_SEARCH_UNIVERSE
+        or any(type(nm) is not int or nm <= 0 for nm in scope_nm_ids)
+        or scope_nm_ids != sorted(set(scope_nm_ids))):
+        raise CollectorError('search_scope_universe_invalid')
+    groups, preview_rows, preview, reported = _scoped_search_rows(report)
+    if not isinstance(batches, list) or not batches or len(batches) > MAX_SEARCH_UNIVERSE:
+        raise CollectorError('search_scope_batches_invalid')
+    scope = set(scope_nm_ids)
+    if not {item['nm_id'] for item in preview}.issubset(scope):
+        raise CollectorError('search_scope_preview_outside_scope')
+    requested = set()
+    indexed = {}
+    raw_indexed = {}
+    complete_rows = []
+    for batch in batches:
+        if not isinstance(batch, dict):
+            raise CollectorError('search_scope_batch_invalid')
+        nms = batch.get('requested_nm_ids')
+        if (not isinstance(nms, list) or not 1 <= len(nms) <= SEARCH_BATCH_SIZE
+            or any(type(nm) is not int or nm <= 0 for nm in nms)
+            or nms != sorted(set(nms)) or requested.intersection(nms) or not set(nms).issubset(scope)):
+            raise CollectorError('search_scope_batch_filter_invalid')
+        requested.update(nms)
+        batch_groups, rows, items, count = _scoped_search_rows(batch.get('response'))
+        if count > len(items) or any(item['nm_id'] not in nms for item in items):
+            raise CollectorError('search_scope_batch_incomplete_or_unbound')
+        _scoped_search_totals(batch_groups, rows)
+        for row, item in zip(rows, _search_items(rows)):
+            nm = item['nm_id']
+            if nm in indexed:
+                raise CollectorError('search_scope_batch_overlap')
+            indexed[nm] = item
+            raw_indexed[nm] = row
+        complete_rows.extend(rows)
+    if requested != scope:
+        raise CollectorError('search_scope_requests_incomplete')
+    for row, item in zip(preview_rows, _search_items(preview_rows)):
+        nm = item['nm_id']
+        if (indexed.get(nm) != item or any(_current(row.get(key)) != _current(raw_indexed[nm].get(key))
+            for key in ('views', 'openCard', 'addToCart', 'orders'))):
+            raise CollectorError('search_scope_preview_missing_or_drifted')
+    if reported > len(indexed):
+        raise CollectorError('search_scope_global_count_incomplete')
+    _scoped_search_totals(groups, complete_rows)
+    returned = sorted(indexed)
+    certificate = {'mode': SEARCH_SCOPED_MODE, 'requested_nm_ids': list(scope_nm_ids),
+                   'returned_nm_ids': returned, 'missing_nm_ids': sorted(scope - set(returned)),
+                   'reported_count': reported, 'observed_count': len(returned),
+                   'count_difference': len(returned) - reported}
+    return [indexed[nm] for nm in returned], certificate
+
+
+def _search_scoped_items(client, url, headers, body, report, candidate_nm_ids):
+    _, _, preview, _ = _scoped_search_rows(report)
+    candidates = list(candidate_nm_ids or ())
+    if any(type(nm) is not int or nm <= 0 for nm in candidates):
+        raise CollectorError('search_scope_universe_invalid')
+    scope = sorted(set(candidates) | {item['nm_id'] for item in preview})
+    if not scope or len(scope) > MAX_SEARCH_UNIVERSE:
+        raise CollectorError('search_scope_universe_invalid')
+    batches = []
+    for start in range(0, len(scope), SEARCH_BATCH_SIZE):
+        requested = scope[start:start + SEARCH_BATCH_SIZE]
+        response = _response_json(_post_report(client, url, headers=headers,
+            data=json.dumps({**body, 'nmIds': requested}), timeout=60000))
+        batches.append({'requested_nm_ids': requested, 'response': response})
+    items, certificate = validate_scoped_search_evidence(report=report, batches=batches, scope_nm_ids=scope)
+    return items, batches, certificate
+
+
 def _search_complete_items(client, url, headers, body, report, candidate_nm_ids):
     """Read the UI's bounded nmIds filter; bind every batch to the global count."""
     data = report['data']
@@ -184,9 +305,12 @@ def _search_complete_items(client, url, headers, body, report, candidate_nm_ids)
 
 
 def collect_web_source(*, source_key: str, snapshot_date: str, storage_state_path: str,
-                       canonical_supplier_id: str, search_candidate_nm_ids=None) -> dict:
+                       canonical_supplier_id: str, search_candidate_nm_ids=None,
+                       search_completeness_mode: str = 'strict') -> dict:
     """Read one exact date; callers own the shared browser lock and any writes."""
     from playwright.sync_api import sync_playwright
+    if search_completeness_mode not in ('strict', SEARCH_SCOPED_MODE):
+        raise ValueError('search_completeness_mode_invalid')
     day = date.fromisoformat(snapshot_date)
     if day.isoformat() != snapshot_date:
         raise ValueError('canonical_date_required')
@@ -226,6 +350,7 @@ def collect_web_source(*, source_key: str, snapshot_date: str, storage_state_pat
             pages = 1
             detail_pages = []
             search_batches = []
+            search_scope = None
             if source_key == 'seller_funnel_snapshot':
                 raw_rows = [row for group in groups for row in group.get('itemsGroup', [])]
                 items = _funnel_items(raw_rows)
@@ -251,15 +376,19 @@ def collect_web_source(*, source_key: str, snapshot_date: str, storage_state_pat
                 else:
                     raise CollectorError('seller_funnel_pagination_bound_exceeded')
             else:
-                items, search_batches = _search_complete_items(context.request,template.url,headers,
-                    body,report,search_candidate_nm_ids)
+                if search_completeness_mode == SEARCH_SCOPED_MODE:
+                    items, search_batches, search_scope = _search_scoped_items(context.request,
+                        template.url,headers,body,report,search_candidate_nm_ids)
+                else:
+                    items, search_batches = _search_complete_items(context.request,template.url,headers,
+                        body,report,search_candidate_nm_ids)
                 pages += len(search_batches)
             items = _dedupe(items)
             if not items:
                 raise CollectorError('seller_report_empty_unqualified')
             if source_key == 'web_source_snapshot':
                 reported_count = data.get('commonInfo', {}).get('totalProducts')
-                if not isinstance(reported_count, int) or reported_count != len(items):
+                if search_scope is None and (not isinstance(reported_count, int) or reported_count != len(items)):
                     raise CollectorError('search_report_product_count_incomplete')
             else:
                 reported_count = len(items)
@@ -272,9 +401,10 @@ def collect_web_source(*, source_key: str, snapshot_date: str, storage_state_pat
                     'snapshot_date': snapshot_date, 'source_fetched_at': started_at,
                     'collection_finished_at': datetime.now(timezone.utc).isoformat(),
                     'supplier_identity_sha256': supplier_hash, 'request_period': body['currentPeriod'],
-                    'header_names': sorted(headers), 'pages': pages, 'reported_count': reported_count, 'completeness': 'complete',
+                    'header_names': sorted(headers), 'pages': pages, 'reported_count': reported_count,
+                    'completeness': 'scoped_complete' if search_scope is not None else 'complete',
                     'items': items, 'raw_report': report, 'detail_pages':detail_pages,
-                    'search_batches':search_batches}
+                    'search_batches':search_batches, **({'search_scope': search_scope} if search_scope is not None else {})}
         except CollectorError as exc:
             raise exc from None
         except Exception as exc:

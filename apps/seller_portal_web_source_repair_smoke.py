@@ -62,7 +62,8 @@ def serving_lineage_checks():
     with patch('packages.adapters.web_source_current_sync._fetch_json',side_effect=api):
         for attempt in range(2):
             try:sync.ensure_snapshot(DAY)
-            except RuntimeError as exc:assert str(exc)=='fake handoff failure'
+            except RuntimeError as exc:
+                assert 'search_analytics materialization failed: fake handoff failure' in str(exc)
             else:raise AssertionError('failed handoff accepted from raw-only clock')
             assert len(sync.commands)==2*(attempt+1) and not sync.observed_states
         handoff[:]=[{k:v for k,v in raw[0].items() if k!='fetched_at'} | {'handoff_synced_at':datetime.now(timezone.utc).isoformat()}]
