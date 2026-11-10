@@ -305,9 +305,11 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             return result
 
-    def load_current_state(self) -> RegistryUploadDbBackedCurrentState:
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+    def load_current_state(self, *, read_only: bool = False) -> RegistryUploadDbBackedCurrentState:
+        from packages.application.ready_publication import readonly
+        with (readonly(self.db_path) if read_only else _connect(self.db_path)) as conn:
+            if not read_only:
+                _ensure_schema(conn)
             current_row = conn.execute(
                 """
                 SELECT bundle_version, activated_at
@@ -8293,10 +8295,17 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             return cursor.rowcount > 0
 
-    def list_nomenclature_items(self, *, active_only: bool = False) -> list[dict[str, Any]]:
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+    def list_nomenclature_items(self, *, active_only: bool = False, read_only: bool = False) -> list[dict[str, Any]]:
+        from packages.application.ready_publication import readonly
+        if read_only and not self.db_path.exists():
+            return []
+        if not read_only:
+            self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with (readonly(self.db_path) if read_only else _connect(self.db_path)) as conn:
+            if not read_only:
+                _ensure_schema(conn)
+            elif not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", ("sheet_vitrina_v1_nomenclature_items",)).fetchone():
+                return []
             where_clause = "WHERE is_active = 1" if active_only else ""
             rows = conn.execute(
                 f"""
@@ -8359,6 +8368,7 @@ class RegistryUploadDbBackedRuntime:
 
     def save_nomenclature_items_atomic(
         self, items: list[Mapping[str, Any]], *, preserve_staged_item_ids: Sequence[str] = (), operator_request=None,
+        defer_activation: bool = False,
     ) -> list[dict[str, Any]]:
         prepared_items: list[dict[str, Any]] = []
         for item in items:
@@ -8543,7 +8553,7 @@ class RegistryUploadDbBackedRuntime:
         # Source+intent committed together. Close the source writer before
         # heavy admission, then let the consumer revalidate its exact revision.
         continuation_error = None
-        if activation_items and operator_request is None:
+        if activation_items and operator_request is None and not defer_activation:
             try:
                 drain_nomenclature_activation_intents(
                     self, item_ids=[item["item_id"] for item in activation_items],
@@ -8617,10 +8627,17 @@ class RegistryUploadDbBackedRuntime:
             raise ValueError(f"nomenclature item not found: {item_id}")
         return loaded
 
-    def list_sku_groups(self, *, include_inactive: bool = True) -> list[dict[str, Any]]:
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+    def list_sku_groups(self, *, include_inactive: bool = True, read_only: bool = False) -> list[dict[str, Any]]:
+        from packages.application.ready_publication import readonly
+        if read_only and not self.db_path.exists():
+            return []
+        if not read_only:
+            self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with (readonly(self.db_path) if read_only else _connect(self.db_path)) as conn:
+            if not read_only:
+                _ensure_schema(conn)
+            elif not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", ("sheet_vitrina_v1_sku_groups",)).fetchone():
+                return []
             where_clause = "" if include_inactive else "WHERE is_active = 1"
             rows = conn.execute(
                 f"""

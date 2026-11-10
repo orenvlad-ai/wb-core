@@ -52,7 +52,8 @@ def authority():
     names = ('current_fbo_supply_close.py', 'current_fbo_supply_close_apply.py',
         'ff_stock_ledger.py', 'registry_upload_db_backed_runtime.py', 'ff_pool_foundation.py',
         'warehouse_fbs_material_rematerialization.py', 'operator_warehouse_documents.py')
-    names += ('current_fbo_supply_cost_source.py','fbs_snapshot_cost_sources.py','fbs_document_cost.py','warehouse_functional.py')
+    names += ('current_fbo_supply_cost_source.py','current_fbo_closure_evidence.py',
+        'current_fbo_closure_evidence_apply.py','fbs_snapshot_cost_sources.py','fbs_document_cost.py','warehouse_functional.py')
     return {**shared.code_authority(), **{n:'sha256:'+hashlib.sha256(Path(__file__).with_name(n).read_bytes()).hexdigest() for n in names}}
 
 

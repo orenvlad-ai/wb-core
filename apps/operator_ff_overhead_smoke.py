@@ -1126,6 +1126,81 @@ class NativeCompletionTests(unittest.TestCase):
         self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
         self.assertEqual(self.business_image(),self.before)
 
+    def test_finance_handoff_diagnostic_rejects_each_condition_without_completing(self):
+        from packages.application.dependency_proof import CompletionProofError
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            with patch.object(self.finance, 'plan_stale_cost_weeks', wraps=self.finance.plan_stale_cost_weeks) as plans:
+                args=self.proof_inputs()
+            captured,receipt,_=args
+            self.assertEqual(plans.call_count,2)
+            self.assertEqual(plans.call_args_list[0].kwargs,plans.call_args_list[1].kwargs)
+            self.assertEqual(captured['finance_plan_context']['date_from'],'2026-09-08')
+            self.assertIsNone(captured['finance_plan_context']['date_to'])
+            self.assertEqual(captured['finance_plan_context']['fingerprint'],receipt['fingerprint'])
+            self.assertEqual(captured['finance_plan_context']['cost_snapshot_version'],self.finance.shared_cost_snapshot.version_id)
+            for field,value,reason in (
+                ('fingerprint','sha256:'+'f'*64,'fingerprint'),
+                ('status','provider secret','status'),
+                ('non_target_preserved',False,'non_target'),
+                ('post_verify_stale_week_count',1,'stale_weeks'),
+                ('post_verify_stale_week_count',True,'stale_weeks'),
+                ('source_advanced_after_apply',True,'source_advanced'),
+            ):
+                c,f,e=deepcopy(args);f[field]=value
+                f['provider_message']='provider secret'
+                with self.subTest(reason=reason,field=field),self.assertRaises(CompletionProofError) as caught:
+                    self.complete(c,f,e)
+                diagnostic=caught.exception.diagnostic()
+                self.assertEqual(diagnostic['reason'],'overhead_completion_finance_unproven')
+                self.assertEqual(diagnostic['processed_count'],0)
+                self.assertEqual(diagnostic['pending_count'],1)
+                self.assertFalse(diagnostic['business_write_started'])
+                self.assertEqual(diagnostic['result_certainty'],'not_started')
+                handoff=diagnostic['finance_handoff']
+                self.assertEqual(handoff['failed_condition'],reason)
+                self.assertEqual(diagnostic['before_vector_digest'],captured['finance_plan_fingerprint'])
+                self.assertEqual(diagnostic['after_vector_digest'],f['fingerprint'])
+                self.assertEqual(handoff['captured']['target_before_digest'],captured['finance_plan_context']['target_before_digest'])
+                self.assertEqual(handoff['observed_after']['cost_snapshot_version'],self.finance.shared_cost_snapshot.version_id)
+                # These fields are absent from native receipts; missing evidence
+                # must remain unknown instead of inheriting the capture values.
+                self.assertIsNone(handoff['applied']['date_from'])
+                self.assertIsNone(handoff['applied']['target_before_digest'])
+                self.assertNotIn('provider secret',json.dumps(diagnostic))
+                self.assertLess(len(json.dumps(diagnostic)),6000)
+                self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+                self.assertEqual(self.business_image(),self.before)
+            # Diagnostic rejection never replaces the original fingerprint or
+            # changes the valid handoff's completion/retention behavior.
+            self.assertEqual(self.complete(*args)['processed_count'],1)
+        self.assertEqual(self.native_terminal(self.identity),('complete','retained'))
+        self.assertEqual(self.business_image(),self.before)
+
+    def test_actual_source_advance_between_capture_and_recalculation_remains_rejected(self):
+        from packages.application.dependency_proof import CompletionProofError
+        self.old_tail()
+        with warehouse_functional_job_lock(self.root):
+            self.install_proof_schema()
+            captured=operations.capture_pending_completion(self.runtime,finance_block=self.finance)
+            with sqlite3.connect(self.runtime.db_path) as conn:
+                conn.execute("""INSERT INTO sheet_vitrina_v1_nomenclature_items(
+                    item_id,nm_id,nomenclature_name,product_type,match_key,aliases_json,is_active,is_hidden,created_at,updated_at)
+                    VALUES('source-advanced',999,'Source advanced','Fixture','source-advanced','[]',1,0,?,?)""",
+                    (self.stamp(),self.stamp()))
+            receipt=self.finance.recalculate_stale_cost_weeks()
+            version=accounting.load(self.root)[1]
+            receipt.update(accounting_version=version,accounting_version_before=version,accounting_version_unchanged=True)
+            self.assertNotEqual(receipt['fingerprint'],captured['finance_plan_fingerprint'])
+            with self.assertRaises(CompletionProofError) as caught:
+                self.complete(captured,receipt,dict(accounting_publication=accounting.current_publication_receipt(self.runtime,now=self.now)))
+            diagnostic=caught.exception.diagnostic()
+            self.assertEqual(diagnostic['finance_handoff']['failed_condition'],'fingerprint')
+            self.assertEqual(diagnostic['before_vector_digest'],captured['finance_plan_fingerprint'])
+            self.assertEqual(diagnostic['after_vector_digest'],receipt['fingerprint'])
+            self.assertEqual(self.native_terminal(self.identity),('posted','mutation_running'))
+        self.assertEqual(self.business_image(),self.before)
+
     def test_queue_exact_revision_nm_date_and_recovery_binding(self):
         self.old_tail()
         with warehouse_functional_job_lock(self.root):

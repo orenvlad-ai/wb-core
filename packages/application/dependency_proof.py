@@ -30,7 +30,7 @@ _SAFE_REASONS = frozenset({
     'dependency_proof_budget_exhausted','overhead_completion_book_changed',
     'overhead_completion_authority_changed','overhead_completion_prepare_before_begin_required',
     'overhead_completion_source_changed','overhead_completion_pre_dml_fence_required',
-    'overhead_completion_transaction_unbound','overhead_completion_unproven','overhead_completion_progress_changed','overhead_completion_pending',
+    'overhead_completion_transaction_unbound','overhead_completion_unproven','overhead_completion_finance_unproven','overhead_completion_progress_changed','overhead_completion_pending',
     'finance_book_changed', 'finance_book_appeared', 'finance_book_changed_at_handoff',
 })
 _SAFE_PHASES = frozenset({'proof','planning','validation','writer_handoff','retention','completion'})
@@ -56,7 +56,7 @@ class CompletionProofError(ValueError):
         self.after_schema_version=None
 
     def diagnostic(self):
-        return dict(contract_version=CONTRACT, reason=self.reason, phase=self.phase,
+        result = dict(contract_version=CONTRACT, reason=self.reason, phase=self.phase,
                     classification=self.classification, business_write_started=self.business_write_started,
                     result_certainty='unknown' if self.business_write_started else 'not_started',
                     processed_count=self.processed_count if type(self.processed_count) is int and self.processed_count>=0 else None,
@@ -67,6 +67,50 @@ class CompletionProofError(ValueError):
                     after_schema_version=self.after_schema_version if type(self.after_schema_version) is int else None,
                     before_vector_digest=self.before_vector_digest if _safe_digest(self.before_vector_digest) else None,
                     after_vector_digest=self.after_vector_digest if _safe_digest(self.after_vector_digest) else None)
+        handoff = getattr(self, 'finance_handoff', None)
+        if isinstance(handoff, dict):
+            result['finance_handoff'] = _safe_finance_handoff(handoff)
+        return result
+
+
+def _safe_finance_handoff(value):
+    """Keep a fixed-size typed diagnostic; never copy provider messages."""
+    from datetime import date
+    digest_fields = frozenset({'fingerprint', 'target_before_digest', 'target_before_image_digest',
+        'non_target_digest', 'source_dependency_digest', 'accounting_version',
+        'accounting_version_before', 'cost_snapshot_version', 'target_image_digest',
+        'planned_non_target_digest', 'non_target_digest_before', 'non_target_digest_after'})
+    bool_fields = frozenset({'accounting_version_unchanged', 'source_advanced_after_apply',
+        'non_target_preserved'})
+    date_fields = frozenset({'date_from', 'date_to', 'cost_snapshot_effective_date'})
+    fields = digest_fields | bool_fields | date_fields | {'status', 'post_verify_stale_week_count'}
+
+    def safe(key, item):
+        if key in digest_fields:
+            return item if _safe_digest(item) else None
+        if key in bool_fields:
+            return item if type(item) is bool else None
+        if key == 'post_verify_stale_week_count':
+            return item if type(item) is int and 0 <= item <= 1000000 else None
+        if key == 'status':
+            return item if item in ('applied', 'already_current') else None
+        if key in date_fields and isinstance(item, str) and len(item) == 10:
+            try:
+                if date.fromisoformat(item).isoformat() == item:
+                    return item
+            except ValueError:
+                pass
+        return None
+
+    result = {key: value.get(key) if _safe_digest(value.get(key)) else None
+        for key in ('applied_source_dependency_digest', 'post_source_dependency_digest')}
+    failed = value.get('failed_condition')
+    result['failed_condition'] = failed if isinstance(failed, str) and failed in {
+        'fingerprint', 'status', 'non_target', 'stale_weeks', 'source_advanced'} else 'unknown'
+    for section in ('captured', 'applied', 'observed_after'):
+        data = value.get(section)
+        result[section] = {key: safe(key, data[key]) for key in sorted(fields) if key in data} if isinstance(data, dict) else {}
+    return result
 
 
 def _safe_digest(value):

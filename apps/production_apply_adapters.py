@@ -27,6 +27,9 @@ _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
     "current_fbo_supply_close_v1": (
         "packages.application.current_fbo_supply_close_apply", "CurrentFboSupplyCloseAdapter",
     ),
+    "current_fbo_closure_evidence_v1": (
+        "packages.application.current_fbo_closure_evidence_apply", "CurrentFboClosureEvidenceAdapter",
+    ),
     "fbs_scoped_lifecycle_recovery_v1": (
         "packages.application.fbs_scoped_lifecycle_production", "FbsScopedLifecycleProductionAdapter",
     ),

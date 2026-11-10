@@ -370,7 +370,9 @@ def accept_external(runtime,req,body,*,accepted_at):
     saved=read_result(runtime.db_path,req)
     if saved:
         return saved
-    from packages.application.supplier_shipments import _bounded_int
+    from packages.application.supplier_shipments import _bounded_int, SupplierShipmentsBlock
+    if req.action == 'barcode':
+        SupplierShipmentsBlock(runtime=runtime, timestamp_factory=lambda:accepted_at)._seed_nomenclature_from_current_config_if_empty()
     task={'item_id':str(body.get('item_id') or '')} if req.action=='barcode' else {
         'limit':_bounded_int(body.get('limit'),default=100,minimum=1,maximum=100),
         'max_pages':_bounded_int(body.get('max_pages'),default=500,minimum=1,maximum=5000)}

@@ -65,6 +65,7 @@ def _settings_reader_does_not_replace_spp_source() -> None:
     with TemporaryDirectory() as directory:
         app = RegistryUploadHttpEntrypoint(runtime_dir=Path(directory))
         assert isinstance(app.buyer_price_block.adapter, WbBuyerChromePriceAdapter)
+        assert app.buyer_price_block.adapter.runtime_dir == app.runtime.runtime_dir
         assert app.spp_tester_block.buyer_source is app.buyer_session_block
         assert app.buyer_price_block is not app.spp_tester_block.buyer_source
         assert type(app.buyer_session_block.adapter).__name__ == "WbBuyerSessionAdapter"
@@ -91,7 +92,7 @@ def _reader_blocks_orphan_and_serializes_profile() -> None:
             patch.object(runtime, "ensure_runner_idle", side_effect=RuntimeError("dedicated Chrome runner still has processes")),
             patch.object(runtime, "ensure_runtime", side_effect=AssertionError("orphan reached Chrome launch")),
         ):
-            blocked = price.read_price(497416931)
+            blocked = price.read_price(497416931, runtime_dir=state)
             assert blocked["status"] == "price_unavailable" and blocked["wallet_price"] is None
 
 
@@ -227,8 +228,10 @@ def main() -> None:
     _reader_blocks_orphan_and_serializes_profile()
     _cleanup_continues_after_chrome_failure()
     _batch_rechecks_auth_and_streams_partial()
-    _printed_rows_survive_failed_cleanup_without_healthy_run()
-    _early_reader_failure_carries_current_login_generation()
+    proof = nullcontext() if sys.platform == "linux" else patch.object(price, "lock_proof")
+    with TemporaryDirectory() as directory, patch.object(price, "HOSTED_RUNTIME", Path(directory)), proof:
+        _printed_rows_survive_failed_cleanup_without_healthy_run()
+        _early_reader_failure_carries_current_login_generation()
     print("wb_buyer_chrome_price_smoke: OK")
 
 

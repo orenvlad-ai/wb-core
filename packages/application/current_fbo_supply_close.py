@@ -272,5 +272,9 @@ def apply_owned(conn, runtime, *, plan, occurred_at, actor, fault=None):
         total_quantity=plan['total_quantity'], supply_ids=plan['supply_ids'], idempotent=False,
         official_wb_stock_changed=False, historical_book_changed=False)
     conn.execute(f'INSERT INTO {RECEIPTS} VALUES(?,?,?)', (plan['operation_id'], plan['plan_digest'], canonical(result)))
+    # Additive evidence lives outside the immutable plan/receipt and money rows.
+    # The same transaction pins the complete source before any later WB refresh.
+    from packages.application.current_fbo_closure_evidence import capture_native
+    capture_native(conn, plan)
     if fault: fault('publication', 0)
     return result

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import importlib
 from typing import Any
+from pathlib import Path
 
 from packages.adapters.wb_buyer_session import load_wb_buyer_session_config_from_env
 
 
 class WbBuyerChromePriceAdapter:
-    def __init__(self) -> None:
+    def __init__(self, *, runtime_dir: Path | None = None) -> None:
+        self.runtime_dir = runtime_dir
         self.config = load_wb_buyer_session_config_from_env()
 
     @staticmethod
@@ -29,7 +31,7 @@ class WbBuyerChromePriceAdapter:
 
     def fetch_authenticated_buyer_price(self, nm_id: int) -> dict[str, Any]:
         reader = importlib.import_module("apps.wb_buyer_chrome_price")
-        return reader.read_price(int(nm_id))
+        return reader.read_price(int(nm_id), runtime_dir=self.runtime_dir)
 
     def fetch_stable_authenticated_buyer_price(self, nm_id: int) -> dict[str, Any]:
         # The one Chrome operation obtains two matching DOM reads. A second

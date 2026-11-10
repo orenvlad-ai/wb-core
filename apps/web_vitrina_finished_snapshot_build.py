@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from packages.application.business_data_cycle_dispatch import selected
 from packages.application.web_vitrina_snapshot_admission import api_jobs_admission
 from packages.application.warehouse_functional_lock import warehouse_functional_job_is_busy
 
@@ -36,7 +37,14 @@ def deadline_seconds(now: datetime) -> float:
     return max(0, (local.replace(minute=59, second=0, microsecond=0) - local).total_seconds())
 
 
-def systemd_admission(run=subprocess.run) -> str:
+def systemd_admission(run=subprocess.run, *, runtime_dir: Path | None = None) -> str:
+    # Only a live current-thread History/cycle lease proves that the collector
+    # cannot enter its real work. Unit state alone includes its brief busy exit.
+    from packages.application.business_data_heavy_admission import current_heavy_owner
+    owner = current_heavy_owner(runtime_dir) if runtime_dir is not None else None
+    excludes_collector = owner is not None and owner.operation in {
+        "cycle", "history", "historical_receipt_completion"
+    } and selected(runtime_dir)
     for unit in HEAVY_UNITS:
         try:
             result = run(["systemctl", "show", unit, "--property=LoadState,ActiveState,MainPID"],
@@ -47,7 +55,8 @@ def systemd_admission(run=subprocess.run) -> str:
             } or not fields.get("MainPID", "").isdigit():
                 return "unknown"
             if fields["ActiveState"] in {"active", "activating", "deactivating"} or int(fields["MainPID"]):
-                return "busy"
+                if unit != "wb-core-buyer-authenticated-collect.service" or not excludes_collector:
+                    return "busy"
         except (OSError, ValueError, subprocess.SubprocessError):
             return "unknown"
     return "idle"
