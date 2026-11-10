@@ -191,6 +191,40 @@ class DependencyProofTests(unittest.TestCase):
         self.assertEqual(diagnostic['changed_schemas'],['main']);self.assertEqual(diagnostic['changed_dependency_count'],1)
         self.assertNotEqual(diagnostic['before_vector_digest'],diagnostic['after_vector_digest'])
 
+    def test_finance_diagnostic_is_typed_allowlisted_and_bounded(self):
+        digest='sha256:'+'a'*64
+        error=CompletionProofError('provider secret',phase='provider secret',classification='provider secret')
+        error.before_vector_digest='provider secret'
+        error.finance_handoff=dict(
+            failed_condition=['provider secret'],
+            captured=dict(date_from='2026-09-08',date_to='provider secret',fingerprint=digest,
+                target_before_digest=True,cost_snapshot_version=digest,
+                non_target_preserved=digest,provider_message='provider secret'),
+            applied=dict(status='provider secret',accounting_version='provider secret',
+                post_verify_stale_week_count=True,source_advanced_after_apply='provider secret'),
+            observed_after=dict(cost_snapshot_effective_date='2026-99-99',cost_snapshot_version=digest),
+            applied_source_dependency_digest='provider secret',post_source_dependency_digest=digest,
+            provider_message='provider secret'*10000)
+        diagnostic=error.diagnostic()
+        self.assertEqual(diagnostic['reason'],'dependency_proof_failed')
+        self.assertNotIn('provider secret',json.dumps(diagnostic))
+        self.assertLess(len(json.dumps(diagnostic)),2500)
+        handoff=diagnostic['finance_handoff']
+        self.assertEqual(handoff['failed_condition'],'unknown')
+        self.assertEqual(handoff['captured']['date_from'],'2026-09-08')
+        self.assertEqual(handoff['captured']['fingerprint'],digest)
+        self.assertIsNone(handoff['captured']['date_to'])
+        self.assertIsNone(handoff['captured']['target_before_digest'])
+        self.assertIsNone(handoff['captured']['non_target_preserved'])
+        self.assertIsNone(handoff['applied']['post_verify_stale_week_count'])
+        self.assertIsNone(handoff['applied_source_dependency_digest'])
+        self.assertEqual(handoff['post_source_dependency_digest'],digest)
+        self.assertEqual(handoff['observed_after']['cost_snapshot_version'],digest)
+        self.assertIsNone(handoff['observed_after']['cost_snapshot_effective_date'])
+        for reason in ('fingerprint','status','non_target','stale_weeks','source_advanced'):
+            error.finance_handoff['failed_condition']=reason
+            self.assertEqual(error.diagnostic()['finance_handoff']['failed_condition'],reason)
+
     def test_same_inode_sqlite_restore_invalidates_schema_cookie(self):
         path=self.fixture('DELETE');conn,proof=self.capture(path)
         backup=sqlite3.connect(str(path)+'.backup');self.addCleanup(backup.close)

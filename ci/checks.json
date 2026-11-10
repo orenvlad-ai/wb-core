@@ -1,6 +1,7 @@
 {
   "schema": "wb-core.check-map/v1",
   "command_dependencies": {
+    "cycle_v2_regression_imports": {"scripts": ["apps/nomenclature_readonly_smoke.py", "apps/current_fbo_closure_evidence_smoke.py", "apps/wb_buyer_authenticated_admission_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "fulfillment_payment_proof_imports": {
       "scripts": ["apps/fulfillment_payment_proof_smoke.py", "apps/fulfillment_payment_proof_http_smoke.py", "apps/fulfillment_payment_proof_browser_smoke.py"],
       "commands": [],
@@ -257,8 +258,8 @@
       "pip": ["openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"]
     },
     "current_fbo_supply_close": {
-      "patterns": ["packages/application/current_fbo_supply_close.py", "packages/application/current_fbo_supply_close_apply.py", "packages/application/current_fbo_supply_cost_source.py", "apps/current_fbo_supply_close_smoke.py", "apps/current_fbo_supply_cost_source_smoke.py"],
-      "commands": [["python3", "apps/current_fbo_supply_close_smoke.py"], ["python3", "apps/current_fbo_supply_cost_source_smoke.py"]],
+      "patterns": ["packages/application/current_fbo_closure_evidence.py", "packages/application/current_fbo_closure_evidence_apply.py", "apps/current_fbo_closure_evidence_smoke.py", "packages/application/current_fbo_supply_close.py", "packages/application/current_fbo_supply_close_apply.py", "packages/application/current_fbo_supply_cost_source.py", "apps/current_fbo_supply_close_smoke.py", "apps/current_fbo_supply_cost_source_smoke.py"],
+      "commands": [["python3", "apps/current_fbo_closure_evidence_smoke.py"], ["python3", "apps/current_fbo_supply_close_smoke.py"], ["python3", "apps/current_fbo_supply_cost_source_smoke.py"]],
       "pip": []
     },
     "fbs_scoped_lifecycle_production": {
@@ -307,7 +308,7 @@
     "operator_autoanswers_settings": {"patterns": ["packages/application/operator_autoanswers_settings.py", "packages/application/wb_autoanswers_runtime.py", "packages/application/operator_operations.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"], "commands": [["python3", "apps/operator_autoanswers_settings_smoke.py"]], "pip": ["apsw==3.53.4.0", "openpyxl==3.1.5", "playwright==1.58.0"]},
     "operator_cleaner_operations": {"patterns": ["packages/application/operator_cleaner_operations.py", "packages/application/operator_operations.py", "packages/adapters/search_cluster_cleaner_http.py", "packages/adapters/templates/sheet_vitrina_v1_keyword_cleaner.js", "apps/operator_cleaner_operations_fixture.py"], "commands": [["python3", "apps/operator_cleaner_operations_smoke.py"]], "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]},
     "operator_cash": {"patterns": ["packages/application/operator_cash_operations.py", "packages/adapters/finance_liquidity_http.py", "packages/adapters/finance_liquidity_static/**", "packages/adapters/templates/sheet_vitrina_v1_operator_acceptance.js"], "commands": [["python3", "apps/operator_cash_operations_smoke.py"]], "pip": ["apsw==3.53.4.0", "openpyxl==3.1.5", "playwright==1.58.0"]},
-    "operator_nomenclature": {"patterns": ["packages/application/operator_nomenclature.py", "packages/application/nomenclature_activation_intents.py", "packages/application/operator_operations.py", "packages/application/supplier_shipments.py", "packages/application/wb_finance_weekly.py", "packages/adapters/templates/sheet_vitrina_v1_operator_nomenclature.js", "packages/adapters/templates/sheet_vitrina_v1_settings.html"], "commands": [["python3", "apps/operator_nomenclature_smoke.py"], ["python3", "apps/operator_nomenclature_journal_smoke.py"], ["python3", "apps/operator_nomenclature_browser_smoke.py"]], "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]},
+    "operator_nomenclature": {"patterns": ["apps/nomenclature_readonly_smoke.py", "packages/application/operator_nomenclature.py", "packages/application/nomenclature_activation_intents.py", "packages/application/operator_operations.py", "packages/application/supplier_shipments.py", "packages/application/wb_finance_weekly.py", "packages/adapters/templates/sheet_vitrina_v1_operator_nomenclature.js", "packages/adapters/templates/sheet_vitrina_v1_settings.html"], "commands": [["python3", "apps/nomenclature_readonly_smoke.py"], ["python3", "apps/operator_nomenclature_smoke.py"], ["python3", "apps/operator_nomenclature_journal_smoke.py"], ["python3", "apps/operator_nomenclature_browser_smoke.py"]], "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]},
     "operator_compat_uploads": {"patterns": ["packages/application/operator_compat_uploads.py", "packages/application/cost_price_upload.py", "packages/application/registry_upload_db_backed_runtime.py", "packages/application/registry_upload_http_entrypoint.py", "packages/adapters/registry_upload_http_entrypoint.py"], "commands": [["python3", "apps/operator_compat_uploads_smoke.py"], ["python3", "apps/cost_price_upload_http_entrypoint_smoke.py"]], "pip": ["openpyxl==3.1.5"]},
     "operator_manual_ff_stock": {"patterns": ["packages/application/operator_manual_ff_stock.py", "packages/application/ff_stock_ledger.py", "packages/application/registry_upload_db_backed_runtime.py", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/templates/sheet_vitrina_v1_operator.html", "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"], "commands": [["python3", "apps/operator_manual_ff_stock_smoke.py"], ["python3", "apps/operator_manual_ff_stock_http_smoke.py"], ["python3", "apps/operator_manual_ff_stock_browser_smoke.py"]], "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]},
     "operator_settings_facilities": {"patterns": ["packages/adapters/templates/sheet_vitrina_v1_settings.html", "packages/adapters/templates/sheet_vitrina_v1_facility_acceptance.js", "packages/application/operator_facility_mappings.py", "packages/adapters/registry_upload_http_entrypoint.py"], "commands": [["python3", "apps/operator_settings_facilities_smoke.py"], ["python3", "apps/operator_settings_facilities_http_smoke.py"], ["python3", "apps/operator_settings_facilities_browser_smoke.py"]], "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]},
@@ -1657,6 +1658,7 @@
     "wb_buyer_authenticated_observations": {
       "patterns": [
         "apps/wb_buyer_authenticated_collect.py",
+        "apps/wb_buyer_authenticated_admission_smoke.py",
         "apps/wb_buyer_authenticated_collect_smoke.py",
         "apps/wb_buyer_authenticated_observations_smoke.py",
         "apps/sheet_vitrina_v1_authenticated_buyer_integration_smoke.py",
@@ -1679,6 +1681,7 @@
       "commands": [
         ["python3", "apps/wb_buyer_authenticated_observations_smoke.py"],
         ["python3", "apps/wb_buyer_authenticated_collect_smoke.py"],
+        ["python3", "apps/wb_buyer_authenticated_admission_smoke.py"],
         ["python3", "apps/wb_buyer_chrome_price_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_authenticated_buyer_integration_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_authenticated_buyer_ready_smoke.py"]

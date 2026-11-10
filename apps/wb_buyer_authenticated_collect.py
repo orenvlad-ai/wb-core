@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import os
+import sqlite3
 from pathlib import Path
 import sys
 from typing import Any, Mapping
@@ -27,6 +28,8 @@ from apps import wb_buyer_chrome_price, wb_buyer_chrome_runtime  # noqa: E402
 from apps.sheet_vitrina_v1_auto_refresh_tick import (  # noqa: E402
     _build_web_auth_cookie, _poll_job, _post_json, _read_env_file,
 )
+from packages.application.business_data_cycle_dispatch import selected  # noqa: E402
+from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted  # noqa: E402
 from packages.adapters.prices_snapshot_block import HttpBackedPricesSnapshotSource  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.sheet_vitrina_v1_auto_refresh import SheetVitrinaV1AutoRefreshSchedulesBlock  # noqa: E402
@@ -82,6 +85,7 @@ def _recent_configured_slot(runtime_dir: Path, now: datetime) -> tuple[str, str]
     """Follow configured cadence without depending on unrelated refresh success."""
     schedules = SheetVitrinaV1AutoRefreshSchedulesBlock(runtime_dir=runtime_dir).build_payload().get("schedules") or []
     candidates = []
+    cycle_managed = selected(runtime_dir)
     for schedule in schedules:
         if not isinstance(schedule, Mapping) or not schedule.get("enabled", True):
             continue
@@ -97,12 +101,19 @@ def _recent_configured_slot(runtime_dir: Path, now: datetime) -> tuple[str, str]
         except (ValueError, TypeError, KeyError):
             continue
         age = (now - due).total_seconds()
-        if schedule_id and MIN_AFTER_SLOT_SECONDS <= age <= MAX_AFTER_SLOT_SECONDS:
+        if schedule_id and (age >= 0 if cycle_managed else MIN_AFTER_SLOT_SECONDS <= age <= MAX_AFTER_SLOT_SECONDS):
             candidates.append((due, schedule_id, due.isoformat()))
     if not candidates:
         return None
-    _, schedule_id, due_at = max(candidates)
-    return schedule_id, due_at
+    due, schedule_id, due_at = max(candidates)
+    age = (now - due).total_seconds()
+    # Selected cycles can own heavy work for ~90 minutes. Keep this exact
+    # slot eligible until the next configured slot, never queue old slots.
+    # Selecting latest before the minimum delay also retires the old slot
+    # immediately when its successor arrives.
+    if MIN_AFTER_SLOT_SECONDS <= age and (cycle_managed or age <= MAX_AFTER_SLOT_SECONDS):
+        return schedule_id, due_at
+    return None
 
 
 def _run_id(schedule_id: str, due_at: str) -> str:
@@ -111,6 +122,20 @@ def _run_id(schedule_id: str, due_at: str) -> str:
 
 
 def collect_once(
+    runtime: RegistryUploadDbBackedRuntime, *, run_id: str, requested_nm_ids: list[int],
+    seller_source: Any = None, buyer_read: Any = None, now: Any = _utc_now,
+) -> dict[str, Any]:
+    """Admit before consuming the run identity or starting any real reader."""
+    runtime_dir = Path(getattr(runtime, "runtime_dir", Path(runtime.db_path).parent))
+    try:
+        with heavy_admitted(runtime_dir, operation="buyer-authenticated-collect"):
+            return _collect_once(runtime, run_id=run_id, requested_nm_ids=requested_nm_ids,
+                                 seller_source=seller_source, buyer_read=buyer_read, now=now)
+    except HeavyAdmissionBusy:
+        return {"status": "skipped_heavy_busy"}
+
+
+def _collect_once(
     runtime: RegistryUploadDbBackedRuntime, *, run_id: str, requested_nm_ids: list[int],
     seller_source: Any = None, buyer_read: Any = None, now: Any = _utc_now,
 ) -> dict[str, Any]:
@@ -126,7 +151,7 @@ def collect_once(
     started_at = now()
     business_date = begin_run(runtime, run_id=run_id, started_at=started_at, requested_nm_ids=requested_nm_ids)
     source = seller_source or HttpBackedPricesSnapshotSource()
-    reader = buyer_read or wb_buyer_chrome_price.read_prices
+    reader = buyer_read or (lambda ids: wb_buyer_chrome_price.read_prices(ids, runtime_dir=runtime.runtime_dir))
     seller: dict[int, dict[str, Any]] = {}
     seller_status = "unavailable"
     try:
@@ -196,6 +221,8 @@ def publish_once(runtime: RegistryUploadDbBackedRuntime, *, run_id: str, busines
                  post_json: Any = _post_json, poll_job: Any = _poll_job,
                  now: Any = _utc_now) -> dict[str, str]:
     """Use the existing Web Vitrina group job and its CAS merge, once per run/date."""
+    if selected(Path(getattr(runtime, "runtime_dir", Path(runtime.db_path).parent))):
+        return {"status": "cycle_managed"}
     fresh, previous_status = begin_publication(runtime, run_id=run_id, business_date=business_date, requested_at=now())
     if not fresh:
         return {"status": "already_completed" if previous_status == "completed" else "ambiguous_previous_attempt"}
@@ -234,7 +261,6 @@ def main() -> int:
         parser.error("choose exactly one of --tick and --run-now")
     os.environ.update({key: value for key, value in _read_env_file(Path("/opt/wb-ai/.env")).items() if key not in os.environ})
     runtime_dir = Path(args.runtime_dir)
-    runtime = RegistryUploadDbBackedRuntime(runtime_dir)
     if args.tick:
         due = _recent_configured_slot(runtime_dir, datetime.now(timezone.utc))
         if due is None:
@@ -244,10 +270,18 @@ def main() -> int:
     else:
         run_id = "buyer-auth-obs-manual-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     try:
-        result = collect_once(runtime, run_id=run_id, requested_nm_ids=_requested_ids(runtime))
+        # Constructor/store provisioning and roster access belong to the same
+        # lease as Chrome and all observation writes. Never hold this lease
+        # while launching or polling the independent legacy publication job.
+        with heavy_admitted(runtime_dir, operation="buyer-authenticated-collect"):
+            runtime = RegistryUploadDbBackedRuntime(runtime_dir)
+            result = collect_once(runtime, run_id=run_id, requested_nm_ids=_requested_ids(runtime))
+    except HeavyAdmissionBusy:
+        print(json.dumps({"status": "skipped_heavy_busy"}))
+        return 0
     except Exception as error:
         # SQLite details, WB payloads and exception strings are never emitted.
-        if "UNIQUE constraint failed" in str(error):
+        if isinstance(error, sqlite3.IntegrityError) and "wb_buyer_authenticated_runs.run_id" in str(error):
             print(json.dumps({"status": "already_collected", "run_id": run_id}))
             return 0
         print(json.dumps({"status": "collector_failed", "stage": "persist_or_read", "error_class": type(error).__name__}))
@@ -255,6 +289,9 @@ def main() -> int:
     print(json.dumps(result, separators=(",", ":")))
     if result["status"] == "storage_reserve":
         return 1
+    if result.get("publication_business_dates") and selected(runtime_dir):
+        print(json.dumps({"publication_status": "cycle_managed", "run_id": run_id}))
+        return 0
     if result.get("publication_business_dates"):
         cookie = _build_web_auth_cookie(os.environ, required=True)
         all_ok = True

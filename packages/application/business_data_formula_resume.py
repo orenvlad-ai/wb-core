@@ -44,7 +44,7 @@ BUYER_UNIT = 'wb-core-buyer-authenticated-collect.service'
 # unchanged; neither default CLI may request the typed FBO activation owner.
 # Formula pins alone do not prove that this CLI is guarded before main().
 BUYER_GUARD_SOURCES = {
-    'apps/wb_buyer_authenticated_collect.py': '62b1cf880bcfb1ef1d027502fd8da3f605f9fa78c5aa65458a1cfbbfa2d4624a',
+    'apps/wb_buyer_authenticated_collect.py': '4e83abf431b9c975ecf44fa26fc16b7ec678710fcfb8f7c675c3ccdd10ca6505',
     'packages/application/business_data_procedure_admission.py': '2ba3dd96c2879bbece12e3133edffb4758bcb305d24663fbe133255a91d02096',
     'packages/application/business_data_write_barrier.py': 'f39e27d2c9f54812a565bc670fd79ea5132552caf8c82d9bc4360d2d408bb116',
 }

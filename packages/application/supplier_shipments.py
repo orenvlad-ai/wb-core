@@ -1893,9 +1893,8 @@ class SupplierShipmentsBlock:
         return result
 
     def list_nomenclature(self, *, visibility: str = "visible") -> dict[str, Any]:
-        self._ensure_nomenclature_ready()
         visibility_mode = _normalize_visibility_mode(visibility)
-        all_items = self.runtime.list_nomenclature_items()
+        all_items = self._nomenclature_read_view()
         sku_groups = self._sku_groups()
         all_items = [_with_sku_group_projection(item, sku_groups) for item in all_items]
         if visibility_mode == "visible":
@@ -1914,13 +1913,12 @@ class SupplierShipmentsBlock:
         }
 
     def export_nomenclature_xlsx(self) -> tuple[bytes, str, str]:
-        self._ensure_nomenclature_ready()
         sku_groups = self._sku_groups()
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.title = "Номенклатура"
         worksheet.append(NOMENCLATURE_XLSX_HEADERS)
-        for raw_item in self.runtime.list_nomenclature_items():
+        for raw_item in self._nomenclature_read_view():
             item = _with_sku_group_projection(raw_item, sku_groups)
             worksheet.append(
                 [
@@ -2062,8 +2060,7 @@ class SupplierShipmentsBlock:
         )
 
     def list_sku_groups(self, *, include_inactive: bool = True) -> dict[str, Any]:
-        self._ensure_sku_groups_ready()
-        groups = self.runtime.list_sku_groups(include_inactive=include_inactive)
+        groups = [g for g in self._sku_groups() if include_inactive or g.get("is_active")]
         return {
             "contract_name": "sheet_vitrina_v1_sku_groups",
             "status": "ok",
@@ -2141,6 +2138,7 @@ class SupplierShipmentsBlock:
         }
 
     def update_nomenclature_item(self, item_id: str, payload: Mapping[str, Any], *, operator_request=None) -> dict[str, Any]:
+        self._seed_nomenclature_from_current_config_if_empty()
         existing = self.runtime.load_nomenclature_item(item_id)
         if existing is None:
             raise ValueError(f"nomenclature item not found: {item_id}")
@@ -2183,6 +2181,7 @@ class SupplierShipmentsBlock:
         }
 
     def deactivate_nomenclature_item(self, item_id: str, *, operator_request=None) -> dict[str, Any]:
+        self._seed_nomenclature_from_current_config_if_empty()
         operator_request = _pin_operator_version(operator_request, {item_id:self.runtime.load_nomenclature_item(item_id)})
         item = self.runtime.delete_nomenclature_item(item_id, updated_at=self.timestamp_factory(), operator_request=operator_request)
         return {
@@ -2760,13 +2759,23 @@ class SupplierShipmentsBlock:
             return hashlib.sha256(file_path.read_bytes()).hexdigest()
         return hashlib.sha256(str(fallback_seed or relative_path or "missing").encode("utf-8")).hexdigest()
 
+    def _nomenclature_read_view(self) -> list[dict[str, Any]]:
+        # Display legacy missing model metadata without changing source revisions.
+        items = self.runtime.list_nomenclature_items(read_only=True)
+        if not items:
+            items = self._seed_nomenclature_candidates()
+        return [_with_inferred_compatible_models(item) for item in items]
+
     def _active_nomenclature_items(self) -> list[dict[str, Any]]:
-        self._ensure_nomenclature_ready()
-        return self.runtime.list_nomenclature_items(active_only=True)
+        return [item for item in self._nomenclature_read_view() if item.get("is_active")]
 
     def _sku_groups(self) -> list[dict[str, Any]]:
-        self._ensure_sku_groups_ready()
-        return self.runtime.list_sku_groups(include_inactive=True)
+        groups = self.runtime.list_sku_groups(include_inactive=True, read_only=True)
+        keys = {g["group_key"] for g in groups}
+        groups += [{"display_order": 0, **g, "is_active": True, "is_system": True,
+                    "created_at": "", "updated_at": ""}
+                   for g in DEFAULT_SKU_GROUPS if g["group_key"] not in keys]
+        return sorted(groups, key=lambda g: (g["display_order"], g["group_key"]))
 
     def _apply_authoritative_nomenclature_matches(
         self,
@@ -2829,11 +2838,16 @@ class SupplierShipmentsBlock:
     def _seed_nomenclature_from_current_config_if_empty(self) -> None:
         if self.runtime.list_nomenclature_items():
             return
+        for item in self._seed_nomenclature_candidates():
+            self.runtime.save_nomenclature_item(_with_inferred_compatible_models(item))
+
+    def _seed_nomenclature_candidates(self) -> list[dict[str, Any]]:
         try:
-            current_state = self.runtime.load_current_state()
+            current_state = self.runtime.load_current_state(read_only=True)
         except Exception:
-            return
-        now = self.timestamp_factory()
+            return []
+        now = str(getattr(current_state, "activated_at", "") or self.timestamp_factory())
+        result = []
         seen: set[str] = set()
         for config_item in getattr(current_state, "config_v2", []) or []:
             if not bool(getattr(config_item, "enabled", False)):
@@ -2849,7 +2863,7 @@ class SupplierShipmentsBlock:
             if match_key in seen:
                 continue
             seen.add(match_key)
-            self.runtime.save_nomenclature_item(
+            result.append(
                 {
                     "item_id": f"nom_seed_{int(getattr(config_item, 'nm_id'))}",
                     "is_active": True,
@@ -2867,6 +2881,7 @@ class SupplierShipmentsBlock:
                     "updated_at": now,
                 }
             )
+        return result
 
     def _backfill_nomenclature_compatible_models(self) -> None:
         items = self.runtime.list_nomenclature_items()
@@ -4615,7 +4630,18 @@ def _apply_wb_card_to_existing_nomenclature(
     )
     updated["wb_sync_evidence"] = _wb_card_sync_evidence(card, result="matched", match_type=match_type)
     updated["updated_at"] = synced_at
-    return updated
+    return _with_inferred_compatible_models(updated)
+
+
+def _with_inferred_compatible_models(item: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(item)
+    if not result.get("compatible_model_keys"):
+        keys = _infer_compatible_model_keys(result)
+        if keys:
+            result["compatible_model_keys"] = keys
+            result["compatible_models_text"] = (str(result.get("compatible_models_text") or "").strip()
+                or _compatible_models_text_from_keys(keys))
+    return result
 
 
 def _new_nomenclature_item_from_wb_card(
@@ -4642,7 +4668,7 @@ def _new_nomenclature_item_from_wb_card(
         detected_group=detection,
         needs_review=needs_review,
     )
-    return {
+    return _with_inferred_compatible_models({
         "item_id": "nom_wb_" + uuid4().hex,
         "is_active": not needs_review and group_key not in {"extra", "other"},
         "is_hidden": False,
@@ -4685,7 +4711,7 @@ def _new_nomenclature_item_from_wb_card(
         "comment": "needs_review: WB vendorCode group is not recognized" if needs_review else "created from WB Content sync",
         "created_at": created_at,
         "updated_at": updated_at,
-    }
+    })
 
 
 def _detect_sku_group_from_vendor_code(vendor_code: str, groups: list[Mapping[str, Any]]) -> dict[str, Any]:

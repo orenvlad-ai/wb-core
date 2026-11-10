@@ -829,13 +829,21 @@ def capture_pending_completion(runtime, *, finance_block=None):
             queue = conn.execute(f"SELECT status FROM {TARGETED_RECALC_QUEUE_TABLE} WHERE stable_source_id=?", ('pool_overhead:'+posted[0],)).fetchone() if posted and posted[0] else None
             if queue and queue[0] == 'complete': sources.append(_completion_source(conn,row[0]))
     planned_finance=None
+    finance_context={}
     if sources:
         from datetime import date
         if finance_block is None: raise ValueError('overhead_completion_finance_owner_required')
         finance_block._pin_active_cost()
-        planned_finance=finance_block.plan_stale_cost_weeks(date_from=date.fromisoformat(finance_block.shared_cost_snapshot.effective_date))['fingerprint']
+        finance_plan=finance_block.plan_stale_cost_weeks(date_from=date.fromisoformat(finance_block.shared_cost_snapshot.effective_date))
+        planned_finance=finance_plan['fingerprint']
+        finance_context={key:finance_plan.get(key) for key in ('date_from','date_to','target_before_digest','target_before_image_digest','non_target_digest')}
+        finance_context['source_dependency_digest']=(finance_plan.get('source_dependency') or {}).get('digest')
+        finance_context['fingerprint']=planned_finance
+        finance_context['cost_snapshot_version']=finance_block.shared_cost_snapshot.version_id
+        finance_context['cost_snapshot_effective_date']=finance_block.shared_cost_snapshot.effective_date
     if registry.load() != authority: raise ValueError('overhead_completion_storage_changed')
-    return dict(authority=authority,sources=sources,finance_plan_fingerprint=planned_finance)
+    return dict(authority=authority,sources=sources,finance_plan_fingerprint=planned_finance,
+                finance_plan_context=finance_context)
 
 
 def _completion_split_tokens(observer, identity):
@@ -933,13 +941,34 @@ def _complete_cohort_proof(runtime, captured, *, finance_block, finance_receipt,
     from packages.application.warehouse_functional_lock import require_warehouse_job_owner
     require_warehouse_job_owner(runtime.runtime_dir)
     if not captured['sources']: return dict(processed_count=0)
-    if (finance_receipt.get('fingerprint') != captured['finance_plan_fingerprint']
-            or finance_receipt.get('status') not in ('applied','already_current')
-            or finance_receipt.get('non_target_preserved') is not True
-            or type(finance_receipt.get('post_verify_stale_week_count')) is not int
-            or finance_receipt['post_verify_stale_week_count'] != 0
-            or finance_receipt.get('source_advanced_after_apply') is True):
-        raise ValueError('overhead_completion_finance_unproven')
+    failed = next((reason for condition, reason in (
+        (finance_receipt.get('fingerprint') != captured['finance_plan_fingerprint'], 'fingerprint'),
+        (finance_receipt.get('status') not in ('applied','already_current'), 'status'),
+        (finance_receipt.get('non_target_preserved') is not True, 'non_target'),
+        (type(finance_receipt.get('post_verify_stale_week_count')) is not int
+         or finance_receipt['post_verify_stale_week_count'] != 0, 'stale_weeks'),
+        (finance_receipt.get('source_advanced_after_apply') is True, 'source_advanced'),
+    ) if condition), None)
+    if failed:
+        error=CompletionProofError('overhead_completion_finance_unproven')
+        error.before_vector_digest=captured.get('finance_plan_fingerprint')
+        error.after_vector_digest=finance_receipt.get('fingerprint')
+        error.finance_handoff=dict(
+            failed_condition=failed, captured=captured.get('finance_plan_context') or {},
+            # Native receipts do not currently expose their period bounds or
+            # target-before image. Preserve missing fields as unknown, never
+            # substitute the captured plan as evidence of the applied plan.
+            applied={key:finance_receipt.get(key) for key in (
+                'fingerprint','date_from','date_to','target_before_digest','target_before_image_digest',
+                'accounting_version','accounting_version_before','accounting_version_unchanged',
+                'planned_non_target_digest','non_target_digest_before','non_target_digest_after','target_image_digest',
+                'status','post_verify_stale_week_count','source_advanced_after_apply','non_target_preserved')},
+            observed_after=dict(
+                cost_snapshot_version=getattr(finance_block.shared_cost_snapshot,'version_id',None),
+                cost_snapshot_effective_date=getattr(finance_block.shared_cost_snapshot,'effective_date',None)),
+            applied_source_dependency_digest=(finance_receipt.get('source_dependency') or {}).get('digest'),
+            post_source_dependency_digest=(finance_receipt.get('post_source_dependency') or {}).get('digest'))
+        raise error
     completed=0
     with ExitStack() as scope:
         proof_budget=ExitStack()

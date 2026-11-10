@@ -1251,7 +1251,7 @@ class RegistryUploadHttpEntrypoint:
         # retain their existing buyer source until identity and context match.
         self.buyer_price_block = (
             self.buyer_session_block if buyer_session_block is not None
-            else WbBuyerSessionBlock(adapter=WbBuyerChromePriceAdapter())
+            else WbBuyerSessionBlock(adapter=WbBuyerChromePriceAdapter(runtime_dir=self.runtime.runtime_dir))
         )
         self.spp_tester_block = spp_tester_block or WbSppTesterBlock(
             runtime=self.runtime,

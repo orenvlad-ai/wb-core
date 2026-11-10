@@ -305,9 +305,11 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             return result
 
-    def load_current_state(self) -> RegistryUploadDbBackedCurrentState:
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+    def load_current_state(self, *, read_only: bool = False) -> RegistryUploadDbBackedCurrentState:
+        from packages.application.ready_publication import readonly
+        with (readonly(self.db_path) if read_only else _connect(self.db_path)) as conn:
+            if not read_only:
+                _ensure_schema(conn)
             current_row = conn.execute(
                 """
                 SELECT bundle_version, activated_at
@@ -8293,10 +8295,17 @@ class RegistryUploadDbBackedRuntime:
             conn.commit()
             return cursor.rowcount > 0
 
-    def list_nomenclature_items(self, *, active_only: bool = False) -> list[dict[str, Any]]:
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+    def list_nomenclature_items(self, *, active_only: bool = False, read_only: bool = False) -> list[dict[str, Any]]:
+        from packages.application.ready_publication import readonly
+        if read_only and not self.db_path.exists():
+            return []
+        if not read_only:
+            self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with (readonly(self.db_path) if read_only else _connect(self.db_path)) as conn:
+            if not read_only:
+                _ensure_schema(conn)
+            elif not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", ("sheet_vitrina_v1_nomenclature_items",)).fetchone():
+                return []
             where_clause = "WHERE is_active = 1" if active_only else ""
             rows = conn.execute(
                 f"""
@@ -8617,10 +8626,17 @@ class RegistryUploadDbBackedRuntime:
             raise ValueError(f"nomenclature item not found: {item_id}")
         return loaded
 
-    def list_sku_groups(self, *, include_inactive: bool = True) -> list[dict[str, Any]]:
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+    def list_sku_groups(self, *, include_inactive: bool = True, read_only: bool = False) -> list[dict[str, Any]]:
+        from packages.application.ready_publication import readonly
+        if read_only and not self.db_path.exists():
+            return []
+        if not read_only:
+            self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with (readonly(self.db_path) if read_only else _connect(self.db_path)) as conn:
+            if not read_only:
+                _ensure_schema(conn)
+            elif not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", ("sheet_vitrina_v1_sku_groups",)).fetchone():
+                return []
             where_clause = "" if include_inactive else "WHERE is_active = 1"
             rows = conn.execute(
                 f"""

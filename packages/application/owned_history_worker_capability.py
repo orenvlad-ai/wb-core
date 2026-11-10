@@ -382,13 +382,15 @@ def receive_message(channel):
     return json.loads(exact(size))
 
 
-def lock_proof(fd, path, *, mode, parent_pid):
-    """Read Linux fdinfo; never acquire, convert or unlock a supplied FD."""
+def inherited_lock_proof(fd, *, mode, parent_pid):
+    """Prove an inherited kernel lock without traversing its private directory.
+
+    A privileged parent must bind the pathname with lock_proof before passing
+    this description to a child that drops its supplementary groups.
+    """
     linux_required()
-    path = Path(path)
-    actual, opened = path.lstat(), os.fstat(fd)
-    if (not stat.S_ISREG(opened.st_mode) or opened.st_mode & 0o007
-            or (actual.st_dev, actual.st_ino) != (opened.st_dev, opened.st_ino)):
+    opened = os.fstat(fd)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_mode & 0o007:
         raise HistoryDelegationError("history_lock_descriptor_unsafe")
     # FLOCK records are tied to this open file description (not just the inode).
     value = Path(f"/proc/self/fdinfo/{fd}").read_text()
@@ -397,7 +399,18 @@ def lock_proof(fd, path, *, mode, parent_pid):
     if not any(len(row) == 9 and row[2:6] == ["FLOCK", "ADVISORY", mode, str(parent_pid)]
                and row[6:] == [expected, "0", "EOF"] for row in records):
         raise HistoryDelegationError("history_lock_not_held_by_parent")
-    return {"path": str(path), "device": opened.st_dev, "inode": opened.st_ino, "mode": mode}
+    return {"device": opened.st_dev, "inode": opened.st_ino, "mode": mode}
+
+
+def lock_proof(fd, path, *, mode, parent_pid):
+    """Read Linux fdinfo; never acquire, convert or unlock a supplied FD."""
+    linux_required()
+    path = Path(path)
+    actual, opened = path.lstat(), os.fstat(fd)
+    if (not stat.S_ISREG(opened.st_mode) or opened.st_mode & 0o007
+            or (actual.st_dev, actual.st_ino) != (opened.st_dev, opened.st_ino)):
+        raise HistoryDelegationError("history_lock_descriptor_unsafe")
+    return {"path": str(path), **inherited_lock_proof(fd, mode=mode, parent_pid=parent_pid)}
 
 
 def child_bootstrap(fd):

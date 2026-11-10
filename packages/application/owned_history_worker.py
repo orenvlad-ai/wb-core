@@ -517,7 +517,7 @@ def _history_worker(*, runtime, config, cycle_owner, operation):
             or owner._maintenance.fd is None or root != root.resolve() or root.is_relative_to(source)
             or not 0 < config.budget_seconds <= 240 or not 1 <= config.max_recomputes <= 31):
         raise HistoryDelegationError("history_parent_contract_invalid")
-    if (api_jobs_admission(source, cycle_owner=cycle_owner if operation == "cycle" else None) != "idle" or systemd_admission() != "idle"
+    if (api_jobs_admission(source, cycle_owner=cycle_owner if operation == "cycle" else None) != "idle" or systemd_admission(runtime_dir=source) != "idle"
             or lock_admission(source / ".wb-finance-daily-worker.lock") != "idle"
             or warehouse_functional_job_is_busy(source)):
         raise HistoryDelegationError("history_parent_admission_busy_or_unknown")

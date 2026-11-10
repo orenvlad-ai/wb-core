@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import pwd
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -28,6 +29,51 @@ if str(ROOT) not in sys.path:
 from apps import wb_buyer_chrome_auth as auth  # noqa: E402
 from apps import wb_buyer_chrome_runtime as runtime  # noqa: E402
 from apps import wb_buyer_session_recovery as legacy  # noqa: E402
+from packages.application.business_data_heavy_admission import (  # noqa: E402
+    HeavyAdmissionBusy, heavy_admitted, require_heavy_owner,
+)
+
+from packages.application.owned_history_worker_capability import inherited_lock_proof, lock_proof  # noqa: E402
+
+HOSTED_RUNTIME = Path("/opt/wb-core-runtime/state")
+
+
+def _collection_runtime(runtime_dir: Path | None) -> Path:
+    return Path(runtime_dir) if runtime_dir is not None else Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", str(HOSTED_RUNTIME)))
+
+
+def _reader_fds(guard_fd: int, runtime_dir: Path) -> tuple[int, ...]:
+    # The parent retains admission through cleanup. Inherit these descriptors
+    # as well so killing the parent cannot release exclusion under live Chrome.
+    owner = require_heavy_owner(runtime_dir)
+    assert owner.fd is not None and owner._maintenance is not None and owner._maintenance.fd is not None
+    # Resolve the root-only path before setpriv drops all supplementary groups.
+    lock_proof(owner.fd, runtime_dir / ".business-data-heavy-admission.lock", mode="WRITE", parent_pid=os.getpid())
+    lock_proof(owner._maintenance.fd, runtime_dir / ".business-data-procedure-admission.lock", mode="READ", parent_pid=os.getpid())
+    return (guard_fd, owner.fd, owner._maintenance.fd)
+
+
+
+def _runner_lock_proof(heavy_fd: int, maintenance_fd: int, runtime_dir: Path) -> None:
+    """Bind inherited native locks after dropping access to the private runtime."""
+    if not runtime_dir.is_absolute() or str(runtime_dir) != os.path.normpath(str(runtime_dir)):
+        raise RuntimeError("buyer runner requires canonical runtime path")
+    if heavy_fd == maintenance_fd:
+        raise RuntimeError("buyer runner requires distinct lock descriptions")
+    identities = set()
+    for fd, name, mode in (
+        (heavy_fd, ".business-data-heavy-admission.lock", "WRITE"),
+        (maintenance_fd, ".business-data-procedure-admission.lock", "READ"),
+    ):
+        opened = os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0
+                or stat.S_IMODE(opened.st_mode) != 0o600 or opened.st_nlink != 1
+                or os.readlink(f"/proc/self/fd/{fd}") != str(runtime_dir / name)):
+            raise RuntimeError("buyer runner lock descriptor identity invalid")
+        identities.add((opened.st_dev, opened.st_ino))
+        inherited_lock_proof(fd, mode=mode, parent_pid=os.getppid())
+    if len(identities) != 2:
+        raise RuntimeError("buyer runner requires distinct lock identities")
 
 
 class BatchInterrupted(BaseException):
@@ -404,7 +450,20 @@ def _parse_batch_lines(output: str | bytes, nm_ids: list[int]) -> dict[int, dict
     return rows
 
 
-def read_price(nm_id: int) -> dict[str, Any]:
+def read_price(nm_id: int, *, runtime_dir: Path | None = None) -> dict[str, Any]:
+    if os.geteuid() != 0:
+        return _unknown(nm_id, "authenticated_price_probe_failed")
+    root = _collection_runtime(runtime_dir)
+    try:
+        with heavy_admitted(root, operation="buyer-authenticated-collect"):
+            return _read_price(nm_id, runtime_dir=root)
+    except HeavyAdmissionBusy:
+        return _unknown(nm_id, "heavy_producer_running")
+    except (OSError, RuntimeError, ValueError):
+        return _unknown(nm_id, "authenticated_price_probe_failed")
+
+
+def _read_price(nm_id: int, *, runtime_dir: Path) -> dict[str, Any]:
     """Synchronous, single-flight call from the existing application contract."""
     if os.geteuid() != 0:
         return _unknown(nm_id, "authenticated_price_probe_failed")
@@ -420,10 +479,13 @@ def read_price(nm_id: int) -> dict[str, Any]:
             user = pwd.getpwnam(runtime.USER)
             command = ["setpriv", "--reuid", str(user.pw_uid), "--regid", str(user.pw_gid), "--clear-groups",
                        sys.executable, str(Path(__file__).resolve()), "read", "--nm-id", str(nm_id)]
+            fds = _reader_fds(guard_fd, runtime_dir)
+            command.extend(["--runtime-dir", str(runtime_dir.resolve()), "--heavy-fd", str(fds[1]),
+                            "--maintenance-fd", str(fds[2])])
             try:
                 child = subprocess.run(command, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "PYTHONUNBUFFERED": "1"},
                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=105, check=True,
-                                       pass_fds=(guard_fd,))
+                                       pass_fds=fds)
                 value = json.loads(child.stdout)
                 return value if isinstance(value, dict) else _unknown(nm_id)
             except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
@@ -434,7 +496,26 @@ def read_price(nm_id: int) -> dict[str, Any]:
         return _unknown(nm_id, "authenticated_price_probe_failed")
 
 
-def read_prices(nm_ids: list[int]) -> list[dict[str, Any]]:
+def read_prices(nm_ids: list[int], *, runtime_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Admit every parent collection path, including direct application calls."""
+    if not 1 <= len(nm_ids) <= 40 or len(set(nm_ids)) != len(nm_ids) or any(not 0 < item < 1_000_000_000_000 for item in nm_ids):
+        raise ValueError("buyer price batch requires 1..40 distinct nm_ids")
+    def unavailable(reason: str) -> list[dict[str, Any]]:
+        references = current_context_references()
+        return [{**_unknown(nm_id, reason), **references} for nm_id in nm_ids]
+    if os.geteuid() != 0:
+        return unavailable("authenticated_price_probe_failed")
+    root = _collection_runtime(runtime_dir)
+    try:
+        with heavy_admitted(root, operation="buyer-authenticated-collect"):
+            return _read_prices(nm_ids, runtime_dir=root)
+    except HeavyAdmissionBusy:
+        return unavailable("heavy_producer_running")
+    except (OSError, RuntimeError, ValueError):
+        return unavailable("authenticated_price_probe_failed")
+
+
+def _read_prices(nm_ids: list[int], *, runtime_dir: Path) -> list[dict[str, Any]]:
     """Read a bounded batch while holding the durable profile lock throughout."""
     if not 1 <= len(nm_ids) <= 40 or len(set(nm_ids)) != len(nm_ids) or any(not 0 < item < 1_000_000_000_000 for item in nm_ids):
         raise ValueError("buyer price batch requires 1..40 distinct nm_ids")
@@ -455,12 +536,15 @@ def read_prices(nm_ids: list[int]) -> list[dict[str, Any]]:
             user = pwd.getpwnam(runtime.USER)
             command = ["setpriv", "--reuid", str(user.pw_uid), "--regid", str(user.pw_gid), "--clear-groups",
                        sys.executable, str(Path(__file__).resolve()), "read-batch", "--nm-ids", ",".join(map(str, nm_ids))]
+            fds = _reader_fds(guard_fd, runtime_dir)
+            command.extend(["--runtime-dir", str(runtime_dir.resolve()), "--heavy-fd", str(fds[1]),
+                            "--maintenance-fd", str(fds[2])])
             output: str | bytes = ""
             child_returncode: int | None = None
             try:
                 child = subprocess.Popen(command, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "PYTHONUNBUFFERED": "1"},
                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                                         pass_fds=(guard_fd,))
+                                         pass_fds=fds)
                 try:
                     output, _ = child.communicate(timeout=390)
                     child_returncode = child.returncode
@@ -530,7 +614,14 @@ def main() -> None:
     parser.add_argument("command", choices=("read", "read-batch"))
     parser.add_argument("--nm-id", type=int)
     parser.add_argument("--nm-ids", default="")
+    parser.add_argument("--runtime-dir", type=Path, required=True, help=argparse.SUPPRESS)
+    parser.add_argument("--heavy-fd", type=int, required=True, help=argparse.SUPPRESS)
+    parser.add_argument("--maintenance-fd", type=int, required=True, help=argparse.SUPPRESS)
     arguments = parser.parse_args()
+    # This child runs under the dedicated unprivileged UID and cannot acquire
+    # the root-owned locks itself. The exact inherited open descriptions must
+    # prove its parent's EX heavy and SH maintenance locks; raw CLI is closed.
+    _runner_lock_proof(arguments.heavy_fd, arguments.maintenance_fd, arguments.runtime_dir)
     if arguments.command == "read":
         if arguments.nm_id is None:
             parser.error("--nm-id is required for read")
