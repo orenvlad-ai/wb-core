@@ -52,6 +52,24 @@ def admission_checks() -> None:
             assert "pr-not-ready" in exc.reason
         else:
             raise AssertionError("Draft PR admitted")
+        with tempfile.TemporaryDirectory() as directory:
+            for event in ("workflow_run", "workflow_dispatch"):
+                output = Path(directory) / event
+                with patch.object(runner, "GitHub", return_value=client), \
+                        patch.dict(os.environ, {"GITHUB_TOKEN": "offline-token", "GITHUB_EVENT_NAME": event}), \
+                        patch.object(runner, "run") as release, \
+                        patch.object(sys, "argv", ["runner", "route", "--workflow-run-id", "10",
+                                                  "--github-output", str(output)]):
+                    try:
+                        assert runner.main() == 0
+                    except runner.RunnerError as exc:
+                        assert event == "workflow_dispatch" and "pr-not-ready" in exc.reason
+                        assert not output.exists()
+                    else:
+                        assert event == "workflow_run"
+                        assert dict(line.split("=", 1) for line in output.read_text().splitlines()) == {
+                            "release_kind": "skipped", "deploy_required": "skipped"}
+                    release.assert_not_called()
         client.pr["draft"] = False
         assert runner.admit(client, 10)[2:] == (7, checked["base_sha"], checked["head_sha"])
         with tempfile.TemporaryDirectory() as directory:

@@ -603,6 +603,15 @@ def main() -> int:
         raise SystemExit("GITHUB_TOKEN is required")
     client = GitHub(args.repository, token)
     if args.command == "route":
+        if os.environ.get("GITHUB_EVENT_NAME") == "workflow_run":
+            gate, _plan = collect_plan(client, args.workflow_run_id)
+            pr = client.get(f"/pulls/{workflow_pr(gate)}")
+            if pr.get("state") == "open" and pr.get("draft") is True:
+                # Neither release job accepts this value. This is a routing
+                # skip, never admission or a successful release receipt.
+                _write_outputs(args.github_output, {"release_kind": "skipped", "deploy_required": "skipped"})
+                print(json.dumps({"state": "skipped", "reason": "draft-pr"}))
+                return 0
         _run, plan, _pr, _base, _head = admit(client, args.workflow_run_id)
         kind = str(plan["release_kind"])
         _write_outputs(args.github_output, {"release_kind": kind, "deploy_required": str(kind != "repo_only").lower()})

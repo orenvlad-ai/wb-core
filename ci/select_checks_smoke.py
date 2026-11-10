@@ -17,6 +17,7 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "hosted_runtime_storage_preflight_smoke": ("apps/registry_upload_http_entrypoint_hosted_runtime.py",),
     "sqlite_contention_smoke": ("packages/application/sqlite_contention.py",),
     "sqlite_schema_contention_smoke": ("packages/application/sqlite_contention.py",),
     "fbs_accounting_historical_unavailable_smoke": (
@@ -925,7 +926,7 @@ def finance_liquidity_checks() -> None:
             "playwright==1.58.0",
         ], (path, plan)
         smokes = [command for command in plan["commands"] if command[1] != "-m"]
-        assert smokes == own_smokes, (path, plan)
+        assert sorted(smokes) == sorted(own_smokes), (path, plan)
 
     liquidity_path = "packages/domain/finance_liquidity/money.py"
     legacy_path = "packages/application/finance_value.py"
@@ -1124,7 +1125,38 @@ def autoanswers_mjs_checks() -> None:
             raise AssertionError(f"unclassified path accepted: {path}")
 
 
+def ordering_and_notifications_checks() -> None:
+    # Ordering must not drop commands or put a browser before its installer.
+    mapping = {"schema": "wb-core.check-map/v1", "groups": {"sample": {
+        "patterns": ["apps/*.py"], "pip": [], "commands": [
+            ["python3", "slow.py"], ["python3", "apps/changed_smoke.py"],
+            ["python3", "apps/production_apply_launcher_smoke.py"]]}},
+        "command_dependencies": {"browser": {"scripts": ["apps/changed_smoke.py"],
+            "commands": [["python3", "-m", "playwright", "install", "chromium"]], "pip": []}}}
+    with patch.object(select_checks, "load_map", return_value=(mapping, "fixture")):
+        plan = build_plan_from_paths(pull_request=1, base=BASE, head=HEAD,
+            paths=["apps/changed_smoke.py"], file_exists=lambda sha, path: True)
+    assert plan["commands"] == [
+        ["python3", "-m", "py_compile", "apps/changed_smoke.py"],
+        ["python3", "apps/production_apply_launcher_smoke.py"],
+        ["python3", "-m", "playwright", "install", "chromium"],
+        ["python3", "apps/changed_smoke.py"], ["python3", "slow.py"]]
+    for name in ("sheet_vitrina_v1_fbo_notifications.js", "sheet_vitrina_v1_fbo_notification_target.js"):
+        plan = build_plan_from_paths(pull_request=1, base=BASE, head=HEAD,
+            paths=["packages/adapters/templates/" + name], file_exists=lambda sha, path: True)
+        assert plan["groups"] == ["fbo_notifications_ui"], plan["groups"]
+        assert plan["release_kind"] == "live_runtime"
+        assert ["python3", "apps/fbo_notifications_ui_http_smoke.py"] in plan["commands"]
+        assert ["python3", "apps/fbo_notifications_domain_integration_smoke.py"] in plan["commands"]
+        assert "playwright==1.58.0" in plan["pip"]
+    for name in ("sheet_vitrina_v1_operator.html", "sheet_vitrina_v1_web_vitrina.html"):
+        plan = build_plan_from_paths(pull_request=1, base=BASE, head=HEAD,
+            paths=["packages/adapters/templates/" + name], file_exists=lambda sha, path: True)
+        assert "fbo_notifications_ui" in plan["groups"] and len(plan["groups"]) > 1
+
+
 def main() -> None:
+    ordering_and_notifications_checks()
     documentation_only_checks()
     autoanswers_mjs_checks()
     cleaner_command_checks()

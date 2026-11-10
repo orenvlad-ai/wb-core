@@ -1,6 +1,9 @@
 """Exercise trusted command budgets without running native history fixtures."""
 
 import json
+import contextlib
+import io
+import tempfile
 from pathlib import Path
 import subprocess
 import sys
@@ -14,7 +17,32 @@ import run_checks
 from select_checks import PLAN_SCHEMA, canonical_bytes, digest
 
 
+def timing_checks():
+    commands = [["python3", "first.py"], ["node", "second.js"]]
+    for failure in [None, subprocess.CalledProcessError(7, commands[0]), subprocess.TimeoutExpired(commands[0], 900)]:
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(output), \
+                patch.object(run_checks.subprocess, "run", side_effect=failure) as execute:
+            try:
+                run_checks.run_commands(Path(directory), commands)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                assert exc is failure
+            else:
+                assert failure is None
+            assert execute.call_count == (1 if failure else 2)
+            assert execute.call_args_list[0].kwargs == {"cwd": Path(directory), "check": True, "timeout": 900}
+        events = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith("{")]
+        assert events[0]["outcome"] == ("failed" if failure else "passed")
+        assert events[0]["check_seconds"] >= 0
+        assert events[-1]["completed_commands"] == (1 if failure else 2)
+        assert "slowest_check_seconds" in events[-1]
+    print("check execution/timing smoke: PASS")
+
+
 class CommandBudgetTests(unittest.TestCase):
+    def test_timing_retains_failure_behavior(self):
+        timing_checks()
+
     def run_plan(self, commands, *, fail=None):
         calls = []
         head = "a" * 40

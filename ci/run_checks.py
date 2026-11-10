@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -76,13 +77,33 @@ def main() -> int:
     if not isinstance(changed, list) or not isinstance(commands, list):
         raise SystemExit("invalid check plan")
     validate_formats(root, [str(path) for path in changed])
-    for command in commands:
-        if not isinstance(command, list) or not command or command[0] not in {"python3", "node"}:
-            raise SystemExit(f"unsupported command: {command!r}")
-        print("check:", " ".join(command), flush=True)
-        timeout = COMMAND_TIMEOUT_SECONDS.get(tuple(command), 900)
-        subprocess.run(command, cwd=root, check=True, timeout=timeout)
+    run_commands(root, commands)
     return 0
+
+
+def run_commands(root: Path, commands: list[list[str]]) -> None:
+    timings = []
+    try:
+        for command in commands:
+            if not isinstance(command, list) or not command or command[0] not in {"python3", "node"}:
+                raise SystemExit(f"unsupported command: {command!r}")
+            print("check:", " ".join(command), flush=True)
+            timeout = COMMAND_TIMEOUT_SECONDS.get(tuple(command), 900)
+            started = time.monotonic()
+            outcome = "failed"
+            try:
+                subprocess.run(command, cwd=root, check=True, timeout=timeout)
+                outcome = "passed"
+            finally:
+                elapsed = time.monotonic() - started
+                timings.append((elapsed, command, outcome))
+                print(json.dumps({"check_seconds": round(elapsed, 3), "command": command,
+                                  "outcome": outcome}), flush=True)
+    finally:
+        if timings:
+            elapsed, command, outcome = max(timings, key=lambda item: item[0])
+            print(json.dumps({"slowest_check_seconds": round(elapsed, 3), "command": command,
+                              "outcome": outcome, "completed_commands": len(timings)}), flush=True)
 
 
 if __name__ == "__main__":
