@@ -585,8 +585,14 @@ def _has_exact_aggregate_sentinel(snapshot: Mapping[str, Any]) -> bool:
         if (
             type(warehouse_id) is int
             and warehouse_id == -999999
-            and warehouse_name == "Склад WB"
-            and region_name == "Склад WB"
+            # Keep the current-snapshot tuples aligned with the official
+            # adapter. None of these labels provides warehouse geography.
+            and (str(warehouse_name or "").strip().casefold(),
+                 str(region_name or "").strip().casefold()) in {
+                     ("склад wb", "склад wb"),
+                     ("склад wb", "россия"),
+                     ("склад wb рф", "россия"),
+                 }
         ):
             return True
     return False

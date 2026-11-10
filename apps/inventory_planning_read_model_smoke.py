@@ -59,6 +59,41 @@ def main() -> int:
             "reason_ru": "Недоступно: WB временно не передаёт распределение",
             "historical_values_preserved": True,
         }
+        # The current RF label has exactly the same total and unavailable
+        # geography as the older aggregate labels, including mixed raw keys.
+        with sqlite3.connect(db_path) as conn:
+            original_rows = conn.execute(
+                "SELECT raw_rows_json FROM sheet_vitrina_v1_warehouse_wb_snapshots "
+                "WHERE snapshot_id='wbsnap-current'"
+            ).fetchone()[0]
+        for name, region, snake_keys in (
+            ("Склад WB", "Россия", False),
+            ("Склад WB РФ", "Россия", False),
+            (" склад wb рф ", " россия ", True),
+        ):
+            rows = json.loads(original_rows)
+            for row in rows:
+                row.update(warehouseName=name, regionName=region)
+                if snake_keys:
+                    for old, new in (("warehouseId", "warehouse_id"),
+                                     ("warehouseName", "warehouse_name"),
+                                     ("regionName", "region_name")):
+                        row[new] = row.pop(old)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET raw_rows_json=? "
+                    "WHERE snapshot_id='wbsnap-current'", (json.dumps(rows),)
+                )
+            aliased = model.current()
+            assert _metric(aliased, "wb_total") == _metric(missing, "wb_total")
+            assert aliased["wb"]["aggregate_only"] is True
+            assert aliased["wb"]["districts"] == missing["wb"]["districts"]
+            assert aliased["wb"]["incident_evidence"] == missing["wb"]["incident_evidence"]
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET raw_rows_json=? "
+                "WHERE snapshot_id='wbsnap-current'", (original_rows,)
+            )
         # Both facilities are active, so the absent SKU 2 physical rows are
         # applicable-missing.  The aggregate must remain unavailable instead
         # of silently treating those missing components as zero.
