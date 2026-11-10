@@ -538,9 +538,12 @@ class ProtectionTests(unittest.TestCase):
         calls = []
         def execute(command, **kwargs):
             calls.append(command)
+            if command[-1] == 'storage-preflight' and fail_storage[0]:
+                raise subprocess.CalledProcessError(fail_storage[0], command)
             if kwargs and fail_start[0] and "'start'" in command[-1]:
                 raise subprocess.TimeoutExpired(command, 120)
         fail_start = [False]
+        fail_storage = [0]
         with ExitStack() as stack:
             for name in ('_ensure_target_allows_mutation', '_validate_managed_systemd_units'):
                 stack.enter_context(patch.object(hosted, name))
@@ -551,7 +554,7 @@ class ProtectionTests(unittest.TestCase):
             for name in dir(hosted):
                 if name.startswith('_build_') and name.endswith('_command'):
                     stack.enter_context(patch.object(hosted, name, return_value=['ssh', 'offline-test', name]))
-            stack.enter_context(patch.object(hosted, '_build_root_storage_policy_commands', return_value={'status': [], 'status_artifact_readback': []}))
+            stack.enter_context(patch.object(hosted, '_build_root_storage_policy_commands', return_value={'preflight': ['ssh', 'offline-test', 'storage-preflight'], 'status': [], 'status_artifact_readback': []}))
             stack.enter_context(patch.object(hosted, '_build_managed_systemd_commands', return_value={
                 key: [] for key in ('install', 'retire', 'daemon_reload', 'enable', 'restart', 'reconcile', 'preflight')}))
             stack.enter_context(patch.object(hosted, '_run_command', side_effect=execute))
@@ -560,18 +563,27 @@ class ProtectionTests(unittest.TestCase):
                 'WB_CORE_RELEASE_DEFER_DEPLOY_OWNER_FINISH': 'false'}))
             hosted.deploy_current_checkout(target, target_file=None, dry_run=False, allow_dirty=True)
             self.assertEqual(calls[0][-1], '_build_auth_env_preflight_command')
-            self.assertIn("'claim'", calls[1][-1])
-            self.assertIn("'start'", calls[2][-1])
-            self.assertIn('deploy_owner_bootstrap', calls[3][-1])  # first mkdir
+            self.assertEqual(calls[1][-1], 'storage-preflight')
+            self.assertIn("'claim'", calls[2][-1])
+            self.assertIn("'start'", calls[3][-1])
+            self.assertIn('deploy_owner_bootstrap', calls[4][-1])  # first mkdir
             rsync = next(command for command in calls if command[0] == 'rsync')
             self.assertIn('deploy_owner_bootstrap', rsync[rsync.index('--rsync-path') + 1])
-            self.assertIn('python3 -m packages.application.business_data_deploy_protection check', calls[5][-1])
+            self.assertIn('python3 -m packages.application.business_data_deploy_protection check', calls[6][-1])
             self.assertIn('business_data_deploy_protection finish', calls[-1][-1])
             calls.clear()
             fail_start[0] = True
             with self.assertRaises(subprocess.TimeoutExpired):
                 hosted.deploy_current_checkout(target, target_file=None, dry_run=False, allow_dirty=True)
-            self.assertEqual(len(calls), 3)  # readonly auth, claim, ambiguous start
+            self.assertEqual(len(calls), 4)  # auth, storage, claim, ambiguous start
+            fail_start[0] = False
+            for code in (3, 255):
+                calls.clear()
+                fail_storage[0] = code
+                with self.assertRaises((subprocess.CalledProcessError, RuntimeError)):
+                    hosted.deploy_current_checkout(target, target_file=None, dry_run=False, allow_dirty=True)
+                self.assertEqual([command[-1] for command in calls],
+                                 ['_build_auth_env_preflight_command', 'storage-preflight'])
 
     def old_runner_evidence(self):
         from apps import github_release_runner as runner

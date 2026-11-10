@@ -545,7 +545,8 @@ def _web_vitrina_ui_base_template() -> str:
     """Cache source text only; request-owned config and barriers stay dynamic."""
 
     template = WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
-    for marker, filename in (("{{STOCK_MONITOR_PANEL}}", "stock_monitor.html"),
+    for marker, filename in (("/* FBO_NOTIFICATIONS_SCRIPT */", "sheet_vitrina_v1_fbo_notifications.js"),
+                             ("{{STOCK_MONITOR_PANEL}}", "stock_monitor.html"),
                              ("<!-- KEYWORD_CLEANER_PANEL -->", "sheet_vitrina_v1_keyword_cleaner.html"),
                              ("/* KEYWORD_CLEANER_SCRIPT */", "sheet_vitrina_v1_keyword_cleaner.js"),
                              ("<!-- BUYER_SUPPORT_PANEL -->", "wb_buyer_support.html"),
@@ -11707,6 +11708,10 @@ def _render_sheet_vitrina_operator_ui(
     }
     template = _inject_sheet_vitrina_ui_system(
         OPERATOR_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    )
+    template = template.replace(
+        "/* FBO_NOTIFICATION_TARGET_SCRIPT */",
+        OPERATOR_UI_TEMPLATE_PATH.with_name("sheet_vitrina_v1_fbo_notification_target.js").read_text(encoding="utf-8"),
     )
     cny_acceptance = UI_SYSTEM_CSS_PATH.with_name('sheet_vitrina_v1_cny_acceptance.js').read_text(encoding='utf-8')
     template = template.replace('</head>', '<script>\n' + cny_acceptance + '\n</script>\n</head>', 1)

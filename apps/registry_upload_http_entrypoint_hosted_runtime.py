@@ -1204,6 +1204,9 @@ def deploy_current_checkout(
 
     # Never let a deploy/restart proceed against a missing hosted auth contour.
     run_stage("auth-preflight", auth_env_preflight_command)
+    if root_storage_commands.get("preflight"):
+        run_stage("root-storage-preflight", root_storage_commands["preflight"],
+                  allow_transport_reconciliation=False)
     # A prepared claim may originate before merge in the trusted runner. The
     # bootstrap path proves the existing held old pause before loading new code.
     # Both requests are bounded; ambiguity stops before any runtime mutation.
@@ -15373,6 +15376,7 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
             "remote_policy_path": None,
             "status": None,
             "status_read_only": None,
+            "preflight": None,
             "status_artifact_readback": None,
         }
     local_policy = _resolve_repo_relative_path(target.root_storage_policy_file)
@@ -15393,7 +15397,23 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
         "python3 apps/root_storage_policy.py "
         f"--policy-file {shlex.quote(remote_policy_path)}"
     )
+    # Run the installed checker without writing its status artifact. A status
+    # command alone does not fail on a breached reserve; use the same capacity
+    # predicate as the final readback, before touching the deployed checkout.
+    preflight_script = "\n".join([
+        "import json, subprocess, sys",
+        "result = subprocess.run([sys.executable, 'apps/root_storage_policy.py', '--policy-file', "
+        + repr(remote_policy_path) + ", 'status'], check=True, capture_output=True, text=True)",
+        "payload = json.loads(result.stdout)",
+        "unregistered = payload.get('unregistered_large_root_files') if isinstance(payload, dict) else None",
+        "registry = payload.get('storage_registry') if isinstance(payload, dict) else None",
+        "ok = isinstance(unregistered, list) and not unregistered and isinstance(registry, dict) and registry.get('ok') is True",
+        "print(json.dumps({'stage': 'root-storage-preflight', 'ok': ok, 'alerts': payload.get('alerts') if isinstance(payload, dict) else None}))",
+        "sys.exit(0 if ok else 3)",
+    ])
     return {
+        "preflight": _remote_shell_command(target,
+            f"cd {shlex.quote(target.target_dir)} && python3 -c {shlex.quote(preflight_script)}"),
         "remote_policy_path": remote_policy_path,
         "status": _remote_shell_command(
             target,

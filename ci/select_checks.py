@@ -198,6 +198,22 @@ def build_plan_from_paths(
         if file_exists(head, sibling) and not any(command[:2] == ["python3", sibling] for command in commands):
             commands.append(["python3", sibling])
 
+    # Fail early on cheap admission contracts and the changed behavior. Keep
+    # dependency expansion below this stable ordering so prerequisites still
+    # precede the commands that need them. Selection and coverage do not change.
+    early_scripts = {
+        "apps/production_apply_adapters_smoke.py",
+        "apps/production_apply_launcher_smoke.py",
+    }
+    changed_scripts = set(python_paths)
+    changed_scripts.update(path[:-3] + "_smoke.py" for path in python_paths)
+    def priority(command: list[str]) -> int:
+        if command[:3] == ["python3", "-m", "py_compile"]:
+            return 0
+        script = command[1] if len(command) > 1 else ""
+        return 1 if script in early_scripts else 2 if script in changed_scripts else 3
+    commands.sort(key=priority)
+
     # Close dependencies over the final selection, including changed/sibling
     # smokes that did not come from a matched group. Only the trusted map owns
     # these prerequisites; candidate source is never imported or inspected.
