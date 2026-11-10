@@ -19,4 +19,3 @@
         if (event.origin !== window.location.origin || event.source !== window.parent || window.parent === window) return;
         if ((event.data || {}).type === "wbc_open_notification_supply") void openNotificationSupply(String(event.data.supply_id || ""));
       });
-
