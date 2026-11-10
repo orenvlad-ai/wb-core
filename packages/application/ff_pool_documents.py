@@ -1495,6 +1495,13 @@ class FfPoolDocumentService:
                 (client_request_id,),
             ).fetchone()
             payment_fingerprint = _payment_fingerprint_from_manifest(manifest)
+            if payment_fingerprint:
+                from packages.application.fulfillment_payment_proof import assert_not_claimed_by_fulfillment
+                try:
+                    assert_not_claimed_by_fulfillment(conn, payment_fingerprint)
+                except ValueError as exc:
+                    raise FfPoolDocumentError('payment_already_attached_to_fulfillment',
+                        'Платёж уже подтверждает оплату существующего расхода услуг ФФ') from exc
             renewal = None
             anchor_request_id = ""
             if document_kind == "pool_overhead" and payment_fingerprint:
@@ -5058,6 +5065,12 @@ def _overhead_metadata(
             "actual": evidence.get("posting_eligible"),
         }
     payment_fingerprint = _payment_fingerprint_from_manifest(manifest)
+    from packages.application.fulfillment_payment_proof import assert_not_claimed_by_fulfillment
+    try:
+        assert_not_claimed_by_fulfillment(conn, payment_fingerprint)
+    except ValueError as exc:
+        raise FfPoolDocumentError('payment_already_attached_to_fulfillment',
+            'Платёж уже подтверждает оплату существующего расхода услуг ФФ') from exc
     file_sha256 = str(evidence.get("file_sha256") or "")
     source_blob = request["source_file_blob"]
     source_type = str(request["source_type"] or "")

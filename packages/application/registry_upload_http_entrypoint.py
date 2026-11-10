@@ -7338,6 +7338,26 @@ class RegistryUploadHttpEntrypoint:
     def handle_fulfillment_services_source_document_request(self, upload_id: str, kind: str) -> tuple[bytes,str,str]:
         return self.fulfillment_services_block.download_source_document(upload_id,kind)
 
+    def handle_fulfillment_payment_proof_preview_request(self, upload_id, pdf_bytes, *, filename, expected_invoice_number, actor=""):
+        from packages.application.fulfillment_payment_proof import preview
+        return preview(self.runtime, upload_id, pdf_bytes, filename=filename,
+                       expected_invoice_number=expected_invoice_number, actor=actor)
+
+    def handle_fulfillment_payment_proof_confirm_request(self, upload_id, payload, *, actor=""):
+        from packages.application.fulfillment_payment_proof import confirm
+        if set(payload) != {"operation_id", "preview_fingerprint"}:
+            raise ValueError("Подтверждение должно содержать номер операции и отпечаток проверки.")
+        return confirm(self.runtime, upload_id, operation_id=payload["operation_id"],
+                       preview_fingerprint=payload["preview_fingerprint"], actor=actor)
+
+    def handle_fulfillment_payment_proof_read_request(self, upload_id, *, operation_id=""):
+        from packages.application.fulfillment_payment_proof import read
+        return read(self.runtime, upload_id, operation_id=operation_id)
+
+    def handle_fulfillment_payment_proof_download_request(self, upload_id):
+        from packages.application.fulfillment_payment_proof import download
+        return download(self.runtime, upload_id)
+
     def handle_warehouses_overview_request(self) -> dict[str, Any]:
         functional = self.warehouse_functional_block.overview()
         return functional if functional.get("status") == "ready" else self.warehouse_stocks_block.overview()

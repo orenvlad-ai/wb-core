@@ -3,7 +3,7 @@ title: "Модуль: fulfillment_services_block"
 doc_id: "WB-CORE-MODULE-39-FULFILLMENT-SERVICES-BLOCK"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать canonical contract для `ФФ -> Услуги ФФ`: XLSX template/download/upload, server-owned runtime validation, PDF-виза на оплату, accepted-only documents table, delete flow and overlay расходов ФФ в `Поставки -> Wildberries`."
+purpose: "Зафиксировать canonical contract для `ФФ -> Услуги ФФ`: XLSX template/download/upload, server-owned runtime validation, PDF-виза на оплату, банковское подтверждение оплаты, accepted-only documents table, delete flow and overlay расходов ФФ в `Поставки -> Wildberries`."
 scope: "Operator supply contour for Fulfillment service expenses only: PNG-derived XLSX template, protected HTTP routes, openpyxl parser, STORAGE row handling with storage allocation, SQLite upload/line persistence with soft-delete, PDF payment-validation artifact, accepted-only UI list and approved-only WB supplies overlay. Final product cost, 1C cost truth, ЕБД metric truth and global cost-source switching are out of scope."
 source_basis:
   - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
@@ -354,3 +354,53 @@ Finance-проводка. Нет отдельной очереди, runner, ledg
 Проверки: `operator_fulfillment_services_smoke.py`, `..._native_smoke.py`,
 `..._integration_smoke.py`, `..._browser_smoke.py` включены в check selector;
 fixtures disposable, publishers/readers настоящие, live API не вызывается.
+
+## Исполненный платёж как приложение к принятому расчёту
+
+`fulfillment_payment_proof.py` прикрепляет исходный банковский PDF к существующему
+`upload_id`. Виза и счёт не являются подтверждением оплаты. Принимается один
+распознанный исполненный RUB-платёж на полную сумму расчёта, с номером счёта,
+совпадающим с указанным оператором. Номер счёта — явная операторская привязка:
+сам XLSX не содержит реквизитов счёта и не доказывает личность получателя.
+Получатель, назначение, сумма, дата исполнения и точные поставки показываются
+перед подтверждением. Частичные, неисполненные, неоднозначные платежи отклоняются.
+
+Маршруты от `/v1/sheet-vitrina-v1/supply/fulfillment-services/uploads/{upload_id}`:
+
+- `POST /payment-proof/preview`: PDF, `X-Filename`, `X-Expected-Invoice-Number`;
+- `POST /payment-proof/confirm`: `operation_id`, `preview_fingerprint`;
+- `GET /payment-proof?operation_id=...`: чтение той же операции после неопределённого ответа;
+- `GET /payment-proof.pdf`: защищённая выдача «Документ, подтверждающий оплату».
+
+Preview сохраняет неизменяемые PDF bytes (до 16 MiB), SHA-256, нормализованный
+результат существующего банковского парсера, semantic payment fingerprint,
+снимок XLSX/receipt/поставок, дату и автора. Confirmation — отдельная immutable
+запись с автором и временем. При подтверждении повторно проверяется тот же
+принятый источник; удалённый или изменённый расход не принимает приложение.
+Повтор того же PDF возвращает прежнюю операцию и оригинальные байты независимо
+от имени файла. Иное представление PDF с тем же semantic fingerprint отклоняется
+с указанием, что оригинал уже сохранён; оно не создаёт второй операции. У одного
+расхода не может быть двух подтверждений; у одного платежа — двух расходов.
+
+Чтение без operation_id возвращает подтверждённую оплату либо последнюю preview.
+При восстановлении потерянного preview UI дополнительно сверяет SHA файла и
+номер счёта со своей сохранённой попыткой; чужой preview не подтверждается.
+После неопределённого confirmation выполняется только GET той же операции.
+
+Любая существующая reservation платежа в FF overhead блокирует приложение;
+после подтверждения приложения overhead блокирует и приём, и проведение того
+же платежа. Даже отменённая overhead reservation не переносится автоматически.
+Все проверки владения выполняются в SQLite write transaction. Загруженные PDF
+сохраняются в immutable preview BLOB, отдельные неучтённые файлы не создаются.
+
+Приложение не меняет XLSX source revision, расход, количество, cost layer,
+очереди пересчёта, признанную себестоимость или прибыль. Статус «Оплата подтверждена
+документом» означает сохранённый исполненный платёж. Он не означает публикацию
+оплаченного капитала: `paid_projection_status=not_projected`; общий canonical
+cost engine и исторические paid operands этим потоком не меняются. Новые расходы
+сохраняют существующий forward-only контракт.
+
+Проверка: `python3 apps/fulfillment_payment_proof_smoke.py` — точная привязка,
+неизменность бизнес-строк, semantic/idempotent/concurrent replay, потеря ответа,
+wrong amount/invoice/execution/currency, source drift/delete и оба направления
+duplicate guard относительно FF overhead.
