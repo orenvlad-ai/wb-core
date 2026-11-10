@@ -1318,6 +1318,23 @@
       ],
       "pip": ["openpyxl==3.1.5"]
     },
+    "web_source_scoped_publication": {
+      "patterns": [
+        "packages/adapters/seller_portal_web_source_collector.py",
+        "apps/seller_portal_web_source_collect.py",
+        "apps/seller_portal_scoped_search_collector_smoke.py",
+        "apps/web_vitrina_web_source_publication.py",
+        "apps/web_vitrina_web_source_publication_smoke.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "apps/closed_source_presentation_smoke.py"
+      ],
+      "commands": [
+        ["python3", "apps/seller_portal_scoped_search_collector_smoke.py"],
+        ["python3", "apps/web_vitrina_web_source_publication_smoke.py"],
+        ["python3", "apps/closed_source_presentation_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "promo_archive_ready_publication": {
       "patterns": ["apps/promo_archive_publication.py", "apps/promo_archive_publication_rollback.py", "packages/application/inventory_retention.py", "apps/promo_inventory_retention_smoke.py"],
       "commands": [["python3", "apps/promo_archive_publication_smoke.py"], ["python3", "apps/promo_inventory_retention_smoke.py"], ["python3", "apps/ready_writer_closure_smoke.py"]],

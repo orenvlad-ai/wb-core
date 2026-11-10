@@ -14160,7 +14160,7 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
         "seller_funnel_snapshot": {
             "view_count", "open_card_count", "total_view_count", "total_open_card_count"},
         "web_source_snapshot": {
-            "views_current", "ctr_current", "total_views_current", "avg_ctr_current"},
+            "views_current", "ctr_current", "orders_current", "position_avg", "total_views_current", "avg_ctr_current"},
     }
     current = _find_sheet(plan, "DATA_VITRINA")
     previous = _find_sheet(previous_plan, "DATA_VITRINA")
@@ -14172,6 +14172,12 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
     cells = metadata.setdefault("server_cell_presentation", {})
     index, old_index = current.header.index(day), previous.header.index(day)
     for source, metrics in groups.items():
+        # Older accepted publications certified only views/CTR. Keep their
+        # original complete proof group without certifying additional fields.
+        extra = {"orders_current", "position_avg"} if source == "web_source_snapshot" else set()
+        if extra and not any(day in by_day for key, by_day in old_cells.items()
+                             if key.split("|")[-1] in extra):
+            metrics = metrics - extra
         payload, captured = runtime.load_temporal_source_slot_snapshot(
             source_key=source, snapshot_date=day, snapshot_role="accepted_closed_day_snapshot")
         if payload is None or getattr(payload, "kind", None) != "success":
@@ -14181,7 +14187,11 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
         if payload_dates != {day}:
             continue
         source_stamp = getattr(payload, "source_fetched_at", None) or captured
-        items = {item.nm_id: item for item in payload.items}
+        group_rows = [row for row in current.rows if _metric_key_from_row_id(_row_id(row)) in metrics]
+        scope = {key.split("|")[0] for key in map(_row_id, group_rows) if key.startswith("SKU:")}
+        # Accepted sources may cover the union of several historical rosters.
+        # The retained proof belongs only to this plan's exact scoped operands.
+        items = {item.nm_id: item for item in payload.items if f"SKU:{item.nm_id}" in scope}
         sku_keys = {key for key in metrics if not key.startswith(("total_", "avg_"))}
         expected = {f"SKU:{nm}|{metric}": (getattr(item, metric) / 100
                     if metric == "ctr_current" else getattr(item, metric))
@@ -14194,11 +14204,9 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
             expected.update({"TOTAL|total_views_current": views,
                 "TOTAL|avg_ctr_current": round(sum(item.ctr_current * item.views_current
                     for item in items.values()) / views / 100, 6) if views else ""})
-        group_rows = [row for row in current.rows if _metric_key_from_row_id(_row_id(row)) in metrics]
-        scope = {key.split("|")[0] for key in map(_row_id, group_rows) if key.startswith("SKU:")}
         missing = scope - {f"SKU:{nm}" for nm in items}
         group_cells = {}
-        valid = bool(scope) and set(items).issubset({int(key[4:]) for key in scope})
+        valid = bool(scope)
         for row in group_rows:
             key = _row_id(row)
             old = old_rows.get(key)
@@ -14207,10 +14215,30 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
                 or row[index] != old[old_index] or row[index] != expected.get(key, "")
                 or cell.get("source_key") != source or cell.get("source_date") != day
                 or cell.get("source_fetched_at") != source_stamp
-                or cell.get("source_completeness") != "complete"
+                or cell.get("source_completeness") not in {"complete", "scoped_complete"}
                 or cell.get("zero_fill_applied") is not False or not cell.get("source_digest")):
                 valid = False
                 break
+            if cell.get("source_completeness") == "scoped_complete":
+                proof = cell.get("search_scope", {})
+                if not isinstance(proof, dict):
+                    valid = False
+                    break
+                requested = proof.get("requested_nm_ids", [])
+                returned = sorted(item.nm_id for item in payload.items)
+                if (source != "web_source_snapshot" or proof.get("mode") != "bounded_nm_scope_v1"
+                    or not isinstance(requested, list) or any(type(n) is not int or n <= 0 for n in requested)
+                    or requested != sorted(set(requested))
+                    or not scope.issubset({f"SKU:{nm}" for nm in requested})
+                    or proof.get("returned_nm_ids") != returned
+                    or not set(returned).issubset(requested)
+                    or proof.get("missing_nm_ids") != sorted(set(requested) - set(returned))
+                    or proof.get("observed_count") != len(returned)
+                    or type(proof.get("reported_count")) is not int
+                    or not 0 <= proof["reported_count"] <= len(returned)
+                    or proof.get("count_difference") != len(returned) - proof["reported_count"]):
+                    valid = False
+                    break
             missing_count = len(missing) if key.startswith("TOTAL|") else int(key.split("|")[0] in missing)
             if (cell.get("missing_sku_count") != missing_count
                 or cell.get("completeness_state") != ("partial" if missing_count else "complete")):
@@ -14227,7 +14255,9 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
         # normalized payload). Its entire group, including missing SKU, must
         # agree with the same dated accepted source before that proof is reused.
         if (not valid or len(group_cells) != len(scope) * len(sku_keys) + 2
-            or len({cell["source_digest"] for cell in group_cells.values()}) != 1):
+            or len({cell["source_digest"] for cell in group_cells.values()}) != 1
+            or len({json.dumps([cell["source_completeness"], cell.get("search_scope")], sort_keys=True)
+                    for cell in group_cells.values()}) != 1):
             continue
         for key, cell in group_cells.items():
             existing = cells.setdefault(key, {}).get(day, {})

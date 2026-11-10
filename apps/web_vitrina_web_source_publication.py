@@ -18,16 +18,17 @@ sys.path.insert(0, str(ROOT))
 from apps.web_vitrina_management_history import WebVitrinaManagementHistoryAdapter, readonly, private_json
 from apps.seller_portal_automation_guard import seller_portal_automation_lock
 from apps.production_apply_contract import AmbiguousSubmit
-from packages.adapters.seller_portal_web_source_collector import _dedupe, _funnel_items, _search_items, _search_group_totals_match
+from packages.adapters.seller_portal_web_source_collector import _dedupe, _funnel_items, _search_items, _search_group_totals_match, validate_scoped_search_evidence
 from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurrentSync, _load_env_file, _closed_day_required_fetched_after
 from packages.application.ready_publication import ExpectedReady, replace_ready
 from packages.application.seller_funnel_snapshot_block import transform_legacy_payload as funnel_payload
 from packages.application.web_source_snapshot_block import transform_legacy_payload as search_payload
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
+from packages.application.business_data_heavy_admission import heavy_admitted
 
 SOURCE_KEYS = ('seller_funnel_snapshot','web_source_snapshot')
-SKU_METRICS = {'seller_funnel_snapshot':('view_count','open_card_count','ctr'), 'web_source_snapshot':('views_current','ctr_current')}
+SKU_METRICS = {'seller_funnel_snapshot':('view_count','open_card_count','ctr'), 'web_source_snapshot':('views_current','ctr_current','orders_current','position_avg')}
 TOTAL_METRICS = {'seller_funnel_snapshot':('total_view_count','total_open_card_count'), 'web_source_snapshot':('total_views_current','avg_ctr_current')}
 PG_TABLES = {
     False: [('sales_funnel_daily_raw','snapshot_date'),('search_analytics_raw','date_to')],
@@ -85,8 +86,9 @@ def validate_observations(request):
         raise ValueError('source-observation-scope-invalid')
     for o in observations:
         day=o['snapshot_date']
+        scoped=o['source_key']=='web_source_snapshot' and o.get('completeness')=='scoped_complete'
         stamp=datetime.fromisoformat(o['source_fetched_at'].replace('Z','+00:00'))
-        if (o.get('contract')!='seller_portal_dated_observation_v1' or o.get('completeness')!='complete'
+        if (o.get('contract')!='seller_portal_dated_observation_v1' or (o.get('completeness')!='complete' and not scoped)
             or o['request_period']!={'start':day,'end':day} or stamp.tzinfo is None
             or stamp < _closed_day_required_fetched_after(day)
             or stamp > datetime.now(timezone.utc) or not o['items']
@@ -110,6 +112,22 @@ def validate_observations(request):
                 for key,field in [('viewCount','view_count'),('openCard','open_card_count')]):
                 raise ValueError('funnel-source-pages-or-totals-incomplete')
         else:
+            if scoped:
+                scope=o.get('search_scope',{})
+                items,certificate=validate_scoped_search_evidence(report=report,batches=o.get('search_batches'),
+                    scope_nm_ids=scope.get('requested_nm_ids'))
+                if (certificate!=scope or items!=o['items'] or o['pages']!=len(o['search_batches'])+1
+                    or o.get('reported_count')!=certificate['reported_count']):
+                    raise ValueError('search-scoped-source-evidence-mismatch')
+                requested=request.get('nm_ids')
+                if (not isinstance(requested,list) or not requested or any(type(n) is not int or n<=0 for n in requested)
+                    or requested!=sorted(set(requested)) or not set(requested).issubset(scope['requested_nm_ids'])):
+                    raise ValueError('search-scoped-source-roster-unbound')
+                # Source replacement must already satisfy the accepted payload
+                # contract, rather than discovering incompatibility afterward.
+                try:source_result(o,requested)
+                except ValueError:raise ValueError('search-scoped-source-contract-invalid') from None
+                continue
             if report['data']['commonInfo']['totalProducts']!=len(ids):
                 raise ValueError('search-source-product-count-incomplete')
             preview_rows=[r for g in groups for r in g['items']]
@@ -168,6 +186,34 @@ def source_result(o, nm_ids):
             'source_fetched_at':o['source_fetched_at']}, nm_ids=nm_ids).result
     return search_payload({'date_from':o['snapshot_date'],'date_to':o['snapshot_date'],
         'count':len(o['items']),'items':o['items'],'source_fetched_at':o['source_fetched_at']}).result
+
+
+def publication_rosters(request, records):
+    """Bind every affected historical plan to its reviewed, unchanged roster.
+
+    The union is only the accepted source payload scope; each plan's counters
+    and missing-SKU evidence continue to use that plan's own catalog.
+    """
+    expected = request.get('expected_nm_ids_by_as_of_date')
+    if 'expected_nm_ids_by_as_of_date' in request:
+        if (not isinstance(expected,dict) or set(expected)!={r['as_of_date'] for r in records}
+            or any(not isinstance(ids,list) or not ids or any(type(n) is not int or n<=0 for n in ids)
+                   or ids!=sorted(set(ids)) for ids in expected.values())):
+            raise ValueError('publication-roster-scope-invalid')
+        union=sorted({n for ids in expected.values() for n in ids})
+        if (not isinstance(request['nm_ids'],list) or any(type(n) is not int for n in request['nm_ids'])
+            or request['nm_ids']!=union):
+            raise ValueError('publication-roster-union-mismatch')
+    else:
+        ids=sorted(set(request['nm_ids']))
+        expected={r['as_of_date']:ids for r in records}
+    for record in records:
+        plan=json.loads(record['plan_json'])
+        actual=sorted({int(r[1].split('|')[0][4:]) for s in plan['sheets']
+                       if s['sheet_name']=='DATA_VITRINA' for r in s['rows'] if r[1].startswith('SKU:')})
+        if actual!=expected[record['as_of_date']]:
+            raise ValueError('publication-roster-drift')
+    return expected
 
 
 def non_target_digest(plan, observations):
@@ -231,9 +277,10 @@ def project(plan, observations, nm_ids, operation_id):
             before=row[col];row[col]=value
             metadata=result.setdefault('metadata',{})
             cell={'source_key':source,'source_date':day,'source_fetched_at':o['source_fetched_at'],
-                'operation_id':operation_id,'source_digest':digest(o),'source_completeness':'complete',
+                'operation_id':operation_id,'source_digest':digest(o),'source_completeness':o['completeness'],
                 'completeness_state':'partial' if scope_missing else 'complete','missing_sku_count':len(scope_missing),
                 'zero_fill_applied':False}
+            if o.get('completeness')=='scoped_complete':cell['search_scope']=deepcopy(o['search_scope'])
             if scope=='TOTAL':
                 cell['metric_scope_evidence']={'operand_date':day,'applicable_scope':['SKU:'+str(n) for n in nm_ids],
                     'missing_scope':['SKU:'+str(n) for n in missing],'sku_metric_keys':list(SKU_METRICS[source]),'group_scopes':{}}
@@ -246,7 +293,8 @@ def project(plan, observations, nm_ids, operation_id):
             for row in status_sheet['rows']:
                 if any(row[0]==f'{source}[{slot}]' for slot in slots):
                     row[1]='success';row[2]=day;row[7]=len(nm_ids);row[8]=len(items);row[9]=','.join(map(str,missing))
-                    row[10]=f'source_fetched_at={o["source_fetched_at"]}; source_completeness=complete; catalog_covered={len(items)}/{len(nm_ids)}; missing_not_zero=true; resolution_rule=accepted_closed_dated_source_recovery; operation_id={operation_id}'
+                    row[10]=f'source_fetched_at={o["source_fetched_at"]}; source_completeness={o["completeness"]}; catalog_covered={len(items)}/{len(nm_ids)}; missing_not_zero=true; resolution_rule=accepted_closed_dated_source_recovery; operation_id={operation_id}'
+                    if o.get('completeness')=='scoped_complete':row[10]+='; source_scope=bounded_nm_scope_v1; accountwide_completeness_unproven=true'
     return result,changes
 
 
@@ -405,6 +453,12 @@ class WebSourcePublicationAdapter(WebVitrinaManagementHistoryAdapter):
             before,identities=self._pg_capture(request,pg_connections)
             if any(r['date_from']!=r['date_to'] for table in ('search_analytics_raw','web_source_search_analytics_daily') for r in before[table]):
                 raise ValueError('source-handoff-period-overlap')
+            for o in observations:
+                if o.get('completeness')!='scoped_complete':continue
+                scope=set(o['search_scope']['requested_nm_ids'])
+                if any(r['nm_id'] not in scope for table in ('search_analytics_raw','web_source_search_analytics_daily')
+                       for r in before[table] if r['date_to']==o['snapshot_date']):
+                    raise ValueError('source-search-scope-excludes-existing-sku')
             return {'operation_id':operation_id,'phase':'source','prestate_sha256':digest(before),
                 'before_images':before,'pg_targets':identities,'source_sha256':request['source_sha256']}
         if request['phase']!='publication':raise ValueError('phase-invalid')
@@ -414,14 +468,13 @@ class WebSourcePublicationAdapter(WebVitrinaManagementHistoryAdapter):
                  if set(json.loads(r['plan_json']).get('date_columns',[])).intersection(request['dates'])]
         if not records or len(records)>16:raise ValueError('publication-ready-scope-invalid')
         expected_ids=sorted(set(request['nm_ids']))
+        rosters=publication_rosters(request,records)
         before_slots=[dict(r) for r in conn.execute("SELECT * FROM temporal_source_slot_snapshots WHERE source_key IN (?,?) AND snapshot_date IN ("+','.join('?' for _ in request['dates'])+") ORDER BY source_key,snapshot_date,snapshot_role",(*SOURCE_KEYS,*request['dates']))]
         before_closure=[dict(r) for r in conn.execute("SELECT * FROM temporal_source_closure_state WHERE source_key IN (?,?) AND target_date IN ("+','.join('?' for _ in request['dates'])+") ORDER BY source_key,target_date,slot_kind",(*SOURCE_KEYS,*request['dates']))]
         updates=[];changes=[]
         for record in records:
             old=json.loads(record['plan_json'])
-            actual_ids=sorted({int(r[1].split('|')[0][4:]) for s in old['sheets'] if s['sheet_name']=='DATA_VITRINA' for r in s['rows'] if r[1].startswith('SKU:')})
-            if actual_ids!=expected_ids:raise ValueError('publication-roster-drift')
-            new,delta=project(old,observations,expected_ids,operation_id)
+            new,delta=project(old,observations,rosters[record['as_of_date']],operation_id)
             if non_target_digest(old,observations)!=non_target_digest(new,observations):
                 raise ValueError('non-target-publication-content-changed')
             updates.append({'bundle_version':current,'as_of_date':record['as_of_date'],'after_plan_json':canonical(new)})
@@ -456,6 +509,11 @@ class WebSourcePublicationAdapter(WebVitrinaManagementHistoryAdapter):
                 conn.execute('BEGIN');candidate=self.build(request,operation_id,conn)
         return {'operation_id':operation_id,'target':str(db),'scope':{'phase':request['phase'],'dates':request['dates'],
                 'source_date_pairs':[{'source_key':s,'snapshot_date':d} for s,d in sorted(source_date_pairs(request))],
+                **({'expected_nm_ids_by_as_of_date':request['expected_nm_ids_by_as_of_date']}
+                   if request['phase']=='publication' and 'expected_nm_ids_by_as_of_date' in request else {}),
+                **({'search_scopes':[{'snapshot_date':o['snapshot_date'],**o['search_scope']}
+                                    for o in request['observations'] if o.get('completeness')=='scoped_complete']}
+                   if any(o.get('completeness')=='scoped_complete' for o in request['observations']) else {}),
                 'changed_cells':len(candidate.get('changes',[]))},
             'prestate_sha256':candidate['prestate_sha256'],'candidate_sha256':digest(candidate),'candidate':candidate,
             'recovery':{'kind':'exact-source-and-ready-before-images','path':str(backup)}}
@@ -471,7 +529,7 @@ class WebSourcePublicationAdapter(WebVitrinaManagementHistoryAdapter):
 
     def _apply(self,request,operation_id,preview):
         runtime,db=self.target(request)
-        with warehouse_functional_job_lock(runtime,blocking=False),warehouse_sync_lock(runtime,blocking=False), seller_portal_automation_lock(runtime_dir=runtime,owner='web_source_publication',purpose=request['phase'],run_id=operation_id,expected_max_seconds=600):
+        with heavy_admitted(runtime,operation='web_source_publication'), warehouse_functional_job_lock(runtime,blocking=False),warehouse_sync_lock(runtime,blocking=False), seller_portal_automation_lock(runtime_dir=runtime,owner='web_source_publication',purpose=request['phase'],run_id=operation_id,expected_max_seconds=600):
             with ExitStack() as stack:
                 pg=stack.enter_context(self._pg_connections(locked=True)) if request['phase']=='source' else None
                 conn=stack.enter_context(sqlite3.connect(db,timeout=30))
@@ -529,7 +587,7 @@ class WebSourcePublicationAdapter(WebVitrinaManagementHistoryAdapter):
         """Restore only an exact before/our write-ahead after mixture under CAS."""
         runtime,db=self.target(request)
         candidate=self._retained(request,operation_id,runtime)
-        with warehouse_functional_job_lock(runtime,blocking=False),warehouse_sync_lock(runtime,blocking=False), seller_portal_automation_lock(runtime_dir=runtime,owner='web_source_publication',purpose='rollback',run_id=operation_id+'-rollback',expected_max_seconds=600):
+        with heavy_admitted(runtime,operation='web_source_publication_rollback'), warehouse_functional_job_lock(runtime,blocking=False),warehouse_sync_lock(runtime,blocking=False), seller_portal_automation_lock(runtime_dir=runtime,owner='web_source_publication',purpose='rollback',run_id=operation_id+'-rollback',expected_max_seconds=600):
             self.target(request)
             if request['phase']=='source':
                 with self._pg_connections(locked=True) as connections:

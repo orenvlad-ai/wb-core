@@ -97,8 +97,12 @@ def main():
     parser.add_argument('--canonical-env', default='/opt/wb-ai/.env')
     parser.add_argument('--runtime-dir', default='/opt/wb-core-runtime/state')
     parser.add_argument('--write-source', action='store_true')
+    parser.add_argument('--search-completeness', choices=['strict', 'bounded_nm_scope_v1'], default='strict',
+                        help='Bounded SKU evidence is candidate-only; publish through the guarded recovery adapter.')
     parser.add_argument('--output')
     args = parser.parse_args()
+    if args.search_completeness != 'strict' and (args.source_key != 'web_source_snapshot' or args.write_source):
+        raise ValueError('scoped_search_requires_candidate_only')
     bot = Path(args.bot_dir)
     env = {**os.environ, **_load_env_file(bot/'.env')}
     canonical_env=_load_env_file(Path(args.canonical_env))
@@ -108,7 +112,7 @@ def main():
         known=search_candidate_nm_ids(args.date,canonical_env=canonical_env,runtime_dir=Path(args.runtime_dir)) if args.source_key=='web_source_snapshot' else None
         candidate = collect_web_source(source_key=args.source_key, snapshot_date=args.date,
             storage_state_path=str(bot/'storage_state.json'), canonical_supplier_id=canonical_supplier,
-            search_candidate_nm_ids=known)
+            search_candidate_nm_ids=known, search_completeness_mode=args.search_completeness)
         if args.write_source:
             write_source(candidate, env=env)
         if args.output:

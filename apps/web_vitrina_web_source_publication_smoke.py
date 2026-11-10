@@ -31,7 +31,7 @@ def observations():
 def plan():
     rows=[['price','TOTAL|weighted_price_seller_discounted',524.434744],['stock','SKU:1|stock_total',900]]
     for n in [1,2,3]:
-        rows.extend([[m,f'SKU:{n}|{m}',7] for m in ['view_count','open_card_count','ctr','views_current','ctr_current']])
+        rows.extend([[m,f'SKU:{n}|{m}',7] for m in ['view_count','open_card_count','ctr','views_current','ctr_current','orders_current','position_avg']])
     rows.extend([[m,'TOTAL|'+m,9] for m in ['total_view_count','total_open_card_count','total_views_current','avg_ctr_current']])
     return {'date_columns':['2026-09-11'],'temporal_slots':[{'slot_key':'yesterday_closed','column_date':'2026-09-11'}],
         'metadata':{'unrelated':'retained'},'sheets':[{'sheet_name':'DATA_VITRINA','header':['name','id','2026-09-11'],'rows':rows},
@@ -74,6 +74,9 @@ def source_recovery_checks(request):
                 def target(self,r):return runtime,db
                 @contextmanager
                 def _pg_connections(self,*,locked=False):
+                    if locked:
+                        from packages.application.business_data_heavy_admission import require_heavy_owner
+                        require_heavy_owner(runtime)
                     self.locked=locked
                     try:yield {t:Connection(self,t) for t in PG_TABLES}
                     finally:self.locked=False
@@ -299,17 +302,188 @@ def search_batch_checks():
     reject_publication(bad,'search-source-batch-scope-invalid')
 
 
+def mixed_roster_checks(source_observations=None):
+    """Overlapping historical plans retain distinct rosters and source coverage."""
+    from contextlib import contextmanager
+    import fcntl
+    import os
+    from unittest.mock import patch
+    from packages.application.business_data_heavy_admission import (
+        heavy_admitted, require_heavy_owner, HeavyAdmissionBusy, LOCK_FILENAME,
+    )
+    from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+    from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
+    with TemporaryDirectory() as tmp:
+        runtime=Path(tmp);db=runtime/'operational.sqlite3'
+        first=plan()
+        first['sheets'][0]['rows']=[r for r in first['sheets'][0]['rows'] if not r[1].startswith('SKU:2|')]
+        second=plan()
+        # The second outer snapshot also contains the requested date. Its next
+        # column is outside recovery and must survive byte-for-byte in the plan.
+        second['date_columns'].append('2026-09-12')
+        second['sheets'][0]['header'].append('2026-09-12')
+        for row in second['sheets'][0]['rows']:row.append(123)
+        originals={'2026-09-11':first,'2026-09-12':second}
+        with sqlite3.connect(db) as conn:
+            conn.executescript('''CREATE TABLE registry_upload_current_state(slot INTEGER,bundle_version TEXT);
+                CREATE TABLE registry_upload_config_v2(bundle_version TEXT,nm_id INTEGER);
+                CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version TEXT,as_of_date TEXT,plan_json TEXT,PRIMARY KEY(bundle_version,as_of_date));
+                CREATE TABLE temporal_source_slot_snapshots(source_key TEXT,snapshot_date TEXT,snapshot_role TEXT,captured_at TEXT,payload_json TEXT,PRIMARY KEY(source_key,snapshot_date,snapshot_role));
+                CREATE TABLE temporal_source_closure_state(source_key TEXT,target_date TEXT,slot_kind TEXT,state TEXT,attempt_count INTEGER,next_retry_at TEXT,last_reason TEXT,last_attempt_at TEXT,last_success_at TEXT,accepted_at TEXT,PRIMARY KEY(source_key,target_date,slot_kind));''')
+            conn.execute("INSERT INTO registry_upload_current_state VALUES(1,'bundle')")
+            conn.executemany("INSERT INTO registry_upload_config_v2 VALUES('bundle',?)",[(1,),(2,),(3,)])
+            conn.executemany("INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES('bundle',?,?)",
+                [(day,canonical(p)) for day,p in originals.items()])
+        class LocalAdapter(WebSourcePublicationAdapter):
+            def target(self,_):return runtime,db
+            def _materialized(self,r):validate_observations(r)
+        adapter=LocalAdapter();adapters={'fixture':adapter}
+        obs=source_observations or observations()
+        request={'dates':['2026-09-11'],'phase':'publication','nm_ids':[1,2,3],
+            'expected_nm_ids_by_as_of_date':{'2026-09-11':[1,3],'2026-09-12':[1,2,3]},
+            'observations':obs,'source_sha256':digest(obs),'supplier_identity_sha256':'fixture','runtime_dir':str(runtime)}
+        for modify,reason in [
+            (lambda r:r.pop('expected_nm_ids_by_as_of_date'),'publication-roster-drift'),
+            (lambda r:r['expected_nm_ids_by_as_of_date'].pop('2026-09-12'),'publication-roster-scope-invalid'),
+            (lambda r:r['expected_nm_ids_by_as_of_date'].update({'2026-09-13':[1]}),'publication-roster-scope-invalid'),
+            (lambda r:r['expected_nm_ids_by_as_of_date'].update({'2026-09-11':[1,2]}),'publication-roster-drift'),
+            (lambda r:r['expected_nm_ids_by_as_of_date'].update({'2026-09-11':[3,1]}),'publication-roster-scope-invalid'),
+            (lambda r:r['expected_nm_ids_by_as_of_date'].update({'2026-09-11':[1,1,3]}),'publication-roster-scope-invalid'),
+            (lambda r:r['expected_nm_ids_by_as_of_date'].update({'2026-09-11':[True,3]}),'publication-roster-scope-invalid'),
+            (lambda r:r.update(nm_ids=[1,3]),'publication-roster-union-mismatch'),
+        ]:
+            invalid=deepcopy(request);modify(invalid)
+            try:adapter.preview(invalid,'mixed-invalid')
+            except ValueError as exc:assert str(exc)==reason,(str(exc),reason)
+            else:raise AssertionError('unbound historical roster accepted')
+        preview=adapter.preview(request,'mixed-publication')
+        assert len(preview['candidate']['updates'])==2
+        if obs[1]['completeness']=='scoped_complete':
+            assert preview['scope']['search_scopes']==[{'snapshot_date':'2026-09-11',**obs[1]['search_scope']}]
+        # A competing heavy producer must be rejected before domain locks or
+        # evidence are created, even if caller already holds a valid preview.
+        lock=runtime/LOCK_FILENAME
+        fd=os.open(lock,os.O_CREAT|os.O_RDWR,0o600)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            try:adapter.apply(request,'mixed-publication',preview)
+            except HeavyAdmissionBusy:pass
+            else:raise AssertionError('competing heavy producer admitted')
+        finally:os.close(fd)
+        with patch('packages.application.business_data_procedure_admission.barrier_status',return_value={'active':True}):
+            try:adapter.apply(request,'mixed-publication',preview)
+            except MaintenanceAdmissionBlocked:pass
+            else:raise AssertionError('maintenance bypassed')
+        assert not (runtime/'.warehouse-functional-job.lock').exists()
+        assert not (runtime/'evidence').exists()
+        @contextmanager
+        def checked_job_lock(root,**kwargs):
+            require_heavy_owner(root)
+            with warehouse_functional_job_lock(root,**kwargs) as owner:yield owner
+        with patch('apps.web_vitrina_web_source_publication.warehouse_functional_job_lock',checked_job_lock):
+            # Same-process heavy ownership is borrowed safely, never reacquired.
+            with heavy_admitted(runtime,operation='fixture_parent') as owner:
+                receipt=execute(action='apply',adapter_name='fixture',operation_id='mixed-publication',request=request,
+                    expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters=adapters)
+                assert require_heavy_owner(runtime) is owner
+            assert receipt['state']=='applied'
+            with sqlite3.connect(db) as conn:
+                saved={day:json.loads(value) for day,value in conn.execute('SELECT as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots')}
+                payload=json.loads(conn.execute("SELECT payload_json FROM temporal_source_slot_snapshots WHERE source_key='seller_funnel_snapshot'").fetchone()[0])
+            assert [i['nm_id'] for i in payload['items']]==[1,2]
+            for day,expected_views in [('2026-09-11',100),('2026-09-12',400)]:
+                new=saved[day];rows={r[1]:r for r in new['sheets'][0]['rows']}
+                assert non_target_digest(originals[day],obs)==non_target_digest(new,obs)
+                assert rows['TOTAL|total_views_current'][2]==expected_views
+                assert rows['SKU:1|orders_current'][2]==1 and rows['SKU:1|position_avg'][2]==2
+                assert rows['SKU:3|orders_current'][2]=='' and rows['SKU:3|position_avg'][2]==''
+                assert rows['SKU:3|view_count'][2]==''
+                meta=new['metadata']['server_cell_presentation']
+                assert meta['SKU:1|orders_current']['2026-09-11']['source_completeness']==obs[1]['completeness']
+                if obs[1]['completeness']=='scoped_complete':
+                    assert meta['SKU:1|orders_current']['2026-09-11']['search_scope']==obs[1]['search_scope']
+                assert meta['SKU:3|view_count']['2026-09-11']['zero_fill_applied'] is False
+                assert meta['TOTAL|total_views_current']['2026-09-11']['missing_sku_count']==1
+                assert len(meta['TOTAL|total_views_current']['2026-09-11']['metric_scope_evidence']['applicable_scope'])==len(request['expected_nm_ids_by_as_of_date'][day])
+            assert saved['2026-09-12']['sheets'][0]['rows'][0][3]==123
+            with patch('packages.application.business_data_procedure_admission.barrier_status',return_value={'active':True}):
+                try:adapter.rollback(request,'mixed-publication')
+                except MaintenanceAdmissionBlocked:pass
+                else:raise AssertionError('rollback maintenance bypassed')
+            assert adapter.readback(request,'mixed-publication')['state']=='applied'
+            assert adapter.rollback(request,'mixed-publication')['state']=='restored'
+        # Even an unrelated change after review invalidates the whole candidate.
+        preview=adapter.preview(request,'mixed-cas-drift')
+        with sqlite3.connect(db) as conn:
+            drift=deepcopy(first);drift['metadata']['unrelated']='concurrent'
+            conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date='2026-09-11'",(canonical(drift),))
+        try:adapter.apply(request,'mixed-cas-drift',preview)
+        except ValueError as exc:assert str(exc)=='candidate-cas-drift'
+        else:raise AssertionError('mixed candidate CAS drift ignored')
+        assert not (runtime/'evidence'/'mixed-cas-drift.before.json').exists()
+
+
+def scoped_observations():
+    """A certificate proves queried SKU scope even when WB reports fewer products."""
+    from packages.adapters.seller_portal_web_source_collector import validate_scoped_search_evidence
+    obs=observations();o=obs[1]
+    report=o['raw_report'];data=report['data'];group=data['groups'][0]
+    data['commonInfo']['totalProducts']=1
+    for row in group['items']:
+        row.update(openCard={'current':1},addToCart={'current':1})
+    group['metrics'].update(openCard={'current':2},addToCart={'current':2})
+    batches=[{'requested_nm_ids':[1,2,3],'response':deepcopy(report)}]
+    items,certificate=validate_scoped_search_evidence(report=report,batches=batches,scope_nm_ids=[1,2,3])
+    o.update(completeness='scoped_complete',search_scope=certificate,items=items,
+        search_batches=batches,pages=2,reported_count=1)
+    return obs
+
+
+def scoped_publication_checks():
+    obs=scoped_observations()
+    request={'dates':['2026-09-11'],'nm_ids':[1,2,3],'observations':obs,
+        'source_sha256':digest(obs),'supplier_identity_sha256':'fixture','phase':'source'}
+    validate_observations(request)
+    for mutate,reason in [
+        (lambda r:r.update(nm_ids=[1,2,3,4]),'search-scoped-source-roster-unbound'),
+        (lambda r:r['observations'][1]['search_scope'].update(missing_nm_ids=[]),'search-scoped-source-evidence-mismatch'),
+        (lambda r:r['observations'][1]['items'][0].update(orders_current=999),'search-scoped-source-evidence-mismatch'),
+        (lambda r:r['observations'][1].update(pages=3),'search-scoped-source-evidence-mismatch'),
+    ]:
+        invalid=deepcopy(request);mutate(invalid);invalid['source_sha256']=digest(invalid['observations'])
+        try:validate_observations(invalid)
+        except ValueError as exc:assert str(exc)==reason,(str(exc),reason)
+        else:raise AssertionError('invalid scoped publication accepted')
+    from apps.web_vitrina_web_source_publication import PG_TABLES
+    class ExistingRowsAdapter(WebSourcePublicationAdapter):
+        def _pg_capture(self,r,connections=None):return self.before,{}
+    for table in ('search_analytics_raw','web_source_search_analytics_daily'):
+        adapter=ExistingRowsAdapter()
+        adapter.before={name:[] for tables in PG_TABLES.values() for name,_ in tables}
+        adapter.before[table]=[{'date_from':'2026-09-11','date_to':'2026-09-11','nm_id':999}]
+        try:adapter.build(request,'scope-before-drift',None)
+        except ValueError as exc:assert str(exc)=='source-search-scope-excludes-existing-sku'
+        else:raise AssertionError('source replacement could discard unqueried existing SKU')
+        adapter.before[table][0]['nm_id']=3
+        assert adapter.build(request,'scope-before-valid',None)['phase']=='source'
+    source_recovery_checks(request)
+    mixed_roster_checks(obs)
+
+
 def main():
     obs=observations();request={'dates':['2026-09-11'],'nm_ids':[1,2,3],'observations':obs,'source_sha256':digest(obs),'supplier_identity_sha256':'fixture','phase':'publication'}
     validate_observations(request)
     source_recovery_checks(request)
     sparse_scope_checks()
     search_batch_checks()
+    mixed_roster_checks()
+    scoped_publication_checks()
     old=plan();new,changes=project(old,obs,[1,2,3],'op-fixture')
     assert non_target_digest(old,obs)==non_target_digest(new,obs)
     rows={r[1]:r for r in new['sheets'][0]['rows']}
     assert rows['SKU:2|view_count'][2]==0 and rows['SKU:3|view_count'][2]==''
     assert rows['TOTAL|avg_ctr_current'][2]==0.25
+    assert rows['SKU:1|orders_current'][2]==1 and rows['SKU:2|position_avg'][2]==3
     assert rows['TOTAL|weighted_price_seller_discounted'][2]==524.434744 and rows['SKU:1|stock_total'][2]==900
     invalid=deepcopy(request);invalid['observations'][0]['items'][0]['view_count']=999;invalid['source_sha256']=digest(invalid['observations'])
     try:validate_observations(invalid)
