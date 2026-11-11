@@ -135,6 +135,12 @@ class RecoverySmoke(unittest.TestCase):
         self.assertEqual(r.command_fingerprint('metadata', first), r.command_fingerprint('metadata', second))
 
     def test_stage_failure_burns_claim_and_never_repeats_sync(self):
+        self._claim_or_stage_failure(False)
+
+    def test_claim_transport_timeout_is_ambiguous_and_never_syncs(self):
+        self._claim_or_stage_failure(True)
+
+    def _claim_or_stage_failure(self, claim_timeout):
         with tempfile.TemporaryDirectory() as directory:
             target_file = Path(directory) / 'target'
             target_file.write_text('{}')
@@ -145,6 +151,8 @@ class RecoverySmoke(unittest.TestCase):
                     return {'claim': 'partial-or-complete-claim' if claim else None}
                 if payload['action'] == 'claim':
                     claim.append(payload)
+                    if claim_timeout:
+                        raise subprocess.TimeoutExpired(['ssh', 'claim'], 180)
                 return {'manifest': {}}
             hosted = types.SimpleNamespace(_ssh_command=lambda: ['ssh'],
                 _build_auth_env_preflight_command=lambda _: None,
@@ -164,9 +172,9 @@ class RecoverySmoke(unittest.TestCase):
                 receipt = r.run(args)
                 self.assertEqual(receipt['state'], 'ambiguous')
                 self.assertEqual(len(claim), 1)
-                self.assertEqual(hosted._run_command.call_count, 1)
+                self.assertEqual(hosted._run_command.call_count, 0 if claim_timeout else 1)
                 self.assertEqual(r.run(args)['state'], 'readback-only')
-                self.assertEqual(hosted._run_command.call_count, 1)
+                self.assertEqual(hosted._run_command.call_count, 0 if claim_timeout else 1)
 
     def test_canonical_order_matches_real_deploy_tail(self):
         # Execute only canonical command construction and capture stage ordering

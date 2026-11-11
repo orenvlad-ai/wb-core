@@ -352,14 +352,16 @@ def run(args):
         return preview
     require(args.action == 'apply' and args.fingerprint == fingerprint, 'preview-fingerprint-changed')
     require(manifest(args.checkout.resolve()) == source_manifest, 'source-manifest-changed')
-    remote(hosted, target, {'action': 'claim', 'fingerprint': fingerprint,
-        'old_files': old_files(args.checkout), 'prestate': prestate})
     receipt = {'schema': preview['schema'], 'fingerprint': fingerprint, 'operation': OPERATION,
                'merge': MERGE, 'state': 'ambiguous', 'completed_stages': []}
     def event(index, stage, state):
         remote(hosted, target, {'action': 'event', 'fingerprint': fingerprint,
                                'event': {'index': index, 'stage': stage, 'state': state}})
     try:
+        # Claim dispatch itself can be indeterminate. Keep that uncertainty in
+        # the recovery receipt; an existing claim always forces readback-only.
+        remote(hosted, target, {'action': 'claim', 'fingerprint': fingerprint,
+            'old_files': old_files(args.checkout), 'prestate': prestate})
         for index, (stage, command) in enumerate(stages):
             event(index, stage, 'before')
             if stage != 'sync':
