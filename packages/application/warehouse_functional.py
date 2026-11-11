@@ -8229,6 +8229,8 @@ def _source_rows(
         key: [dict(row) for row in conn.execute(sql).fetchall()]
         for key, sql in queries.items()
     }
+    from packages.application.fbo_dispatch_valuation import normalize_warehouse_lines
+    result['ff_lines'] = normalize_warehouse_lines(conn, result['ff_lines'])
     if "sheet_vitrina_v1_ff_pool_current_supply_close_receipts" in tables:
         from packages.application.current_fbo_supply_cost_source import capture_warehouse_closures
         closures=capture_warehouse_closures(conn)

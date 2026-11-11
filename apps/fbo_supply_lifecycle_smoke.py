@@ -21,6 +21,10 @@ NOW='2026-11-09T12:00:00Z'
 
 class LifecycleTests(unittest.TestCase):
     def setUp(self):
+        # These pre-accounting fixtures isolate physical reservation/CAS rules.
+        # The valuation smoke exercises real mandatory accounting admission.
+        self.legacy_cost_capture=patch('packages.application.fbo_dispatch_valuation.capture',return_value=None)
+        self.legacy_cost_capture.start();self.addCleanup(self.legacy_cost_capture.stop)
         self.temp=TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.runtime=RegistryUploadDbBackedRuntime(runtime_dir=Path(self.temp.name))
         self.runtime.list_wb_supplies();_seed_nomenclature(self.runtime,[101,102])

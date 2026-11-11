@@ -2161,7 +2161,9 @@ def _historical_supply_cost_facts(
     debit_lines: Iterable[sqlite3.Row],
     debit_created_at: str,
 ) -> dict[int, dict[str, Any]]:
-    debit_rows = list(debit_lines)
+    from packages.application.fbo_dispatch_valuation import normalize_warehouse_lines, CONTRACT as VALUATION_CONTRACT
+    debit_rows = normalize_warehouse_lines(conn, [dict(row) for row in debit_lines])
+    canonical_frozen = set()
     nm_ids = sorted({int(row["nm_id"]) for row in debit_rows})
     frozen_debit_costs: dict[int, dict[str, Any]] = {}
     for debit in debit_rows:
@@ -2169,6 +2171,8 @@ def _historical_supply_cost_facts(
         snapshot = raw.get("cost_snapshot") if isinstance(raw, Mapping) else None
         if not isinstance(snapshot, Mapping):
             continue
+        if (snapshot.get('provenance') or {}).get('contract') == VALUATION_CONTRACT:
+            canonical_frozen.add(int(debit['nm_id']))
         unit_cost = _decimal(snapshot.get("unit_cost_rub"))
         quantity = abs(_decimal(debit["quantity_delta"]))
         if unit_cost <= ZERO or quantity <= ZERO:
@@ -2179,7 +2183,8 @@ def _historical_supply_cost_facts(
             "packed_quantity": _text(quantity),
             "accepted_quantity": "0",
             "accepted_evidence_available": False,
-            "capital_rub": _text(unit_cost * quantity),
+            "capital_rub": (_text(abs(_decimal(snapshot['capital_delta_rub'])))
+                            if int(debit['nm_id']) in canonical_frozen else _text(unit_cost * quantity)),
             "source_revision": str(snapshot.get("source_plan_fingerprint") or "frozen_debit_cost_snapshot"),
             "version_id": str(snapshot.get("source_version_id") or ""),
             "business_effective_date": str(snapshot.get("source_business_date") or ""),
@@ -2265,7 +2270,10 @@ def _historical_supply_cost_facts(
         selected.pop("version_order", None)
         result[nm_id] = selected
     for nm_id, fact in frozen_debit_costs.items():
-        result.setdefault(nm_id, fact)
+        if nm_id in canonical_frozen:
+            result[nm_id] = fact
+        else:
+            result.setdefault(nm_id, fact)
     return result
 
 

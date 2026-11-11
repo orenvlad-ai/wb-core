@@ -38,6 +38,8 @@ def digest(value):
 
 
 def ensure_schema(conn):
+    from packages.application.fbo_dispatch_valuation import ensure_schema as ensure_valuation_schema
+    ensure_valuation_schema(conn)
     # execute, never executescript: safe in a caller-owned transaction.
     conn.execute(f'''CREATE TABLE IF NOT EXISTS {CONFIG}(
         slot INTEGER PRIMARY KEY CHECK(slot=1), cutoff_at TEXT NOT NULL,
@@ -258,6 +260,11 @@ def evaluate_owned(conn, record, *, origin_override=None):
         reserved_qty=sum(prior.get('reservation', {}).values()), shortages=[], operation_id=prior.get('operation_id', ''),
         composition=prior.get('composition', {}), frozen_costs=prior.get('frozen_costs', []),
         supply=dict(record['normalized']), legacy_reserved_qty=sum(sum(v.values()) for v in _legacy(conn,sid).values()))
+    if state['operation_id']:
+        from packages.application.fbo_dispatch_valuation import resolve
+        valuation=resolve(conn,state['operation_id'],state['frozen_costs'])
+        if valuation:
+            state['frozen_costs']=valuation['lines']
     if CONFIG in _tables(conn):
         config=conn.execute(f'SELECT cutoff_at,created_at FROM {CONFIG} WHERE slot=1').fetchone()
         if config: state.update(cutoff_at=config[0],activated_at=config[1])
@@ -309,6 +316,8 @@ def evaluate_owned(conn, record, *, origin_override=None):
         for nm,qty in quantities.items(): actual[str(nm)]=actual.get(str(nm),0)+qty
     durable=durable and actual==goods
     state.update(status='shortage' if shortages else 'reserved' if durable else 'reservation_pending',reason='insufficient_fbo_stock' if shortages else 'reservation_reconciliation_required' if not durable else 'ready_for_dispatch' if status in {4,5,6} else 'awaiting_gate_shipment',shortages=shortages,composition=goods)
+    if state['status']=='reserved' and prior.get('reason')=='accounting_dispatch_valuation_pending':
+        state.update(reason=prior['reason'],valuation_blocker=prior.get('valuation_blocker'))
     return state
 
 
@@ -480,6 +489,17 @@ class FboSupplyLifecycle:
         op='fbod_'+digest(key)[:32]
         expected={l['nm_id']:conn.execute(f'SELECT COALESCE(SUM(quantity_delta),0) FROM {AGGREGATE_LINES} WHERE nm_id=?',(l['nm_id'],)).fetchone()[0] for l in lines}
         runtime=self.runtime or RegistryUploadDbBackedRuntime(runtime_dir=self.db_path.parent,operational_db_path=self.db_path)
+        from packages.application import fbo_dispatch_valuation
+        try:
+            valuation=fbo_dispatch_valuation.capture(conn,runtime.runtime_dir,business_date=business_date,lines=lines)
+        except ValueError as exc:
+            if str(exc) not in {'fbo_dispatch_accounting_book_unavailable','fbo_dispatch_accounting_period_unavailable',
+                                'fbo_dispatch_accounting_documents_changed','fbo_dispatch_accounting_quantity_changed'}:
+                raise
+            # Keep the existing reservation. The normal cycle can refresh the
+            # book, then the next reconciliation can dispatch without a queue.
+            state.update(status='reserved',reason='accounting_dispatch_valuation_pending',valuation_blocker=str(exc))
+            return
         runtime.create_ff_stock_operation_guarded(connection=conn,operation_id=op,operation_type='auto_writeoff',source_type='wb_supply',source_key=key,source_object_id=state['supply_id'],source_object_label=state['wb_supply_id'],created_at=now,created_by='system',business_effective_date=business_date,warnings=[],diagnostics=dict(contract=CONTRACT,origin=state['origin'],composition=state['composition']),lines=lines,expected_balances=expected)
         conn.execute(f'INSERT INTO {OPERATIONS_TABLE} VALUES(?,?,?,?,?,?,?,?,?,?)',(op,'wb_supply_dispatch',CONTRACT,'wb_supply',key,digest(state['composition']),epoch,business_date,now,canonical(dict(supply_id=state['supply_id'],origin=state['origin'],composition=state['composition']))))
         for number,line in enumerate(lines,1):
@@ -487,5 +507,9 @@ class FboSupplyLifecycle:
             wac=canonical_decimal_ratio_text(line['after_capital_rub'],line['after_quantity']) if line['after_quantity'] else None
             changed=conn.execute(f"UPDATE {BALANCES_TABLE} SET quantity=?,capital_rub=?,wac_rub=?,source_watermark=?,updated_at=? WHERE facility_id=? AND pool='FBO' AND nm_id=? AND projection_epoch=? AND quantity=? AND capital_rub=?",(line['after_quantity'],line['after_capital_rub'],wac,op,now,facility,line['nm_id'],epoch,line['before_quantity'],line['before_capital_rub']))
             if changed.rowcount!=1: raise ValueError('fbo_pool_balance_changed')
+        if valuation:
+            fbo_dispatch_valuation.append(conn,op,valuation)
+            lines=fbo_dispatch_valuation.resolve(conn,op,lines)['lines']
         _replace_reservation(conn,state,{},now)
+        state.pop('valuation_blocker',None)
         state.update(status='debited',reason='gate_shipment_debited',operation_id=op,frozen_costs=lines)
