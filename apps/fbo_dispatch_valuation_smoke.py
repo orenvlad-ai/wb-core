@@ -219,5 +219,18 @@ class ValuationTests(unittest.TestCase):
         self.assertEqual(result['valuation_blocker'],'fbo_dispatch_accounting_book_unavailable')
         self.assertEqual(self.fixture.balance(),(10,Decimal(100)))
 
+    def test_live_dispatch_reads_real_latest_book_outside_window_cache(self):
+        from packages.application import fbs_accounting_runtime as accounting
+        book=deepcopy(self.book)
+        book.update(schema=accounting.SCHEMA,shared_days={},wb_days={},retained_days={},presentations={})
+        book['state']['baseline']={}
+        version=accounting._save_book(self.fixture.runtime.runtime_dir,book,expected=None,operation_id='fixture')
+        # A cached GET book must not supply the authority for an owned write.
+        with patch('packages.application.web_vitrina_window_read_context.active_window_read_context',
+                   side_effect=AssertionError('borrowed stale request context')):
+            result=self.fixture.service.reconcile('1')
+        self.assertEqual(result['status'],'debited')
+        self.assertEqual(result['frozen_costs'][0]['raw']['cost_snapshot']['source_version_id'],version)
+
 
 if __name__=='__main__':unittest.main()
