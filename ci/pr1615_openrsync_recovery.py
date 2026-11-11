@@ -119,7 +119,8 @@ def verify_old(actual, expected):
     extras = {name for name, item in actual.items()
               if item['kind'] != 'directory' and name not in expected}
     require(all(name in {'.wb-core-runtime-sha', '.wb-core-deploy.json'}
-                or '/node_modules/' in '/' + name for name in extras),
+                or name.startswith('packages/node/wb_autoanswers_v1_4_2/make_mvp/node_modules/')
+                for name in extras),
             'unexpected-deletable-files')
 
 
@@ -185,6 +186,11 @@ def remote_action(e):
             stream.write(canonical(e['event']) + b'\n')
             stream.flush()
             os.fsync(stream.fileno())
+        directory = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
         return {'recorded': e['event']}
     with deploy._locked(runtime):
         require(read_private(claim_path) is None, 'existing-claim-readback-only')
@@ -212,6 +218,9 @@ def remote_action(e):
             # Revalidate after the durable boundary. Failure burns the claim.
             require(manifest(Path(APP)) == actual and deploy.require_owner(runtime, OPERATION, MERGE) == owner,
                     'postclaim-prestate-changed')
+            current = reader()
+            require(current.get('quiet') is True, 'postclaim-not-quiet')
+            pause._unchanged(state, current)
         return proof
 
 
