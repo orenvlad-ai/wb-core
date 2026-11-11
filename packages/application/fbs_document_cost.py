@@ -604,8 +604,9 @@ def _resolve(state, capture, opening, absorbed, historical_fbo_outgoings=()):
                     effect(doc,k,'expense',value=Decimal(amount)/100,reference={'allocation_basis_id':basis['id']})
             continue
         pools = {"FBS", "FBO"} if scope == "both" else {scope}
-        weights = {k: n["mass"] for k, n in nodes.items()
-                   if n["facility_id"] == facility and n["pool"] in pools and n["mass"] > 0}
+        weights = {k: n["mass"] + n.get('frozen_dispatch_quantity', 0) for k, n in nodes.items()
+                   if n["facility_id"] == facility and n["pool"] in pools
+                   and n["mass"] + n.get('frozen_dispatch_quantity', 0) > 0}
         pool_weights = {pool: sum(q for k, q in weights.items() if nodes[k]["pool"] == pool) for pool in pools}
         pool_amounts = allocate(total, pool_weights)
         amounts = {}

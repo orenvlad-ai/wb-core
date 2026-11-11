@@ -1,4 +1,4 @@
-"""One-submit, held activation of addressed FBO supplies and forward costs.
+"""One-submit, held activation and dispatch valuation for addressed FBO supplies.
 
 Activation only appends policy/baseline records. Existing quantities, reservations,
 costs and documents must be byte-for-byte unchanged. The private admission is the
@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 
 from apps.production_apply_contract import AdapterError, AmbiguousSubmit
@@ -19,6 +20,7 @@ from packages.application import fbo_supply_lifecycle as lifecycle
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock, warehouse_functional_write_lock
 
 CONTRACT = 'fbo_lifecycle_activation_v1'
+REPAIR_ACTION = 'repair_dispatch_valuation'
 _HELD = ContextVar('fbo_lifecycle_activation_owner', default=None)
 RECOVERY_CONTRACT = 'fbo_activation_precommit_recovery_v1'
 # Reviewed original transaction: CONFIG is inserted before all domain effects;
@@ -69,9 +71,12 @@ def admitted(root, request):
             _HELD.reset(token)
 
 
-def authority():
+def authority(*, repair=False):
     names = ('fbo_lifecycle_activation.py', 'fbo_supply_lifecycle.py', 'fbo_forward_costs.py',
              'ff_wb_supply_origins.py', 'ff_stock_ledger.py', 'business_data_procedure_admission.py')
+    if repair:
+        names += ('fbo_dispatch_valuation.py', 'fbo_dispatch_cost_source.py', 'fbs_accounting_runtime.py',
+                  'fbs_snapshot_cost_sources.py', 'fbs_snapshot_cost.py', 'current_fbo_supply_close.py')
     return {name: 'sha256:' + hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in names}
 
 
@@ -170,9 +175,10 @@ def _failure(exc, operation_id, stage):
     return result
 
 
-def protected(conn):
+def protected(conn, *, repair_target=None):
     """Fingerprint existing operational business rows, excluding new policy state."""
-    names = sorted(name for name in lifecycle._tables(conn)
+    tables = lifecycle._tables(conn)
+    names = {name for name in tables
                    if (name.startswith('sheet_vitrina_v1_ff_')
                        or name.startswith('sheet_vitrina_v1_fulfillment_')
                        or name.startswith('sheet_vitrina_v1_wb_suppl')
@@ -183,14 +189,22 @@ def protected(conn):
                                    'sheet_vitrina_v1_warehouse_functional_documents',
                                    'sheet_vitrina_v1_warehouse_functional_document_lines',
                                    'sheet_vitrina_v1_warehouse_business_operations',
-                                   'sheet_vitrina_v1_warehouse_business_operation_relations'}))
+                                   'sheet_vitrina_v1_warehouse_business_operation_relations'})}
     result = {}
-    for name in names:
+    valuation_table = None
+    if repair_target is not None:
+        from packages.application.fbo_dispatch_valuation import TABLE
+        valuation_table = TABLE
+        names.update(name for name in tables if name.startswith(('sheet_vitrina_v1_fbo_supply_lifecycle_',
+                                                                   'sheet_vitrina_v1_fbo_forward_cost_')))
+        result[TABLE] = dict(rows=0, sha256=hashlib.sha256().hexdigest())
+    for name in sorted(names):
         hashed = hashlib.sha256()
         count = 0
         # All domain tables here are ordinary rowid SQLite tables. A schema
         # change refusing this query blocks activation instead of skipping it.
-        for row in conn.execute(f'SELECT * FROM "{name}" ORDER BY rowid'):
+        where, params = (' WHERE operation_id<>?', (repair_target,)) if name == valuation_table else ('', ())
+        for row in conn.execute(f'SELECT * FROM "{name}"{where} ORDER BY rowid', params):
             for value in row:
                 payload = value if isinstance(value, bytes) else lifecycle.canonical(value).encode()
                 hashed.update(len(payload).to_bytes(8, 'big'))
@@ -200,9 +214,100 @@ def protected(conn):
     return result
 
 
+def _repair_target(request):
+    require('recovery' not in request, 'repair_recovery_conflict')
+    for field in ('actor', 'approval_reference', 'target_dispatch_operation_id'):
+        value = request.get(field)
+        require(isinstance(value, str) and value.strip(), 'repair_' + field + '_required')
+    version = request.get('book_version')
+    require(isinstance(version, str) and re.fullmatch(r'sha256:[0-9a-f]{64}', version),
+            'repair_pinned_book_required')
+    return request['target_dispatch_operation_id']
+
+
+def _capture_repair(conn, root, db, request, operation_id):
+    from packages.application import fbo_dispatch_valuation as valuation
+    from packages.application.fbs_accounting_runtime import load, readonly_book_connection
+
+    dispatch_id = _repair_target(request)
+    _, claim = paths(root, operation_id)
+    file_authority = shared._file_authority(db)
+    with readonly_book_connection(root) as book_conn:
+        book_conn.execute('BEGIN')
+        book, version = load(root, version=request['book_version'], connection=book_conn)
+        current_book, current_version = load(root, connection=book_conn)
+    require(version == request['book_version'], 'repair_book_changed')
+    candidate = valuation.prepare_repair(conn, book, version, operation_id=dispatch_id,
+                                         approval_reference=request['approval_reference'])
+    require(current_book and current_book['active'] and current_version, 'repair_current_book_unavailable')
+    current_state = current_book['state']
+    periods = current_state['periods']
+    require(periods.get(candidate['business_date'], {}).get('status') == 'open', 'repair_period_not_open')
+    require(dispatch_id not in current_state['observed_documents']
+            and dispatch_id not in current_state['baseline']['absorbed_documents']
+            and all(dispatch_id not in period['applied_documents'] for period in periods.values()),
+            'repair_target_already_accounted')
+    candidate.update(operation_id=dispatch_id, native_digest=candidate['expected_native_digest'])
+    candidate['repair']['actor'] = request['actor']
+    material = dict(candidate=candidate, protected=protected(conn, repair_target=dispatch_id),
+                    held=shared._held_binding(root, request), code=authority(repair=True),
+                    current_book_version=current_version, file_authority=file_authority, request_digest=digest(request))
+    require(shared._file_authority(db) == file_authority, 'repair_operational_file_changed')
+    return dict(operation_id=operation_id, target=str(db), scope=dict(
+        action=REPAIR_ACTION, target_dispatch_operation_id=dispatch_id, book_version=version,
+        current_book_version=current_version,
+        native_digest=candidate['native_digest'], valuation_lines=candidate['lines'], quantity_mutation=False),
+        prestate_sha256=digest(material), candidate_sha256=digest(candidate),
+        recovery=dict(kind='atomic_append_only_valuation', before_image=str(claim),
+                      rollback='sqlite_transaction_before_commit'), prepared=material)
+
+
+def _repair_intent(claim, db, request, operation_id):
+    dispatch_id = _repair_target(request)
+    saved, _ = _private_json(claim)
+    require(saved.get('contract') == CONTRACT and saved.get('action') == REPAIR_ACTION
+            and saved.get('request_digest') == digest(request), 'request_conflict')
+    preview = saved['preview']
+    material = preview['prepared']
+    candidate = material['candidate']
+    require(saved['request_digest'] == material.get('request_digest')
+            and preview['operation_id'] == operation_id and preview['target'] == str(db)
+            and preview['scope']['action'] == REPAIR_ACTION
+            and preview['scope']['target_dispatch_operation_id'] == candidate['operation_id'] == dispatch_id
+            and preview['scope']['book_version'] == candidate['book_version'] == request['book_version']
+            and preview['scope']['current_book_version'] == material['current_book_version']
+            and preview['scope']['native_digest'] == candidate['native_digest'] == candidate['expected_native_digest']
+            and preview['scope']['valuation_lines'] == candidate['lines']
+            and candidate['repair']['actor'] == request['actor']
+            and candidate['repair']['approval_reference'] == request['approval_reference']
+            and preview['prestate_sha256'] == digest(material)
+            and preview['candidate_sha256'] == digest(candidate), 'repair_intent_changed')
+    return preview
+
+
+def _repair_row_matches(conn, candidate):
+    from packages.application import fbo_dispatch_valuation as valuation
+
+    if valuation.TABLE not in lifecycle._tables(conn):
+        return False
+    dispatch_id = candidate['operation_id']
+    row = conn.execute(f'SELECT valuation_digest, valuation_json FROM {valuation.TABLE} WHERE operation_id=?',
+                       (dispatch_id,)).fetchone()
+    if row is None or tuple(row) != (digest(candidate), lifecycle.canonical(candidate)):
+        return False
+    try:
+        return valuation.native_identity(conn, dispatch_id) == candidate['native_digest']
+    except ValueError:
+        return False
+
+
 class FboLifecycleActivationAdapter:
     def capture(self, request, operation_id):
         root, db = shared.target(request)
+        if request.get('action') == REPAIR_ACTION:
+            with closing(shared.readonly(db)) as conn:
+                conn.execute('BEGIN')
+                return _capture_repair(conn, root, db, request, operation_id)
         require(request.get('actor') and request.get('approval_reference'), 'actor_approval_required')
         recovery = _original_recovery(root, db, request, operation_id) if 'recovery' in request else None
         plan = lifecycle.FboSupplyLifecycle(db_path=db).migration_preview(
@@ -234,6 +339,10 @@ class FboLifecycleActivationAdapter:
     def preview(self, request, operation_id):
         root, db = shared.target(request)
         folder, claim = paths(root, operation_id)
+        if request.get('action') == REPAIR_ACTION:
+            if claim.exists():
+                return _repair_intent(claim, db, request, operation_id)
+            return self.capture(request, operation_id)
         if 'recovery' in request:
             _original_recovery(root, db, request, operation_id)
             claim = folder / 'recovery-submitted.json'
@@ -248,6 +357,8 @@ class FboLifecycleActivationAdapter:
     def apply(self, request, operation_id, preview):
         root, db = shared.target(request)
         folder, claim = paths(root, operation_id)
+        if request.get('action') == REPAIR_ACTION:
+            return self._apply_repair(root, db, request, operation_id, preview, claim)
         recovery = 'recovery' in request
         if recovery:
             _original_recovery(root, db, request, operation_id)
@@ -297,9 +408,66 @@ class FboLifecycleActivationAdapter:
                 raise AmbiguousSubmit('fbo_activation_same_operation_readback_only') from exc
         return dict(operation_id=operation_id, disposition='submitted')
 
+    def _apply_repair(self, root, db, request, operation_id, preview, claim):
+        from packages.application import fbo_dispatch_valuation as valuation
+
+        dispatch_id = _repair_target(request)
+        service = lifecycle.FboSupplyLifecycle(db_path=db)
+        with admitted(root, request), warehouse_functional_job_lock(root), warehouse_functional_write_lock(root):
+            require(not claim.exists(), 'prior_submit_readback_only')
+            require(not any(parent.is_symlink() for parent in claim.parents), 'evidence_symlink')
+            with service._connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                fresh = _capture_repair(conn, root, db, request, operation_id)
+                require(fresh == preview, 'preview_changed')
+                material = fresh['prepared']
+                require(require_held_activation(root) == material['held'], 'hold_changed')
+                shared._exclusive_json(claim, dict(contract=CONTRACT, action=REPAIR_ACTION,
+                                                    request_digest=digest(request), preview=fresh))
+                stage = 'repair_append'
+                try:
+                    valuation.append(conn, dispatch_id, material['candidate'])
+                    require(_repair_row_matches(conn, material['candidate']), 'readback_failed')
+                    require(protected(conn, repair_target=dispatch_id) == material['protected'], 'protected_state_changed')
+                    require(shared.target(request) == (root, db) and authority(repair=True) == material['code']
+                            and shared._file_authority(db) == material['file_authority'], 'authority_changed')
+                    require(require_held_activation(root) == material['held'], 'hold_changed')
+                    conn.commit()
+                    stage = 'post_commit_readback'
+                    result = self.readback(request, operation_id)
+                    require(result['state'] == 'applied' and result['protected_scope_unchanged_now'], 'readback_failed')
+                except BaseException as exc:
+                    try:
+                        shared._exclusive_json(claim.parent / 'failure.json', _failure(exc, operation_id, stage))
+                    except Exception:
+                        pass
+                    raise AmbiguousSubmit('fbo_activation_same_operation_readback_only') from exc
+        return dict(operation_id=operation_id, disposition='submitted')
+
     def readback(self, request, operation_id):
         root, db = shared.target(request)
         folder, claim = paths(root, operation_id)
+        if request.get('action') == REPAIR_ACTION:
+            _repair_target(request)
+            if not claim.exists():
+                return dict(operation_id=operation_id, state='not_submitted')
+            preview = _repair_intent(claim, db, request, operation_id)
+            material = preview['prepared']
+            candidate = material['candidate']
+            dispatch_id = candidate['operation_id']
+            with closing(shared.readonly(db)) as conn:
+                conn.execute('BEGIN')
+                applied = (shared._file_authority(db) == material['file_authority']
+                           and _repair_row_matches(conn, candidate))
+                unchanged = protected(conn, repair_target=dispatch_id) == material['protected']
+            result = dict(operation_id=operation_id, state='applied' if applied else 'ambiguous',
+                          target_dispatch_operation_id=dispatch_id, book_version=candidate['book_version'],
+                          protected_scope_unchanged_now=unchanged,
+                          valuation_digest=preview['candidate_sha256'] if applied else None)
+            failure = folder / 'failure.json'
+            if failure.exists():
+                result['failure'] = _private_json(failure)[0]
+            return result
         recovery = 'recovery' in request
         original = _original_recovery(root, db, request, operation_id) if recovery else None
         if recovery:

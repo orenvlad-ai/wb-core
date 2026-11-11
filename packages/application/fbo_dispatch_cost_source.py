@@ -39,13 +39,21 @@ def capture_documents(conn):
                     or evidence['before_quantity']+movement['quantity_delta']!=evidence['after_quantity']):
                     raise ValueError('fbo_dispatch_frozen_conservation')
             lines.append(evidence)
+        from packages.application.fbo_dispatch_valuation import resolve
+        native_digest=owner.digest(dict(header=header,lines=native,compat=compat))
+        valuation=resolve(conn,header['operation_id'],lines,native_digest=native_digest)
+        if valuation:
+            lines=valuation['lines']
         metadata=json.loads(header['metadata_json'])
-        result.append(dict(document_id=header['operation_id'],operation_id=header['operation_id'],root_document_id=header['operation_id'],
+        document=dict(document_id=header['operation_id'],operation_id=header['operation_id'],root_document_id=header['operation_id'],
             kind=KIND,document_kind=KIND,business_date=header['business_date'],posted_at=header['posted_at'],
-            fingerprint=owner.digest(dict(header=header,lines=native,compat=compat)),events=[],
+            fingerprint=owner.digest(dict(native_digest=native_digest,valuation_digest=valuation['valuation_digest'])) if valuation else native_digest,events=[],
             fbo_lifecycle_native=dict(contract=CONTRACT,operation_id=header['operation_id']),
             cost_document=dict(contract=CONTRACT,domain=dict(facility_id=metadata['origin']['facility_id'],pool='FBO',supply_id=metadata['supply_id'],source_key=header['source_id']),
-                lines=lines,expense_lines=[],movements=lines,relations=[])))
+                lines=lines,expense_lines=[],movements=lines,relations=[]))
+        if valuation:
+            document['dispatch_valuation']={key:value for key,value in valuation.items() if key!='lines'}
+        result.append(document)
     return result
 
 
@@ -56,6 +64,10 @@ def apply_dispatch(doc, *, effect, node, key):
     for line in data['lines']:
         location=key(line['facility_id'],'FBO',int(line['nm_id']))
         n=node(location)
+        # A frozen debit reduces the remaining stock, not the approved daily
+        # opening-plus-receipts allocation weight for already posted expenses.
+        if doc.get('dispatch_valuation'):
+            n['frozen_dispatch_quantity']=n.get('frozen_dispatch_quantity',0)-line['quantity_delta']
         # Retain exact carried capital across quiet periods and later receipts.
         # This is a fixed debit; no daily average may reprice shipped goods.
         n['current_fbo_boundary']=dict(operation_id=doc['operation_id'],posted_at=doc['posted_at'],policy=CONTRACT)

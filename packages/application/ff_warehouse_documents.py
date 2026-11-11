@@ -247,7 +247,13 @@ def _project_documents(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             )
             if row["line_no"] is not None:
                 entry["lines"].append(dict(row))
+        from packages.application.fbo_dispatch_valuation import normalize_warehouse_lines
+        normalized = normalize_warehouse_lines(conn, [line for entry in grouped.values() for line in entry['lines']])
+        by_operation = {}
+        for line in normalized:
+            by_operation.setdefault(line['operation_id'], []).append(line)
         for entry in grouped.values():
+            entry['lines'] = by_operation.get(entry['header']['operation_id'], [])
             item = _ledger_document(entry["header"], entry["lines"])
             ledger_opening_exists = ledger_opening_exists or item["reason"] == "opening"
             documents.append(item)
@@ -660,6 +666,8 @@ def _ledger_detail(conn: sqlite3.Connection, operation_id: str) -> dict[str, Any
             (operation_id,),
         ).fetchall()
     ]
+    from packages.application.fbo_dispatch_valuation import normalize_warehouse_lines
+    lines = normalize_warehouse_lines(conn, lines)
     document = _ledger_document(dict(header), lines)
     public_lines = [_public_ledger_line(item) for item in lines]
     if str(header["operation_type"] or "") in {
