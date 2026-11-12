@@ -60,6 +60,9 @@ _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
     "web_source_publication_v1": (
         "apps.web_vitrina_web_source_publication", "WebSourcePublicationAdapter",
     ),
+    "web_source_history_repair_v1": (
+        "apps.web_vitrina_source_history_repair", "WebSourceHistoryRepairAdapter",
+    ),
     "promo_archive_publication_v1": (
         "apps.promo_archive_publication", "PromoArchivePublicationAdapter",
     ),

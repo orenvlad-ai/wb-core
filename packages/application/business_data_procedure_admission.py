@@ -46,7 +46,7 @@ def business_write_is_blocked(runtime_dir: Path) -> bool:
 class AdmissionLease:
     """One independent open-file description; transferable to a worker thread."""
 
-    def __init__(self, runtime_dir: Path, *, independent: bool = False, _held_history_completion: bool = False, _held_fbs_recovery: bool = False, _held_fbo_close: bool = False, _held_fbo_activation: bool = False) -> None:
+    def __init__(self, runtime_dir: Path, *, independent: bool = False, _held_history_completion: bool = False, _held_fbs_recovery: bool = False, _held_fbo_close: bool = False, _held_fbo_activation: bool = False, _held_web_source_recovery: bool = False) -> None:
         self.runtime_dir = Path(runtime_dir).resolve()
         self.pid = os.getpid()
         self.fd: int | None = None
@@ -68,6 +68,10 @@ class AdmissionLease:
             from packages.application.fbs_scoped_lifecycle_production import require_held_scoped_recovery
             held_validator = require_held_scoped_recovery
             held_binding = require_held_scoped_recovery(self.runtime_dir)
+        elif _held_web_source_recovery:
+            from apps.web_vitrina_web_source_publication import require_held_source_recovery
+            held_validator = require_held_source_recovery
+            held_binding = held_validator(self.runtime_dir)
         elif business_write_is_blocked(self.runtime_dir):
             raise MaintenanceAdmissionBlocked("skipped_maintenance")
         inherited_authority = already_admitted(self.runtime_dir)
@@ -82,7 +86,10 @@ class AdmissionLease:
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_mode & 0o077:
                 raise MaintenanceAdmissionBlocked("admission_lock_not_private")
-            fcntl.flock(fd, fcntl.LOCK_SH)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | (fcntl.LOCK_NB if _held_web_source_recovery else 0))
+            except BlockingIOError:
+                raise MaintenanceAdmissionBlocked('source-recovery-admission-busy') from None
             if held_binding is not None:
                 if held_validator(self.runtime_dir) != held_binding:
                     raise MaintenanceAdmissionBlocked("history_completion_hold_changed")
@@ -112,6 +119,11 @@ class AdmissionLease:
     def held_fbo_activation(cls, runtime_dir: Path):
         """Only the bounded activation owner can initialize the new policy."""
         return cls(runtime_dir, independent=True, _held_fbo_activation=True)
+
+    @classmethod
+    def held_web_source_recovery(cls, runtime_dir: Path):
+        """Independent lease for the registered held web-source recovery."""
+        return cls(runtime_dir, independent=True, _held_web_source_recovery=True)
 
     def close(self) -> None:
         if self.fd is not None:

@@ -63,6 +63,33 @@ _UNSET = object()
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
+def source_repair_pins(root: Path) -> dict:
+    """Explicit operator repair bases have no implicit four-hour expiration.
+
+    Removal requires a separate reviewed recovery-retention decision. Corrupt
+    pins stop collection rather than silently discarding rollback evidence.
+    """
+    path = root / "SOURCE_REPAIR_PINS.json"
+    if not path.exists():
+        return {}
+    if path.is_symlink() or path.stat().st_size > 256 * 1024:
+        raise HistoryUnavailable("source_history_pins_invalid")
+    value = _read(path)
+    operations = value.get("operations") if isinstance(value, dict) else None
+    if (not isinstance(value, dict) or set(value) != {"contract", "operations"} or value["contract"] != "explicit_source_repair_base_pins_v1"
+            or not isinstance(operations, dict) or not 1 <= len(operations) <= 366):
+        raise HistoryUnavailable("source_history_pins_invalid")
+    for operation, entry in operations.items():
+        if (not isinstance(operation, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{7,127}", operation)
+                or not isinstance(entry, dict) or set(entry) != {"base_edition_id", "claim_sha256"}
+                or any(not isinstance(v, str) or not _HASH.fullmatch(v) for v in entry.values())
+                or not (root / "editions" / (entry["base_edition_id"] + ".json")).is_file()):
+            raise HistoryUnavailable("source_history_pins_invalid")
+        if digest(_read(root / "editions" / (entry["base_edition_id"] + ".json"))) != entry["base_edition_id"]:
+            raise HistoryUnavailable("source_history_pins_invalid")
+    return operations
+
+
 def validate_vector(vector: dict) -> None:
     # No automatic adapter may claim no-change with incomplete coverage.
     if vector.get("coverage") not in {"complete_frozen_native_v1", "complete_live_native_v1"}:
@@ -446,6 +473,13 @@ class HistoryStore:
                 if retained:
                     edition["group_repair"] = deepcopy(old["group_repair"])
                     edition["group_repair_retained_days"] = retained
+            if old and "source_repair" in old:
+                # A source repair attests exact saved cells, not a new native
+                # compilation. Retain each dated claim only with its object.
+                retained = {day: deepcopy(claim) for day, claim in old["source_repair"].items()
+                            if refs.get(day) == claim.get("object_id")}
+                if retained:
+                    edition["source_repair"] = retained
             edition_id = digest(edition)
             self._reserve(len(_json(edition)) + 4096)
             _atomic(self.root / "editions" / (edition_id + ".json"), edition)
@@ -567,6 +601,7 @@ class HistoryStore:
         """Worker-only bounded retention: current/previous, TTL pins, pending refs."""
         pointer = self._current() or {}
         keep = {pointer.get("current"), pointer.get("previous")}
+        keep.update(entry["base_edition_id"] for entry in source_repair_pins(self.root).values())
         refs, catalogs = set(), set()
         now = time.time()
         for path in (self.root / "editions").glob("*.json"):

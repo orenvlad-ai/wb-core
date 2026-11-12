@@ -1,6 +1,6 @@
 """Application-слой блока web-source snapshot."""
 
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from packages.adapters.web_source_snapshot_block import WebSourceSnapshotSource
 from packages.contracts.web_source_snapshot_block import (
@@ -10,6 +10,16 @@ from packages.contracts.web_source_snapshot_block import (
     WebSourceSnapshotRequest,
     WebSourceSnapshotSuccess,
 )
+
+
+def observed_search_ctr(items: Iterable[tuple[int | None, int | None]]) -> float | str:
+    """Project the native search CTR weighted average into a sheet cell."""
+    numeric = [(ctr, views) for ctr, views in items if ctr is not None]
+    weighted = [(ctr, views) for ctr, views in numeric if views is not None and views > 0]
+    total_views = sum(views for _, views in weighted)
+    if total_views:
+        return round(sum(ctr * views for ctr, views in weighted) / total_views / 100, 6)
+    return 0.0 if numeric and all(ctr == 0 for ctr, _ in numeric) else ""
 
 
 def transform_legacy_payload(payload: Mapping[str, Any]) -> WebSourceSnapshotEnvelope:
