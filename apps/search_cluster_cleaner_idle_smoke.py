@@ -153,6 +153,38 @@ def maintenance_read_quiescence_regressions():
             assert health['state']=='maintenance' and health['reason']=='MaintenanceAdmissionBlocked',health
 
 
+def parked_batch_does_not_sleep_until_daily_slot():
+    # ready_cycle reports no active work during backoff, but run's pending
+    # batch guard must keep polling. Exercise that complete loop boundary.
+    with tempfile.TemporaryDirectory() as raw:
+        root=Path(raw);runtime=root/'state';runtime.mkdir();admission=root/'admission';admission.mkdir()
+        store=Store();cleaner=SimpleNamespace(store=store,key='seller:scope')
+        polls=[];ticks=[];fired=[]
+        child=SimpleNamespace(pending_jobs=lambda:[],release_terminal_unsent_scans=lambda:None)
+        batch=SimpleNamespace(pending_batches=lambda:['parked'],waiting_only=lambda:not fired)
+        def tick():
+            ticks.append(True)
+            if len(polls)>=2:fired.append(True)
+        batch.tick=tick
+        daily=SimpleNamespace(tick=lambda:None,reconcile_finished=lambda:None)
+        def sleep(_seconds):
+            polls.append(True)
+            if len(polls)==3:raise KeyboardInterrupt
+        try:
+            with (patch.object(worker,'ROOT',root),patch.object(worker,'_load_env_file'),
+                  patch.object(worker,'deployment_ready',return_value=True),
+                  patch.object(worker.CleanerWeb,'from_env',return_value=SimpleNamespace(require_service=lambda:cleaner,generation='current')),
+                  patch.object(worker,'LocalStageEAdapter'),patch.object(worker,'ManualCleanerCoordinator',return_value=child),
+                  patch.object(worker,'BatchCleanerCoordinator',return_value=batch),
+                  patch.object(worker,'DailyCleanerScheduler',return_value=daily),
+                  patch.object(worker.IdleWake,'refresh',side_effect=AssertionError('parked batch entered idle sleep')),
+                  patch.object(worker.time,'sleep',side_effect=sleep)):
+                try:worker.run(runtime_dir=runtime,env_file=root/'env',admission_dir=admission)
+                except KeyboardInterrupt:pass
+            assert len(ticks)==3 and fired,(ticks,fired)
+        finally:store.connection.close()
+
+
 def main():
     with tempfile.TemporaryDirectory() as raw:
         root=Path(raw)
@@ -227,6 +259,7 @@ def main():
         store.connection.close()
     next_due_floor_regressions()
     maintenance_read_quiescence_regressions()
+    parked_batch_does_not_sleep_until_daily_slot()
     print('search cluster cleaner idle smoke: ok')
 
 

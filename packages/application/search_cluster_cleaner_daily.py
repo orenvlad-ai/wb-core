@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 from packages.application.business_data_procedure_admission import business_write_is_blocked
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
+from packages.application.search_cluster_cleaner_store import is_proven_local_contention
+from packages.application.storage_registry import StorageRegistryError
 from packages.contracts.search_cluster_cleaner import CleanerError, Principal, digest
 
 ZONE = ZoneInfo('Asia/Yekaterinburg')
@@ -21,11 +23,17 @@ RETRY_GRACE = timedelta(minutes=1)
 
 
 def retry_window(due: datetime, now: datetime) -> tuple[int | None, int | None]:
-    """Return the current window and next window; neither means exhausted."""
+    """Catch up once in the latest due interval, until the bounded deadline.
+
+    Attempt indices persisted on the occurrence prevent polling/restarts from
+    replaying that interval. Missed intervals are coalesced, never burst-replayed.
+    """
     for index, minutes in enumerate(RETRY_MINUTES):
         scheduled=due+timedelta(minutes=minutes)
         if now<scheduled:return None,index
-        if now<scheduled+RETRY_GRACE:
+        end=(due+timedelta(minutes=RETRY_MINUTES[index+1])
+             if index+1<len(RETRY_MINUTES) else scheduled+RETRY_GRACE)
+        if now<end:
             return index,index+1 if index+1<len(RETRY_MINUTES) else None
     return None,None
 
@@ -414,6 +422,7 @@ class DailyCleanerScheduler:
         if self._busy():return self._mark_queue_wait(item)
         try:return self._enqueue(item)
         except CleanerError as exc:
+            if is_proven_local_contention(exc):raise
             if exc.code in {'manual_batch_active','manual_job_active','manual_queue_blocked'}:
                 return self._mark_queue_wait(item)
             if exc.code in {'schedule_changed','schedule_authority_changed'}:
@@ -424,7 +433,8 @@ class DailyCleanerScheduler:
                     return dict(batch_id=item['batch_id'],state='waiting_for_queue',reason=str(exc))
                 return self._defer_start(item,now,str(exc),deployment_blocked=True)
             return self._defer_start(item,now,str(exc))
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc,StorageRegistryError) or is_proven_local_contention(exc):raise
             return self._defer_start(item,now,'Не удалось получить текущий каталог WB')
 
     def reconcile_pending(self,today:str) -> None:
