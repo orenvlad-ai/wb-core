@@ -29,13 +29,31 @@ def observations():
 
 
 def plan():
-    rows=[['price','TOTAL|weighted_price_seller_discounted',524.434744],['stock','SKU:1|stock_total',900]]
+    rows=[['price','TOTAL|weighted_price_seller_discounted',524.434744],['stock','SKU:1|stock_total',900],
+          ['orders','TOTAL|total_orderCount',1234]]
     for n in [1,2,3]:
         rows.extend([[m,f'SKU:{n}|{m}',7] for m in ['view_count','open_card_count','ctr','views_current','ctr_current','orders_current','position_avg']])
-    rows.extend([[m,'TOTAL|'+m,9] for m in ['total_view_count','total_open_card_count','total_views_current','avg_ctr_current']])
+    rows.extend([[m,'TOTAL|'+m,9] for m in ['total_view_count','total_open_card_count','total_views_current',
+        'avg_ctr_current','total_orders_current','avg_position_avg']])
     return {'date_columns':['2026-09-11'],'temporal_slots':[{'slot_key':'yesterday_closed','column_date':'2026-09-11'}],
         'metadata':{'unrelated':'retained'},'sheets':[{'sheet_name':'DATA_VITRINA','header':['name','id','2026-09-11'],'rows':rows},
         {'sheet_name':'STATUS','rows':[[s+'[yesterday_closed]','success','','','','','',3,0,'','stale'] for s in ['seller_funnel_snapshot','web_source_snapshot']]}]}
+
+
+def held_pause(runtime):
+    from packages.application import business_data_maintenance_pause as pause
+    from packages.application.business_data_procedure_admission import initialize_admission
+    from packages.application.business_data_write_barrier import acquire_barrier, confirm_barrier_hold
+
+    initialize_admission(runtime)
+    baseline = {'fixture':True}
+    state = {'schema_version':pause.SCHEMA,'phase':'held','window_id':'fixture-source-recovery',
+             'baseline':baseline,'baseline_fingerprint':pause.fingerprint(baseline),'hold_readback':{'quiet':True}}
+    acquire_barrier(runtime,window_id=state['window_id'],window_kind='maintenance_pause',
+        plan_fingerprint=state['baseline_fingerprint'],approval_reference='fixture-approved',actor='fixture',reason='fixture')
+    pause.save_state(runtime,state,'fixture-held')
+    confirm_barrier_hold(runtime,window_id=state['window_id'],plan_fingerprint=state['baseline_fingerprint'],maintenance_state=state)
+    return state['window_id']
 
 
 def source_recovery_checks(request):
@@ -45,7 +63,7 @@ def source_recovery_checks(request):
     from apps.web_vitrina_web_source_publication import PG_TABLES
     from apps.production_apply_launcher import ApplyError
     request={**request,'phase':'source'}
-    for failure in ('raw-after-commit','handoff-before-commit','none'):
+    for failure in ('raw-after-commit','handoff-before-commit','none','held'):
         with TemporaryDirectory() as tmp:
             runtime=Path(tmp);db=runtime/'operational.sqlite3'
             sqlite3.connect(db).close()
@@ -90,11 +108,12 @@ def source_recovery_checks(request):
                     conn.staged=deepcopy(images)
                 def _materialized(self,r):pass
             adapter=Adapter();adapters={'fixture':adapter};request['runtime_dir']=str(runtime)
+            if failure=='held':request['maintenance_window_id']=held_pause(runtime)
             operation='operation-source-'+failure
             preview=execute(action='preview',adapter_name='fixture',operation_id=operation,request=request,adapters=adapters)
             receipt=execute(action='apply',adapter_name='fixture',operation_id=operation,request=request,
                 expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters=adapters)
-            if failure!='none':
+            if failure not in {'none','held'}:
                 assert receipt['state']=='ambiguous' and receipt['readback']['parts']=={'raw':'after','handoff':'before'},receipt
                 commits=list(adapter.commits)
                 try:execute(action='apply',adapter_name='fixture',operation_id=operation,request=request,
@@ -391,10 +410,15 @@ def mixed_roster_checks(source_observations=None):
                 saved={day:json.loads(value) for day,value in conn.execute('SELECT as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots')}
                 payload=json.loads(conn.execute("SELECT payload_json FROM temporal_source_slot_snapshots WHERE source_key='seller_funnel_snapshot'").fetchone()[0])
             assert [i['nm_id'] for i in payload['items']]==[1,2]
-            for day,expected_views in [('2026-09-11',100),('2026-09-12',400)]:
+            for day,expected_views,expected_orders,expected_position in [
+                ('2026-09-11',100,1,2),('2026-09-12',400,3,2.5),
+            ]:
                 new=saved[day];rows={r[1]:r for r in new['sheets'][0]['rows']}
                 assert non_target_digest(originals[day],obs)==non_target_digest(new,obs)
                 assert rows['TOTAL|total_views_current'][2]==expected_views
+                assert rows['TOTAL|total_orders_current'][2]==expected_orders
+                assert rows['TOTAL|avg_position_avg'][2]==expected_position
+                assert rows['TOTAL|total_orderCount'][2]==1234
                 assert rows['SKU:1|orders_current'][2]==1 and rows['SKU:1|position_avg'][2]==2
                 assert rows['SKU:3|orders_current'][2]=='' and rows['SKU:3|position_avg'][2]==''
                 assert rows['SKU:3|view_count'][2]==''
@@ -405,6 +429,21 @@ def mixed_roster_checks(source_observations=None):
                 assert meta['SKU:3|view_count']['2026-09-11']['zero_fill_applied'] is False
                 assert meta['TOTAL|total_views_current']['2026-09-11']['missing_sku_count']==1
                 assert len(meta['TOTAL|total_views_current']['2026-09-11']['metric_scope_evidence']['applicable_scope'])==len(request['expected_nm_ids_by_as_of_date'][day])
+                for total,operand in [('total_orders_current','orders_current'),('avg_position_avg','position_avg')]:
+                    cell=meta['TOTAL|'+total]['2026-09-11']
+                    assert cell['source_key']=='web_source_snapshot' and cell['source_digest']==digest(obs[1])
+                    assert cell['completeness_state']=='partial' and cell['missing_sku_count']==1
+                    assert cell['zero_fill_applied'] is False
+                    assert cell['metric_scope_evidence']=={
+                        'operand_date':'2026-09-11',
+                        'applicable_scope':[f'SKU:{nm}' for nm in request['expected_nm_ids_by_as_of_date'][day]],
+                        'missing_scope':['SKU:3'], 'sku_metric_keys':[operand], 'group_scopes':{},
+                    }
+                    if day=='2026-09-12':
+                        assert rows['TOTAL|'+total][3]==123
+                        drift=deepcopy(new)
+                        next(r for r in drift['sheets'][0]['rows'] if r[1]=='TOTAL|'+total)[3]+=1
+                        assert non_target_digest(drift,obs)!=non_target_digest(new,obs)
             assert saved['2026-09-12']['sheets'][0]['rows'][0][3]==123
             with patch('packages.application.business_data_procedure_admission.barrier_status',return_value={'active':True}):
                 try:adapter.rollback(request,'mixed-publication')
@@ -454,6 +493,14 @@ def scoped_publication_checks():
         try:validate_observations(invalid)
         except ValueError as exc:assert str(exc)==reason,(str(exc),reason)
         else:raise AssertionError('invalid scoped publication accepted')
+    from packages.adapters.seller_portal_web_source_collector import CollectorError
+    for metric in ('orders','avgPosition'):
+        invalid=deepcopy(request)
+        invalid['observations'][1]['raw_report']['data']['groups'][0]['items'][0][metric]['current']=None
+        invalid['source_sha256']=digest(invalid['observations'])
+        try:validate_observations(invalid)
+        except CollectorError as exc:assert str(exc)=='search_scope_metric_invalid'
+        else:raise AssertionError('null search metric accepted as an observation')
     from apps.web_vitrina_web_source_publication import PG_TABLES
     class ExistingRowsAdapter(WebSourcePublicationAdapter):
         def _pg_capture(self,r,connections=None):return self.before,{}
@@ -470,6 +517,241 @@ def scoped_publication_checks():
     mixed_roster_checks(obs)
 
 
+def explicit_search_zero_checks():
+    from packages.adapters.seller_portal_web_source_collector import _search_items
+    obs=observations()
+    group=obs[1]['raw_report']['data']['groups'][0]
+    group['items'][0]['orders']['current']=0
+    group['items'][1]['orders']['current']=0
+    group['items'][1]['avgPosition']['current']=0
+    group['metrics']['orders']['current']=0
+    obs[1]['items']=_search_items(group['items'])
+    request={'dates':['2026-09-11'],'observations':obs,'source_sha256':digest(obs),'supplier_identity_sha256':'fixture'}
+    validate_observations(request)
+    new,_=project(plan(),obs,[1,2,3],'explicit-zero')
+    values={row[1]:row[2] for row in new['sheets'][0]['rows']}
+    assert values['TOTAL|total_orders_current']==0
+    assert values['TOTAL|avg_position_avg']==1
+    assert values['SKU:2|orders_current']==values['SKU:2|position_avg']==0
+    assert values['SKU:3|orders_current']==values['SKU:3|position_avg']==''
+    for item in obs[1]['items']:
+        item.update(views_current=0,ctr_current=0)
+    for expected, ctr in [(0,0),('',1)]:
+        obs[1]['items'][0]['ctr_current']=ctr
+        new,_=project(plan(),obs,[1,2,3],'zero-search-views')
+        values={row[1]:row[2] for row in new['sheets'][0]['rows']}
+        assert values['TOTAL|total_views_current']==0 and values['TOTAL|avg_ctr_current']==expected
+        assert values['SKU:3|ctr_current']==''
+
+
+def historical_row_expansion_checks():
+    import fcntl
+    from apps.web_vitrina_web_source_publication import SKU_METRICS, historical_publication_roster
+    from packages.adapters.seller_portal_web_source_collector import _funnel_items, _search_items
+    from packages.application.business_data_procedure_admission import AdmissionLease, LOCK_FILENAME, MaintenanceAdmissionBlocked
+    from packages.application.web_vitrina_history_compiler import CONTRACT, digest as history_digest
+    from packages.application.web_vitrina_history_store import HistoryStore
+
+    first, second, untouched = '2026-09-11', '2026-09-12', '2026-09-13'
+    all_metrics = tuple(metric for keys in SKU_METRICS.values() for metric in keys)
+    funnel, search_first = observations()
+    search_group = search_first['raw_report']['data']['groups'][0]
+    for nm in (94, 96):
+        search_group['items'].append({'nmId':nm,'views':{'current':nm},'ctr':{'current':10},
+            'orders':{'current':nm},'avgPosition':{'current':nm}})
+        funnel['raw_report']['data']['groups'][0]['itemsGroup'].append({'nmId':nm,'name':str(nm),
+            'vendorCode':str(nm),'viewCount':{'current':nm},'openCard':{'current':1},'viewToOpen':{'current':1}})
+    search_group['metrics']['views']['current'] += 190
+    search_group['metrics']['orders']['current'] += 190
+    search_first['raw_report']['data']['commonInfo']['totalProducts'] = 4
+    search_first['items'] = _search_items(search_group['items'])
+    search_second = deepcopy(search_first)
+    funnel_group = funnel['raw_report']['data']['groups'][0]
+    funnel_group['viewCount']['current'] += 190
+    funnel_group['openCard']['current'] += 2
+    funnel['items'] = _funnel_items(funnel_group['itemsGroup'])
+    for observation in (funnel, search_second):
+        observation.update(snapshot_date=second,request_period={'start':second,'end':second},
+                           source_fetched_at='2026-09-13T22:00:00Z')
+    obs = [search_first, funnel, search_second]
+
+    def ready(ids):
+        value = plan()
+        sheet = value['sheets'][0]
+        sheet['rows'].extend([[metric, f'SKU:{nm}|{metric}', 7] for nm in ids if nm > 3 for metric in all_metrics])
+        value['date_columns'] = [first, second, untouched]
+        sheet['header'] = ['label', 'key', *value['date_columns']]
+        for row in sheet['rows']:
+            row.extend([234, 345])
+        sheet.update(write_start_cell='A1', row_count=len(sheet['rows']), write_rect=f"A1:E{len(sheet['rows']) + 1}")
+        return value
+
+    with TemporaryDirectory() as tmp:
+        runtime = Path(tmp)
+        db = runtime / 'operational.sqlite3'
+        store = HistoryStore(runtime / 'history')
+        rows = {f'SKU:{nm}|{metric}': {'row_id':f'SKU:{nm}|{metric}','row_kind':'sku',
+            'values':{'scope_label':[f'Catalog SKU {nm}'],'metric_label':[f'Catalog {metric}']}}
+            for nm in range(1,97) for metric in all_metrics}
+        epoch = history_digest('catalog fixture')
+        catalog = {'rows':rows,'order':list(rows),'context_epoch':epoch}
+        units = {day:{'contract':CONTRACT,'date':day,'context_epoch':epoch,'accepted_ready_available':True,
+            'members':[f'SKU:{nm}|{metric}' for nm in range(1,upper+1) for metric in all_metrics],
+            'cells':{key:[None]*16 for key in rows}} for day,upper in [(first,94),(second,96),(untouched,96)]}
+        def publish_fixture():
+            vector={'coverage':'complete_frozen_native_v1','epoch':epoch,
+                    'dates':{day:history_digest(unit) for day,unit in units.items()}}
+            return store.update(vector=vector,catalog=catalog,compile_day=units.__getitem__,revalidate=lambda:vector)['edition_id']
+        base = publish_fixture()
+        dated = historical_publication_roster(store, base, obs)
+        assert dated[first]['nm_ids']==list(range(1,95)) and dated[second]['nm_ids']==list(range(1,97))
+        assert 'SKU:94|view_count' not in dated[first]['row_labels']
+        originals = {first:ready(range(1,34)),untouched:ready(range(1,97))}
+        with sqlite3.connect(db) as conn:
+            conn.executescript('''CREATE TABLE registry_upload_current_state(slot INTEGER,bundle_version TEXT);
+                CREATE TABLE registry_upload_config_v2(bundle_version TEXT,nm_id INTEGER);
+                CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version TEXT,as_of_date TEXT,plan_json TEXT,PRIMARY KEY(bundle_version,as_of_date));
+                CREATE TABLE temporal_source_slot_snapshots(source_key TEXT,snapshot_date TEXT,snapshot_role TEXT,captured_at TEXT,payload_json TEXT,PRIMARY KEY(source_key,snapshot_date,snapshot_role));
+                CREATE TABLE temporal_source_closure_state(source_key TEXT,target_date TEXT,slot_kind TEXT,state TEXT,attempt_count INTEGER,next_retry_at TEXT,last_reason TEXT,last_attempt_at TEXT,last_success_at TEXT,accepted_at TEXT,PRIMARY KEY(source_key,target_date,slot_kind));''')
+            conn.execute("INSERT INTO registry_upload_current_state VALUES(1,'bundle')")
+            conn.executemany("INSERT INTO registry_upload_config_v2 VALUES('bundle',?)",[(nm,) for nm in range(1,97)])
+            conn.executemany("INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES('bundle',?,?)",
+                [(day,canonical(value)) for day,value in originals.items()])
+        class LocalAdapter(WebSourcePublicationAdapter):
+            fail_materialized=False
+            def target(self,_):return runtime,db
+            def _materialized(self,r):
+                if self.fail_materialized:raise ValueError('materialized-source-value-mismatch')
+                validate_observations(r)
+            def _history_store(self):return store
+        adapter = LocalAdapter()
+        request = {'dates':[first,second],'observations':obs,'source_sha256':digest(obs),'supplier_identity_sha256':'fixture',
+            'source_date_pairs':[{'source_key':o['source_key'],'snapshot_date':o['snapshot_date']} for o in obs],
+            'phase':'publication','runtime_dir':str(runtime),'nm_ids':list(range(1,97)),
+            'expected_nm_ids_by_as_of_date':{first:list(range(1,34)),untouched:list(range(1,97))},
+            'history_roster':{'edition_id':base,'dates':dated},'maintenance_window_id':held_pause(runtime)}
+        for mutate, error in [
+            (lambda r:r['history_roster']['dates'][first]['row_labels'].update({'SKU:94|position_avg':'invented'}),
+             'publication-history-roster-drift'),
+            (lambda r:r['history_roster']['dates'][first]['row_labels'].update({'SKU:94|stock_total':'invented'}),
+             'publication-history-roster-drift'),
+            (lambda r:r['history_roster']['dates'][first]['nm_ids'].remove(94),'publication-history-roster-drift'),
+            (lambda r:r['history_roster'].update(edition_id='f'*64),'publication-history-edition-drift'),
+            (lambda r:r['expected_nm_ids_by_as_of_date'][first].append(34),'publication-roster-drift'),
+            (lambda r:r['nm_ids'].remove(96),'publication-history-roster-union-mismatch'),
+            (lambda r:r.update(maintenance_window_id='incorrect-window'),'source-recovery-maintenance-window-mismatch'),
+        ]:
+            bad=deepcopy(request);mutate(bad)
+            try:adapter.preview(bad,'history-invalid')
+            except ValueError as exc:assert str(exc)==error,(str(exc),error)
+            else:raise AssertionError('unbound history scope accepted')
+        operation = 'history-expansion'
+        adapters = {'fixture':adapter}
+        preview = execute(action='preview',adapter_name='fixture',operation_id=operation,request=request,adapters=adapters)
+        assert preview['scope']['added_rows']==63*7
+        try:AdmissionLease.held_web_source_recovery(runtime)
+        except ValueError as exc:assert str(exc)=='source-recovery-held-owner-required'
+        else:raise AssertionError('procedure lease issued to an unbound caller')
+        ordinary={key:value for key,value in request.items() if key!='maintenance_window_id'}
+        try:adapter.apply(ordinary,operation,preview)
+        except MaintenanceAdmissionBlocked:pass
+        else:raise AssertionError('ordinary recovery bypassed held pause')
+        with (runtime/LOCK_FILENAME).open('rb') as exclusive:
+            fcntl.flock(exclusive,fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:adapter.apply(request,operation,preview)
+            except ValueError as exc:assert str(exc)=='source-recovery-admission-not-idle'
+            else:raise AssertionError('recovery bypassed a real procedure writer')
+        with store._writer():
+            try:adapter.apply(request,operation,preview)
+            except ValueError as exc:assert str(exc)=='publication-history-writer-busy'
+            else:raise AssertionError('native recovery admitted with a moving history base')
+        receipt = execute(action='apply',adapter_name='fixture',operation_id=operation,request=request,
+            expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters=adapters)
+        assert receipt['state']=='applied'
+        with sqlite3.connect(db) as conn:
+            saved={day:json.loads(value) for day,value in conn.execute('SELECT as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots')}
+        assert set(saved)=={first,untouched}  # A covered day without an outer READY is not synthesized.
+        early = saved[first]['sheets'][0]
+        projected = {row[1]:row for row in early['rows']}
+        assert projected['SKU:94|position_avg']==['Catalog SKU 94: Catalog position_avg','SKU:94|position_avg',94,94,'']
+        assert projected['SKU:96|orders_current'][2:]==['',96,'']
+        assert projected['SKU:94|view_count'][2:]==['',94,'']
+        assert projected['TOTAL|total_orders_current'][2:]==[97,193,345]
+        assert projected['TOTAL|avg_position_avg'][2:]==[33,48.75,345]
+        assert projected['TOTAL|total_view_count'][2:]==[9,290,345]
+        assert projected['TOTAL|total_orderCount'][2:]==[1234,234,345]
+        assert 'SKU:94|stock_total' not in projected
+        assert early['row_count']==len(early['rows']) and early['write_rect']==f"A1:E{early['row_count'] + 1}"
+        proof = saved[first]['metadata']['server_cell_presentation']
+        assert proof['SKU:96|orders_current'].keys()=={second}
+        assert proof['TOTAL|total_orders_current'][first]['history_edition_id']==base
+        assert proof['TOTAL|total_orders_current'][first]['missing_sku_count']==91
+        assert next(row for row in saved[untouched]['sheets'][0]['rows'] if row[1]=='SKU:96|orders_current')[2:]==[7,96,345]
+        additions = adapter._retained(request,operation,runtime)['added_rows'][first]
+        baseline = non_target_digest(originals[first],obs,dated_rosters=dated)
+        assert non_target_digest(saved[first],obs,dated_rosters=dated,added_rows=additions)==baseline
+        drift=deepcopy(saved[first])
+        drift['metadata']['server_cell_presentation']['SKU:96|orders_current'][untouched]={'invented':True}
+        assert non_target_digest(drift,obs,dated_rosters=dated,added_rows=additions)!=baseline
+        drift=deepcopy(saved[first])
+        next(row for row in drift['sheets'][0]['rows'] if row[1]=='SKU:96|orders_current')[2]=123
+        try:non_target_digest(drift,obs,dated_rosters=dated,added_rows=additions)
+        except ValueError as exc:assert str(exc)=='publication-history-added-row-outside-scope'
+        else:raise AssertionError('new row could alter a day outside its roster')
+        units[first]['source_note']='later verified edition'
+        next_edition=publish_fixture()
+        assert next_edition!=base
+        assert adapter.readback(request,operation)['state']=='applied'
+        neighbor=deepcopy(search_second)
+        neighbor.update(snapshot_date=untouched,request_period={'start':untouched,'end':untouched},
+                        source_fetched_at='2026-09-14T22:00:00Z')
+        second_request={**request,'dates':[untouched],'observations':[neighbor],'source_sha256':digest([neighbor]),
+            'source_date_pairs':[{'source_key':'web_source_snapshot','snapshot_date':untouched}],
+            'expected_nm_ids_by_as_of_date':{first:list(range(1,97)),untouched:list(range(1,97))},
+            'history_roster':{'edition_id':next_edition,'dates':historical_publication_roster(store,next_edition,[neighbor])}}
+        second_operation='history-adjacent'
+        second_preview=execute(action='preview',adapter_name='fixture',operation_id=second_operation,request=second_request,adapters=adapters)
+        second_receipt=execute(action='apply',adapter_name='fixture',operation_id=second_operation,request=second_request,
+            expected_prestate=second_preview['prestate_sha256'],expected_candidate=second_preview['candidate_sha256'],adapters=adapters)
+        assert second_receipt['state']=='applied'
+        assert adapter.readback(request,operation)['state']=='ambiguous'
+        assert adapter.readback(request,operation,target_only=True)['state']=='applied'
+        try:adapter.rollback(request,operation)
+        except ValueError as exc:assert str(exc)=='rollback-after-state-drift'
+        else:raise AssertionError('strict rollback overwrote the adjacent operation')
+        with sqlite3.connect(db) as conn:
+            current=conn.execute('SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?',(first,)).fetchone()[0]
+        for kind in ('value','label','provenance','status'):
+            altered=json.loads(current)
+            row=next(row for row in altered['sheets'][0]['rows'] if row[1]=='SKU:94|position_avg')
+            if kind=='value':row[2]+=1
+            elif kind=='label':row[0]='changed label'
+            elif kind=='provenance':altered['metadata']['server_cell_presentation'][row[1]][first]['source_digest']='changed'
+            else:altered['sheets'][1]['rows'][1][10]='changed status'
+            with sqlite3.connect(db) as conn:
+                conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?',(canonical(altered),first))
+            assert adapter.readback(request,operation,target_only=True)['parts']['publication']=='drift'
+        with sqlite3.connect(db) as conn:
+            conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?',(current,first))
+        for table, key, column in [('temporal_source_slot_snapshots','snapshot_date','captured_at'),
+                                   ('temporal_source_closure_state','target_date','last_reason')]:
+            with sqlite3.connect(db) as conn:
+                sql=f" WHERE {key}=? AND source_key='web_source_snapshot'"
+                before=conn.execute(f'SELECT {column} FROM {table}'+sql,(first,)).fetchone()[0]
+                conn.execute(f'UPDATE {table} SET {column}=?'+sql,('changed',first))
+            assert adapter.readback(request,operation,target_only=True)['parts']['publication']=='drift'
+            with sqlite3.connect(db) as conn:
+                conn.execute(f'UPDATE {table} SET {column}=?'+sql,(before,first))
+        adapter.fail_materialized=True
+        assert adapter.readback(request,operation,target_only=True)['mismatches']==['materialized:ValueError']
+        adapter.fail_materialized=False
+        assert adapter.rollback(second_request,second_operation)['state']=='restored'
+        assert adapter.rollback(request,operation)['state']=='restored'
+        with sqlite3.connect(db) as conn:
+            assert {day:json.loads(value) for day,value in conn.execute(
+                'SELECT as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots')}==originals
+
+
 def main():
     obs=observations();request={'dates':['2026-09-11'],'nm_ids':[1,2,3],'observations':obs,'source_sha256':digest(obs),'supplier_identity_sha256':'fixture','phase':'publication'}
     validate_observations(request)
@@ -478,6 +760,8 @@ def main():
     search_batch_checks()
     mixed_roster_checks()
     scoped_publication_checks()
+    explicit_search_zero_checks()
+    historical_row_expansion_checks()
     old=plan();new,changes=project(old,obs,[1,2,3],'op-fixture')
     assert non_target_digest(old,obs)==non_target_digest(new,obs)
     rows={r[1]:r for r in new['sheets'][0]['rows']}

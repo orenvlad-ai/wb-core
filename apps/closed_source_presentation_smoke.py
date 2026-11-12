@@ -80,12 +80,14 @@ class PortalTests(unittest.TestCase):
         result = self.run_keep()
         cells = result.metadata['server_cell_presentation']
         self.assertEqual(result.sheets, self.new.sheets)
-        self.assertEqual(len(cells), 23)  # 22 portal cells and one inventory proof.
+        self.assertEqual(len(cells), 25)  # 24 portal cells and one inventory proof.
         self.assertNotIn('SKU:1|ctr', cells)
         self.assertEqual(cells['SKU:3|view_count']['2026-09-11']['missing_sku_count'], 1)
         self.assertEqual(cells['SKU:2|view_count']['2026-09-11']['missing_sku_count'], 0)
         self.assertIn('SKU:1|orders_current', cells)
         self.assertIn('SKU:3|position_avg', cells)
+        self.assertIn('TOTAL|total_orders_current', cells)
+        self.assertIn('TOTAL|avg_position_avg', cells)
         for key in cells:
             if key != 'SKU:1|stock_total':
                 self.assertEqual(cells[key], self.old.metadata['server_cell_presentation'][key])
@@ -126,22 +128,77 @@ class PortalTests(unittest.TestCase):
         self.assertIn('SKU:1|orders_current', cells)
         self.assertNotIn('SKU:2|orders_current', cells)
         self.assertEqual(cells['TOTAL|total_views_current']['2026-09-11']['missing_sku_count'], 1)
+        for metric, operand in [('total_orders_current', 'orders_current'), ('avg_position_avg', 'position_avg')]:
+            cell = cells['TOTAL|' + metric]['2026-09-11']
+            self.assertEqual(cell['metric_scope_evidence']['applicable_scope'], ['SKU:1', 'SKU:3'])
+            self.assertEqual(cell['metric_scope_evidence']['missing_scope'], ['SKU:3'])
+            self.assertEqual(cell['metric_scope_evidence']['sku_metric_keys'], [operand])
+
+    def test_dated_proof_survives_a_wider_ready_roster(self):
+        day = '2026-09-11'
+        edition = 'a' * 64
+        obs = observations()
+        value, _ = portal_project(portal_plan(), obs, [1, 2, 3], 'accepted-dated',
+            history_roster={'edition_id':edition,'dates':{day:{'nm_ids':[1,3]}}})
+        self.old = envelope(value)
+        self.new = replace(self.old, metadata={})
+        cells = self.run_keep().metadata['server_cell_presentation']
+        self.assertIn('SKU:1|orders_current', cells)
+        self.assertIn('SKU:3|orders_current', cells)
+        self.assertNotIn('SKU:2|orders_current', cells)
+        self.assertEqual(cells['TOTAL|total_orders_current'][day]['history_edition_id'], edition)
+        self.assertEqual(cells['TOTAL|total_view_count'][day]['history_edition_id'], edition)
+        old = deepcopy(self.old)
+        old.metadata['server_cell_presentation']['SKU:1|orders_current'][day]['history_edition_id'] = 'b' * 64
+        self.assertNotIn('TOTAL|total_orders_current', self.run_keep(old).metadata['server_cell_presentation'])
+
+    def test_zero_weight_search_ctr_proof_preserves_confirmed_zero(self):
+        obs = observations()
+        for item in obs[1]['items']:
+            item.update(views_current=0,ctr_current=0)
+        value, _ = portal_project(portal_plan(), obs, [1, 2, 3], 'accepted-zero-views')
+        self.old = envelope(value)
+        self.new = replace(self.old, metadata={})
+        self.sources['web_source_snapshot'] = source_result(obs[1], [1, 2, 3]), obs[1]['source_fetched_at']
+        total = next(row for row in self.new.sheets[0].rows if row[1]=='TOTAL|avg_ctr_current')
+        self.assertEqual(total[2], 0)
+        self.assertIn('TOTAL|avg_ctr_current', self.run_keep().metadata['server_cell_presentation'])
 
     def test_legacy_search_proof_retains_only_its_original_metrics(self):
         for key in list(self.old.metadata['server_cell_presentation']):
-            if key.split('|')[-1] in {'orders_current', 'position_avg'}:
+            if key.split('|')[-1] in {'orders_current', 'position_avg', 'total_orders_current', 'avg_position_avg'}:
                 del self.old.metadata['server_cell_presentation'][key]
         cells = self.run_keep().metadata['server_cell_presentation']
         self.assertIn('SKU:1|views_current', cells)
         self.assertNotIn('SKU:1|orders_current', cells)
+        self.assertNotIn('TOTAL|avg_position_avg', cells)
+
+    def test_search_proof_without_order_and_position_totals_is_retained(self):
+        for key in ('TOTAL|total_orders_current', 'TOTAL|avg_position_avg'):
+            del self.old.metadata['server_cell_presentation'][key]
+        cells = self.run_keep().metadata['server_cell_presentation']
+        self.assertIn('SKU:1|orders_current', cells)
+        self.assertIn('SKU:1|position_avg', cells)
+        self.assertNotIn('TOTAL|total_orders_current', cells)
+        self.assertNotIn('TOTAL|avg_position_avg', cells)
 
     def test_search_order_or_position_drift_rejects_all_extended_proof(self):
-        for metric in ('orders_current', 'position_avg'):
+        for key in ('SKU:1|orders_current', 'SKU:1|position_avg', 'TOTAL|total_orders_current', 'TOTAL|avg_position_avg'):
             old = deepcopy(self.old)
-            next(r for r in old.sheets[0].rows if r[1] == 'SKU:1|' + metric)[2] += 1
+            next(r for r in old.sheets[0].rows if r[1] == key)[2] += 1
             cells = self.run_keep(old).metadata['server_cell_presentation']
             self.assertNotIn('SKU:1|views_current', cells)
-            self.assertNotIn('SKU:1|' + metric, cells)
+            self.assertNotIn(key, cells)
+
+    def test_search_total_proof_requires_both_totals_and_exact_operand(self):
+        for mode in ('missing', 'wrong_operand'):
+            old = deepcopy(self.old)
+            proofs = old.metadata['server_cell_presentation']
+            if mode == 'missing':
+                del proofs['TOTAL|total_orders_current']
+            else:
+                proofs['TOTAL|total_orders_current']['2026-09-11']['metric_scope_evidence']['sku_metric_keys'] = ['views_current']
+            self.assertNotIn('SKU:1|views_current', self.run_keep(old).metadata['server_cell_presentation'])
 
     def test_scoped_union_proof_stays_scoped_for_current_and_historical_rosters(self):
         obs = scoped_observations()

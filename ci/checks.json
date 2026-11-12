@@ -1335,6 +1335,21 @@
       ],
       "pip": ["openpyxl==3.1.5"]
     },
+    "web_source_history_repair": {
+      "patterns": [
+        "apps/web_vitrina_source_history_repair*.py",
+        "packages/application/web_vitrina_source_history_repair.py",
+        "packages/application/web_vitrina_history_store.py",
+        "apps/web_vitrina_web_source_publication.py"
+      ],
+      "commands": [
+        ["python3", "apps/web_vitrina_source_history_repair_smoke.py"],
+        ["python3", "apps/web_vitrina_web_source_publication_smoke.py"],
+        ["python3", "apps/production_apply_adapters_smoke.py"],
+        ["python3", "apps/production_apply_launcher_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "promo_archive_ready_publication": {
       "patterns": ["apps/promo_archive_publication.py", "apps/promo_archive_publication_rollback.py", "packages/application/inventory_retention.py", "apps/promo_inventory_retention_smoke.py"],
       "commands": [["python3", "apps/promo_archive_publication_smoke.py"], ["python3", "apps/promo_inventory_retention_smoke.py"], ["python3", "apps/ready_writer_closure_smoke.py"]],

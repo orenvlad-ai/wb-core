@@ -14156,12 +14156,15 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
     This does not certify a new source, recalculate values, or carry another
     metric family's metadata. A newer accepted source owns its own provenance.
     """
+    from packages.application.web_source_snapshot_block import observed_search_ctr
+
     groups = {
         "seller_funnel_snapshot": {
             "view_count", "open_card_count", "total_view_count", "total_open_card_count"},
         "web_source_snapshot": {
             "views_current", "ctr_current", "orders_current", "position_avg", "total_views_current", "avg_ctr_current"},
     }
+    search_total_operands = {"total_orders_current": "orders_current", "avg_position_avg": "position_avg"}
     current = _find_sheet(plan, "DATA_VITRINA")
     previous = _find_sheet(previous_plan, "DATA_VITRINA")
     if current is None or previous is None or day not in current.header or day not in previous.header:
@@ -14171,13 +14174,15 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
     metadata = deepcopy(plan.metadata)
     cells = metadata.setdefault("server_cell_presentation", {})
     index, old_index = current.header.index(day), previous.header.index(day)
+    previous_proof_metrics = {key.split("|")[-1] for key, by_day in old_cells.items() if day in by_day}
     for source, metrics in groups.items():
-        # Older accepted publications certified only views/CTR. Keep their
-        # original complete proof group without certifying additional fields.
-        extra = {"orders_current", "position_avg"} if source == "web_source_snapshot" else set()
-        if extra and not any(day in by_day for key, by_day in old_cells.items()
-                             if key.split("|")[-1] in extra):
-            metrics = metrics - extra
+        if source == "web_source_snapshot":
+            # Older publications certified orders and position only at SKU
+            # level, or certified only views and CTR. Retain each proof as issued.
+            if previous_proof_metrics.intersection(search_total_operands):
+                metrics = metrics.union(search_total_operands)
+            elif not previous_proof_metrics.intersection({"orders_current", "position_avg"}):
+                metrics = metrics.difference({"orders_current", "position_avg"})
         payload, captured = runtime.load_temporal_source_slot_snapshot(
             source_key=source, snapshot_date=day, snapshot_role="accepted_closed_day_snapshot")
         if payload is None or getattr(payload, "kind", None) != "success":
@@ -14189,6 +14194,20 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
         source_stamp = getattr(payload, "source_fetched_at", None) or captured
         group_rows = [row for row in current.rows if _metric_key_from_row_id(_row_id(row)) in metrics]
         scope = {key.split("|")[0] for key in map(_row_id, group_rows) if key.startswith("SKU:")}
+        anchor_key = ("TOTAL|total_view_count" if source == "seller_funnel_snapshot"
+                      else "TOTAL|total_views_current")
+        anchor = old_cells.get(anchor_key, {}).get(day, {})
+        history_edition_id = anchor.get("history_edition_id")
+        if "history_edition_id" in anchor:
+            dated_scope = anchor.get("metric_scope_evidence", {}).get("applicable_scope")
+            if (not isinstance(history_edition_id, str) or len(history_edition_id) != 64
+                or any(c not in "0123456789abcdef" for c in history_edition_id)
+                or not isinstance(dated_scope, list) or not dated_scope
+                or any(not isinstance(key, str) or key not in scope for key in dated_scope)
+                or len(set(dated_scope)) != len(dated_scope)):
+                continue
+            scope = set(dated_scope)
+            group_rows = [row for row in group_rows if _row_id(row).split("|")[0] in scope | {"TOTAL"}]
         # Accepted sources may cover the union of several historical rosters.
         # The retained proof belongs only to this plan's exact scoped operands.
         items = {item.nm_id: item for item in payload.items if f"SKU:{item.nm_id}" in scope}
@@ -14202,8 +14221,13 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
         else:
             views = sum(item.views_current for item in items.values())
             expected.update({"TOTAL|total_views_current": views,
-                "TOTAL|avg_ctr_current": round(sum(item.ctr_current * item.views_current
-                    for item in items.values()) / views / 100, 6) if views else ""})
+                "TOTAL|avg_ctr_current": observed_search_ctr(
+                    (item.ctr_current, item.views_current) for item in items.values())})
+            if items and metrics.intersection(search_total_operands):
+                expected.update({
+                    "TOTAL|total_orders_current": sum(item.orders_current for item in items.values()),
+                    "TOTAL|avg_position_avg": round(sum(item.position_avg for item in items.values()) / len(items), 6),
+                })
         missing = scope - {f"SKU:{nm}" for nm in items}
         group_cells = {}
         valid = bool(scope)
@@ -14215,6 +14239,7 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
                 or row[index] != old[old_index] or row[index] != expected.get(key, "")
                 or cell.get("source_key") != source or cell.get("source_date") != day
                 or cell.get("source_fetched_at") != source_stamp
+                or cell.get("history_edition_id") != history_edition_id
                 or cell.get("source_completeness") not in {"complete", "scoped_complete"}
                 or cell.get("zero_fill_applied") is not False or not cell.get("source_digest")):
                 valid = False
@@ -14246,15 +14271,17 @@ def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtim
                 break
             if key.startswith("TOTAL|"):
                 proof = cell.get("metric_scope_evidence", {})
+                operand = search_total_operands.get(key.split("|")[1])
                 if (proof.get("operand_date") != day or set(proof.get("applicable_scope", [])) != scope
-                    or set(proof.get("missing_scope", [])) != missing):
+                    or set(proof.get("missing_scope", [])) != missing
+                    or (operand is not None and proof.get("sku_metric_keys") != [operand])):
                     valid = False
                     break
             group_cells[key] = cell
         # The retained digest identifies the original observation (not the
         # normalized payload). Its entire group, including missing SKU, must
         # agree with the same dated accepted source before that proof is reused.
-        if (not valid or len(group_cells) != len(scope) * len(sku_keys) + 2
+        if (not valid or len(group_cells) != len(scope) * len(sku_keys) + len(metrics - sku_keys)
             or len({cell["source_digest"] for cell in group_cells.values()}) != 1
             or len({json.dumps([cell["source_completeness"], cell.get("search_scope")], sort_keys=True)
                     for cell in group_cells.values()}) != 1):
