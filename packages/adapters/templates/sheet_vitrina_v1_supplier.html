@@ -3994,8 +3994,9 @@
       }
 
       function updateTotalsAndState() {
-        const payload = readCurrentPayload();
-        const lines = payload.lines || [];
+        // Rendering may run before the new card's rows replace the previous DOM.
+        // Input handlers and submission own DOM-to-model synchronization.
+        const lines = (currentShipment && currentShipment.lines) || [];
         const productLines = lines.filter((line) => line.line_type !== "extra");
         const extraLines = lines.filter((line) => line.line_type === "extra");
         const productQty = sum(productLines.map((line) => line.qty));

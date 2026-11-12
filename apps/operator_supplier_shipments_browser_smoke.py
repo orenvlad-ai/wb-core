@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 from contextlib import closing
+from copy import deepcopy
 from unittest.mock import patch
 from playwright.sync_api import sync_playwright, expect
 ROOT=Path(__file__).resolve().parents[1]
@@ -14,6 +15,76 @@ from apps.sheet_vitrina_v1_supplier_shipments_http_smoke import _build_invoice_f
 from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_SUPPLIER_UI_PATH
 from packages.application import operator_supplier_shipments as receipts
 from packages.adapters import registry_upload_http_entrypoint as http
+
+
+def composition_survives_card_rendering():
+    """Opening/resetting financial UI must not replace source lines with old DOM."""
+    with TemporaryDirectory(prefix='supplier-composition-') as raw:
+        rt,entry,payload=seed(raw)
+        saved=entry.handle_supplier_shipments_create_request(payload)
+        first_id=saved['shipment_id']
+        first=rt.load_supplier_shipment(first_id)
+        second=deepcopy(first)
+        second_id='sup_composition_second'
+        second['header'].update(shipment_id=second_id,invoice_no='COMPOSITION-SECOND')
+        for field in ('product_qty_total','product_amount_total','extras_amount_total','invoice_amount_total','declared_invoice_total'):
+            if second['header'].get(field) is not None:
+                second['header'][field]*=2
+        for line in second['lines']:
+            line['line_id']+='-second'
+            line['qty']*=2
+            line['amount']*=2
+        rt.save_supplier_shipment(header=second['header'],lines=second['lines'])
+        server,thread,base=server_for(entry)
+        try:
+            with sync_playwright() as pw:
+                browser=pw.chromium.launch()
+                page=browser.new_page()
+                errors=[]
+                page.on('pageerror',lambda error:errors.append(str(error)))
+                page.route('**/sup_*/documents',lambda route:route.fulfill(status=500,content_type='application/json',body='{"error":"composition-test-documents-unavailable"}'))
+                page.goto(base+DEFAULT_SHEET_SUPPLIER_UI_PATH+'?embedded=operator')
+                def check_card(shipment_id,source):
+                    page.locator(f'#shipmentRows tr[data-row="{shipment_id}"]').click()
+                    expect(page.locator('#cardTitle')).to_contain_text(shipment_id)
+                    page.locator('#supplyCompositionTabButton').click()
+                    products=[x for x in source['lines'] if x['line_type']=='product']
+                    extras=[x for x in source['lines'] if x['line_type']=='extra']
+                    expect(page.locator('#productLines tr[data-line-kind]')).to_have_count(len(products))
+                    expect(page.locator('#extraLines tr[data-line-kind]')).to_have_count(len(extras))
+                    for kind,lines in (('product',products),('extra',extras)):
+                        rows=page.locator(f'tr[data-line-kind="{kind}"]')
+                        for index,line in enumerate(lines):
+                            assert float(rows.nth(index).locator('[data-line-field="qty"]').input_value())==line['qty']
+                            assert float(rows.nth(index).locator('[data-line-field="amount"]').input_value())==line['amount']
+                    displayed=page.locator('#totalInvoice').inner_text().replace('\u00a0','').replace('\u202f','').replace(' ','').replace(',','.')
+                    assert float(displayed)==source['header']['invoice_amount_total']
+                check_card(first_id,first)  # Initially empty DOM.
+                check_card(second_id,second)  # Old DOM belongs to another order.
+                check_card(first_id,first)
+                # Genuine input still updates totals and survives financial reset.
+                qty=page.locator('#productLines [data-line-field="qty"]').first
+                old_qty=float(qty.input_value())
+                qty.fill(str(old_qty+7))
+                quantity=page.locator('#totalQty').inner_text().replace('\u00a0','').replace('\u202f','').replace(' ','').replace(',','.')
+                assert float(quantity)==first['header']['product_qty_total']+7
+                page.evaluate("window.dispatchEvent(new Event('focus'))")
+                page.locator('#financialDocumentsTabButton').click()
+                expect(page.locator('#financialDocumentsMessage')).to_contain_text('composition-test-documents-unavailable')
+                page.locator('#supplyCompositionTabButton').click()
+                expect(qty).to_have_value(str(old_qty+7))
+                page.locator('#addShipmentButton').click()
+                expect(page.locator('#productLines tr[data-line-kind]')).to_have_count(0)
+                expect(page.locator('#extraLines tr[data-line-kind]')).to_have_count(0)
+                expect(page.locator('#totalInvoice')).to_have_text('0')
+                page.goto(base+DEFAULT_SHEET_SUPPLIER_UI_PATH)
+                check_card(first_id,first)
+                assert rt.load_supplier_shipment(first_id)['lines']==first['lines']
+                assert rt.load_supplier_shipment(second_id)['lines']==second['lines']
+                assert not errors,errors
+                browser.close()
+        finally:stop(server,thread)
+    print('Supplier composition: first open, order switch, edited draft, document error, blank order: OK')
 
 
 def wire_and_prewrite_refusal():
@@ -264,4 +335,6 @@ def main(screenshot_path=None):
         finally:stop(server,thread)
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    composition_survives_card_rendering()
+    main()
