@@ -93,6 +93,15 @@ def main():
         absent_renderer=deepcopy(archived_catalog)
         absent_renderer['presentation']['renderers']=[r for r in absent_renderer['presentation']['renderers'] if r['formatter_id']!='percent_default']
         expect_error(lambda:project_day(DAYS[0],absent_renderer,units[DAYS[0]],observations(DAYS[0]),[100,101],'missing-renderer'),HistoryUnavailable,'presentation_asset_missing')
+        # September 23's dated catalog has no percent renderer, while the
+        # unchanged edition serving catalog does. The actual HTTP reader uses
+        # that serving union; rows/membership still come from the dated one.
+        unchanged_dated=deepcopy(absent_renderer)
+        assert project_day(DAYS[0],absent_renderer,units[DAYS[0]],observations(DAYS[0]),[100,101],'serving-assets',
+                           presentation_catalog=archived_catalog)==patch0
+        assert absent_renderer==unchanged_dated and archived_catalog==original_catalog
+        expect_error(lambda:project_day(DAYS[0],archived_catalog,units[DAYS[0]],observations(DAYS[0]),[100,101],'missing-serving-assets',
+                                        presentation_catalog=absent_renderer),HistoryUnavailable,'presentation_asset_missing')
         wrong_binding=deepcopy(archived_catalog)
         next(r for r in wrong_binding['presentation']['renderers'] if r['formatter_id']=='percent_default')['formatter_id']='number_default'
         expect_error(lambda:project_day(DAYS[0],wrong_binding,units[DAYS[0]],observations(DAYS[0]),[100,101],'wrong-renderer'),HistoryUnavailable,'presentation_asset_missing')

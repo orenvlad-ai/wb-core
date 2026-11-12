@@ -77,7 +77,7 @@ def _totals(observation, ids):
     return values, missing, undefined
 
 
-def project_day(day, catalog, unit, observations, ids, operation_id):
+def project_day(day, catalog, unit, observations, ids, operation_id, *, presentation_catalog=None):
     if roster(unit) != ids:
         raise HistoryUnavailable('source_history_roster_drift')
     cells, patch = unit['cells'], {}
@@ -116,8 +116,12 @@ def project_day(day, catalog, unit, observations, ids, operation_id):
                     continue  # No new GROUP identities or membership are invented.
                 patch[rid] = _cell(day, metric, values[metric], missing,
                     undefined=metric in undefined)
-    renderers = {r['renderer_id']: r.get('formatter_id') for r in catalog.get('presentation', {}).get('renderers', [])}
-    formatters = {f['formatter_id'] for f in catalog.get('presentation', {}).get('formatters', [])}
+    # HistoryStore/read_history_page serves assets from edition.catalog. Dated
+    # catalogs bind row membership/context but may lack an asset already in the
+    # unchanged serving union (e.g. an old day had no numeric percent cells).
+    presentation = (catalog if presentation_catalog is None else presentation_catalog).get('presentation', {})
+    renderers = {r['renderer_id']: r.get('formatter_id') for r in presentation.get('renderers', [])}
+    formatters = {f['formatter_id'] for f in presentation.get('formatters', [])}
     # read_history_page expands built-in formatters referenced by declared
     # renderers. Older saved catalogs legitimately store only custom `rating`.
     # Require the exact existing renderer binding; never append catalog assets.
@@ -143,12 +147,14 @@ def plan_repair(source, *, expected_base, observations, rosters, operation_id, a
     if not set(days) <= set(old['days']):
         raise HistoryUnavailable('source_history_unpublished_date')
     cache, patches, changed, base_objects = {}, {}, 0, {}
+    presentation_catalog = _catalog(source, old['catalog'], deadline, cache)
     for day in days:
         _deadline(deadline)
         catalog = _catalog(source, source.day_catalogs(old)[day], deadline, cache)
         ref = old['days'][day]
         unit, _, _ = _unit(source, source.root/'objects'/(ref+'.sqlite3'), ref, day, catalog, deadline)
-        patch = project_day(day, catalog, unit, [o for o in observations if o['snapshot_date']==day], rosters[day], operation_id)
+        patch = project_day(day, catalog, unit, [o for o in observations if o['snapshot_date']==day], rosters[day], operation_id,
+                            presentation_catalog=presentation_catalog)
         changed += sum(unit['cells'][r] != c for r,c in patch.items())
         patches[day] = patch
         base_objects[day] = ref
@@ -156,6 +162,7 @@ def plan_repair(source, *, expected_base, observations, rosters, operation_id, a
         'base_pointer_sha256': hashlib.sha256(pointer).hexdigest(), 'base_objects': base_objects,
         'source_observations_sha256': digest(observations), 'audited_nm_ids_by_date': deepcopy(rosters),
         'authority': deepcopy(authority), 'patches_sha256': digest(patches),
+        'presentation_catalog_id': old['catalog'],
         'allowlisted_row_ids': {d: sorted(patches[d]) for d in days},
         'native_proofs_retained': True, 'fresh_native_watermark_claimed': False}
     if (source.root/'CURRENT.json').read_bytes() != pointer:
@@ -166,7 +173,7 @@ def plan_repair(source, *, expected_base, observations, rosters, operation_id, a
 def verify_candidate(source, candidate, plan, edition, *, deadline=None):
     """Verify exact expected patches plus byte-identical non-target BLOBs."""
     claim = plan['claim']; old = source.edition(claim['base_edition_id'])
-    if (digest(plan['patches']) != claim['patches_sha256'] or
+    if (claim['presentation_catalog_id'] != old['catalog'] or digest(plan['patches']) != claim['patches_sha256'] or
             {d: sorted(p) for d,p in plan['patches'].items()} != claim['allowlisted_row_ids']):
         raise HistoryUnavailable('source_history_patch_proof_changed')
     expected = repaired_edition(old, edition['days'], claim)
@@ -199,6 +206,7 @@ def retained_claim(claim, day, object_id):
         'source_observations_sha256': claim['source_observations_sha256'],
         'audited_nm_ids': claim['audited_nm_ids_by_date'][day],
         'row_ids_sha256': digest(claim['allowlisted_row_ids'][day]),
+        'presentation_catalog_id': claim['presentation_catalog_id'],
         'authority': deepcopy(claim['authority']), 'native_proofs_retained': True,
         'fresh_native_watermark_claimed': False}
 
