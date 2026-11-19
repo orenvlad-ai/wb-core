@@ -14,6 +14,7 @@ import sqlite3
 from typing import Any
 
 from packages.application import fulfillment_recalc_intents as intents
+from packages.application.sqlite_contention import connect_sqlite
 
 DOMAIN = "fulfillment_services"
 TABLE = "sheet_vitrina_v1_operator_fulfillment_receipts"
@@ -489,7 +490,7 @@ def record_completion(runtime: Any, operation_id: str, *, seller_id: str = "cano
         proof = read_native_proof(runtime, operation_id, seller_id=seller_id, now=now,
                                   connection=observer, _handoff=handoff, _stack=stack)
         _after_native_proof()
-        with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(sqlite3.connect(runtime.db_path, timeout=2)) as conn:
+        with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(connect_sqlite(runtime.db_path)) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(f"SELECT * FROM {TABLE} WHERE operation_id=?", (operation_id,)).fetchone()
@@ -558,7 +559,7 @@ def reconcile(runtime, *, seller_id="canonical", now=None):
                 state = "processing"
             # Small status write only; the heavy verifier has already released
             # its readers. Never overwrite an immutable completion.
-            with warehouse_functional_write_lock(runtime.runtime_dir,timeout_seconds=5), closing(sqlite3.connect(runtime.db_path,timeout=2)) as conn:
+            with warehouse_functional_write_lock(runtime.runtime_dir,timeout_seconds=5), closing(connect_sqlite(runtime.db_path)) as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if not conn.execute(f"SELECT 1 FROM {COMPLETIONS} WHERE operation_id=?",(operation_id,)).fetchone():
                     conn.execute(f"INSERT OR REPLACE INTO {ATTEMPTS} VALUES(?,?,?,?)",(

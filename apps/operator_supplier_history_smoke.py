@@ -373,6 +373,32 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(checked.call_args.args[2],'supplier_history_formula_changed')
             self.assertEqual(checked.call_args.kwargs['state'],'needs_attention')
 
+    def test_exact_queue_pending_keeps_history_fairness_and_unknown_errors_propagate(self):
+        from types import SimpleNamespace
+        with TemporaryDirectory(prefix='supplier-history-native-queue-') as raw:
+            runtime=SimpleNamespace(db_path=Path(raw)/'source.sqlite')
+            with sqlite3.connect(runtime.db_path) as conn:
+                processing.ensure_schema(conn);ready.ensure_publication_schema(conn)
+                conn.execute(f'CREATE TABLE {processing.QUEUE}(queue_id,stable_source_id,source_revision,affected_nm_ids_json,effective_date,status,error)')
+            op=dict(operation_id='waiting',shipment_id='shipment',action='edit',domain='supplier_shipment',revision=1,source_digest='saved',
+                intent=dict(revision=1,source_fingerprint='native',affected_nm_ids_json='[1]',effective_date=FIRST))
+            receipt=object()
+            def numerical(rt,identity,*,now):
+                if identity=='valid':return {'effect_dates':[FIRST]}
+                with ready.readonly(rt.db_path) as conn:return candidate.native_cohort(conn,identity)
+            with patch.object(processing,'captured_cohort',return_value=['waiting','valid']),patch.object(processing,'operation',side_effect=lambda conn,key:{**op,'operation_id':key}),patch.object(processing,'current',return_value=True),patch.object(processing,'superseded',return_value=False),patch.object(candidate,'prepare',side_effect=numerical),patch.object(h,'prepare',return_value={'new':'exact'}),patch.object(h,'publish',return_value=receipt):
+                self.assertIs(h.pending(runtime,now=MOMENT),receipt)
+                with sqlite3.connect(runtime.db_path) as conn:
+                    self.assertEqual(conn.execute(f'SELECT state,reason FROM {processing.ATTEMPTS}').fetchall(),[('processing','supplier_exact_queue_pending')])
+                    conn.execute(f'INSERT INTO {processing.QUEUE} VALUES(?,?,?,?,?,?,?)',('q','supplier_shipment:shipment','supplier-preparation:1:native','[1]',FIRST,'pending',''))
+                self.assertIs(h.pending(runtime,now=MOMENT),receipt)
+                with sqlite3.connect(runtime.db_path) as conn:
+                    self.assertEqual(conn.execute(f'SELECT state,reason FROM {processing.ATTEMPTS}').fetchall(),[('processing','supplier_exact_functional_publication_pending')])
+                with patch.object(processing,'queue_for',side_effect=ValueError('supplier_unexpected_queue_corruption')):
+                    with self.assertRaisesRegex(ValueError,'supplier_unexpected_queue_corruption'):h.pending(runtime,now=MOMENT)
+                with sqlite3.connect(runtime.db_path) as conn:
+                    self.assertEqual(conn.execute(f'SELECT state,reason FROM {processing.ATTEMPTS}').fetchall(),[('processing','supplier_exact_functional_publication_pending')])
+
 
 class PendingTransactionTests(unittest.TestCase):
     """Real native readers/attempt writer on disposable DELETE, not WAL seams.

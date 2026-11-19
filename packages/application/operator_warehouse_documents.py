@@ -12,6 +12,7 @@ from pathlib import Path
 import sqlite3
 
 from packages.application.operator_ff_overhead import readonly, _resolve
+from packages.application.sqlite_contention import connect_sqlite
 
 TABLE = "sheet_vitrina_v1_ff_pool_operator_confirmations"
 KINDS = ("china_acceptance", "transfer_root", "transfer_shipment", "transfer_receipt",
@@ -372,7 +373,7 @@ def enqueue_posted(conn, *, request, plan, posted_at):
 
 
 def _update(db_path, identity, state, reason, receipt=None):
-    with sqlite3.connect(db_path, timeout=2) as conn:
+    with connect_sqlite(db_path) as conn:
         conn.execute(f"UPDATE {TABLE} SET state=?,reason_code=?,receipt_json=COALESCE(?,receipt_json),updated_at=? WHERE request_id=? AND state<>'completed'",
                      (state,reason,json.dumps(receipt,ensure_ascii=False) if receipt is not None else None,datetime.now(timezone.utc).isoformat(),identity))
 

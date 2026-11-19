@@ -443,4 +443,75 @@ class NativeHistoricalStages(unittest.TestCase):
             stages.build_dated_stage_revision(plan,capture=cap,dated=forged)
 
 
+class HistoricalDispatchValuationTests(unittest.TestCase):
+    """Real append-only dispatch with different compatibility/canonical money."""
+    def setUp(self):
+        from apps.fbo_dispatch_valuation_smoke import ValuationTests, DAY
+        self.case=ValuationTests();self.case.setUp();self.addCleanup(self.case.doCleanups)
+        self.day=DAY
+        self.dispatch=self.case.dispatch()
+        self.db=self.case.fixture.runtime.db_path
+
+    def capture(self,cost='20',*,day=None):
+        queries=[]
+        with ready.readonly(self.db) as conn:
+            proof=stages._native_debit(conn,record=dict(supply_id='1',ff_wac_at_ledger_debit_rub=cost),
+                nm_id=101,day=day or self.day,queries=queries)
+            return proof,ready.pin_queries(conn,queries)
+
+    def change_valuation(self,change):
+        from packages.application import fbo_dispatch_valuation as valuation
+        with self.case.fixture.conn() as conn:
+            conn.execute(f'DROP TRIGGER {valuation.TABLE}_no_update')
+            row=conn.execute(f'SELECT valuation_json FROM {valuation.TABLE}').fetchone()
+            value=json.loads(row[0]);change(value)
+            conn.execute(f'UPDATE {valuation.TABLE} SET valuation_json=?,valuation_digest=?',(canonical(value),fingerprint(value)))
+
+    def test_exact_saved_canonical_and_original_editions_preserve_immutable_debit(self):
+        from packages.application import fbo_supply_lifecycle as lifecycle
+        with self.case.fixture.conn() as conn:
+            before=[tuple(r) for r in conn.execute(f'SELECT * FROM {lifecycle.AGGREGATE_LINES}')]
+        proof,fence=self.capture()
+        self.assertEqual(proof['frozen']['capital_delta_rub'],'-120')
+        self.assertEqual(proof['frozen']['unit_cost_rub'],'20')
+        self.assertEqual(json.loads(proof['line']['raw_json'])['cost_snapshot']['unit_cost_rub'],'10')
+        self.assertEqual(proof['frozen']['provenance']['book_version'],self.case.version)
+        self.assertEqual(self.capture('10')[0]['frozen']['capital_delta_rub'],'-60')
+        with self.case.fixture.conn() as conn:
+            stages.check_query_fence(conn,fence)
+            self.assertEqual([tuple(r) for r in conn.execute(f'SELECT * FROM {lifecycle.AGGREGATE_LINES}')],before)
+        with self.assertRaisesRegex(ValueError,'historical_dispatch_frozen_basis_mismatch'):self.capture('21')
+
+    def test_used_valuation_digest_quantity_and_date_cannot_fallback(self):
+        from packages.application import fbo_dispatch_valuation as valuation
+        self.change_valuation(lambda value:value.update(business_date='2026-11-08'))
+        with self.assertRaisesRegex(ValueError,'historical_dispatch_valuation_date_mismatch'):self.capture()
+        with self.case.fixture.conn() as conn:
+            value=json.loads(conn.execute(f'SELECT valuation_json FROM {valuation.TABLE}').fetchone()[0])
+            value['business_date']=self.day;value['lines'][0]['quantity_delta']=-5
+            conn.execute(f'UPDATE {valuation.TABLE} SET valuation_json=?,valuation_digest=?',(canonical(value),fingerprint(value)))
+        with self.assertRaisesRegex(ValueError,'fbo_dispatch_valuation_quantity_changed'):self.capture()
+        with self.case.fixture.conn() as conn:conn.execute(f'UPDATE {valuation.TABLE} SET valuation_digest=?',('corrupt',))
+        with self.assertRaisesRegex(ValueError,'fbo_dispatch_valuation_proof_changed'):self.capture()
+
+    def test_date_bound_and_query_fence_cover_canonical_append_and_native_proof(self):
+        from packages.application import fbo_dispatch_valuation as valuation, fbo_supply_lifecycle as lifecycle
+        with self.assertRaisesRegex(ValueError,'historical_dispatch_valuation_date_mismatch'):self.capture(day='2026-11-08')
+        _,fence=self.capture()
+        with self.case.fixture.conn() as conn:
+            # Synthetic storage corruption after capture must fail the writer fence.
+            trigger=next(r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql LIKE '%BEFORE UPDATE%'",(lifecycle.LINES_TABLE,)))
+            conn.execute('DROP TRIGGER '+trigger)
+            conn.execute(f'UPDATE {lifecycle.LINES_TABLE} SET metadata_json=?',('{}',))
+            with self.assertRaisesRegex(ready.ReadyPublicationConflict,'ready_repair_source_changed'):stages.check_query_fence(conn,fence)
+        # Legacy acceptance also pins the absence of a canonical valuation.
+        with self.case.fixture.conn() as conn:
+            saved=tuple(conn.execute(f'SELECT * FROM {valuation.TABLE}').fetchone())
+            conn.execute(f'DROP TRIGGER {valuation.TABLE}_no_delete');conn.execute(f'DELETE FROM {valuation.TABLE}')
+        _,legacy_fence=self.capture('10')
+        with self.case.fixture.conn() as conn:
+            conn.execute(f'INSERT INTO {valuation.TABLE} VALUES(?,?,?)',saved)
+            with self.assertRaisesRegex(ready.ReadyPublicationConflict,'ready_repair_source_changed'):stages.check_query_fence(conn,legacy_fence)
+
+
 if __name__=="__main__":unittest.main()
