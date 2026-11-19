@@ -187,6 +187,11 @@
       "commands": [["python3", "apps/sqlite_schema_contention_smoke.py"], ["python3", "apps/sqlite_contention_smoke.py"], ["python3", "apps/registry_upload_db_backed_runtime_smoke.py"], ["python3", "apps/web_vitrina_group_trigger_upgrade_smoke.py"], ["python3", "apps/ready_publication_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
+    "operator_warehouse_contention": {
+      "patterns": ["packages/application/operator_warehouse_documents.py", "apps/operator_warehouse_documents_contention_smoke.py"],
+      "commands": [["python3", "apps/operator_warehouse_documents_contention_smoke.py"], ["python3", "apps/operator_warehouse_documents_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "stocks_failure_diagnostics": {
       "patterns": [
         "packages/adapters/stocks_block.py",
@@ -988,9 +993,12 @@
         "packages/application/fbs_accounting_historical_stages.py",
         "packages/application/registry_upload_http_entrypoint.py",
         "apps/web_vitrina_history_candidate_build.py",
-        "apps/web_vitrina_owned_history_worker.py"
+        "apps/web_vitrina_owned_history_worker.py",
+        "apps/fbs_accounting_historical_stages_smoke.py",
+        "apps/operator_supplier_history*_smoke.py"
       ],
       "commands": [
+        ["python3", "apps/fbs_accounting_historical_stages_smoke.py"],
         [
           "python3",
           "apps/operator_supplier_history_smoke.py"
@@ -1197,6 +1205,7 @@
           "python3",
           "apps/operator_fulfillment_services_native_smoke.py"
         ],
+        ["python3", "apps/operator_fulfillment_services_contention_smoke.py"],
         [
           "python3",
           "apps/operator_fulfillment_services_integration_smoke.py"

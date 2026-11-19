@@ -21,6 +21,7 @@ CONTRACT='supplier_cost_dated_publication_v1'
 MAX_COHORT=32
 require=sources.require
 EXPECTED_NATIVE={
+    'supplier_exact_queue_pending','supplier_exact_functional_publication_pending',
     'supplier_completion_source_changed','supplier_correlated_functional_proof_missing',
     'supplier_correlated_source_changed','supplier_functional_version_missing',
     'supplier_native_wb_source_changed','supplier_native_cost_projection_changed',

@@ -58,7 +58,33 @@ def _native_debit(conn, *, record, nm_id, day, queries):
     rows=[dict(r) for r in conn.execute(sql,args)]
     require(len(rows)==1,'historical_dispatch_exact_debit_missing_or_ambiguous',day=day,source=supply_ids[0])
     from packages.application.warehouse_functional import _ff_ledger_line_cost_snapshot
+    from packages.application import fbo_dispatch_valuation as valuation, fbo_supply_lifecycle as lifecycle
+    schema_sql="SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+    queries.append((schema_sql,(valuation.TABLE,)))
+    operation_args=(rows[0]['operation_id'],)
+    valuation_row=None
+    if conn.execute(schema_sql,(valuation.TABLE,)).fetchone():
+        valuation_sql=f'SELECT * FROM {valuation.TABLE} WHERE operation_id=? ORDER BY operation_id'
+        queries.append((valuation_sql,operation_args))  # Pin absence, too.
+        valuation_row=conn.execute(valuation_sql,operation_args).fetchone()
     frozen=_ff_ledger_line_cost_snapshot(rows[0])
+    if frozen and valuation_row and decimal(record['ff_wac_at_ledger_debit_rub'])!=frozen['unit_cost_rub']:
+        # An old edition can retain the original debit. A newer edition may
+        # instead pin its append-only accounting valuation, never today's WAC.
+        native_sql=f'SELECT * FROM {lifecycle.LINES_TABLE} WHERE operation_id=? ORDER BY line_no'
+        native=[json.loads(r['metadata_json']) for r in conn.execute(native_sql,operation_args)]
+        resolved=valuation.resolve(conn,rows[0]['operation_id'],native)
+        if resolved:
+            selected=[r for r in resolved['lines'] if r['nm_id']==nm_id]
+            require(len(selected)==1 and selected[0]['quantity_delta']==rows[0]['quantity_delta'],
+                    'historical_dispatch_valuation_quantity_mismatch',day=day)
+            snapshot=selected[0]['raw']['cost_snapshot']
+            debit_day=str(rows[0].get('business_effective_date') or rows[0].get('business_date') or rows[0]['created_at'])[:10]
+            require(snapshot['source_business_date']==debit_day and debit_day<=day,
+                    'historical_dispatch_valuation_date_mismatch',day=day)
+            frozen=_ff_ledger_line_cost_snapshot(selected[0])
+            for table,order in ((lifecycle.OPERATIONS_TABLE,'operation_id'),(lifecycle.LINES_TABLE,'line_no'),(lifecycle.AGGREGATE_LINES,'line_no')):
+                queries.append((f'SELECT * FROM {table} WHERE operation_id=? ORDER BY {order}',operation_args))
     if frozen:require(decimal(record['ff_wac_at_ledger_debit_rub'])==frozen['unit_cost_rub'],'historical_dispatch_frozen_basis_mismatch',day=day)
     queries.append((sql,args))
     return dict(kind='frozen_native_money' if frozen else 'proportional_native_aggregate',line=rows[0],
