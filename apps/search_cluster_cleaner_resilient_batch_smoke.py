@@ -344,7 +344,68 @@ def http_504_recovery_with_guarded_worker():
                 assert [write['advert_id'] for write in fake.writes]==[12,11],fake.writes
                 assert fake.stats_failures==1 and not parent.pending_batches() and not child.pending_jobs()
 
+def retry_during_long_first_pass():
+    box,cleaner,owner,source,admitted,batch_id=prepared(4)
+    clock=Clock()
+    try:
+        def coordinator():
+            return BatchCleanerCoordinator(cleaner,generation='monolith',source_factory=lambda:source,
+                                           fixture_admission=admitted,now=clock)
+        parent=coordinator();child=ManualCleanerCoordinator(cleaner,object())
+        first=parent.tick()['items'][0]['job_id']
+        fail_preview(child);parent.tick()
+        second=parent.tick()['items'][1]['job_id']
+        fail_preview(child);parent.tick()
+        sibling=parent.tick()['items'][2]['job_id']
+        clock.advance(READ_RETRY_DELAYS[0]+10)
+        # An in-flight sibling must finish; no second active run is admitted.
+        assert parent.tick()['current_index']==2
+        assert child.pending_jobs()==[sibling]
+        finish_no_change(cleaner,owner,sibling);parent.tick()
+        parent=coordinator()  # Fairness survives a process restart.
+        retried=parent.tick()
+        assert retried['current_index']==0 and retried['items'][3]['job_id'] is None,retried
+        assert child.pending_jobs()==[first]
+        assert cleaner.manual_job(first,owner)['scan_attempt']==1
+        finish_no_change(cleaner,owner,first)
+        for _ in range(20):
+            state=parent.tick()
+            for job_id in child.pending_jobs():finish_no_change(cleaner,owner,job_id)
+            if state['state']=='complete':break
+        else:raise AssertionError(state)
+        assert state['done_count']==4
+        assert cleaner.manual_job(second,owner)['scan_attempt']==1
+        with cleaner.store.read() as c:
+            assert c.execute("SELECT count(*) FROM cleaner_requests WHERE route='manual-clean'").fetchone()[0]==4
+            assert c.execute('SELECT count(*) FROM cleaner_write_operations').fetchone()[0]==0
+    finally:box.__exit__(None,None,None)
+
+
+def expired_local_wait_preserves_unstarted_tail():
+    box,cleaner,owner,source,admitted,batch_id=prepared(2)
+    clock=Clock()
+    try:
+        parent=BatchCleanerCoordinator(cleaner,generation='monolith',source_factory=lambda:source,
+                                       fixture_admission=admitted,now=clock)
+        # A proven local prelaunch failure has no WB child or write to repeat.
+        batch=cleaner.manual_batch_snapshot(batch_id,owner)
+        parent._defer_read(batch,0,code='local_not_submitted_retry',message='Локальный запуск занят')
+        clock.advance(READ_RETRY_DELAYS[-1]+READ_RETRY_POLL_GRACE+1)
+        expired=parent.tick()
+        assert expired['state']=='running' and expired['current_index']==1,expired
+        assert expired['items'][0]['error_code']=='read_retry_exhausted'
+        assert 'локального' in expired['items'][0]['error'] and 'WB' not in expired['items'][0]['error']
+        child=parent.tick()['items'][1]['job_id']
+        finish_no_change(cleaner,owner,child);parent.tick()
+        assert parent.tick()['state']=='partial'
+        with cleaner.store.read() as c:
+            assert c.execute('SELECT count(*) FROM cleaner_write_operations').fetchone()[0]==0
+    finally:box.__exit__(None,None,None)
+
+
 if __name__=='__main__':
+    retry_during_long_first_pass()
+    expired_local_wait_preserves_unstarted_tail()
     recover_after_restart()
     exhausted_and_auth_stop()
     read_http_diagnostics_and_write_budget()

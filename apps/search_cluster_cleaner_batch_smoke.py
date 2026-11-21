@@ -724,6 +724,10 @@ def main():
                 child=ManualCleanerCoordinator(service,adapter)
                 assert not parent.pending_batches() and not child.pending_jobs()
                 assert service.start_manual_batch(command,owner)==accepted and len(fake.writes)==2
+    from apps.search_cluster_cleaner_resilient_batch_smoke import (
+        retry_during_long_first_pass,expired_local_wait_preserves_unstarted_tail)
+    retry_during_long_first_pass()
+    expired_local_wait_preserves_unstarted_tail()
     print('search cluster cleaner batch smoke: ok')
 
 

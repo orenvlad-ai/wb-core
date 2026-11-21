@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from datetime import datetime,timedelta,timezone
 import json
+import sqlite3
 from pathlib import Path
 import sys
 import tempfile
 import threading
 import time
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 from apps.search_cluster_cleaner_stage_e_recovery_smoke import Sandbox
 from packages.application.change_registry import ChangeRegistryRepository
+from packages.application.storage_registry import StorageRegistryError
 from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator
 from packages.application.search_cluster_cleaner_daily import ZONE,DailyCleanerScheduler,history,policy_ready,result_summary,save_schedules,schedules
 from apps.search_cluster_cleaner_self_service_worker import armed_cycle,heartbeat_while_busy,ready_cycle,report_health
@@ -75,13 +78,13 @@ def check() -> None:
         first=scheduler.tick()
         assert first['selected_count']==1,first
         assert source.calls==1
-        assert scheduler.tick() is None
+        assert scheduler.tick()['state']=='waiting_for_queue'
         rows=history(cleaner,owner)['items']
-        assert len(rows)==2 and {x['state'] for x in rows}=={'queued','start_wait'},rows
+        assert len(rows)==2 and {x['state'] for x in rows}=={'queued','pending'},rows
         # Restart with the same slot identity must not create a duplicate batch.
         restarted=DailyCleanerScheduler(cleaner,generation='monolith',source_factory=lambda:source,
                                         fixture_admission=admitted,now=lambda:current[0])
-        assert restarted.tick() is None
+        assert restarted.tick()['state']=='waiting_for_queue'
         with cleaner.store.read() as c:
             assert c.execute('SELECT count(*) FROM cleaner_daily_occurrences WHERE account=?',(cleaner.key,)).fetchone()[0]==2
             assert c.execute("SELECT count(*) FROM cleaner_requests WHERE account=? AND route='manual-batches'",(cleaner.key,)).fetchone()[0]==1
@@ -301,6 +304,8 @@ def deployment_blocked_flow() -> None:
                                         now=lambda:current[0])
         armed_cycle(ReadOnlyQueue(),ReadOnlyQueue(),scheduler)
         current[0]=datetime(2026,9,26,23,10,tzinfo=timezone.utc)
+        # The worker remains armed through the catchup interval as well.
+        armed_cycle(ReadOnlyQueue(),ReadOnlyQueue(),scheduler)
         assert not ready_cycle(ReadOnlyQueue(),ReadOnlyQueue(),scheduler)
         assert history(cleaner,owner)['items'][0]['details']['next_retry_at']=='2026-09-26T23:15:00+00:00'
         current[0]=datetime(2026,9,27,0,47,tzinfo=timezone.utc)  # Beyond +120 min and grace.
@@ -383,10 +388,11 @@ def finite_retry_regressions() -> None:
                                         fixture_admission=admitted,now=lambda:current[0])
         assert restarted.tick() is None and source.calls==2
         current[0]=due+timedelta(minutes=70)
-        assert restarted.tick() is None and source.calls==2
+        assert restarted.tick()['state']=='start_wait' and source.calls==3
+        assert restarted.tick() is None and source.calls==3
         assert history(cleaner,owner)['items'][0]['details']['next_retry_at']==(due+timedelta(minutes=120)).isoformat()
         source.errors=[];current[0]=due+timedelta(minutes=120,seconds=20)
-        assert restarted.tick()['selected_count']==1 and source.calls==3
+        assert restarted.tick()['selected_count']==1 and source.calls==4
 
     with Sandbox() as box:
         cleaner=provision(box)
@@ -621,7 +627,75 @@ def integrated_flow() -> None:
         assert scheduler.tick() is None
 
 
+def missed_intervals_and_storage_recovery():
+    due=datetime(2026,9,26,22,45,tzinfo=timezone.utc)
+    owner=Principal('owner',True,True,True)
+    target=Target(11,101,name='Active CPM',contract_verified=True)
+    admitted=[dict(advert_id=11,nm_id=101,state='verified')]
+    # Every regular one-minute launch window is missed. Each latest due
+    # interval is attempted once, including after restarts; no burst replay.
+    with Sandbox() as box:
+        cleaner=provision(box)
+        save_schedules(cleaner,owner,'monolith',dict(request_id='catchup-slots',expected_revision=1,
+                       schedules=[dict(id='default',time='03:45',enabled=True)]))
+        source=Source([target],errors=['catalog_unavailable'])
+        for attempts,minutes in enumerate((3,19,37,72),1):
+            scheduler=DailyCleanerScheduler(cleaner,generation='monolith',source_factory=lambda:source,
+                fixture_admission=admitted,now=lambda:due+timedelta(minutes=minutes))
+            assert scheduler.tick()['state']=='start_wait'
+            assert scheduler.tick() is None and source.calls==attempts
+        source.errors=[]
+        scheduler=DailyCleanerScheduler(cleaner,generation='monolith',source_factory=lambda:source,
+            fixture_admission=admitted,now=lambda:due+timedelta(minutes=120,seconds=40))
+        assert scheduler.tick()['selected_count']==1 and source.calls==5
+        assert scheduler.tick() is None and source.calls==5
+        with cleaner.store.read() as c:
+            assert c.execute("SELECT count(*) FROM cleaner_requests WHERE route='manual-batches'").fetchone()[0]==1
+
+    # A local storage failure is not a WB read failure and consumes no new
+    # launch interval: the same durable pending intent can resume immediately.
+    wrapped=CleanerError('storage_unavailable','Хранилище временно занято',503)
+    wrapped.__cause__=sqlite3.OperationalError('database is locked')
+    for error in (sqlite3.OperationalError('database is locked'),StorageRegistryError('storage unavailable'),wrapped):
+        with Sandbox() as box:
+            cleaner=provision(box)
+            save_schedules(cleaner,owner,'monolith',dict(request_id='storage-catchup',expected_revision=1,
+                           schedules=[dict(id='default',time='03:45',enabled=True)]))
+            source=Source([target])
+            scheduler=DailyCleanerScheduler(cleaner,generation='monolith',source_factory=lambda:source,
+                fixture_admission=admitted,now=lambda:due+timedelta(minutes=4))
+            with patch.object(scheduler,'_enqueue',side_effect=error):
+                try:scheduler.tick()
+                except type(error):pass
+                else:raise AssertionError('local storage failure was hidden as WB failure')
+            item=history(cleaner,owner)['items'][0]
+            assert item['state']=='pending' and not item['reason'] and source.calls==0,item
+            assert scheduler.tick()['selected_count']==1 and source.calls==1
+            assert scheduler.tick() is None and source.calls==1
+
+    # Admission committed but its compact occurrence receipt failed. Recovery
+    # must read the existing request, never enqueue or fetch the catalog again.
+    with Sandbox() as box:
+        cleaner=provision(box)
+        save_schedules(cleaner,owner,'monolith',dict(request_id='post-commit-recovery',expected_revision=1,
+                       schedules=[dict(id='default',time='03:45',enabled=True)]))
+        source=Source([target])
+        def scheduler():
+            return DailyCleanerScheduler(cleaner,generation='monolith',source_factory=lambda:source,
+                fixture_admission=admitted,now=lambda:due+timedelta(minutes=4))
+        first=scheduler()
+        with patch.object(first,'_finish',side_effect=StorageRegistryError('receipt unavailable')):
+            try:first.tick()
+            except StorageRegistryError:pass
+            else:raise AssertionError('receipt failure was hidden')
+        assert source.calls==1
+        assert scheduler().tick() is None and source.calls==1
+        assert history(cleaner,owner)['items'][0]['state']=='queued'
+        with cleaner.store.read() as c:
+            assert c.execute("SELECT count(*) FROM cleaner_requests WHERE route='manual-batches'").fetchone()[0]==1
+
+
 if __name__=='__main__':
     from apps.search_cluster_cleaner_idle_smoke import main as idle_smoke
-    check();summary_regressions();deployment_blocked_flow();finite_retry_regressions();integrated_flow();idle_smoke()
+    check();summary_regressions();deployment_blocked_flow();finite_retry_regressions();missed_intervals_and_storage_recovery();integrated_flow();idle_smoke()
     print('search cluster cleaner daily smoke: ok')
