@@ -254,14 +254,24 @@ def commit_drift_cases():
                 with closing(sqlite3.connect(runtime.db_path)) as conn:
                     assert conn.execute('PRAGMA journal_mode=DELETE').fetchone()[0] == 'delete'
                 targets = identities[:1] if single else identities
-                changed, validations, guards = [], [], []
+                changed, validations, guard_refusals = [], [], []
+                drift_committed = threading.Event()
                 validate, check = processing._validate_completion, processing._check_independent_handoff
                 def counted_validate(*args):
                     validations.append(args[1])
                     return validate(*args)
                 def counted_guard(*args):
-                    guards.append(bool(changed))
-                    return check(*args)
+                    try:
+                        return check(*args)
+                    except ValueError as exc:
+                        if str(exc) == 'supplier_completion_handoff_changed':
+                            # SQLite can expose the commit before the holder's
+                            # Python context exit/notification has completed.
+                            # Observe the native refusal first, then synchronize
+                            # its bookkeeping; never serialize the actual check.
+                            assert drift_committed.wait(5), 'guard refused before the independent commit'
+                            guard_refusals.append(statements.count('COMMIT'))
+                        raise
                 def drift():
                     path = raw_path if store == 'raw' else accounting.path(runtime.runtime_dir)
                     with closing(sqlite3.connect(path)) as external, external:
@@ -270,13 +280,15 @@ def commit_drift_cases():
                         else:
                             assert external.execute("UPDATE accounting_revisions SET payload=payload || ' '").rowcount > 0
                     changed.append(store)
+                    drift_committed.set()
                 started = time.monotonic()
                 with patch.object(processing, 'captured_cohort', return_value=targets), patch.object(processing, 'COMPLETION_COHORT_MAX_BYTES', 1 if single else 8*1024**2), patch.object(processing, '_validate_completion', counted_validate), patch.object(processing, '_check_independent_handoff', counted_guard):
                     with contention(runtime, processing, lock='reader', release_after=2.2, on_wait=drift) as statements:
                         result = _reconcile(runtime)
-                assert changed and time.monotonic()-started >= 2.2
+                assert changed and drift_committed.is_set() and time.monotonic()-started >= 2.2
                 assert validations == targets, validations
-                assert statements.count('COMMIT') > 1 and True in guards, (statements, guards)
+                assert statements.count('COMMIT') > 1
+                assert guard_refusals and all(attempts > 0 for attempts in guard_refusals), guard_refusals
                 assert result['status'] == 'pending' and not any(value['complete'] for value in result['operations']), result
                 with closing(source.readonly(runtime.db_path)) as conn:
                     assert conn.execute('SELECT count(*) FROM '+processing.COMPLETIONS).fetchone()[0] == 0
