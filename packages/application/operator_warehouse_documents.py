@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 import sqlite3
 
-from packages.application.operator_ff_overhead import readonly, _resolve
+from packages.application.operator_ff_overhead import _resolve
 from packages.application.sqlite_contention import connect_sqlite
 
 TABLE = "sheet_vitrina_v1_ff_pool_operator_confirmations"
@@ -19,6 +19,14 @@ KINDS = ("china_acceptance", "transfer_root", "transfer_shipment", "transfer_rec
          "transfer_loss", "transfer_discrepancy", "transfer_cancellation", "pool_reallocation",
          "pool_inventory", "correction", "storno", "late_expense")
 SOURCE_KEYS = ("request_identity", "source_revision", "source_sha256", "business_date", "document_kind", "idempotency_epoch")
+
+
+def readonly(db_path):
+    conn = connect_sqlite(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("BEGIN")
+    return conn
 
 
 def ensure_schema(conn):

@@ -187,6 +187,11 @@
       "commands": [["python3", "apps/sqlite_schema_contention_smoke.py"], ["python3", "apps/sqlite_contention_smoke.py"], ["python3", "apps/registry_upload_db_backed_runtime_smoke.py"], ["python3", "apps/web_vitrina_group_trigger_upgrade_smoke.py"], ["python3", "apps/ready_publication_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
+    "cycle_sqlite_contention": {
+      "patterns": ["packages/application/sqlite_contention.py", "packages/application/operator_warehouse_documents.py", "packages/application/operator_supplier_processing.py", "packages/application/operator_supplier_history.py", "packages/application/ff_stock_ledger.py", "apps/cycle_sqlite_contention_smoke.py"],
+      "commands": [["python3", "apps/cycle_sqlite_contention_smoke.py"]],
+      "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]
+    },
     "operator_warehouse_contention": {
       "patterns": ["packages/application/operator_warehouse_documents.py", "apps/operator_warehouse_documents_contention_smoke.py"],
       "commands": [["python3", "apps/operator_warehouse_documents_contention_smoke.py"], ["python3", "apps/operator_warehouse_documents_smoke.py"]],
