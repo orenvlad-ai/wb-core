@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.simple_xlsx import build_single_sheet_workbook_bytes, read_first_sheet_rows
+from packages.application.sqlite_contention import connect_sqlite
 from packages.application.warehouse_recovery_policy import (
     RecoveryState,
     WarehouseRecoveryRegistry,
@@ -899,7 +900,8 @@ class FfStockLedgerBlock:
         )
 
         result: dict[str, dict[str, Any]] = {}
-        with sqlite3.connect(self.runtime.db_path) as conn:
+        with connect_sqlite(self.runtime.db_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+            conn.execute("PRAGMA query_only=ON")
             conn.row_factory = sqlite3.Row
             operations = conn.execute(
                 """

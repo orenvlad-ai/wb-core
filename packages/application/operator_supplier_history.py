@@ -16,6 +16,7 @@ from packages.application import operator_supplier_history_sources as sources
 from packages.application import operator_supplier_processing as processing
 from packages.application import fbs_accounting_historical_stages as stages
 from packages.application.fbs_snapshot_cost import fingerprint,canonical
+from packages.application.sqlite_contention import connect_sqlite
 
 CONTRACT='supplier_cost_dated_publication_v1'
 MAX_COHORT=32
@@ -63,7 +64,7 @@ def _pending_check(conn,op):
 
 def _checked(runtime,identity,reason,now,*,state='processing',expected_check=None):
     _require_check_writer_context()
-    with closing(sqlite3.connect(runtime.db_path)) as conn:
+    with closing(connect_sqlite(runtime.db_path)) as conn:
         conn.row_factory=sqlite3.Row;conn.execute('BEGIN IMMEDIATE')
         actual=processing.operation(conn,identity)
         if expected_check is not None:

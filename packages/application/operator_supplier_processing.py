@@ -11,6 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from packages.application import operator_supplier_shipments as source
+from packages.application.sqlite_contention import connect_sqlite
 
 FUNCTIONAL = "sheet_vitrina_v1_operator_supplier_functional_proofs"
 COMPLETIONS = "sheet_vitrina_v1_operator_supplier_completions"
@@ -362,12 +363,11 @@ def record_completion(runtime, operation_id, *, seller_id="canonical", now=None)
     with ExitStack() as stack:
         prepared = _prepare_completion(runtime, operation_id, seller_id=seller_id, now=now, stack=stack)
         if 'saved' in prepared:return prepared['saved']
-        with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(sqlite3.connect(runtime.db_path, timeout=2)) as conn:
+        with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(connect_sqlite(runtime.db_path)) as conn:
             conn.row_factory = sqlite3.Row;conn.execute('BEGIN IMMEDIATE')
             _validate_completion(conn, operation_id, prepared['proof'], prepared['handoff'])
             _insert_completion(conn, operation_id, prepared['proof'])
-            _check_independent_handoff(runtime, prepared['handoff'])
-            conn.commit()
+            conn.commit_with_guard(lambda: _check_independent_handoff(runtime, prepared['handoff']))
     return {'state': 'completed', 'complete': True}
 
 
@@ -422,7 +422,7 @@ def reconcile(runtime, *, seller_id="canonical", now=None):
             if order:
                 values = {}
                 try:
-                    with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(sqlite3.connect(runtime.db_path, timeout=2)) as conn:
+                    with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(connect_sqlite(runtime.db_path)) as conn:
                         conn.row_factory = sqlite3.Row;conn.execute('BEGIN IMMEDIATE')
                         # Validate every main observer before any receipt/attempt
                         # DML. One invalid source must not starve valid siblings.
@@ -440,15 +440,18 @@ def reconcile(runtime, *, seller_id="canonical", now=None):
                                 _check_independent_handoff(runtime, item['handoff'])
                                 _insert_completion(conn, identity, item['proof'])
                                 values[identity] = {'state':'completed', 'complete':True}
-                        for identity in order:
-                            item = prepared.get(identity)
-                            if item and 'saved' not in item and identity not in failures:
-                                _check_independent_handoff(runtime, item['handoff'])
-                        conn.commit()
+                        def check_commit_handoffs():
+                            for identity in order:
+                                item = prepared.get(identity)
+                                if item and 'saved' not in item and identity not in failures:
+                                    _check_independent_handoff(runtime, item['handoff'])
+                        conn.commit_with_guard(check_commit_handoffs)
                 except (ValueError, sqlite3.OperationalError) as exc:
                     # Independent raw/book drift invalidates this uncommitted
-                    # cohort; persist retry outcomes after its rollback.
-                    with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(sqlite3.connect(runtime.db_path, timeout=2)) as conn:
+                    # cohort; persist retry outcomes after its rollback. No
+                    # proof observer is needed by this diagnostic-only writer.
+                    stack.close()
+                    with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(connect_sqlite(runtime.db_path)) as conn:
                         conn.row_factory = sqlite3.Row;conn.execute('BEGIN IMMEDIATE')
                         for identity in order:
                             item = prepared.get(identity)
@@ -460,7 +463,7 @@ def reconcile(runtime, *, seller_id="canonical", now=None):
             # No shared observer/cache survives the preceding writer commit.
             try:value = record_completion(runtime, oversized, seller_id=seller_id, now=now)
             except (ValueError, sqlite3.OperationalError) as exc:
-                with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(sqlite3.connect(runtime.db_path, timeout=2)) as conn:
+                with warehouse_functional_write_lock(runtime.runtime_dir, timeout_seconds=5), closing(connect_sqlite(runtime.db_path)) as conn:
                     conn.row_factory = sqlite3.Row;conn.execute('BEGIN IMMEDIATE')
                     value = _record_attempt(conn, oversized, exc);conn.commit()
             results.append({'operation_id':oversized, **value});position += 1

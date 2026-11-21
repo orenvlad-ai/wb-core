@@ -283,6 +283,29 @@ class ObservedSQLiteConnection(sqlite3.Connection):
         finally:
             self._finish_transaction_observation(started_at, outcome="commit")
 
+    def commit_with_guard(self, before_attempt: Callable[[], None]) -> None:
+        """Recheck independent read-only fences before each COMMIT attempt.
+
+        Do not wait inside SQLite after checking the fence: a separate source
+        could advance during that wait. Only this guarded COMMIT loop uses a
+        zero native timeout; the existing bounded backoff remains responsible
+        for contention. Neither the guard nor this method may replay DML.
+        """
+        previous_timeout = int(
+            sqlite3.Connection.execute(self, "PRAGMA busy_timeout").fetchone()[0]
+        )
+        started_at = self._transaction_started_at
+        sqlite3.Connection.execute(self, "PRAGMA busy_timeout = 0")
+        try:
+            def commit_once() -> None:
+                before_attempt()
+                sqlite3.Connection.commit(self)
+
+            self._retry(phase="commit", action=commit_once)
+        finally:
+            sqlite3.Connection.execute(self, f"PRAGMA busy_timeout = {previous_timeout}")
+            self._finish_transaction_observation(started_at, outcome="commit")
+
     def rollback(self) -> None:
         started_at = self._transaction_started_at
         try:

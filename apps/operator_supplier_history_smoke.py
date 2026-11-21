@@ -481,12 +481,13 @@ class PendingTransactionTests(unittest.TestCase):
                 self.assertEqual(self.image(rt),before)
     def test_wal_control_still_uses_real_attempt_writer(self):
         rt,identity,_=self.fixture(mode='WAL');self.assertIsNone(self.invoke(rt));self.assertEqual(len(self.attempts(rt)),1)
-    def test_external_delete_reader_busy_propagates_without_attempt_or_retry(self):
+    def test_external_delete_reader_exhaustion_propagates_without_attempt(self):
         rt,identity,_=self.fixture()
-        with ready.readonly(rt.db_path) as external:
+        from packages.application.sqlite_contention import connect_sqlite,SQLiteContentionExhausted
+        with ready.readonly(rt.db_path) as external,patch.object(h,'connect_sqlite',side_effect=lambda path:connect_sqlite(path,timeout_ms=350)):
             external.execute('SELECT * FROM '+source.TABLE).fetchall()
-            with self.assertRaises(sqlite3.OperationalError) as caught:h.pending(rt,now=MOMENT)
-            self.assertEqual(caught.exception.sqlite_errorcode,sqlite3.SQLITE_BUSY)
+            with self.assertRaises(SQLiteContentionExhausted) as caught:h.pending(rt,now=MOMENT)
+            self.assertEqual(caught.exception.phase,'commit')
             self.assertTrue(external.in_transaction);self.assertEqual(self.attempts(rt),[])
         self.assertIsNone(self.invoke(rt));self.assertEqual(len(self.attempts(rt)),1)
     def test_current_and_monotonic_successor_gap_refuse_stale_reason(self):
