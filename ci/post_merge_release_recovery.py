@@ -82,6 +82,7 @@ EXPECTED_ACTIVATION_MERGE_SHA = "7a9196e8af0d2113db7e42f0f4291fc2bc2c528c"
 
 # Exact final cleaner probe failed after activation had already skipped under pause.
 CLEANER_RELEASE_RUN_ID = 39635174275
+CLEANER_BOUNDED_LISTENER_RUN_ID = 45429927905
 CLEANER_PROFILE = {
     "pull_request": 1486, "gate_run_id": 39630567883,
     "base_sha": "bde0f6cd47277ae3f44e3ea44b0b29f5629c1fb6",
@@ -105,6 +106,13 @@ CLEANER_PROFILES = {
         "head_sha": "b2f7062e9db9c25aac5406c1ea94d25862cb9225",
         "merge_sha": "597eafe8f50bbfbe5c38533006dbfde1361cc867",
         "operation_id": "release-v3-4b74569e32b7a8fbaaa36d1c03c69106",
+    },
+    CLEANER_BOUNDED_LISTENER_RUN_ID: {
+        "pull_request": 1621, "gate_run_id": 45425668063,
+        "base_sha": "62ef453c55f2faddc86c0661960d350084b9fbfd",
+        "head_sha": "7cca15e72938a5c98a12c7089f86c0984a432173",
+        "merge_sha": "336345e6c9b08f6c2741523aa066f93c485a2f6e",
+        "operation_id": "release-v3-ef96969c1f11e80a3b8c784cbb1cc0e2",
     },
 }
 
@@ -498,19 +506,25 @@ def _prove_failed_stage(
 ) -> dict[str, Any]:
     text = raw_log.decode("utf-8", errors="replace")
     if cleaner_completion_case(case, release_run_id):
+        bounded_listener = release_run_id == CLEANER_BOUNDED_LISTENER_RUN_ID
         required = (
-            "line 1282, in deploy_current_checkout",
+            "line 1285, in deploy_current_checkout" if bounded_listener else "line 1282, in deploy_current_checkout",
             'run_stage("readback",cleaner_precomplete_probe_command,allow_transport_reconciliation=False)',
             "apps/search_cluster_cleaner_release_probe.py --phase before_complete",
             "--expected-sha " + CLEANER_PROFILES[release_run_id]["merge_sha"],
             CLEANER_PROFILES[release_run_id]["operation_id"],
             '{"status": "skipped_maintenance", "reason": "skipped_maintenance"}',
-            "ConnectionRefusedError", "returned non-zero exit status 1.",
+            "RuntimeError: cleaner listener not ready for before_complete" if bounded_listener else "ConnectionRefusedError",
+            "returned non-zero exit status 1.",
         )
+        if bounded_listener:
+            required += ("line 30, in _listener_ready",)
         failures = re.findall(r"(?:subprocess\.)?CalledProcessError:.*?returned non-zero exit status (\d+)", text, re.DOTALL)
         if (release_run_id not in CLEANER_PROFILES or gate_run_id != CLEANER_PROFILES[release_run_id]["gate_run_id"]
                 or any(item not in text for item in required)
-                or not _storage_tail_gate_argument_matches(text, gate_run_id)
+                or not _storage_tail_gate_argument_matches(text, gate_run_id,
+                    runner_path="ci/github_release_runner.py" if bounded_listener else "apps/github_release_runner.py",
+                    allow_expanded=not bounded_listener)
                 or failures != ["1"] or "exit status 255" in text):
             raise RecoveryError("failed-stage-not-exact-cleaner-completion")
         return {"job_name": job_name, "job_log_sha256": digest(raw_log),
