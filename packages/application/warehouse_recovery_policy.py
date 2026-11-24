@@ -4878,7 +4878,7 @@ def _empty_precheckpoint_trace(path: Path) -> dict[str, Any]:
 @contextmanager
 def _connect_readonly(db_path: Path) -> Iterator[sqlite3.Connection]:
     path = Path(db_path).resolve()
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = connect_sqlite(path.as_uri() + "?mode=ro", uri=True)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")

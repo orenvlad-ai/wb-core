@@ -5,7 +5,7 @@ dated source components; posted receipt and debit money retain their owners.
 """
 from copy import deepcopy
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 
 from packages.application import operator_supplier_shipments as source
@@ -115,7 +115,82 @@ def receipt_dependency(conn, shipment_id):
             "snapshots": [{k: str(v) if isinstance(v, Decimal) else v for k, v in s.items()} for s in snapshots]}
 
 
-def dated_supplier_rows(saved_balances, *, shipment, day):
+def _initial_supplier_rows(saved_balances, *, shipment, day, destination, expected, native_context):
+    """First payment activates the admitted full invoice, never upload time."""
+    from packages.application.warehouse_historical_recovery import _supplier_record
+    from packages.application.warehouse_business_projection import _reproject_supplier_source
+    from packages.application.fbs_snapshot_cost import fingerprint
+    op=native_context['operation'];functional=native_context['functional'];dependency=native_context['receipt_dependency']
+    ref=processing.ref(op);sid=shipment['shipment_id']
+    require(op['action']=='create' and ref==functional['source_ref'] and ref['shipment_id']==sid,
+            'initial_supplier_admission_source_unproved')
+    require(dependency.get('kind')=='unaccepted' and all(dependency.get(k)==[] for k in ('operations','lines','documents'))
+            and shipment.get('actual_ff_acceptance_date')=='','initial_supplier_admission_receipt_unproved')
+    require(all(functional['cost_state'][k]==shipment[k] for k in ('source_fingerprint','calculation_fingerprint')),
+            'initial_supplier_admission_cost_changed')
+    admitted={r['line_id']:(int(r['internal_nm_id']),Decimal(str(r['qty']))) for r in op['saved_source']['lines'] if r.get('line_type')=='product'}
+    current={r['line_id']:(int(r['nm_id']),Decimal(str(r['quantity']))) for r in shipment['lines']}
+    require(len(current)==len(shipment['lines']) and admitted==current and all(q>0 for _,q in current.values())
+            and set(expected)==set(functional['queue_ref']['affected_nm_ids']),
+            'initial_supplier_admission_invoice_changed')
+    def owned(rows):
+        return [(row,record) for row in rows for record in (row['provenance'] if 'provenance' in row else json.loads(row['provenance_json'])).get('source_records',[])
+                if record.get('shipment_id')==sid]
+    require(not owned(saved_balances) and not owned(native_context['before_rows']),
+            'initial_supplier_admission_not_absent')
+    observed={};native_lines={}
+    for row,record in owned(native_context['after_rows']):
+        require(row['version_id']==functional['version_id'] and row['warehouse_key'] in ('production','china_to_ff')
+                and all(record.get(k)==shipment[k] for k in ('source_fingerprint','calculation_fingerprint')),
+                'initial_supplier_admission_native_source_changed')
+        nm=int(row['nm_id']);q=Decimal(str(record['flow_quantity']));require(q>0,'initial_supplier_admission_native_quantity_invalid')
+        observed[nm]=observed.get(nm,Decimal(0))+q
+        parts=record.get('line_cost_breakdown') or ([dict(line_id=record['line_id'],nm_id=nm,quantity=record['flow_quantity'])] if record.get('line_id') else [])
+        require(parts and sum((Decimal(str(p['quantity'])) for p in parts),Decimal(0))==q,
+                'initial_supplier_admission_native_lines_missing')
+        for part in parts:
+            require(part['line_id'] not in native_lines and int(part.get('nm_id',nm))==nm,'initial_supplier_admission_native_line_duplicate')
+            native_lines[part['line_id']]=(nm,Decimal(str(part['quantity'])))
+    require(observed==expected and native_lines==current,'initial_supplier_admission_native_composition_changed')
+    for row in saved_balances:
+        if row['warehouse_key'] not in ('production','china_to_ff'):continue
+        sources=row['provenance'].get('source_records')
+        require(isinstance(sources,list) and all(sum((Decimal(str(s[key])) for s in sources),Decimal(0))==Decimal(str(row[field]))
+                for key,field in (('flow_quantity','quantity'),('flow_capital_rub','capital_rub'))),'supplier_dated_source_not_conserved')
+    records=[_supplier_record(shipment,line=line,business_date=day,capital=sum(
+        (Decimal(str(c['amount_rub'])) for c in line['current_components'] if c['business_effective_date']<=day),Decimal(0))) for line in shipment['lines']]
+    require(all(Decimal(r['flow_capital_rub'])>0 for r in records),'supplier_dated_positive_cost_missing')
+    after=_reproject_supplier_source(saved_balances,plan=dict(shipment_id=sid,affected_nm_ids=sorted(expected),business_effective_date=day,
+        after_header=shipment,target_rows_after=[dict(nm_id=nm,provenance=dict(source_records=[r for r in records if r['nm_id']==nm])) for nm in sorted(expected)]),as_of_date=day)
+    preff={'production','china_to_ff'}
+    require([r for r in saved_balances if r['warehouse_key'] not in preff]==[r for r in after if r['warehouse_key'] not in preff],
+            'initial_supplier_admission_foreign_stage_changed')
+    def foreign(rows):
+        return {(r['warehouse_key'],r['nm_id']):[s for s in r.get('provenance',{}).get('source_records',[]) if s.get('shipment_id')!=sid]
+                for r in rows if any(s.get('shipment_id')!=sid for s in r.get('provenance',{}).get('source_records',[]))}
+    require(foreign(saved_balances)==foreign(after),'initial_supplier_admission_foreign_source_changed')
+    before_rows={(r['warehouse_key'],r['nm_id']):r for r in saved_balances};after_rows={(r['warehouse_key'],r['nm_id']):r for r in after}
+    capitals={nm:sum((Decimal(r['flow_capital_rub']) for r in records if r['nm_id']==nm),Decimal(0)) for nm in expected}
+    for key in set(before_rows)|set(after_rows):
+        for field,delta in (('quantity',expected),('capital_rub',capitals)):
+            actual=Decimal(str(after_rows.get(key,{}).get(field,'0')))-Decimal(str(before_rows.get(key,{}).get(field,'0')))
+            require(actual==(delta.get(key[1],Decimal(0)) if key[0]==destination else 0),'initial_supplier_admission_delta_changed')
+    return after,dict(kind='native_initial_pre_ff_supplier_admission',date=day,source_ref=ref,
+        native_version=functional['version_id'],native_before_version=functional['origin_before_version_id'],native_proof_digest=fingerprint(functional),
+        native_source_digest=fingerprint([[r['warehouse_key'],r['nm_id'],s] for r,s in owned(native_context['after_rows'])]),
+        first_payment_date=shipment['first_payment_date'],quantity_by_nm={str(k):str(v) for k,v in expected.items()},
+        capital_by_nm={str(k):str(v) for k,v in capitals.items()},source_records=records)
+
+
+def dated_supplier_rows(saved_balances, *, shipment, day, native_context=None):
+    # Canonical source folds use 160 digits. Initial-admission rows must also
+    # remain exact inputs to every later ordinary source revaluation.
+    with localcontext() as context:
+        context.prec=160
+        return _dated_supplier_rows(saved_balances,shipment=shipment,day=day,native_context=native_context)
+
+
+def _dated_supplier_rows(saved_balances, *, shipment, day, native_context=None):
     """Replace only exact pre-FF source contributions, preserving quantities.
 
     No current destination can erase a past production/China source. Native
@@ -130,6 +205,10 @@ def dated_supplier_rows(saved_balances, *, shipment, day):
     if destination not in {"production", "china_to_ff"}:
         return deepcopy(saved_balances), {"kind": "outside_pre_ff_source", "date": day}
     sid = shipment["shipment_id"]
+    if native_context is not None and not any(s.get('shipment_id')==sid for r in saved_balances for s in r.get('provenance',{}).get('source_records',[])):
+        expected={}
+        for line in shipment['lines']:expected[line['nm_id']]=expected.get(line['nm_id'],Decimal(0))+Decimal(line['quantity'])
+        return _initial_supplier_rows(saved_balances,shipment=shipment,day=day,destination=destination,expected=expected,native_context=native_context)
     prior = {}
     for row in saved_balances:
         if row["warehouse_key"] not in {"production", "china_to_ff"}:

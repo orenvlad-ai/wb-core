@@ -140,4 +140,74 @@ class FrozenReceiptDependencies(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'frozen_relation_missing'):h.receipt_dependency(conn,'foreign')
 
 
+class InitialSupplierAdmission(unittest.TestCase):
+    def fixture(self):
+        from packages.application.operator_supplier_processing import ref
+        shipment=dict(shipment_id='new',invoice_no='invoice',first_payment_date=DAY,actual_shipment_date='',actual_ff_acceptance_date='',
+            expenses_complete=False,source_fingerprint='source',calculation_fingerprint='calc',lines=[dict(line_id='line',nm_id=1,quantity='10',
+                current_components=[dict(source_component_id='paid',component_key='supplier_payment',business_effective_date=DAY,amount_rub='100',document={})])])
+        op=dict(domain='supplier_shipment',operation_id='create-new',shipment_id='new',action='create',revision=1,source_digest='admitted',
+            saved_source=dict(lines=[dict(line_id='line',line_type='product',internal_nm_id=1,qty=10)]))
+        record=dict(shipment_id='new',source_fingerprint='source',calculation_fingerprint='calc',flow_quantity='10',flow_capital_rub='100',
+            line_cost_breakdown=[dict(line_id='line',nm_id=1,quantity='10')])
+        native=dict(version_id='native',warehouse_key='production',nm_id=1,provenance=dict(source_records=[record]))
+        functional=dict(source_ref=ref(op),version_id='native',origin_before_version_id='before',queue_ref=dict(affected_nm_ids=[1]),
+            cost_state=dict(source_fingerprint='source',calculation_fingerprint='calc'))
+        context=dict(operation=op,functional=functional,receipt_dependency=dict(kind='unaccepted',operations=[],lines=[],documents=[]),before_rows=[],after_rows=[native])
+        money='500.0000000000000000000000000000000000000000000001'
+        base=dict(version_id='saved',nm_id=1,quality='foreign',certified=0,cost_covered_quantity='3',wb_quantity='0',wb_in_way_to_client='0',wb_in_way_from_client='0')
+        foreign=dict(shipment_id='foreign',flow_quantity='3',flow_capital_rub=money,quality='foreign')
+        rows=[dict(base,warehouse_key='production',quantity='3',capital_rub=money,wac_rub='foreign',provenance=dict(source_records=[foreign])),
+            dict(base,warehouse_key='ff',quantity='3',capital_rub='30',wac_rub='10',provenance=dict(source_records=[])),
+            dict(base,warehouse_key='wb',quantity='379',capital_rub='3790',wac_rub='10',provenance=dict(source_records=[]))]
+        return rows,shipment,context
+
+    def test_only_admitted_source_activates_full_invoice_with_exact_foreign_money(self):
+        from decimal import localcontext
+        rows,shipment,context=self.fixture();before=deepcopy((rows,shipment,context));results=[]
+        for precision in (12,28,160):
+            with localcontext() as decimal_context:
+                decimal_context.prec=precision
+                after,proof=h.dated_supplier_rows(rows,shipment=shipment,day=DAY,native_context=context)
+                self.assertEqual(decimal_context.prec,precision);results.append((after,proof))
+        self.assertEqual(results[0],results[1]);self.assertEqual(results[1],results[2]);self.assertEqual((rows,shipment,context),before)
+        after,proof=results[0];production=next(r for r in after if r['warehouse_key']=='production')
+        self.assertEqual(production['quantity'],'13')
+        self.assertEqual(production['capital_rub'],'600.0000000000000000000000000000000000000000000001')
+        self.assertEqual([r for r in after if r['warehouse_key']!='production'],rows[1:])
+        self.assertEqual(production['provenance']['source_records'][0],rows[0]['provenance']['source_records'][0])
+        self.assertEqual(proof['kind'],'native_initial_pre_ff_supplier_admission');self.assertEqual(proof['quantity_by_nm'],{'1':'10'})
+        for precision in (12,28,160):
+            with localcontext() as decimal_context:
+                decimal_context.prec=precision
+                ordinary,no_change=h.dated_supplier_rows(after,shipment=shipment,day=DAY)
+                self.assertEqual(ordinary,after);self.assertEqual(no_change['kind'],'native_dated_supplier_components')
+                repriced=deepcopy(shipment);repriced['lines'][0]['current_components'][0]['amount_rub']='125'
+                revised,_=h.dated_supplier_rows(after,shipment=repriced,day=DAY)
+                production=next(r for r in revised if r['warehouse_key']=='production')
+                self.assertEqual(production['capital_rub'],'625.0000000000000000000000000000000000000000000001')
+                self.assertEqual(production['provenance']['source_records'][0],rows[0]['provenance']['source_records'][0])
+                self.assertEqual(decimal_context.prec,precision)
+        unchanged,no_effect=h.dated_supplier_rows(rows,shipment=shipment,day='2026-07-01',native_context=context)
+        self.assertEqual(unchanged,rows);self.assertEqual(no_effect['kind'],'outside_pre_ff_source')
+
+    def test_wrong_owner_receipt_composition_native_proof_and_partial_source_refuse(self):
+        for case in ('edit','financial','accepted','header','admitted_quantity','current_quantity','native_quantity','native_fingerprint','extra_native_sku','before_present','partial_saved'):
+            rows,shipment,context=self.fixture()
+            if case in ('edit','financial'):context['operation']['action']=case
+            elif case=='accepted':context['receipt_dependency']['kind']='legacy_supplier_allocation'
+            elif case=='header':shipment['actual_ff_acceptance_date']='2026-07-25'
+            elif case=='admitted_quantity':context['operation']['saved_source']['lines'][0]['qty']=11
+            elif case=='current_quantity':shipment['lines'][0]['quantity']='11'
+            elif case=='native_quantity':context['after_rows'][0]['provenance']['source_records'][0]['flow_quantity']='9'
+            elif case=='native_fingerprint':context['after_rows'][0]['provenance']['source_records'][0]['source_fingerprint']='foreign'
+            elif case=='extra_native_sku':context['after_rows'].append({**deepcopy(context['after_rows'][0]),'nm_id':2})
+            elif case=='before_present':context['before_rows']=deepcopy(context['after_rows'])
+            elif case=='partial_saved':
+                own=dict(context['after_rows'][0]['provenance']['source_records'][0],flow_quantity='1',flow_capital_rub='1')
+                rows[0]['provenance']['source_records'].append(own)
+                rows[0].update(quantity='4',capital_rub='501.0000000000000000000000000000000000000000000001')
+            with self.subTest(case=case),self.assertRaises(ValueError):h.dated_supplier_rows(rows,shipment=shipment,day=DAY,native_context=context)
+
+
 if __name__=='__main__':unittest.main()

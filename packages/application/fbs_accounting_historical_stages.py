@@ -26,6 +26,7 @@ STAGES = {"PRODUCTION":"production", "PRODUCTION_TO_FF":"china_to_ff", "FF":"ff"
           "FF_TO_WB":"ff_to_wb", "WB":"wb", "WB_ACCEPTANCE_DISCREPANCY":"wb_acceptance_discrepancy"}
 MAX_ROWS = 100000
 MAX_BYTES = 64 * 1024**2
+READ_MODEL_PROOFS = 'validated_read_model_payload_digests_v1'
 
 
 class HistoricalArchivedWbValuationUnavailable(ValueError):
@@ -97,7 +98,33 @@ def _applicability(proof, *, first, day, source):
     return 'pre_revision_dispatch' if debit_day<first else 'exact_frozen_native_money'
 
 
-def capture_dated_stages(conn, *, db_path, book, dates):
+def read_model_capture_mode(saved):
+    """Recover the exact saved representation, including legacy full payloads."""
+    require(('read_models' in saved) != ('read_model_proofs' in saved),
+            'historical_read_model_capture_shape_invalid')
+    if 'read_models' in saved:
+        require(type(saved['read_models']) is list and len(saved['read_models']) == 6
+                and all(type(row) is dict and 'payload_json' in row for row in saved['read_models']),
+                'historical_read_model_capture_shape_invalid')
+        return 'payloads'
+    require(type(saved['read_model_proofs']) is dict
+            and saved['read_model_proofs'].get('contract') == READ_MODEL_PROOFS
+            and set(saved['read_model_proofs']) == {'contract', 'rows'},
+            'historical_read_model_capture_shape_invalid')
+    rows=saved['read_model_proofs']['rows']
+    require(type(rows) is list and len(rows) == 6
+            and all(type(row) is dict and 'payload_digest' in row and 'payload_json' not in row for row in rows),
+            'historical_read_model_capture_shape_invalid')
+    return READ_MODEL_PROOFS
+
+
+def capture_dated_stages(conn, *, db_path, book, dates, read_model_mode='payloads'):
+    # Supplier cost revisions consume balances and rebuild read models. Their
+    # saved evidence needs the validated exact payload digest, not another copy
+    # of that unused presentation. Full source rows remain in the query fence.
+    # Other callers and legacy recovery retain their original representation.
+    require(read_model_mode in ('payloads', READ_MODEL_PROOFS),
+            'historical_read_model_capture_mode_invalid')
     require(conn.in_transaction and conn.execute("PRAGMA query_only").fetchone()[0] == 1,
             "historical_stage_query_only_required")
     result, queries = {}, []
@@ -112,7 +139,8 @@ def capture_dated_stages(conn, *, db_path, book, dates):
         require(exact == wb and exact["complete"], "historical_saved_wb_authority_changed", day=day, source=version_id)
         count,size=conn.execute(f'SELECT count(*),coalesce(sum(length(provenance_json)+length(capital_rub)+length(quantity)),0) FROM {P}functional_balances WHERE version_id=?',(version_id,)).fetchone()
         require(count<=MAX_ROWS and size<=MAX_BYTES,'historical_saved_stage_size_limit',day=day)
-        count,size=conn.execute(f'SELECT count(*),coalesce(sum(length(payload_json)),0) FROM {P}functional_read_models WHERE version_id=?',(version_id,)).fetchone()
+        model_size='length(CAST(payload_json AS BLOB))' if read_model_mode==READ_MODEL_PROOFS else 'length(payload_json)'
+        count,size=conn.execute(f'SELECT count(*),coalesce(sum({model_size}),0) FROM {P}functional_read_models WHERE version_id=?',(version_id,)).fetchone()
         require(count==6 and size<=MAX_BYTES,'historical_complete_stage_models_missing',day=day)
         balances = _version_balances(conn, version_id=version_id)
         require(len(balances) <= MAX_ROWS, "historical_stage_row_limit", day=day)
@@ -180,6 +208,11 @@ def capture_dated_stages(conn, *, db_path, book, dates):
                 proof=_native_debit(conn,record=record,nm_id=nm,day=day,queries=queries)
                 wb_events.append(dict(event=event,native_debit=proof))
         result[day] = {"version":dict(version),"snapshot":snapshots[0],"balances":balances,"read_models":models,"debit_proofs":debit_proofs,"companions":companions,'wb_acceptance_proofs':wb_events}
+        if read_model_mode == READ_MODEL_PROOFS:
+            result[day].pop('read_models')
+            result[day]['read_model_proofs'] = dict(contract=READ_MODEL_PROOFS, rows=[
+                {**{key:value for key,value in model.items() if key != 'payload_json'},
+                 'payload_digest':ready.digest(model['payload_json'])} for model in models])
         require(len(canonical(result).encode()) <= MAX_BYTES, "historical_dated_stage_byte_limit")
         queries.extend((f"SELECT * FROM {P}{table} WHERE version_id=? ORDER BY {order}", (version_id,))
                        for table,order in (("functional_versions","version_id"),("wb_snapshots","snapshot_id"),
@@ -359,10 +392,16 @@ def _build_dated_stage_revision(plan, *, capture, dated):
         retained = deepcopy(candidate["retained_days"][day])
         retained["wb_version_id"] = version_id
         by_key = {(r["warehouse_key"],str(r["nm_id"])):r for r in balances}
+        # Retained cells use the native public projection, as capture_retained_stages
+        # does. Exact Decimal money remains in balances and the pinned WB capture.
+        public_metrics=_metric_rows(balances,affected_nm_ids=sorted(int(nm) for nm in retained['rows']))
         for nm,row in retained["rows"].items():
             for stage in RETAINED_STAGES:
                 r = by_key.get((STAGES[stage],nm))
-                row["stages"][stage].update(quantity=r["quantity"] if r else "0",capital_rub=r["capital_rub"] if r else "0",wac_rub=r["wac_rub"] if r else None,
+                metrics=public_metrics[int(nm)]['metrics']
+                row["stages"][stage].update(quantity=metrics[own_stage_metric_key(stage,'qty')] if r else "0",
+                    capital_rub=metrics[own_stage_metric_key(stage,'capital_rub')] if r else "0",
+                    wac_rub=metrics[own_stage_metric_key(stage,'unit_cost_rub')] if r else None,
                     revision_proof={"contract":CONTRACT,"saved_version":saved["version"]["version_id"],"revised_version":version_id,"source_set_digest":plan["derived_stage_applicability"]["source_set_digest"]})
         retained["source_digest"] = fingerprint({k:v for k,v in retained.items() if k!="source_digest"})
         candidate["retained_days"][day] = retained

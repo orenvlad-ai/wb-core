@@ -18,7 +18,7 @@ from packages.application.shared_sku_cost import build_shared_cost_day
 from packages.application.fbs_inventory_presentation import FbsInventorySnapshot
 
 CONTRACT = "supplier_cost_dated_candidate_v1"
-MAX_BYTES = 160*1024**2
+MAX_BYTES = 256*1024**2  # Measured complete numerical candidate: 179,002,069 bytes.
 MAX_COHORT = 32
 MAX_ATTEMPTS = 32
 require = sources.require
@@ -28,7 +28,8 @@ def code_authority():
     from packages.application import warehouse_functional, warehouse_historical_recovery, warehouse_business_projection
     from packages.application import historical_dated_inputs
     modules = (sources, warehouse_functional, warehouse_historical_recovery, warehouse_business_projection, historical_dated_inputs)
-    paths = [Path(m.__file__) for m in modules] + [Path(__file__), Path(__file__).with_name("operator_supplier_history.py"), Path(stages.__file__), Path(processing.__file__)]
+    paths = [Path(m.__file__) for m in modules] + [Path(__file__), Path(__file__).with_name("operator_supplier_history.py"), Path(stages.__file__), Path(processing.__file__),
+        Path(__file__).with_name('fbs_accounting_historical_publication.py'),Path(__file__).with_name('fbs_accounting_historical_history.py')]
     return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 
 
@@ -41,9 +42,21 @@ def business_image(rows):
         "wb_in_way_to_client", "wb_in_way_from_client")} for row in sorted(rows,key=lambda r:(r["warehouse_key"],r["nm_id"]))]
 
 
-def _wb_rows(rows, *, daily, day, ids):
+def _wb_rows(rows, *, daily, day, ids, members=None):
     """Only the actual correlated native daily cost can replace WB money."""
     result = deepcopy(rows)
+    # Supplier cost reaches the FF/WB pools only through a real native FF
+    # acceptance. An entirely unaccepted cohort owns pre-FF money only; a
+    # different same-date WB observation is not its monetary operand. Header
+    # and empty native acceptance sets are already pinned in source_inputs.
+    if members and all(m['receipt_dependency']['kind']=='unaccepted'
+            and all(m['receipt_dependency'].get(key)==[] for key in ('operations','lines','documents'))
+            and m['shipment'].get('actual_ff_acceptance_date')=='' for m in members):
+        return result,[dict(kind='unaccepted_supplier_has_no_wb_cost_authority',date=day,
+            source_refs=[m['source_ref'] for m in members],
+            receipt_absence=[dict(shipment_id=m['shipment']['shipment_id'],
+                actual_ff_acceptance_date=m['shipment']['actual_ff_acceptance_date'],
+                dependency=deepcopy(m['receipt_dependency'])) for m in members])]
     by_nm = {int(r["nm_id"]): r for r in daily if r["as_of_date"] == day}
     evidence = []
     for row in result:
@@ -132,7 +145,7 @@ def retained_obligations(conn, natives, *, runtime, pinned=None):
             revision=ledger.execute('SELECT version,payload,previous_version FROM accounting_revisions WHERE operation_id=?',(manifest['book_operation_id'],)).fetchone()
             require(revision is not None or row['state']=='prepared','prior_book_revision_missing')
             if revision:require(revision[0]==manifest['after_book'] and revision[2]==manifest['expected_book'] and accounting.unpack(ledger,revision[1])==manifest['candidate']['candidate_book'],'prior_book_revision_changed')
-        if row['state']=='complete':require(row['book_version']==manifest['after_book'] and row['after_digest']==ready.digest(manifest['targets'][-1]['after_json']),'prior_native_publication_changed')
+        if row['state']=='complete':require(row['book_version']==manifest['after_book'] and row['after_digest']==history._target_after_digest(manifest['targets'][-1]),'prior_native_publication_changed')
         for old in manifest['candidate']['cohort_refs']:
             actual=processing.operation(conn,old['operation_id']);require(processing.ref(actual)==old,'prior_source_identity_changed')
             if processing.current(conn,actual):
@@ -158,9 +171,39 @@ def book_tuple(book,day):
     return {key:book[key].get(day) for key in ('wb_days','retained_days','shared_days','presentations')}
 
 
+def _ghost_quantity_rows(conn,prior,day,facts,queries,native_rows):
+    """Replay only the exact initial admissions already proved by this owner.
+
+    A cost-only ghost keeps its original quantities. A first admission added
+    the invoice's physical source; verify that same pure admission again from
+    the original saved facts rather than treating any ghost delta as allowed.
+    """
+    rows=facts
+    for item in prior['candidate']['editions'][day]['source_dependency']['supplier']:
+        proof=item['proof']
+        if proof['kind']!='native_initial_pre_ff_supplier_admission':continue
+        members=[m for m in prior['candidate']['members'] if m['source_ref']==item['source_ref']]
+        require(len(members)==1 and proof['source_ref']==item['source_ref'] and proof['date']==day,
+                'ghost_initial_admission_changed')
+        member=members[0];functional=member['functional']
+        op=processing.operation(conn,member['source_ref']['operation_id'])
+        require(processing.ref(op)==member['source_ref'],'ghost_initial_admission_changed')
+        for version in (functional['origin_before_version_id'],functional['version_id']):
+            if version not in native_rows:
+                native_rows[version]=stages._version_balances(conn,version_id=version)
+                queries.append((f'SELECT * FROM {stages.P}functional_balances WHERE version_id=? ORDER BY warehouse_key,nm_id',(version,)))
+        queries.append((f'SELECT proof_json,proof_digest FROM {processing.FUNCTIONAL} WHERE operation_id=? AND version_id=?',
+                        (member['source_ref']['operation_id'],functional['version_id'])))
+        rows,actual=sources.dated_supplier_rows(rows,shipment=member['shipment'],day=day,native_context=dict(
+            operation=op,functional=functional,receipt_dependency=member['receipt_dependency'],
+            before_rows=native_rows[functional['origin_before_version_id']],after_rows=native_rows[functional['version_id']]))
+        require(actual==proof,'ghost_initial_admission_changed')
+    return rows
+
+
 def recovery_stage_book(conn,runtime,book,obligations,dates):
     """Only an exact own after-book ghost can reuse ORIGINAL saved stages."""
-    capture=deepcopy(book);recovery=[];queries=[]
+    capture=deepcopy(book);recovery=[];queries=[];native_rows={}
     for day in dates:
         version=book['wb_days'][day]['version_id']
         if conn.execute(f'SELECT 1 FROM {stages.P}functional_versions WHERE version_id=?',(version,)).fetchone():continue
@@ -174,10 +217,13 @@ def recovery_stage_book(conn,runtime,book,obligations,dates):
             row=ledger.execute('SELECT version,payload,previous_version FROM accounting_revisions WHERE operation_id=?',(prior['book_operation_id'],)).fetchone()
             require(row and row[0]==prior['after_book'] and row[2]==prior['expected_book'] and accounting.unpack(ledger,row[1])==prior['candidate']['candidate_book'],'ghost_book_revision_unproved')
         original,_=accounting.load(runtime.runtime_dir,version=prior['expected_book'])
-        saved=stages.capture_dated_stages(conn,db_path=runtime.db_path,book=original,dates=[day])
+        original_saved=prior['candidate']['editions'][day]['saved']
+        saved=stages.capture_dated_stages(conn,db_path=runtime.db_path,book=original,dates=[day],
+            read_model_mode=stages.read_model_capture_mode(original_saved))
         require(saved['dates'][day]==prior['candidate']['editions'][day]['saved'],'ghost_original_stage_changed')
         ghost=prior['candidate']['editions'][day]['balances'];facts=saved['dates'][day]['balances']
-        require([(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in ghost]==[(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in facts],'ghost_quantity_changed')
+        admitted=_ghost_quantity_rows(conn,prior,day,facts,queries,native_rows)
+        require([(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in ghost]==[(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in admitted],'ghost_quantity_changed')
         # The old after-image proves ownership only. Physical quantities and
         # frozen modern money come exclusively from the original saved facts.
         for key,value in book_tuple(original,day).items():capture[key][day]=deepcopy(value)
@@ -227,8 +273,10 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         require(len(dates)<=sources.MAX_DATES,'date_scope_unavailable')
         require(all(d in book["wb_days"] and d in book["retained_days"] for d in dates), "dated_book_inputs_missing")
         stage_book,recovery,recovery_queries=recovery_stage_book(conn,runtime,book,obligations,dates)
-        dated = stages.capture_dated_stages(conn,db_path=runtime.db_path,book=stage_book,dates=dates) if dates else {
+        dated = stages.capture_dated_stages(conn,db_path=runtime.db_path,book=stage_book,dates=dates,
+            read_model_mode=stages.READ_MODEL_PROOFS) if dates else {
             "dates": {}, "query_fence": [], "source_digest": fingerprint({})}
+        del stage_book  # Captured immutable rows own the evidence; the full copy is no longer used.
         daily_index={}
         for m in natives:
             actual=processing.daily_rows(conn,m['queue'],functional['business_date'])
@@ -248,7 +296,7 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
             proof=m['functional'];identity=m['operation']['operation_id']
             queries.extend([(f'SELECT * FROM {processing.FUNCTIONAL} WHERE operation_id=? AND version_id=?',(identity,proof['version_id'])),
                 (f'SELECT * FROM {sources.P}warehouse_targeted_recalc_queue WHERE queue_id=?',(m['queue']['queue_id'],))])
-            for version in {proof['version_id'],proof['origin_before_version_id']}:
+            for version in sorted({proof['version_id'], proof['origin_before_version_id']}):
                 queries.extend([(f'SELECT * FROM {sources.P}warehouse_functional_versions WHERE version_id=?',(version,)),
                     (f'SELECT * FROM {sources.P}warehouse_functional_balances WHERE version_id=? ORDER BY warehouse_key,nm_id',(version,)),
                     (f'SELECT * FROM {sources.P}warehouse_supplier_cost_states WHERE version_id=? AND shipment_id=?',(version,m['operation']['shipment_id']))])
@@ -270,17 +318,21 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         current_after = processing.balance_rows(conn,functional["version_id"],functional["queue_ref"]["affected_nm_ids"])
         current_evaluation = {"before_version":original_version,"after_version":functional["version_id"],
             "before_digest":fingerprint(business_image(current_before)),"after_digest":fingerprint(business_image(current_after))}
-        member_evaluation={}
+        member_evaluation={};native_contexts={}
         for member in members:
             own=member['source_ref'];proof=member['functional'];own_ids=proof['queue_ref']['affected_nm_ids']
-            before=[r for r in stages._version_balances(conn,version_id=proof['origin_before_version_id']) if r['nm_id'] in own_ids]
-            after=[r for r in stages._version_balances(conn,version_id=proof['version_id']) if r['nm_id'] in own_ids]
+            all_before=stages._version_balances(conn,version_id=proof['origin_before_version_id'])
+            before=[r for r in all_before if r['nm_id'] in own_ids]
+            all_after=stages._version_balances(conn,version_id=proof['version_id'])
+            after=[r for r in all_after if r['nm_id'] in own_ids]
             def contributions(rows):
                 return sorted([(r['warehouse_key'],r['nm_id'],str(s['flow_quantity']),str(s['flow_capital_rub'])) for r in rows for s in r['provenance'].get('source_records',[]) if s.get('shipment_id')==own['shipment_id']])
             prior,actual=contributions(before),contributions(after)
             independent=bool(prior or actual)
             no_change=(prior==actual) if independent else (len(members)==1 and business_image(before)==business_image(after))
             member_evaluation[own['operation_id']]=dict(current_before=fingerprint(prior),current_after=fingerprint(actual),independent_supplier_contributions=independent,current_no_change=no_change,dated={})
+            native_contexts[own['operation_id']]=dict(operation=next(m['operation'] for m in natives if m['operation']['operation_id']==own['operation_id']),
+                functional=proof,receipt_dependency=member['receipt_dependency'],before_rows=all_before,after_rows=all_after)
         ff_revisions={}
         for day in dates:
             after,proof,fence=sources.dated_ff_rows(conn,dated['dates'][day],shipment=shipment,dependency=dependency,day=day,cohort=members)
@@ -293,10 +345,11 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         rows=ff_revisions[day][0];supplier_proof=[]
         for member in members:
             before=fingerprint(business_image(rows))
-            rows,proof=sources.dated_supplier_rows(rows,shipment=member['shipment'],day=day)
+            rows,proof=sources.dated_supplier_rows(rows,shipment=member['shipment'],day=day,
+                native_context=native_contexts[member['source_ref']['operation_id']])
             supplier_proof.append(dict(source_ref=member['source_ref'],proof=proof))
             member_evaluation[member['source_ref']['operation_id']]['dated'][day]=dict(before=before,after=fingerprint(business_image(rows)))
-        rows, wb_proof = _wb_rows(rows,daily=daily,day=day,ids=ids)
+        rows, wb_proof = _wb_rows(rows,daily=daily,day=day,ids=ids,members=members)
         evaluated[day] = {"before": fingerprint(business_image(saved["balances"])),
                           "after": fingerprint(business_image(rows)), "supplier": supplier_proof,
                           "ff": ff_revisions[day][1], "wb": wb_proof, "saved_version": saved["version"]["version_id"]}
@@ -311,12 +364,20 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         wb = stages._cloned_wb_capture(version,snapshot,rows,day=day,nm_ids=book["wb_days"][day]["requested_nm_ids"])
         require(wb["complete"], "revised_wb_authority_incomplete")
         retained = deepcopy(book["retained_days"][day]);retained["wb_version_id"] = version_id
+        for member,proof in zip(members,supplier_proof):
+            if proof['proof']['kind']=='native_initial_pre_ff_supplier_admission':
+                require(set(proof['proof']['quantity_by_nm'])<=set(retained['rows']),'initial_supplier_admission_catalog_missing')
         by_key = {(r["warehouse_key"],str(r["nm_id"])):r for r in rows}
+        # Same presentation boundary as native capture_retained_stages; raw
+        # source balances and exact WB capture money retain their full precision.
+        public_metrics=stages._metric_rows(rows,affected_nm_ids=sorted(int(nm) for nm in retained['rows']))
         for nm, row in retained["rows"].items():
             for stage in stages.RETAINED_STAGES:
                 operand = by_key.get((stages.STAGES[stage],nm))
-                row["stages"][stage].update(quantity=operand["quantity"] if operand else "0",
-                    capital_rub=operand["capital_rub"] if operand else "0",wac_rub=operand["wac_rub"] if operand else None,
+                metrics=public_metrics[int(nm)]['metrics']
+                row["stages"][stage].update(quantity=metrics[stages.own_stage_metric_key(stage,'qty')] if operand else "0",
+                    capital_rub=metrics[stages.own_stage_metric_key(stage,'capital_rub')] if operand else "0",
+                    wac_rub=metrics[stages.own_stage_metric_key(stage,'unit_cost_rub')] if operand else None,
                     revision_proof={"contract":CONTRACT,"saved_version":saved["version"]["version_id"],"revised_version":version_id})
         retained["source_digest"] = fingerprint({k:v for k,v in retained.items() if k!="source_digest"})
         candidate["retained_days"][day] = retained;candidate["wb_days"][day] = wb
@@ -327,6 +388,8 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
             state=member['functional']['cost_state'];sid=member['source_ref']['shipment_id']
             prior=next((r for r in companions['supplier_cost_states'] if r['shipment_id']==sid),None)
             if prior is not None:prior.update(state)
+            elif any(p['source_ref']==member['source_ref'] and p['proof']['kind']=='native_initial_pre_ff_supplier_admission' for p in supplier_proof):
+                companions['supplier_cost_states'].append(dict(version_id=version_id,created_at=now.isoformat(),**state))
         editions[day] = {"version_id":version_id,"version":version,"snapshot":snapshot,"saved":saved,
                         "balances":rows,"companions":companions,"source_dependency":evaluated[day]}
     if effects:
@@ -346,13 +409,15 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         "code_authority":code_authority(),"created_at":now.isoformat()}
     require(len(canonical(result).encode()) <= MAX_BYTES, "candidate_size_limit")
     result=json.loads(canonical(result))
-    result["manifest_digest"] = fingerprint(result)
+    from packages.application.fbs_accounting_historical_history import _stream_fingerprint
+    result["manifest_digest"] = _stream_fingerprint(result)
     return result
 
 
 def validate(candidate, *, runtime, now):
-    require(candidate.get("contract") == CONTRACT and candidate.get("manifest_digest") == fingerprint(
+    from packages.application.fbs_accounting_historical_history import _stream_fingerprint
+    require(candidate.get("contract") == CONTRACT and candidate.get("manifest_digest") == _stream_fingerprint(
         {k:v for k,v in candidate.items() if k!="manifest_digest"}), "candidate_corrupt")
     require(candidate["code_authority"] == code_authority(), "formula_changed")
     require(prepare(runtime,candidate["operation_id"],now=now,before_book=candidate["before_book"],cohort_refs=candidate['cohort_refs'],obligations=candidate['obligations']) == candidate, "independent_rebuild_changed")
-    return deepcopy(candidate)
+    return candidate  # Validation is non-mutating; the caller already owns this verified object.

@@ -16,7 +16,7 @@
     "fbs_native_attachment_imports": {"scripts": ["apps/fbs_historical_fbo_native_smoke.py", "apps/fbs_temporary_allocation_action_smoke.py", "apps/fbs_temporary_allocation_repair_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "operator_supplier_bounded_imports": {"scripts": ["apps/historical_dated_inputs_smoke.py", "apps/operator_supplier_release_scope_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]},
     "operator_complaint_http_imports": {"scripts": ["apps/operator_complaint_runs_http_smoke.py", "apps/operator_complaint_runs_browser_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
-    "operator_supplier_history_imports": {"scripts": ["apps/operator_supplier_history_cycle_smoke.py", "apps/operator_supplier_history_sources_smoke.py", "apps/operator_supplier_history_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]},
+    "operator_supplier_history_imports": {"scripts": ["apps/operator_supplier_history_cycle_smoke.py", "apps/operator_supplier_history_sources_smoke.py", "apps/operator_supplier_history_smoke.py", "apps/operator_supplier_history_ready_codec_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]},
     "operator_fulfillment_imports": {"scripts": ["apps/operator_fulfillment_services_smoke.py", "apps/operator_fulfillment_services_native_smoke.py", "apps/operator_fulfillment_services_integration_smoke.py", "apps/operator_fulfillment_services_browser_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"]},
     "operator_next_imports": {"scripts": ["apps/operator_supplier_release_scope_smoke.py", "apps/operator_settings_facilities_smoke.py", "apps/operator_settings_facilities_http_smoke.py", "apps/operator_facility_journal_cycle_smoke.py","apps/operator_manual_ff_stock_smoke.py","apps/operator_manual_ff_stock_http_smoke.py","apps/operator_facility_mappings_smoke.py", "apps/operator_facility_mappings_http_smoke.py", "apps/operator_supplier_contracts_smoke.py", "apps/operator_supplier_contracts_http_smoke.py", "apps/operator_nomenclature_smoke.py", "apps/operator_nomenclature_journal_smoke.py", "apps/operator_compat_uploads_smoke.py", "apps/operator_supplier_shipments_smoke.py", "apps/operator_supplier_shipments_http_smoke.py", "apps/operator_supplier_factual_dates_smoke.py", "apps/fbs_accounting_historical_revision_smoke.py", "apps/fbs_accounting_historical_revision_writer_smoke.py", "apps/fbs_accounting_historical_cohort_smoke.py", "apps/fbs_accounting_historical_stages_smoke.py", "apps/fbs_accounting_historical_publication_smoke.py", "apps/fbs_accounting_historical_history_smoke.py", "apps/business_data_formula_resume_smoke.py", "apps/operator_supplier_processing_smoke.py", "apps/operator_supplier_processing_cohort_smoke.py", "apps/operator_supplier_journal_http_smoke.py", "apps/operator_policy_smoke.py", "apps/operator_policy_http_smoke.py", "apps/operator_policy_history_smoke.py", "apps/operator_external_operations_smoke.py", "apps/operator_policy_journal_smoke.py", "apps/operator_supplier_financial_journal_smoke.py", "apps/operator_feedback_operations_smoke.py", "apps/operator_feedback_forms_browser_smoke.py", "apps/operator_supplier_financial_http_smoke.py", "apps/operator_supplier_financial_native_smoke.py", "apps/operator_supplier_financial_processing_smoke.py", "apps/operator_cny_documents_smoke.py", "apps/operator_cny_documents_processing_smoke.py", "apps/operator_cny_documents_http_smoke.py", "apps/operator_cny_journal_smoke.py", "apps/operator_trade_documents_smoke.py", "apps/operator_trade_documents_http_smoke.py", "apps/operator_trade_journal_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "payment_pdf_fixtures": {
@@ -191,6 +191,11 @@
       "patterns": ["packages/application/sqlite_contention.py", "packages/application/operator_warehouse_documents.py", "packages/application/operator_supplier_processing.py", "packages/application/operator_supplier_history.py", "packages/application/ff_stock_ledger.py", "apps/cycle_sqlite_contention_smoke.py"],
       "commands": [["python3", "apps/cycle_sqlite_contention_smoke.py"]],
       "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]
+    },
+    "cycle_read_sqlite_contention": {
+      "patterns": ["packages/application/sqlite_contention.py", "packages/application/warehouse_recovery_policy.py", "packages/application/operator_ff_overhead.py", "packages/application/fbs_current_snapshot_policy.py", "apps/cycle_read_sqlite_contention_smoke.py"],
+      "commands": [["python3", "apps/cycle_read_sqlite_contention_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
     },
     "operator_warehouse_contention": {
       "patterns": ["packages/application/operator_warehouse_documents.py", "apps/operator_warehouse_documents_contention_smoke.py"],
@@ -1015,6 +1020,10 @@
         [
           "python3",
           "apps/operator_supplier_history_cycle_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/operator_supplier_history_ready_codec_smoke.py"
         ]
       ],
       "pip": [

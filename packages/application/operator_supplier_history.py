@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-import json,sqlite3,time
+import base64,hashlib,json,sqlite3,time,zlib
 from packages.application import ready_publication as ready, fbs_accounting_runtime as accounting
 from packages.application import operator_supplier_history_candidate as candidate
 from packages.application import operator_supplier_history_sources as sources
@@ -20,6 +20,11 @@ from packages.application.sqlite_contention import connect_sqlite
 
 CONTRACT='supplier_cost_dated_publication_v1'
 MAX_COHORT=32
+MAX_READY_HEADERS=10000
+MAX_READY_HEADER_BYTES=8*1024**2
+MAX_READY_SOURCE_BYTES=256*1024**2  # Measured selected bodies: 192,995,022 UTF-8 bytes.
+MAX_PUBLICATION_BYTES=256*1024**2
+READY_JSON_ENCODING='supplier_ready_zlib_utf8_v1'
 require=sources.require
 EXPECTED_NATIVE={
     'supplier_exact_queue_pending','supplier_exact_functional_publication_pending',
@@ -81,25 +86,146 @@ def _checked(runtime,identity,reason,now,*,state='processing',expected_check=Non
         conn.execute(f'INSERT OR REPLACE INTO {processing.ATTEMPTS} VALUES(?,?,?,?)',(identity,state,reason,now.isoformat()));conn.commit()
 
 
+def _large_fingerprint(value):
+    from packages.application.fbs_accounting_historical_history import _stream_fingerprint
+    return _stream_fingerprint(value)
+
+
+def _publication_json_size(value):
+    from packages.application.fbs_accounting_historical_publication import _json_size
+    try:return _json_size(value,MAX_PUBLICATION_BYTES,'supplier_history_publication_size_limit')
+    except ValueError as exc:
+        if str(exc)!='supplier_history_publication_size_limit':raise
+        require(False,'publication_size_limit')
+
+
+def _pack_ready_json(text):
+    if text is None:return None
+    require(type(text) is str,'ready_image_invalid')
+    raw=text.encode('utf-8')
+    require(len(raw)<=MAX_READY_SOURCE_BYTES,'ready_image_size_limit')
+    return dict(encoding=READY_JSON_ENCODING,utf8_bytes=len(raw),
+        sha256='sha256:'+hashlib.sha256(raw).hexdigest(),
+        payload=base64.b64encode(zlib.compress(raw,6)).decode('ascii'))
+
+
+def _ready_json(value):
+    """Recover one exact Ready image; never expand a complete manifest."""
+    if value is None or type(value) is str:return value
+    require(type(value) is dict and set(value)=={'encoding','utf8_bytes','sha256','payload'}
+        and value['encoding']==READY_JSON_ENCODING,'ready_image_encoding_invalid')
+    size=value['utf8_bytes'];payload=value['payload']
+    require(type(size) is int and 0<=size<=MAX_READY_SOURCE_BYTES
+        and type(payload) is str and len(payload)<=((MAX_READY_SOURCE_BYTES+MAX_READY_SOURCE_BYTES//100+65536)*4+2)//3,
+        'ready_image_size_limit')
+    try:
+        compressed=base64.b64decode(payload,validate=True)
+        decoder=zlib.decompressobj()
+        raw=decoder.decompress(compressed,size+1)
+        require(len(raw)==size and decoder.eof and not decoder.unconsumed_tail
+            and not decoder.unused_data,'ready_image_compression_invalid')
+        require(type(value['sha256']) is str and value['sha256']=='sha256:'+hashlib.sha256(raw).hexdigest(),
+            'ready_image_digest_changed')
+        return raw.decode('utf-8')
+    except (ValueError,zlib.error,UnicodeError) as exc:
+        if isinstance(exc,sources.SupplierHistoryError):raise
+        require(False,'ready_image_compression_invalid')
+
+
+def _target_expected(target):
+    return ready.ExpectedReady(**{**target['expected'],'plan_json':_ready_json(target['expected']['plan_json'])})
+
+
+def _target_after_digest(target):
+    return ready.digest(_ready_json(target['after_json']))
+
+
 def _verify(manifest):
-    require(manifest.get('contract')==CONTRACT and manifest.get('manifest_digest')==fingerprint({k:v for k,v in manifest.items() if k!='manifest_digest'}),'publication_corrupt')
+    require(manifest.get('contract')==CONTRACT and manifest.get('manifest_digest')==_large_fingerprint({k:v for k,v in manifest.items() if k!='manifest_digest'}),'publication_corrupt')
     require(manifest['operation_id']=='supplier-history:'+manifest['source_ref']['operation_id'],'publication_identity_changed')
     require(manifest['candidate']['code_authority']==candidate.code_authority(),'formula_changed')
     require(sorted({*manifest['candidate']['effect_dates'],manifest['candidate']['functional']['business_date']})==sorted({d for t in manifest['targets'] for d in t['dates']}) and manifest['candidate']['effect_dates'],'publication_scope_changed')
-    require(manifest['after_book']==fingerprint(manifest['candidate']['candidate_book']),'book_candidate_corrupt')
+    require(manifest['after_book']==_large_fingerprint(manifest['candidate']['candidate_book']),'book_candidate_corrupt')
+    encoding=manifest.get('storage_encoding')
+    require('storage_encoding' not in manifest or encoding==READY_JSON_ENCODING,'ready_image_encoding_invalid')
+    if encoding is None:
+        require(all(type(t['after_json']) is str and (t['expected']['plan_json'] is None
+            or type(t['expected']['plan_json']) is str) for t in manifest['targets']),
+            'ready_image_encoding_invalid')
+    if encoding is not None:
+        for field in ('before','after'):
+            total=0
+            for target in manifest['targets']:
+                value=target['expected']['plan_json'] if field=='before' else target['after_json']
+                require((field=='before' and value is None) or type(value) is dict,'ready_image_encoding_invalid')
+                if value is not None:
+                    _ready_json(value)
+                    total+=value['utf8_bytes']
+            require(total<=MAX_READY_SOURCE_BYTES,'ready_image_size_limit')
 
 
-def _targets(runtime, numerical, *, now):
-    from packages.application.historical_dated_inputs import selected,dated_slice,book_lineage
-    from packages.application.fbs_accounting_historical_publication import materialize_exact_dates
+def _selected_ready(conn,dates,today):
+    """Native bindings from bounded headers; only selected bodies are operands."""
+    from packages.application.historical_dated_inputs import require as dated_require
+    from packages.application.web_vitrina_window_v3 import _ReadyHeader,_select_bindings,has_complete_recovery
+    from packages.application.sheet_vitrina_v1 import _require_date_columns_or_infer
+    from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+    active=conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()
+    dated_require(active,'active_bundle_missing');bundle=active[0]
+    sql=f'''SELECT bundle_version,as_of_date,activated_at,refreshed_at,
+        json_extract(plan_json,'$.snapshot_id') AS snapshot_id,
+        json_extract(plan_json,'$.date_columns') AS dates_json,
+        (SELECT json_extract(value,'$.header') FROM json_each(plan_json,'$.sheets')
+         WHERE json_extract(value,'$.sheet_name')='DATA_VITRINA' LIMIT 1) AS header_json,
+        length(CAST(plan_json AS BLOB)) AS source_bytes FROM {ready.TABLE} WHERE bundle_version=?'''
+    count,size=conn.execute(f'''SELECT count(*),coalesce(sum(
+        length(CAST(coalesce(dates_json,'') AS BLOB))+length(CAST(coalesce(header_json,'') AS BLOB))+
+        length(CAST(coalesce(snapshot_id,'') AS BLOB))+
+        length(CAST(bundle_version||as_of_date||activated_at||refreshed_at AS BLOB))),0) FROM ({sql})''',(bundle,)).fetchone()
+    require(count<=MAX_READY_HEADERS and size<=MAX_READY_HEADER_BYTES,'ready_header_size_limit')
+    raw=[dict(r) for r in conn.execute(sql+' ORDER BY activated_at DESC,refreshed_at DESC,as_of_date DESC',(bundle,))]
+    headers=[];header_bytes=0
+    for row in raw:
+        header_bytes+=len(canonical(row).encode())
+        require(header_bytes<=MAX_READY_HEADER_BYTES,'ready_header_size_limit')
+        columns=_require_date_columns_or_infer({'date_columns':json.loads(row['dates_json']) if row['dates_json'] is not None else None},json.loads(row['header_json'] or '[]'))
+        headers.append(_ReadyHeader(bundle,row['as_of_date'],row['snapshot_id'],row['activated_at'],row['refreshed_at'],tuple(columns),'{}',0))
+    recovery={};recovery_bytes=0
+    def bounded_recovery(connection,header,day):
+        nonlocal recovery_bytes
+        if header.key not in recovery:
+            query=f"SELECT json_extract(plan_json,'$.metadata.server_cell_presentation') AS value FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?"
+            size=connection.execute(f'SELECT length(CAST(value AS BLOB)) FROM ({query})',header.key).fetchone()
+            recovery_bytes+=(size[0] or 0) if size else 0
+            dated_require(recovery_bytes<=MAX_READY_SOURCE_BYTES,'source_size_limit')
+            row=connection.execute(query,header.key).fetchone()
+            try:recovery[header.key]=json.loads(row[0] or '{}') if row else {}
+            except json.JSONDecodeError:recovery[header.key]={}
+        return has_complete_recovery({'server_cell_presentation':recovery[header.key]},day)
+    bindings,_=_select_bindings(conn,headers,dates,bundle,today,recovery_check=bounded_recovery)
+    source={binding.date:binding.source_key for binding in bindings}
+    dated_require(set(source)==set(dates) and all(source.values()),'dated_ready_inputs_missing')
+    keys=set(source.values())
+    dated_require(sum(row['source_bytes'] for row in raw if (bundle,row['as_of_date']) in keys)<=MAX_READY_SOURCE_BYTES,'source_size_limit')
+    result=[]
+    for header in headers:
+        if header.key not in keys:continue
+        row=dict(conn.execute(f'SELECT * FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',header.key).fetchone())
+        _deserialize_sheet_vitrina_plan(row['plan_json'])
+        result.append((row,sorted(day for day,key in source.items() if key==header.key)))
+    return result
+
+
+def _targets(runtime, numerical, *, now,ready_encoding=READY_JSON_ENCODING):
+    from packages.application.historical_dated_inputs import dated_slice,book_lineage
+    from packages.application.fbs_accounting_historical_publication import materialize_exact_dates,_parameter_proof
     from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan,_serialize_sheet_vitrina_plan
     from packages.application.inventory_quantity import resolve_plan_quantities,CONTRACT as QUANTITY_CONTRACT,EFFECTIVE_DATE as QUANTITY_EFFECTIVE_DATE
     from packages.application.sheet_vitrina_v1_inventory_history import FINALIZATIONS_TABLE
-    from packages.application.web_vitrina_management_history import dated_parameters
     after_book=fingerprint(numerical['candidate_book']);targets=[]
     with ready.readonly(runtime.db_path) as conn:
         dates=sorted({*numerical['effect_dates'],numerical['functional']['business_date']})
-        for row,days in selected(conn,dates,numerical['functional']['business_date']):
+        for row,days in _selected_ready(conn,dates,numerical['functional']['business_date']):
             target={'bundle_version':row['bundle_version'],'as_of_date':row['as_of_date']}
             plan=materialize_exact_dates(_deserialize_sheet_vitrina_plan(row['plan_json']),book=numerical['candidate_book'],version=after_book,runtime_dir=runtime.runtime_dir,target=target,dates=days,now=now,connection=conn)
             inventory=[]
@@ -110,21 +236,33 @@ def _targets(runtime, numerical, *, now):
                 predecessor=conn.execute(f'SELECT finalization_digest FROM {FINALIZATIONS_TABLE} WHERE business_date=? ORDER BY finalization_sequence DESC LIMIT 1',(day,)).fetchone()
                 inventory.append(dict(business_date=day,capture_kind='accepted_refresh',formula_version=QUANTITY_CONTRACT,bundle_version=row['bundle_version'],ready_snapshot_id=plan.snapshot_id,ready_plan_version=plan.plan_version,generation_identity=row['bundle_version'],facility_roster=operands['facility_roster'],source_manifest=operands['source_manifest'],components=operands['components'],captured_at=now.isoformat(),expected_predecessor=predecessor[0] if predecessor else '',closed=day<numerical['functional']['business_date']))
             encoded=_serialize_sheet_vitrina_plan(plan)
-            targets.append(dict(expected=asdict(ready.ExpectedReady(row['bundle_version'],row['as_of_date'],row['plan_json'])),after_json=encoded,dates=days,inventory=inventory,dated_outputs={day:fingerprint(dated_slice(encoded,day)) for day in days}))
+            target=dict(expected=asdict(ready.ExpectedReady(row['bundle_version'],row['as_of_date'],row['plan_json'])),after_json=encoded,dates=days,inventory=inventory,dated_outputs={day:fingerprint(dated_slice(encoded,day)) for day in days})
+            if ready_encoding is not None:
+                require(ready_encoding==READY_JSON_ENCODING,'ready_image_encoding_invalid')
+                target['expected']['plan_json']=_pack_ready_json(target['expected']['plan_json'])
+                target['after_json']=_pack_ready_json(encoded)
+            targets.append(target)
         targets.sort(key=lambda target:(numerical['functional']['business_date'] in target['dates'],target['expected']['as_of_date']))
-        parameters={day:dated_parameters(conn,day) for day in dates}
+        parameters=_parameter_proof(conn,dates)
+    # Normalize each target independently; the numerical candidate and native
+    # parameter proof already have durable JSON types. Avoid a full-copy roundtrip.
+    for index,target in enumerate(targets):targets[index]=json.loads(canonical(target))
     return targets,parameters
 
 
 def prepare(runtime,operation_id,*,now):
-    numerical=candidate.prepare(runtime,operation_id,now=now)
+    return _prepare_publication(runtime,candidate.prepare(runtime,operation_id,now=now),now=now)
+
+
+def _prepare_publication(runtime,numerical,*,now):
     operation_id=numerical['operation_id']
     require(numerical['effect_dates'],'no_dated_effect')
     targets,parameters=_targets(runtime,numerical,now=now)
-    result=dict(contract=CONTRACT,operation_id='supplier-history:'+operation_id,attempt_id=numerical['attempt_id'],source_ref=numerical['source_ref'],candidate=numerical,targets=targets,parameter_proof=parameters,expected_book=numerical['before_book'],after_book=fingerprint(numerical['candidate_book']),created_at=now.isoformat(),authority=ready.capture_authority(runtime.runtime_dir),book_operation_id='supplier-history-book:'+numerical['attempt_id'])
-    require(len(canonical(result).encode())<=candidate.MAX_BYTES,'publication_size_limit')
-    result=json.loads(canonical(result))
-    result['manifest_digest']=fingerprint(result);_verify(result);return result
+    authority=json.loads(canonical(ready.capture_authority(runtime.runtime_dir)))
+    result=dict(contract=CONTRACT,operation_id='supplier-history:'+operation_id,attempt_id=numerical['attempt_id'],source_ref=numerical['source_ref'],candidate=numerical,targets=targets,parameter_proof=parameters,expected_book=numerical['before_book'],after_book=_large_fingerprint(numerical['candidate_book']),created_at=now.isoformat(),authority=authority,book_operation_id='supplier-history-book:'+numerical['attempt_id'])
+    result['storage_encoding']=READY_JSON_ENCODING
+    require(_publication_json_size(result)<=MAX_PUBLICATION_BYTES,'publication_size_limit')
+    result['manifest_digest']=_large_fingerprint(result);_verify(result);return result
 
 
 def _fence(conn,manifest,*,ready_before=True):
@@ -134,10 +272,10 @@ def _fence(conn,manifest,*,ready_before=True):
     for ref in manifest['candidate']['cohort_refs']:
         actual=processing.operation(conn,ref['operation_id'])
         require(processing.ref(actual)==ref and processing.current(conn,actual),'native_source_changed')
-    from packages.application.web_vitrina_management_history import dated_parameters
-    require({day:dated_parameters(conn,day) for day in manifest['parameter_proof']}==manifest['parameter_proof'],'dated_parameters_changed')
+    from packages.application.fbs_accounting_historical_publication import _parameter_proof
+    require(_parameter_proof(conn,list(manifest['parameter_proof']))==manifest['parameter_proof'],'dated_parameters_changed')
     if ready_before:
-        for target in manifest['targets']:ready.check_expected(conn,ready.ExpectedReady(**target['expected']))
+        for target in manifest['targets']:ready.check_expected(conn,_target_expected(target))
     check_obligations(conn,manifest,retired=not ready_before)
     for recovery in manifest['candidate']['recovery_inputs']:
         before,_=accounting.load(Path(manifest['authority']['runtime_dir']),version=manifest['expected_book'])
@@ -164,7 +302,7 @@ def verified_retirement(conn,row):
     new=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(link['operation_id'],link['attempt_id'])).fetchone()
     require(new and new['kind']==CONTRACT and new['state']=='complete','retirement_publication_missing')
     manifest=json.loads(new['inputs_json']);_verify(manifest)
-    require(link==replacement_link(manifest) and new['book_version']==manifest['after_book'] and new['after_digest']==ready.digest(manifest['targets'][-1]['after_json']),'retirement_publication_changed')
+    require(link==replacement_link(manifest) and new['book_version']==manifest['after_book'] and new['after_digest']==_target_after_digest(manifest['targets'][-1]),'retirement_publication_changed')
     prior=json.loads(row['inputs_json']);_verify(prior)
     require(any(item['operation_id']==row['operation_id'] and item['attempt_id']==row['attempt_id'] and item['inputs_json']==row['inputs_json'] and item['manifest_digest']==prior['manifest_digest'] for item in manifest['candidate']['obligations']) and set(prior['candidate']['effect_dates'])<=set(manifest['candidate']['effect_dates']) and 'supplier_history_ack' not in diagnostics,'retirement_obligations_changed')
     return True
@@ -200,15 +338,16 @@ def publish(runtime,manifest,*,inject=lambda point:None):
     # The immutable before-book is still independently rebuildable after a
     # crash that activated the own candidate but rolled back the registry TX.
     clock=datetime.fromisoformat(manifest['created_at']);candidate.validate(manifest['candidate'],runtime=runtime,now=clock)
-    rebuilt,parameters=_targets(runtime,manifest['candidate'],now=clock)
+    rebuilt,parameters=_targets(runtime,manifest['candidate'],now=clock,ready_encoding=manifest.get('storage_encoding'))
     require(rebuilt==manifest['targets'] and parameters==manifest['parameter_proof'],'ready_independent_rebuild_changed')
+    del rebuilt,parameters
     with warehouse_functional_write_lock(runtime.runtime_dir,timeout_seconds=5),accounting.writer_lock(runtime.runtime_dir),closing(sqlite3.connect(Path(runtime.db_path).as_uri()+'?mode=rw',uri=True,timeout=0)) as conn:
         conn.row_factory=sqlite3.Row
         with conn:
             conn.execute('BEGIN IMMEDIATE');_fence(conn,manifest)
             row=conn.execute('SELECT inputs_json,state FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(manifest['operation_id'],manifest['attempt_id'])).fetchone()
             require(not row or json.loads(row['inputs_json'])==manifest,'retry_identity_conflict')
-            if not row:ready.record_intent(conn,operation_id=manifest['operation_id'],attempt_id=manifest['attempt_id'],kind=CONTRACT,expected=ready.ExpectedReady(**manifest['targets'][-1]['expected']),inputs=manifest,expected_book=manifest['expected_book'],book_required=True,ready_required=True,created_at=manifest['created_at'],book_operation_id=manifest['book_operation_id'])
+            if not row:ready.record_intent(conn,operation_id=manifest['operation_id'],attempt_id=manifest['attempt_id'],kind=CONTRACT,expected=_target_expected(manifest['targets'][-1]),inputs=manifest,expected_book=manifest['expected_book'],book_required=True,ready_required=True,created_at=manifest['created_at'],book_operation_id=manifest['book_operation_id'])
         inject('after_intent')
         with conn:
             conn.execute('BEGIN IMMEDIATE');_fence(conn,manifest)
@@ -216,13 +355,14 @@ def publish(runtime,manifest,*,inject=lambda point:None):
             stages.publish_dated_stages(conn,manifest=manifest['candidate']);inject('after_stages')
             from packages.application.sheet_vitrina_v1_inventory_history import append_inventory_history_capture,append_inventory_history_finalization
             for target in manifest['targets']:
-                envelope=json.loads(target['after_json'])
-                ready.replace_ready(conn,expected=ready.ExpectedReady(**target['expected']),plan_json=target['after_json'],activated_at=manifest['created_at'],snapshot_id=envelope['snapshot_id'],plan_version=envelope['plan_version'],refreshed_at=manifest['created_at'])
+                after_json=_ready_json(target['after_json']);envelope=json.loads(after_json)
+                ready.replace_ready(conn,expected=_target_expected(target),plan_json=after_json,activated_at=manifest['created_at'],snapshot_id=envelope['snapshot_id'],plan_version=envelope['plan_version'],refreshed_at=manifest['created_at'])
                 for item in target['inventory']:
                     capture=append_inventory_history_capture(conn,**{k:v for k,v in item.items() if k not in {'expected_predecessor','closed'}})
                     if item['closed']:append_inventory_history_finalization(conn,business_date=item['business_date'],capture_id=capture['capture_id'],finalization_identity=manifest['operation_id']+':'+item['business_date'],finalized_at=manifest['created_at'],expected_predecessor=item['expected_predecessor'],provenance=dict(contract=CONTRACT,manifest_digest=manifest['manifest_digest'],book_version=manifest['after_book']))
+                del after_json,envelope
             inject('after_ready')
-            ready.complete_publication(conn,operation_id=manifest['operation_id'],attempt_id=manifest['attempt_id'],book_version=manifest['after_book'],after_digest=ready.digest(manifest['targets'][-1]['after_json']),finished_at=manifest['created_at'])
+            ready.complete_publication(conn,operation_id=manifest['operation_id'],attempt_id=manifest['attempt_id'],book_version=manifest['after_book'],after_digest=_target_after_digest(manifest['targets'][-1]),finished_at=manifest['created_at'])
             inject('before_retirement')
             retire_obligations(conn,manifest)
     receipt=SupplierHistory(runtime,manifest['operation_id'],manifest['attempt_id']);receipt.validate_sources_readonly(now=clock);return receipt
@@ -235,32 +375,36 @@ class SupplierHistory:
         self.manifest=self._read()[0];self.dates=tuple(self.manifest['candidate']['effect_dates'])
     def _read(self):
         with ready.readonly(self.runtime.db_path) as conn:
-            row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(self.operation_id,self.attempt_id)).fetchone()
-            require(row and row['kind']==CONTRACT and row['state']=='complete' and len(row['inputs_json'].encode())<=candidate.MAX_BYTES,'publication_not_complete')
+            row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND kind=? AND state=? AND length(CAST(inputs_json AS BLOB))<=?',(self.operation_id,self.attempt_id,CONTRACT,'complete',MAX_PUBLICATION_BYTES)).fetchone()
+            require(row,'publication_not_complete')
             manifest=json.loads(row['inputs_json']);_verify(manifest)
             require('supplier_history_replaced_by' not in json.loads(row['diagnostics_json']),'publication_superseded')
-            require(manifest['operation_id']==self.operation_id and manifest['attempt_id']==self.attempt_id and row['book_version']==manifest['after_book'] and row['after_digest']==ready.digest(manifest['targets'][-1]['after_json']),'publication_readback_changed')
+            require(manifest['operation_id']==self.operation_id and manifest['attempt_id']==self.attempt_id and row['book_version']==manifest['after_book'] and row['after_digest']==_target_after_digest(manifest['targets'][-1]),'publication_readback_changed')
             return manifest,json.loads(row['diagnostics_json'])
     def binding(self):
         require(self._read()[0]==self.manifest,'receipt_changed')
         return dict(operation_id=self.operation_id,attempt_id=self.attempt_id,digest=self.manifest['manifest_digest'],dates=list(self.dates))
     def publication_dates(self):return self.dates
     def _validate_sources_conn(self,conn):
-        from packages.application.historical_dated_inputs import selected,dated_slice,book_lineage
+        from packages.application.historical_dated_inputs import dated_slice,book_lineage
         manifest=self.manifest;_fence(conn,manifest,ready_before=False)
         active,version=accounting.load(self.runtime.runtime_dir);expected=manifest['candidate']['candidate_book']
         require(all(active[field].get(day)==expected[field][day] for field in ('wb_days','retained_days','shared_days','presentations') for day in self.dates),'book_dates_changed')
+        del active  # Do not retain a full book while selecting Ready or rereading the receipt.
         proof={}
-        for row,days in selected(conn,list(self.dates),manifest['candidate']['functional']['business_date']):
+        for row,days in _selected_ready(conn,list(self.dates),manifest['candidate']['functional']['business_date']):
             for day in days:
                 target=next(t for t in manifest['targets'] if day in t['dates'])
                 require(fingerprint(dated_slice(row['plan_json'],day))==target['dated_outputs'][day],'dated_ready_changed')
                 lineage=book_lineage(self.runtime,row['plan_json'],day)
                 require(lineage=={field:expected[field][day] for field in ('wb_days','retained_days','shared_days','presentations')},'dated_book_binding_changed')
+                del lineage
                 edition=manifest['candidate']['editions'][day]
                 actual=conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',(edition['version_id'],)).fetchone()
                 require(actual and dict(actual)==edition['version'] and stages._version_balances(conn,version_id=edition['version_id'])==edition['balances'],'dated_stage_readback_changed')
+                del actual
                 proof[day]=dict(ready_key=[row['bundle_version'],row['as_of_date']],ready_digest=ready.digest(row['plan_json']),dated_digest=target['dated_outputs'][day],functional_version=edition['version_id'])
+            del row
         require(set(proof)==set(self.dates),'dated_scope_missing')
         return dict(binding=self.binding(),dated=proof,active_book=version)
     def validate_sources_readonly(self,*,now):
@@ -326,28 +470,33 @@ def pending(runtime,*,now):
         if not sources.source._exists(conn,processing.FUNCTIONAL):return None
         identities=processing.captured_cohort(conn)
     for identity in identities:
+        numerical=manifest=receipt=None
         try:
             with ready.readonly(runtime.db_path) as conn:
                 op=processing.operation(conn,identity)
                 check,prior=_pending_check(conn,op)
             if check is not None:
                 _checked(runtime,identity,check['reason'],now,expected_check=check);continue
+            prior_attempt=None
             if prior:
-                manifest=json.loads(prior['inputs_json']);_verify(manifest)
+                manifest=json.loads(prior['inputs_json']);del prior;_verify(manifest)
+                prior_attempt=manifest['attempt_id'];receipt=None
                 try:
                     receipt=publish(runtime,manifest);receipt.validate_sources_readonly(now=now);return receipt
                 except ValueError as exc:
                     if not isinstance(exc,(sources.SupplierHistoryError,ready.ReadyPublicationConflict)) and str(exc).split(':')[0] not in EXPECTED_NATIVE:raise
-                    # An actual newer native source publication must prove
-                    # supersession; candidate discovery preserves all owed
-                    # dates and refuses unknown/code/Ready-only drift.
-                    numerical=candidate.prepare(runtime,identity,now=now)
-                    require(numerical['obligations'] and numerical['attempt_id']!=manifest['attempt_id'],'native_attempt_not_superseded')
-                    return publish(runtime,prepare(runtime,identity,now=now))
+                # Leave the exception scope before rebuilding: its traceback
+                # can retain the failed publisher's complete old operands.
+                del manifest,receipt
             numerical=candidate.prepare(runtime,identity,now=now)
-            if not numerical['effect_dates']:
+            if prior_attempt is not None:
+                # Discovery must prove native supersession and preserve every
+                # owed date before a replacement publication is prepared.
+                require(numerical['obligations'] and numerical['attempt_id']!=prior_attempt,'native_attempt_not_superseded')
+            elif not numerical['effect_dates']:
+                del numerical
                 _checked(runtime,identity,'supplier_history_no_dated_effect',now);continue
-            return publish(runtime,prepare(runtime,identity,now=now))
+            return publish(runtime,_prepare_publication(runtime,numerical,now=now))
         except ValueError as exc:
             reason=str(exc)
             if not isinstance(exc,(sources.SupplierHistoryError,ready.ReadyPublicationConflict)) and reason.split(':')[0] not in EXPECTED_NATIVE:raise

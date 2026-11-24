@@ -543,6 +543,15 @@ versions и `ready_publications`. Отдельной очереди или ск�
   собственного native source. Исторические даты требуют сохранённых dated
   operands: отсутствие данных оставляет операцию ожидающей, не означает ноль.
 
+Первичное принятое действие `create` может материализовать отсутствовавший целиком
+pre-FF source с даты первого подтверждённого платежа: активируется весь Invoice,
+а не оплаченная доля и не дата загрузки. Нужны exact admitted/current Invoice,
+correlated native composition/fingerprints, отсутствие старого source во всех
+стадиях и native before, отсутствие FF-приёмки и точный source-owned delta.
+Частичный source, accepted source и другие действия сохраняют cost-only guards;
+foreign source records, FF и WB не меняются. Это append-only dated edition в том
+же owner, без нового складского документа или изменения posted ledger.
+
 Современный `guided_china_acceptance` имеет frozen posted capital/expense и
 точную native relation. Supplier continuation не переписывает его receipt или
 debit. Legacy receipt без frozen snapshot допускает ровно существующий native

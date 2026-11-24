@@ -17,6 +17,12 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "cycle_read_sqlite_contention_smoke": (
+        "packages/application/sqlite_contention.py",
+        "packages/application/warehouse_recovery_policy.py",
+        "packages/application/operator_ff_overhead.py",
+        "packages/application/fbs_current_snapshot_policy.py",
+    ),
     "hosted_runtime_storage_preflight_smoke": ("apps/registry_upload_http_entrypoint_hosted_runtime.py",),
     "sqlite_contention_smoke": ("packages/application/sqlite_contention.py",),
     "sqlite_schema_contention_smoke": ("packages/application/sqlite_contention.py",),
@@ -38,6 +44,7 @@ BOUNDARIES = {
     'operator_supplier_journal_http_smoke': ('packages/application/operator_operations.py', 'packages/application/operator_supplier_journal.py', 'packages/adapters/registry_upload_http_entrypoint.py'),
     'operator_supplier_financial_journal_smoke': ('packages/application/operator_supplier_financial.py', 'packages/application/operator_supplier_journal.py', 'packages/application/operator_operations.py'),
     'operator_supplier_history_cycle_smoke': ('packages/application/registry_upload_http_entrypoint.py', 'packages/application/operator_supplier_history.py', 'packages/application/owned_history_worker.py'),
+    'operator_supplier_history_ready_codec_smoke': ('packages/application/operator_supplier_history.py', 'packages/application/operator_supplier_history_candidate.py'),
     'historical_dated_inputs_smoke': ('packages/application/historical_dated_inputs.py', 'apps/fixtures/historical_dated_inputs_67138346.json'),
     'operator_supplier_release_scope_smoke': ('packages/adapters/registry_upload_http_entrypoint.py', 'packages/application/operator_operations.py', 'packages/application/operator_supplier_journal.py'),
     'warehouse_ff_cost_fold_smoke': ('packages/application/warehouse_functional.py', 'apps/fixtures/warehouse_ff_fold_a46d0dad.json'),
@@ -737,7 +744,7 @@ def command_dependency_checks():
             assert 'playwright==1.58.0' not in narrow['pip'], narrow
     print('next operator leaves: narrow backend/browser prerequisite selection OK')
 
-    for history_script in ('apps/operator_supplier_history_sources_smoke.py', 'apps/operator_supplier_history_smoke.py'):
+    for history_script in ('apps/operator_supplier_history_sources_smoke.py', 'apps/operator_supplier_history_smoke.py', 'apps/operator_supplier_history_ready_codec_smoke.py'):
         history = build_plan_from_paths(pull_request=43, base=BASE, head=HEAD,
             paths=[history_script], file_exists=lambda _, p: p == history_script)
         verify_plan(history)

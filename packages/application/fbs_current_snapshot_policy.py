@@ -13,6 +13,7 @@ import sqlite3
 
 from packages.application.storage_registry import StoreRegistry, MANIFEST_FILENAME, parse_manifest
 from packages.application import business_data_schedule_profile as schedule
+from packages.application.sqlite_contention import ObservedSQLiteConnection
 
 OFFICIAL_LEGACY_SECONDS = 30 * 60
 BOOK_LEGACY_SECONDS = 3 * 3600
@@ -25,7 +26,7 @@ class FbsSnapshotPolicyError(ValueError):
     pass
 
 
-class _OpenedReadConnection(sqlite3.Connection):
+class _OpenedReadConnection(ObservedSQLiteConnection):
     """Only open_current_snapshot_readonly creates the opened-file proof."""
 
 
@@ -44,6 +45,9 @@ def open_current_snapshot_readonly(path, *, timeout=5):
     conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=timeout,
                            factory=_OpenedReadConnection)
     try:
+        # Retain this factory's exact inode-proof type and caller timeout while
+        # sharing the existing bounded statement retry implementation.
+        conn.configure_contention(timeout_ms=max(1, int(timeout * 1000)), priority="background")
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
         conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()

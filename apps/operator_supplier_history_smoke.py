@@ -6,7 +6,7 @@ from datetime import datetime,date,timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import json,sqlite3,sys,unittest
+import json,sqlite3,sys,unittest,weakref
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from apps.operator_supplier_processing_smoke import seed,publish_functional,publish_accounting,NOW,MOMENT,DAY
@@ -30,7 +30,7 @@ from packages.application.warehouse_functional_lock import warehouse_functional_
 FIRST='2026-07-05'
 
 
-def install_native_saved_dates(rt):
+def install_native_saved_dates(rt,*,long_wb_money=False):
     """Saved dated fixtures use real immutable schemas/readers/presentations.
 
     Their initial money is copied from the actual native supplier publisher,
@@ -44,6 +44,14 @@ def install_native_saved_dates(rt):
         version=dict(conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',(current,)).fetchone())
         snapshot=dict(conn.execute(f'SELECT * FROM {stages.P}wb_snapshots WHERE version_id=?',(current,)).fetchone())
         balances=stages._version_balances(conn,version_id=current)
+        if long_wb_money:
+            from decimal import localcontext
+            with localcontext() as context:
+                context.prec=28  # Existing published WB WAC serialization contract.
+                for balance in balances:
+                    if balance['warehouse_key']=='wb':
+                        balance['capital_rub']='35673.01176443006162885432398'
+                        balance['wac_rub']=str(Decimal(balance['capital_rub'])/Decimal(balance['quantity']))
         companions={table:[dict(r) for r in conn.execute(f'SELECT * FROM {stages.P}{table} WHERE version_id=?',(current,))] for table in ('functional_ff_reservations','supplier_cost_states','unmatched_doprinato')}
         for day in dates[:-1]:
             stamp=day+'T12:00:00Z';vid='fixture-dated:'+day
@@ -119,7 +127,7 @@ class Tests(unittest.TestCase):
             rt.save_supplier_shipment(header=self.second_header,lines=self.second_lines)
             _save_payment(rt,'second-payment','second',FIRST+'T11:00:00Z','100');ledger.replay_ledger(reason='synthetic-second-dated')
         intents.drain_supplier_preparation_intents(rt,shipment_ids=owners);publish_functional(rt)
-        self.before=install_native_saved_dates(rt)
+        self.before=install_native_saved_dates(rt,long_wb_money=getattr(self,'LONG_WB_MONEY',False))
         result=execute(rt,'financial-historical-cost',[{'child_key':'expense','kind':'financial','subject_id':'extra-expense'}],lambda c:rt.save_supplier_financial_document(document=dict(document_id='extra-expense',supplier_order_id='source',document_type='logistics_invoice',uploaded_at=NOW,updated_at=NOW,document_date=FIRST,parse_status='confirmed',total_amount_rub=120),expense_lines=[dict(line_id='extra-line',amount=120,amount_rub=120,currency='RUB',category='logistics',status='confirmed')]))
         self.parent=result['results'][0]['acceptance']['operation_id']
         with ready.readonly(rt.db_path) as conn:self.identity=conn.execute(f'SELECT operation_id FROM {financial.SCOPES} WHERE parent_operation_id=?',(self.parent,)).fetchone()[0]
@@ -164,6 +172,91 @@ class Tests(unittest.TestCase):
         with self.assertRaises(ValueError):self.publish(manifest)
         receipt=financial.read_request(self.runtime.runtime_dir,self.runtime.db_path,'financial-historical-cost',request_scope='alice-key')['results'][0]['acceptance']
         self.assertTrue(receipt['durable_saved']);self.assertFalse(receipt['processing']['complete'])
+    def test_new_native_acceptance_after_prepare_refuses_empty_receipt_fence(self):
+        manifest=self.prepare();before=accounting.load(self.runtime.runtime_dir)[1]
+        self.assertEqual(manifest['candidate']['members'][0]['receipt_dependency']['kind'],'unaccepted')
+        self.runtime.create_ff_stock_operation(operation_id='LOCAL later acceptance',operation_type='receipt',
+            source_type='supplier_shipment',source_key='LOCAL actual receipt',source_object_id='source',
+            created_at=NOW,business_effective_date=DAY,lines=[dict(nm_id=1,quantity_delta=1)])
+        with ready.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(ready.ReadyPublicationConflict,'ready_repair_source_changed'):
+                stages.check_query_fence(conn,manifest['candidate']['source_inputs'])
+        with self.assertRaises(ValueError):self.publish(manifest)
+        self.assertEqual(accounting.load(self.runtime.runtime_dir)[1],before)
+
+    def test_acceptance_header_after_prepare_refuses_source_fence(self):
+        manifest=self.prepare();before=accounting.load(self.runtime.runtime_dir)[1]
+        with _connect(self.runtime.db_path) as conn:
+            conn.execute('UPDATE sheet_vitrina_v1_supplier_shipments SET actual_ff_acceptance_date=? WHERE shipment_id=?',(DAY,'source'));conn.commit()
+        with ready.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(ready.ReadyPublicationConflict,'ready_repair_source_changed'):
+                stages.check_query_fence(conn,manifest['candidate']['source_inputs'])
+        with self.assertRaises(ValueError):self.publish(manifest)
+        self.assertEqual(accounting.load(self.runtime.runtime_dir)[1],before)
+
+    def initial_admission_manifest(self):
+        rt=self.runtime;ledger=CnyLedgerBlock(runtime=rt,timestamp_factory=lambda:NOW)
+        ledger.create_opening_balance({'operation_date':'2026-07-04','cny_amount':100,'rub_value':1000})
+        header={**HEADER,'shipment_id':'new-admission','created_at':NOW,'updated_at':NOW,'invoice_date':FIRST,
+            'shipment_date':FIRST,'actual_shipment_date':'','actual_ff_acceptance_date':'','invoice_no':'late-native-create','expenses_complete':0}
+        lines=[{**LINES[0],'line_id':'new-product','internal_nm_id':1}]
+        accepted=source.execute(rt,action='create',payload={'request_id':'late-native-create'},shipment_id='new-admission',
+            actor='alice',request_scope='alice-key',write=lambda context:rt.save_supplier_shipment(header=header,lines=lines,operator_request=context))
+        identity=accepted['acceptance']['operation_id']
+        _save_payment(rt,'new-payment','new-admission',FIRST+'T12:00:00Z','100');ledger.replay_ledger(reason='late-native-create')
+        intents.drain_supplier_preparation_intents(rt,shipment_ids=['source','new-admission']);publish_functional(rt);publish_accounting(rt)
+        return h.prepare(rt,identity,now=MOMENT)
+
+    def test_native_late_create_materializes_initial_source_and_companions(self):
+        rt=self.runtime;manifest=self.initial_admission_manifest()
+        admissions=[(day,p['proof']) for day,e in manifest['candidate']['editions'].items()
+            for p in e['source_dependency']['supplier'] if p['proof']['kind']=='native_initial_pre_ff_supplier_admission']
+        self.assertTrue(admissions)
+        for day,proof in admissions:
+            edition=manifest['candidate']['editions'][day]
+            self.assertEqual(proof['source_ref']['action'],'create');self.assertEqual(proof['quantity_by_nm'],{'1':'10'})
+            state=next(r for r in edition['companions']['supplier_cost_states'] if r['shipment_id']=='new-admission')
+            self.assertEqual(state['version_id'],edition['version_id'])
+            retained=manifest['candidate']['candidate_book']['retained_days'][day]['rows']['1']['stages']['PRODUCTION']
+            self.assertEqual(Decimal(str(retained['quantity'])),10);self.assertEqual(Decimal(str(retained['capital_rub'])),1000)
+            before_wb=[{k:v for k,v in r.items() if k!='version_id'} for r in edition['saved']['balances'] if r['warehouse_key']=='wb']
+            after_wb=[{k:v for k,v in r.items() if k!='version_id'} for r in edition['balances'] if r['warehouse_key']=='wb']
+            self.assertEqual(after_wb,before_wb)
+            if getattr(self,'LONG_WB_MONEY',False):
+                self.assertEqual(after_wb[0]['capital_rub'],'35673.01176443006162885432398')
+        receipt=self.publish(manifest);self.assertTrue(receipt.validate_sources_readonly(now=MOMENT)['dated'])
+        with ready.readonly(rt.db_path) as conn:
+            for day,_ in admissions:
+                version=manifest['candidate']['editions'][day]['version_id']
+                self.assertEqual(conn.execute('SELECT count(*) FROM '+stages.P+'supplier_cost_states WHERE version_id=? AND shipment_id=?',(version,'new-admission')).fetchone()[0],1)
+            stages.capture_dated_stages(conn,db_path=rt.db_path,book=manifest['candidate']['candidate_book'],dates=manifest['candidate']['effect_dates'],read_model_mode=stages.READ_MODEL_PROOFS)
+
+    def test_native_decimal_parameters_json_proof_rebuild_and_exact_fence(self):
+        from packages.application.calculation_parameters import ensure_calculation_parameters_schema,DEFAULT_PROXY_PARAMETERS,PROXY_BLOCK_KEY
+        from packages.application.calculation_parameters_v4 import ensure_proxy_v4_schema,PROXY_V4_BLOCK_KEY,AUTOMATIC_RATE_FIELDS,PROXY_V4_FORMULA_VERSION
+        with _connect(self.runtime.db_path) as conn:
+            ensure_calculation_parameters_schema(conn);ensure_proxy_v4_schema(conn)
+            conn.execute('INSERT INTO sheet_vitrina_v1_calculation_parameter_versions VALUES(?,?,?,?,?,?,?,?,?)',
+                ('source-proxy3',PROXY_BLOCK_KEY,999,FIRST,canonical(DEFAULT_PROXY_PARAMETERS.public()),'fixture3','fixture','fixture',NOW))
+            values={field:'0' for field in AUTOMATIC_RATE_FIELDS}
+            values.update(buyout_rate='0.91',tax_rate='0.06',agent_remuneration_rate='0.38',source_week_ranges=[['2026-06-22','2026-06-28']],
+                buyout_order_count_weight='123.4500',finance_net_revenue_weight='456.7800',formula_version=PROXY_V4_FORMULA_VERSION)
+            conn.execute('INSERT INTO sheet_vitrina_v1_proxy_v4_parameter_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                ('source-proxy4',PROXY_V4_BLOCK_KEY,999,FIRST,'2026-06-22','2026-06-28','fixture-window',canonical(values),'fixture4','fixture','fixture',NOW));conn.commit()
+        manifest=self.prepare();proof=manifest['parameter_proof'][FIRST]
+        self.assertEqual(proof[0]['buyout_rate'],'0.91');self.assertEqual(proof[1]['buyout_order_count_weight'],'123.4500')
+        self.assertEqual(proof[1]['source_week_ranges'],[['2026-06-22','2026-06-28']])
+        self.assertEqual(manifest,json.loads(canonical(manifest)))
+        self.assertEqual(h._large_fingerprint(manifest),fingerprint(manifest))
+        self.assertEqual(h._publication_json_size(manifest),len(canonical(manifest).encode()))
+        targets,parameters=h._targets(self.runtime,manifest['candidate'],now=MOMENT)
+        self.assertEqual(targets,manifest['targets']);self.assertEqual(parameters,manifest['parameter_proof'])
+        with ready.readonly(self.runtime.db_path) as conn:h._fence(conn,manifest)
+        values['buyout_order_count_weight']='123.4501'
+        with _connect(self.runtime.db_path) as conn:
+            conn.execute('UPDATE sheet_vitrina_v1_proxy_v4_parameter_versions SET parameters_json=? WHERE version_id=?',(canonical(values),'source-proxy4'));conn.commit()
+        with ready.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(ValueError,'dated_parameters_changed'):h._fence(conn,manifest)
     def test_generic_history_success_cannot_ack(self):
         receipt=self.publish(self.prepare())
         with self.assertRaisesRegex(Exception,'not_supervised'):receipt._acknowledge_verified_native({'completed':True})
@@ -258,6 +351,23 @@ class ReplanTests(unittest.TestCase):
         new,_,_=self.followup(case,old)
         self.assertEqual(len(new['candidate']['recovery_inputs']),19)
         for day,edition in new['candidate']['editions'].items():self.assertEqual(edition['saved'],old['candidate']['editions'][day]['saved'])
+        case.publish(new)
+    def test_legacy_payload_ghost_recovers_into_validated_model_proofs(self):
+        case=self.fixture();capture=stages.capture_dated_stages
+        def legacy(*args,**kwargs):
+            kwargs['read_model_mode']='payloads'
+            return capture(*args,**kwargs)
+        def crash(point):
+            if point=='after_book':raise RuntimeError('legacy own book crash')
+        with patch.object(stages,'capture_dated_stages',side_effect=legacy):
+            old=case.prepare()
+            with self.assertRaisesRegex(RuntimeError,'legacy own'):case.publish(old,inject=crash)
+        self.assertTrue(all('read_models' in e['saved'] for e in old['candidate']['editions'].values()))
+        new,_,_=self.followup(case,old)
+        self.assertEqual(len(new['candidate']['recovery_inputs']),19)
+        self.assertTrue(all('read_model_proofs' in e['saved'] for e in new['candidate']['editions'].values()))
+        for day,edition in new['candidate']['editions'].items():
+            self.assertEqual(edition['saved']['balances'],old['candidate']['editions'][day]['saved']['balances'])
         case.publish(new)
     def test_same_prepared_attempt_clock_and_lost_response_resume_exactly(self):
         case=self.fixture();old=case.prepare()
@@ -368,7 +478,7 @@ class SelectionTests(unittest.TestCase):
             corrupt['manifest_digest']=fingerprint(corrupt)
             prior={'inputs_json':canonical(corrupt)}
             receipt=object()
-            with patch.object(processing,'captured_cohort',return_value=['old','valid']),patch.object(processing,'operation',side_effect=lambda conn,key:{'operation_id':key,'action':'edit'}),patch.object(processing,'current',return_value=True),patch.object(processing,'ref',side_effect=lambda op:ref if op['operation_id']=='old' else {'operation_id':'valid'}),patch.object(h,'publication_for',side_effect=lambda conn,source:prior if source['operation_id']=='old' else None),patch.object(h,'completed_proof',return_value=None),patch.object(h,'_checked') as checked,patch.object(candidate,'prepare',return_value={'effect_dates':[FIRST]}),patch.object(h,'prepare',return_value={'new':'exact'}),patch.object(h,'publish',return_value=receipt):
+            with patch.object(processing,'captured_cohort',return_value=['old','valid']),patch.object(processing,'operation',side_effect=lambda conn,key:{'operation_id':key,'action':'edit'}),patch.object(processing,'current',return_value=True),patch.object(processing,'ref',side_effect=lambda op:ref if op['operation_id']=='old' else {'operation_id':'valid'}),patch.object(h,'publication_for',side_effect=lambda conn,source:prior if source['operation_id']=='old' else None),patch.object(h,'completed_proof',return_value=None),patch.object(h,'_checked') as checked,patch.object(candidate,'prepare',return_value={'effect_dates':[FIRST]}),patch.object(h,'_prepare_publication',return_value={'new':'exact'}),patch.object(h,'publish',return_value=receipt):
                 self.assertIs(h.pending(runtime,now=MOMENT),receipt)
             self.assertEqual(checked.call_args.args[2],'supplier_history_formula_changed')
             self.assertEqual(checked.call_args.kwargs['state'],'needs_attention')
@@ -386,7 +496,7 @@ class SelectionTests(unittest.TestCase):
             def numerical(rt,identity,*,now):
                 if identity=='valid':return {'effect_dates':[FIRST]}
                 with ready.readonly(rt.db_path) as conn:return candidate.native_cohort(conn,identity)
-            with patch.object(processing,'captured_cohort',return_value=['waiting','valid']),patch.object(processing,'operation',side_effect=lambda conn,key:{**op,'operation_id':key}),patch.object(processing,'current',return_value=True),patch.object(processing,'superseded',return_value=False),patch.object(candidate,'prepare',side_effect=numerical),patch.object(h,'prepare',return_value={'new':'exact'}),patch.object(h,'publish',return_value=receipt):
+            with patch.object(processing,'captured_cohort',return_value=['waiting','valid']),patch.object(processing,'operation',side_effect=lambda conn,key:{**op,'operation_id':key}),patch.object(processing,'current',return_value=True),patch.object(processing,'superseded',return_value=False),patch.object(candidate,'prepare',side_effect=numerical),patch.object(h,'_prepare_publication',return_value={'new':'exact'}),patch.object(h,'publish',return_value=receipt):
                 self.assertIs(h.pending(runtime,now=MOMENT),receipt)
                 with sqlite3.connect(runtime.db_path) as conn:
                     self.assertEqual(conn.execute(f'SELECT state,reason FROM {processing.ATTEMPTS}').fetchall(),[('processing','supplier_exact_queue_pending')])
@@ -443,7 +553,7 @@ class PendingTransactionTests(unittest.TestCase):
             if kind=='source':conn.execute(f'UPDATE {intents.TABLE} SET source_fingerprint=?',('unknown-source',))
             if kind=='finance':
                 numerical=dict(code_authority=candidate.code_authority(),effect_dates=[FIRST],functional={'business_date':FIRST},candidate_book={},cohort_refs=[processing.ref(op)],editions={FIRST:{'version_id':'local-version'}})
-                manifest=dict(contract=h.CONTRACT,operation_id='supplier-history:'+identity,attempt_id='local-attempt',source_ref=processing.ref(op),candidate=numerical,targets=[{'dates':[FIRST],'after_json':'{}'}],after_book=fingerprint({}))
+                manifest=dict(contract=h.CONTRACT,storage_encoding=h.READY_JSON_ENCODING,operation_id='supplier-history:'+identity,attempt_id='local-attempt',source_ref=processing.ref(op),candidate=numerical,targets=[{'dates':[FIRST],'expected':asdict(ready.ExpectedReady('local-bundle',FIRST,None)),'after_json':h._pack_ready_json('{}')}],after_book=fingerprint({}))
                 manifest['manifest_digest']=fingerprint(manifest)
                 ack={'manifest_digest':manifest['manifest_digest'],'native':{FIRST:{'object_digest':'synthetic-object','edition_id':'synthetic-edition','functional_version':'local-version'}}}
                 ready.record_intent(conn,operation_id=manifest['operation_id'],attempt_id=manifest['attempt_id'],kind=h.CONTRACT,expected=None,inputs=manifest,expected_book='synthetic-before',book_required=True,ready_required=True,created_at=NOW)
@@ -658,6 +768,383 @@ class LinuxTests(unittest.TestCase):
             if second:
                 saved=financial.read_request(rt.runtime_dir,rt.db_path,second_request,request_scope='alice-key')['results'][0]['acceptance']
                 self.assertTrue(saved['processing']['complete']);self.assertEqual(saved['state'],'completed')
+
+
+class NumericalDigestTests(unittest.TestCase):
+    def test_stream_digest_matches_exact_canonical_normalized_json(self):
+        from packages.application.fbs_accounting_historical_history import _stream_fingerprint
+        value=json.loads(canonical({'utf8':('Кириллица 😀 \\"\n'*6000),
+            'types':[None,True,False,0,1,1.0,-0.0,'0.000000000000000000001'],
+            'rows':{'я':{'nm_id':1},'a':[]}}))
+        self.assertEqual(_stream_fingerprint(value),fingerprint(value))
+
+    def test_native_prepare_and_validate_never_use_full_candidate_serialization_for_digest(self):
+        case=Tests();case.setUp();self.addCleanup(case.doCleanups)
+        original=candidate.fingerprint
+        def small_fingerprint(value):
+            if isinstance(value,dict) and value.get('contract')==candidate.CONTRACT and 'candidate_book' in value:
+                self.fail('whole candidate must use the exact streaming digest')
+            return original(value)
+        with patch.object(candidate,'fingerprint',side_effect=small_fingerprint):
+            numerical=candidate.prepare(case.runtime,case.identity,now=MOMENT)
+            self.assertEqual(candidate.validate(numerical,runtime=case.runtime,now=MOMENT),numerical)
+        operands={k:v for k,v in numerical.items() if k!='manifest_digest'}
+        self.assertEqual(numerical['manifest_digest'],original(operands))
+        self.assertEqual(numerical,json.loads(canonical(numerical)))
+        corrupt=deepcopy(numerical);corrupt['manifest_digest']='sha256:'+'0'*64
+        with self.assertRaisesRegex(ValueError,'candidate_corrupt'):
+            candidate.validate(corrupt,runtime=case.runtime,now=MOMENT)
+
+
+class InitialAdmissionRecoveryTests(unittest.TestCase):
+    def fixture(self):
+        case=Tests();case.SECOND_SOURCE=True;case.setUp();self.addCleanup(case.doCleanups)
+        old=case.initial_admission_manifest()
+        self.assertTrue(any(p['proof']['kind']=='native_initial_pre_ff_supplier_admission'
+            for e in old['candidate']['editions'].values() for p in e['source_dependency']['supplier']))
+        def crash(point):
+            if point=='after_book':raise RuntimeError('initial admission book ghost')
+        with self.assertRaisesRegex(RuntimeError,'initial admission book ghost'):case.publish(old,inject=crash)
+        return case,old
+
+    def followup(self,case):
+        from packages.application.warehouse_functional import WarehouseFunctionalBlock
+        rt=case.runtime;tomorrow=MOMENT+timedelta(days=1)
+        accepted=execute(rt,'initial-ghost-next-day',[{'child_key':'expense','kind':'financial','subject_id':'initial-ghost-next-day'}],
+            lambda context:rt.save_supplier_financial_document(document=dict(document_id='initial-ghost-next-day',supplier_order_id='source',
+                document_type='logistics_invoice',uploaded_at=NOW,updated_at=NOW,document_date=FIRST,parse_status='confirmed',total_amount_rub=90),
+                expense_lines=[dict(line_id='initial-ghost-next-day',amount=90,amount_rub=90,currency='RUB',category='logistics',status='confirmed')]),owners=('source',))
+        with ready.readonly(rt.db_path) as conn:
+            identity=conn.execute(f'SELECT operation_id FROM {financial.SCOPES} WHERE parent_operation_id=?',(accepted['results'][0]['acceptance']['operation_id'],)).fetchone()[0]
+        intents.drain_supplier_preparation_intents(rt,shipment_ids=['source','second','new-admission'])
+        native=WarehouseFunctionalBlock(runtime=rt,timestamp_factory=lambda:tomorrow.isoformat())
+        # A new business day first owns a fresh fixture official observation;
+        # the targeted publisher must not bypass its stale-snapshot guard.
+        payload=deepcopy(native._last_good_wb_payload())
+        payload['snapshot_date']=tomorrow.date().isoformat();payload['data']['fetched_at']=tomorrow.isoformat()
+        sync=native._build_plan(kind='hourly_wb_sync',wb_payload=payload)
+        native.apply_plan(sync,confirm_fingerprint=sync['plan_fingerprint'])
+        return candidate.prepare(rt,identity,now=tomorrow),tomorrow
+
+    def test_initial_admission_book_ghost_recovers_new_attempt_next_day(self):
+        case,old=self.fixture();new,tomorrow=self.followup(case)
+        self.assertNotEqual(new['attempt_id'],old['attempt_id'])
+        self.assertEqual(new['functional']['business_date'],tomorrow.date().isoformat())
+        self.assertEqual(len(new['recovery_inputs']),len(old['candidate']['effect_dates']))
+        for day in old['candidate']['effect_dates']:
+            self.assertEqual(new['editions'][day]['saved'],old['candidate']['editions'][day]['saved'])
+            owned=[s for r in new['editions'][day]['balances'] for s in r['provenance'].get('source_records',[])
+                   if s.get('shipment_id')=='new-admission']
+            self.assertEqual(sum((Decimal(s['flow_quantity']) for s in owned),Decimal(0)),10)
+        self.assertEqual(candidate.validate(new,runtime=case.runtime,now=tomorrow),new)
+
+    def test_only_exact_prior_initial_deltas_can_explain_ghost_quantities(self):
+        case,old=self.fixture();day=old['candidate']['effect_dates'][0]
+        def admission(value):
+            return next(p['proof'] for p in value['candidate']['editions'][day]['source_dependency']['supplier']
+                        if p['proof']['kind']=='native_initial_pre_ff_supplier_admission')
+        changes=[]
+        value=deepcopy(old);admission(value)['quantity_by_nm']['1']='11';changes.append(value)
+        value=deepcopy(old);admission(value)['capital_by_nm']['1']='1001';changes.append(value)
+        value=deepcopy(old);admission(value)['source_records'][0]['flow_quantity']='11';changes.append(value)
+        value=deepcopy(old);admission(value)['kind']='not_an_initial_admission';changes.append(value)
+        for stage in ('production','wb'):
+            value=deepcopy(old);row=next(r for r in value['candidate']['editions'][day]['balances'] if r['warehouse_key']==stage)
+            row['quantity']=str(Decimal(row['quantity'])+1);changes.append(value)
+        for index,value in enumerate(changes):
+            item=dict(inputs_json=canonical(value),operation_id=old['operation_id'],attempt_id=old['attempt_id'])
+            with self.subTest(change=index),ready.readonly(case.runtime.db_path) as conn:
+                with self.assertRaisesRegex(ValueError,'ghost_initial_admission_changed|ghost_quantity_changed'):
+                    candidate.recovery_stage_book(conn,case.runtime,old['candidate']['candidate_book'],[item],[day])
+
+    def test_replayed_native_admission_proof_remains_in_writer_fence(self):
+        case,old=self.fixture();new,_=self.followup(case)
+        member=next(m for m in old['candidate']['members'] if m['source_ref']['shipment_id']=='new-admission')
+        with _connect(case.runtime.db_path) as conn:
+            with self.assertRaisesRegex(sqlite3.IntegrityError,'immutable'):
+                conn.execute(f'UPDATE {processing.FUNCTIONAL} SET proof_digest=? WHERE operation_id=? AND version_id=?',
+                             ('changed-after-prepare',member['source_ref']['operation_id'],member['functional']['version_id']))
+            row=conn.execute(f'SELECT warehouse_key,nm_id,provenance_json FROM {stages.P}functional_balances WHERE version_id=? LIMIT 1',
+                             (member['functional']['version_id'],)).fetchone()
+            provenance=json.loads(row['provenance_json']);provenance['changed_after_replay']=True
+            conn.execute(f'UPDATE {stages.P}functional_balances SET provenance_json=? WHERE version_id=? AND warehouse_key=? AND nm_id=?',
+                         (canonical(provenance),member['functional']['version_id'],row['warehouse_key'],row['nm_id']));conn.commit()
+        with ready.readonly(case.runtime.db_path) as conn:
+            with self.assertRaisesRegex(ready.ReadyPublicationConflict,'ready_repair_source_changed'):
+                stages.check_query_fence(conn,new['source_inputs'])
+
+
+class SupplierWbSourceAuthorityTests(unittest.TestCase):
+    def member(self,kind='unaccepted'):
+        return dict(source_ref=dict(operation_id='supplier-own',shipment_id='own',source_digest='sha256:own'),
+            shipment=dict(shipment_id='own',actual_ff_acceptance_date=''),
+            receipt_dependency=dict(kind=kind,operations=[],lines=[],documents=[]))
+
+    def test_unaccepted_source_preserves_all_wb_bytes_despite_foreign_daily_drift(self):
+        rows=[dict(warehouse_key='wb',nm_id=1,quantity='379',capital_rub='35672.00000000000000000000001',wac_rub='94.12',
+            provenance=dict(source_records=[dict(snapshot_id='saved-morning')]),quality='saved'),
+            dict(warehouse_key='wb',nm_id=2,quantity='5',capital_rub='25',wac_rub='5',provenance={'foreign':True})]
+        daily=[dict(as_of_date=DAY,nm_id=1,quantity='373',wac_rub='9999',capital_rub=str(373*9999),quality='foreign-evening')]
+        before=deepcopy((rows,daily));member=self.member()
+        after,proof=candidate._wb_rows(rows,daily=daily,day=DAY,ids=[1],members=[member])
+        self.assertEqual(canonical(after),canonical(rows));self.assertEqual((rows,daily),before)
+        self.assertEqual(proof[0]['kind'],'unaccepted_supplier_has_no_wb_cost_authority')
+        self.assertEqual(proof[0]['source_refs'],[member['source_ref']])
+        self.assertEqual(proof[0]['receipt_absence'][0]['dependency'],member['receipt_dependency'])
+
+    def test_accepted_unknown_mixed_and_unproven_cohorts_keep_strict_quantity_guard(self):
+        rows=[dict(warehouse_key='wb',nm_id=1,quantity='379',capital_rub='379',provenance={})]
+        daily=[dict(as_of_date=DAY,nm_id=1,quantity='373',wac_rub='1',capital_rub='373',quality='daily')]
+        invalid=self.member();invalid['shipment']['actual_ff_acceptance_date']=DAY
+        incomplete=self.member();incomplete['receipt_dependency'].pop('lines')
+        changed=self.member();changed['receipt_dependency']['operations']=[{'operation_id':'new-receipt'}]
+        cases=[None,[],[self.member('legacy_supplier_allocation')],[self.member('immutable_posted_supplier_receipt')],
+            [self.member('unknown')],[self.member(),self.member('legacy_supplier_allocation')],[invalid],[incomplete],[changed]]
+        for members in cases:
+            with self.subTest(members=members),self.assertRaisesRegex(ValueError,'dated_wb_quantity_changed'):
+                candidate._wb_rows(rows,daily=daily,day=DAY,ids=[1],members=members)
+
+    def test_real_initial_admission_long_wb_money_publish_receipt_and_recapture(self):
+        fixture=Tests();fixture.LONG_WB_MONEY=True;fixture.setUp();self.addCleanup(fixture.doCleanups)
+        fixture.test_native_late_create_materializes_initial_source_and_companions()
+
+
+class SupplierReadySelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.conn=sqlite3.connect(':memory:');self.conn.row_factory=sqlite3.Row
+        self.addCleanup(self.conn.close)
+        self.conn.executescript('''CREATE TABLE registry_upload_current_state(slot,bundle_version);
+            INSERT INTO registry_upload_current_state VALUES(1,'fixture');
+            CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version,as_of_date,snapshot_id,
+                activated_at,refreshed_at,plan_json,PRIMARY KEY(bundle_version,as_of_date));''')
+        self.body_keys=[]
+
+    def add(self,day,next_day,*,recovery=None,inferred=False,padding=''):
+        payload=asdict(make_plan(as_of_date=day,day=next_day))
+        if inferred:payload.pop('date_columns')
+        payload['metadata']={'local_padding':padding,**(recovery or {})}
+        body=canonical(payload)
+        self.conn.execute('INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?,?,?)',
+            ('fixture',day,payload['snapshot_id'],day+'T12:00:00Z',day+'T12:00:00Z',body))
+        return len(body.encode())
+
+    def readonly(self):
+        self.conn.commit();self.conn.execute('PRAGMA query_only=ON');self.conn.execute('BEGIN')
+        owner=self
+        class Observer:
+            def execute(self,sql,args=()):
+                if sql.startswith('SELECT * FROM '+ready.TABLE):owner.body_keys.append(tuple(args))
+                return owner.conn.execute(sql,args)
+        return Observer()
+
+    def parity(self,dates,today):
+        from packages.application.historical_dated_inputs import selected
+        conn=self.readonly();before=self.conn.total_changes
+        self.assertEqual(h._selected_ready(conn,dates,today),selected(self.conn,dates,today))
+        self.assertEqual(self.conn.total_changes,before)
+        self.assertEqual(self.conn.execute('PRAGMA query_only').fetchone()[0],1)
+        self.assertTrue(self.conn.in_transaction)
+
+    def test_exact_inferred_columns_and_original_source_order(self):
+        self.add('2026-09-07','2026-09-08',inferred=True)
+        self.add('2026-09-08','2026-09-09')
+        self.parity(['2026-09-07','2026-09-08','2026-09-09'],'2026-09-08')
+        self.assertEqual(self.body_keys,[('fixture','2026-09-08'),('fixture','2026-09-07')])
+
+    def test_functional_today_default_is_not_latest_or_wall_clock(self):
+        self.add('2026-09-07','2026-09-08');self.add('2026-09-09','2026-09-10')
+        self.parity(['2026-09-08'],'2026-09-07')
+        self.assertEqual(self.body_keys,[('fixture','2026-09-07')])
+
+    def test_covering_recovery_matches_native_selection(self):
+        from packages.application.web_vitrina_management_history import FACT_SOURCE,FACT_GROUPS
+        proof={'server_cell_presentation':{'SKU:1|ordersCount':{'2026-09-08':{
+            'source':FACT_SOURCE,'source_as_of_date':'2026-09-08','complete_source_groups':sorted(FACT_GROUPS)}}}}
+        self.add('2026-09-07','2026-09-08',recovery=proof)
+        self.add('2026-09-09','2026-09-10')
+        self.parity(['2026-09-08'],'2026-09-09')
+
+    def test_missing_and_unproven_covering_sources_still_fail_closed(self):
+        from packages.application.historical_dated_inputs import selected
+        self.add('2026-09-07','2026-09-08');self.add('2026-09-09','2026-09-10')
+        conn=self.readonly()
+        for dates in (['1900-01-01'],['2026-09-08']):
+            for selector in (h._selected_ready,selected):
+                with self.assertRaisesRegex(ValueError,'policy_history_dated_ready_inputs_missing'):
+                    selector(conn,dates,'2026-09-09')
+        self.assertEqual(self.body_keys,[])
+
+    def test_unrelated_archive_over_real_limit_never_loads_full_bodies(self):
+        selected_bytes=self.add('2026-09-07','2026-09-08')
+        padding='x'*(h.MAX_READY_SOURCE_BYTES//2+1024)
+        self.add('2025-01-01','2025-01-02',padding=padding)
+        self.add('2025-01-03','2025-01-04',padding=padding)
+        conn=self.readonly()
+        self.assertGreater(self.conn.execute('SELECT sum(length(CAST(plan_json AS BLOB))) FROM '+ready.TABLE).fetchone()[0],h.MAX_READY_SOURCE_BYTES)
+        result=h._selected_ready(conn,['2026-09-07'],'2026-09-07')
+        self.assertEqual(len(result),1);self.assertEqual(len(result[0][0]['plan_json'].encode()),selected_bytes)
+        self.assertEqual(self.body_keys,[('fixture','2026-09-07')])
+
+    def test_selected_body_and_header_limits_refuse_before_body_fetch(self):
+        selected_bytes=self.add('2026-09-07','2026-09-08')
+        conn=self.readonly()
+        with patch.object(h,'MAX_READY_SOURCE_BYTES',selected_bytes-1):
+            with self.assertRaisesRegex(ValueError,'policy_history_source_size_limit'):
+                h._selected_ready(conn,['2026-09-07'],'2026-09-07')
+        with patch.object(h,'MAX_READY_HEADER_BYTES',1):
+            with self.assertRaisesRegex(ValueError,'ready_header_size_limit'):
+                h._selected_ready(conn,['2026-09-07'],'2026-09-07')
+        self.assertEqual(self.body_keys,[])
+
+
+class PendingCandidateBoundaryTests(unittest.TestCase):
+    def test_native_pending_replan_discovers_once_and_still_validates_independently(self):
+        helper=ReplanTests();self.addCleanup(helper.doCleanups);case=helper.fixture()
+        old=case.prepare();case.publish(old)
+        new,_,_=helper.followup(case,old);attempt=new['attempt_id'];del new
+        prepare=candidate.prepare;calls=[]
+        def observed(*args,**kwargs):
+            calls.append('validation' if 'cohort_refs' in kwargs else 'discovery')
+            return prepare(*args,**kwargs)
+        with patch.object(candidate,'prepare',observed), \
+             heavy_admitted(case.runtime.runtime_dir,operation='cycle'),warehouse_functional_job_lock(case.runtime.runtime_dir):
+            receipt=h.pending(case.runtime,now=MOMENT)
+        self.assertIsNotNone(receipt);self.assertEqual(receipt.attempt_id,attempt)
+        self.assertEqual(calls.count('discovery'),1);self.assertGreaterEqual(calls.count('validation'),1)
+        self.assertEqual(receipt.manifest['candidate']['owed_dates'],old['candidate']['effect_dates'])
+
+    def test_one_candidate_for_fresh_and_replan_without_old_exception_operands(self):
+        from types import SimpleNamespace
+        class Tracked(dict):pass
+        runtime=SimpleNamespace(db_path=Path('/isolated/op.sqlite3'))
+        @contextmanager
+        def readonly(path):yield object()
+        for fail_at in (None,'publish','validation'):
+            with self.subTest(fail_at=fail_at):
+                refs={};result=object()
+                numerical={'effect_dates':[FIRST],'attempt_id':'new','obligations':[{'old':'owed'}]}
+                def pending_check(*args):
+                    if fail_at is None:return None,None
+                    row=Tracked(inputs_json='old-json');refs['prior']=weakref.ref(row)
+                    return None,row
+                def load_old(value):
+                    self.assertEqual(value,'old-json')
+                    old=Tracked(attempt_id='old');refs['manifest']=weakref.ref(old)
+                    return old
+                def fail():
+                    large=Tracked(payload='old publisher operand');refs['failed_frame']=weakref.ref(large)
+                    raise ready.ReadyPublicationConflict('ready_target_changed:fixture')
+                class OldReceipt:
+                    def __init__(self,manifest):self.manifest=manifest
+                    def validate_sources_readonly(self,**kwargs):fail()
+                def publish(rt,manifest):
+                    if manifest.get('attempt_id')=='old':
+                        if fail_at=='publish':fail()
+                        receipt=OldReceipt(manifest);refs['receipt']=weakref.ref(receipt);return receipt
+                    self.assertIs(manifest['candidate'],numerical);return result
+                def prepare_candidate(*args,**kwargs):
+                    self.assertIsNone(sys.exception(),'replan stayed inside failed publisher except')
+                    for name,ref in refs.items():self.assertIsNone(ref(),name+' survived into numerical rebuild')
+                    return numerical
+                with patch.object(ready,'readonly',readonly),patch.object(source,'_exists',return_value=True), \
+                     patch.object(processing,'captured_cohort',return_value=['source']), \
+                     patch.object(processing,'operation',return_value={'operation_id':'source'}), \
+                     patch.object(h,'_pending_check',side_effect=pending_check),patch.object(h,'_verify',lambda manifest:None), \
+                     patch.object(h.json,'loads',side_effect=load_old),patch.object(h,'publish',publish), \
+                     patch.object(candidate,'prepare',side_effect=prepare_candidate) as prepared, \
+                     patch.object(h,'_prepare_publication',side_effect=lambda rt,value,**kw:{'candidate':value}) as publication:
+                    self.assertIs(h.pending(runtime,now=MOMENT),result)
+                    self.assertEqual(prepared.call_count,1);self.assertEqual(publication.call_count,1)
+                    self.assertIs(publication.call_args.args[1],numerical)
+
+    def test_no_dated_effect_skips_publication_preparation(self):
+        from types import SimpleNamespace
+        @contextmanager
+        def readonly(path):yield object()
+        with patch.object(ready,'readonly',readonly),patch.object(source,'_exists',return_value=True), \
+             patch.object(processing,'captured_cohort',return_value=['source']), \
+             patch.object(processing,'operation',return_value={'operation_id':'source'}), \
+             patch.object(h,'_pending_check',return_value=(None,None)), \
+             patch.object(candidate,'prepare',return_value={'effect_dates':[]}) as prepared, \
+             patch.object(h,'_prepare_publication',side_effect=AssertionError('no-op prepared publication')), \
+             patch.object(h,'_checked') as checked:
+            self.assertIsNone(h.pending(SimpleNamespace(db_path=Path('/isolated/op.sqlite3')),now=MOMENT))
+            self.assertEqual(prepared.call_count,1)
+            self.assertEqual(checked.call_args.args[2],'supplier_history_no_dated_effect')
+
+
+class ReceiptMemoryBoundaryTests(unittest.TestCase):
+    def test_full_active_book_and_last_ready_operands_release_before_receipt_reread(self):
+        from types import SimpleNamespace
+        from packages.application import historical_dated_inputs as dated
+        class Tracked(dict):pass
+        refs={}
+        fields=('wb_days','retained_days','shared_days','presentations')
+        expected={field:{FIRST:{'value':field}} for field in fields}
+        receipt=object.__new__(h.SupplierHistory);receipt.runtime=SimpleNamespace(runtime_dir=Path('/isolated-fixture'))
+        receipt.dates=(FIRST,)
+        receipt.manifest={'candidate':{'candidate_book':expected,'functional':{'business_date':FIRST},
+            'editions':{FIRST:{'version_id':'native','version':{'version_id':'native'},'balances':[]}}},
+            'targets':[{'dates':[FIRST],'dated_outputs':{FIRST:fingerprint({})}}]}
+        def active_book(*args,**kwargs):
+            book=Tracked(deepcopy(expected));refs['active']=weakref.ref(book)
+            return book,'active-version'
+        def selected(*args):
+            self.assertIsNone(refs['active'](),'full active book retained during Ready selection')
+            row=Tracked(bundle_version='fixture',as_of_date=FIRST,plan_json='{}');refs['row']=weakref.ref(row)
+            return [(row,[FIRST])]
+        def lineage(*args):
+            value=Tracked({field:deepcopy(expected[field][FIRST]) for field in fields});refs['lineage']=weakref.ref(value)
+            return value
+        def binding():
+            for name,ref in refs.items():self.assertIsNone(ref(),name+' retained during receipt reread')
+            return {'verified':'binding'}
+        conn=SimpleNamespace(execute=lambda *args:SimpleNamespace(fetchone=lambda:{'version_id':'native'}))
+        with patch.object(h,'_fence'),patch.object(accounting,'load',side_effect=active_book), \
+             patch.object(h,'_selected_ready',side_effect=selected),patch.object(dated,'dated_slice',return_value={}), \
+             patch.object(dated,'book_lineage',side_effect=lineage),patch.object(stages,'_version_balances',return_value=[]), \
+             patch.object(receipt,'binding',side_effect=binding):
+            result=receipt._validate_sources_conn(conn)
+        self.assertEqual(result['binding'],{'verified':'binding'});self.assertEqual(result['active_book'],'active-version')
+        self.assertEqual(set(result['dated']),{FIRST})
+
+    def test_receipt_sql_utf8_size_guard_precedes_fetch_without_python_encode(self):
+        from types import SimpleNamespace
+        with TemporaryDirectory(prefix='supplier-receipt-size-') as raw:
+            runtime=SimpleNamespace(runtime_dir=Path(raw),db_path=Path(raw)/'op.sqlite3')
+            manifest=dict(contract=h.CONTRACT,storage_encoding=h.READY_JSON_ENCODING,operation_id='supplier-history:source',
+                attempt_id='attempt',source_ref={'operation_id':'source'},
+                candidate=dict(code_authority=candidate.code_authority(),effect_dates=[FIRST],functional={'business_date':FIRST},candidate_book={}),
+                targets=[dict(dates=[FIRST],expected=asdict(ready.ExpectedReady('fixture',FIRST,None)),after_json=h._pack_ready_json('{}'))],
+                after_book=h._large_fingerprint({}),unicode_padding='Ж😀'*100)
+            manifest['manifest_digest']=h._large_fingerprint(manifest)
+            encoded=canonical(manifest);raw_bytes=encoded.encode();size=len(raw_bytes)
+            self.assertGreater(size,len(encoded))
+            with closing(sqlite3.connect(runtime.db_path)) as conn,conn:
+                conn.execute('CREATE TABLE sheet_vitrina_v1_ready_publications(operation_id,attempt_id,kind,state,inputs_json,diagnostics_json,book_version,after_digest)')
+                conn.execute('INSERT INTO sheet_vitrina_v1_ready_publications VALUES(?,?,?,?,?,?,?,?)',
+                    (manifest['operation_id'],manifest['attempt_id'],h.CONTRACT,'complete',encoded,'{}',manifest['after_book'],ready.digest('{}')))
+            receipt=object.__new__(h.SupplierHistory);receipt.runtime=runtime
+            receipt.operation_id=manifest['operation_id'];receipt.attempt_id=manifest['attempt_id']
+            native=ready.readonly;fetched=[];statements=[]
+            class NoEncode(str):
+                def encode(self,*args,**kwargs):raise AssertionError('receipt allocated an extra UTF-8 publication copy')
+            def text(value):
+                if value==raw_bytes:fetched.append('publication')
+                return NoEncode(value.decode())
+            @contextmanager
+            def readonly(path):
+                with native(path) as conn:
+                    self.assertTrue(conn.in_transaction)
+                    conn.text_factory=text;conn.set_trace_callback(statements.append)
+                    yield conn
+            with patch.object(ready,'readonly',readonly):
+                with patch.object(h,'MAX_PUBLICATION_BYTES',size):self.assertEqual(receipt._read()[0],manifest)
+                self.assertEqual(fetched,['publication']);fetched.clear()
+                with patch.object(h,'MAX_PUBLICATION_BYTES',size-1),self.assertRaisesRegex(ValueError,'publication_not_complete'):
+                    receipt._read()
+                self.assertEqual(fetched,[],'oversize publication crossed the SQL fetch guard')
+            self.assertTrue(any('length(CAST(inputs_json AS BLOB))' in sql for sql in statements))
 
 
 if __name__=='__main__':unittest.main()
