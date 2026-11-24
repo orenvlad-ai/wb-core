@@ -145,7 +145,7 @@ def retained_obligations(conn, natives, *, runtime, pinned=None):
             revision=ledger.execute('SELECT version,payload,previous_version FROM accounting_revisions WHERE operation_id=?',(manifest['book_operation_id'],)).fetchone()
             require(revision is not None or row['state']=='prepared','prior_book_revision_missing')
             if revision:require(revision[0]==manifest['after_book'] and revision[2]==manifest['expected_book'] and accounting.unpack(ledger,revision[1])==manifest['candidate']['candidate_book'],'prior_book_revision_changed')
-        if row['state']=='complete':require(row['book_version']==manifest['after_book'] and row['after_digest']==ready.digest(manifest['targets'][-1]['after_json']),'prior_native_publication_changed')
+        if row['state']=='complete':require(row['book_version']==manifest['after_book'] and row['after_digest']==history._target_after_digest(manifest['targets'][-1]),'prior_native_publication_changed')
         for old in manifest['candidate']['cohort_refs']:
             actual=processing.operation(conn,old['operation_id']);require(processing.ref(actual)==old,'prior_source_identity_changed')
             if processing.current(conn,actual):
