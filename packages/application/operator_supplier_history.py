@@ -42,6 +42,20 @@ RETAINED_CODE_AUTHORITY={
     'warehouse_functional.py':'aabd5e17025957e2ef01a6035dfb783899a41b6c65ec79f7c20053254aa4b4c0',
     'warehouse_historical_recovery.py':'4b033bbc0781dfd78f3b19ac75b677d66059b088fde953e3091d891b5a1c443c',
 }
+# Exact 48aba616 algorithm whose completed, unacknowledged attempt is
+# retained as supersession evidence; never admission for publish or ACK.
+RETAINED_COMPLETE_CODE_AUTHORITY={'fbs_accounting_historical_history.py': 'b7176006b91d533bd1a20a984a2524d669254de69331441a61178caae8b6f067',
+ 'fbs_accounting_historical_publication.py': 'ed9ef8047fb7c27d7468b40c6dc9493f5fa8ab6be50ceb2d59b32bc79c66930f',
+ 'fbs_accounting_historical_stages.py': '4aea8f2b7129693dc1361db4e6aae33b3182107966e2991d749eedfbed572eb8',
+ 'historical_dated_inputs.py': '28fd39c17c21b54903455146bc7984d2907becfaf40721c9c4460747299d91cf',
+ 'operator_supplier_history.py': '966e89661648ec6e13b5110ff6dd954288a51d9cab290694866d30274ff6fed3',
+ 'operator_supplier_history_candidate.py': '422f44c351fcded7c50c2eb60c4fdfea76ce6f819b5d887ca04cc052f17828bd',
+ 'operator_supplier_history_sources.py': '72898532ef83384f72810cba28677107949750b603fe4f1a572fb0ff9eb4d614',
+ 'operator_supplier_processing.py': 'b8a1c78ad96ab92c5452f8a39e97d06d694bdb4b0c1cb638a70cb8d20aa15012',
+ 'warehouse_business_projection.py': 'f46303181835a039d60ce48bd1cde4a3be67e4ed37f1d8dfe17b8b1082537ee9',
+ 'warehouse_functional.py': 'aabd5e17025957e2ef01a6035dfb783899a41b6c65ec79f7c20053254aa4b4c0',
+ 'warehouse_historical_recovery.py': '4b033bbc0781dfd78f3b19ac75b677d66059b088fde953e3091d891b5a1c443c'}
+
 require=sources.require
 EXPECTED_NATIVE={
     'supplier_exact_queue_pending','supplier_exact_functional_publication_pending',
@@ -195,7 +209,7 @@ def _verify(manifest,*,retained=False):
     require(manifest.get('contract')==CONTRACT and manifest.get('manifest_digest')==_large_fingerprint({k:v for k,v in manifest.items() if k!='manifest_digest'}),'publication_corrupt')
     require(manifest['operation_id']=='supplier-history:'+manifest['source_ref']['operation_id'],'publication_identity_changed')
     authority=manifest['candidate']['code_authority']
-    require(authority==candidate.code_authority() or (retained and authority==RETAINED_CODE_AUTHORITY),'formula_changed')
+    require(authority==candidate.code_authority() or (retained and authority in (RETAINED_CODE_AUTHORITY,RETAINED_COMPLETE_CODE_AUTHORITY)),'formula_changed')
     require(sorted({*manifest['candidate']['effect_dates'],manifest['candidate']['functional']['business_date']})==sorted({d for t in manifest['targets'] for d in t['dates']}) and manifest['candidate']['effect_dates'],'publication_scope_changed')
     require(manifest['after_book']==_large_fingerprint(manifest['candidate']['candidate_book']),'book_candidate_corrupt')
     encoding=manifest.get('storage_encoding')
@@ -394,7 +408,7 @@ def verified_retirement(conn,row):
     require(isinstance(link,dict) and set(link)=={'operation_id','attempt_id','manifest_digest','reason'} and link['reason']=='native_cohort_superseded','retirement_link_corrupt')
     new=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND length(CAST(inputs_json AS BLOB))<=?',(link['operation_id'],link['attempt_id'],MAX_PUBLICATION_BYTES)).fetchone()
     require(new and new['kind']==CONTRACT and new['state']=='complete','retirement_publication_missing')
-    manifest=json.loads(new['inputs_json']);_verify(manifest)
+    manifest=json.loads(new['inputs_json']);_verify(manifest,retained=True)
     require(link==replacement_link(manifest) and new['book_version']==manifest['after_book'] and new['after_digest']==_target_after_digest(manifest['targets'][-1]),'retirement_publication_changed')
     prior=json.loads(row['inputs_json']);_verify(prior,retained=True)
     items=[item for item in manifest['candidate']['obligations'] if item['operation_id']==row['operation_id'] and item['attempt_id']==row['attempt_id']]
@@ -461,7 +475,12 @@ def publish(runtime,manifest,*,inject=lambda point:None):
             ready.complete_publication(conn,operation_id=manifest['operation_id'],attempt_id=manifest['attempt_id'],book_version=manifest['after_book'],after_digest=_target_after_digest(manifest['targets'][-1]),finished_at=manifest['created_at'])
             inject('before_retirement')
             retire_obligations(conn,manifest)
-    receipt=SupplierHistory(runtime,manifest['operation_id'],manifest['attempt_id']);receipt.validate_sources_readonly(now=clock);return receipt
+    try:
+        receipt=SupplierHistory(runtime,manifest['operation_id'],manifest['attempt_id']);receipt.validate_sources_readonly(now=clock);return receipt
+    except ValueError as exc:
+        # A committed publication cannot become "no pending receipt" and
+        # accidentally admit generic History without its native supplier ACK.
+        raise RuntimeError('supplier_history_committed_validation_failed') from exc
 
 
 class SupplierHistory:

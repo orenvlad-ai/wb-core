@@ -680,7 +680,9 @@ class LinuxTests(unittest.TestCase):
     def test_native_two_source_cohort_history_finance_each_exact_completed(self):self.completion(second=True)
     def test_followup_owed_dates_actual_history_each_parent_completed(self):self.completion(second=True,replan=True)
     def test_after_book_peer_and_new_book_crash_exact_history_recovery(self):self.completion(second=True,replan=True,crash=True)
-    def completion(self,*,race=None,second=False,replan=False,crash=False):
+    def test_unchanged_money_ghost_new_native_generation_gets_exact_history_ack(self):self.completion(crash=True,unchanged=True)
+    def completion(self,*,race=None,second=False,replan=False,crash=False,unchanged=False):
+        moment=MOMENT
         from types import SimpleNamespace
         import hashlib
         from packages.application import owned_history_worker as supervisor,owned_history_native_ack as ack
@@ -696,7 +698,7 @@ class LinuxTests(unittest.TestCase):
         rt=case.runtime
         OwnProductCapitalBlock(runtime=rt)
         legacy=CalculationParametersBlock(runtime=rt);legacy.ensure_initial_version(created_at=NOW,created_by='synthetic supplier fixture')
-        ProxyV4ParametersBlock(runtime=rt,now_factory=lambda:MOMENT)
+        ProxyV4ParametersBlock(runtime=rt,now_factory=lambda:moment)
         second_request='second-historical-cost'
         old=case.prepare()
         if crash:
@@ -704,6 +706,12 @@ class LinuxTests(unittest.TestCase):
                 if point=='after_book':raise RuntimeError('old supplier after book')
             with self.assertRaisesRegex(RuntimeError,'old supplier'):case.publish(old,inject=stop)
         else:receipt=case.publish(old)
+        if unchanged:
+            moment+=timedelta(hours=1);SupplierNativeEditionIdentityTests.next_native(case,moment)
+            fresh=h.prepare(rt,case.identity,now=moment);receipt=case.publish(fresh)
+            self.assertEqual(set(receipt.dates),set(old['candidate']['effect_dates']))
+            self.assertTrue(all(r['ghost_version']!=fresh['candidate']['editions'][r['day']]['version_id']
+                for r in fresh['candidate']['recovery_inputs']))
         if replan:
             fresh,case.second_identity,second_request=ReplanTests.followup(case,old)
             if crash:
@@ -712,11 +720,11 @@ class LinuxTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'new supplier'):case.publish(fresh,inject=stop_new)
             receipt=case.publish(fresh)
             self.assertEqual(set(receipt.dates),set(old['candidate']['effect_dates']))
-        finance=WbFinanceWeeklyBlock(rt.runtime_dir,seller_id='canonical',now_factory=lambda:MOMENT);finance.ensure_schema()
+        finance=WbFinanceWeeklyBlock(rt.runtime_dir,seller_id='canonical',now_factory=lambda:moment);finance.ensure_schema()
         finance.ingest_week(date(2026,7,20),date(2026,7,26),[_row(1,DAY,nm_id=1)])
         # Real cost proof still refuses to call this completed before History.
         from packages.application.operator_supplier_cost_proof import read_native_proof
-        with self.assertRaisesRegex(ValueError,'history_exact_ack_pending'):read_native_proof(rt,case.identity,now=MOMENT)
+        with self.assertRaisesRegex(ValueError,'history_exact_ack_pending'):read_native_proof(rt,case.identity,now=moment)
         with TemporaryDirectory(prefix='supplier-supervisor-') as raw,closing(sqlite3.connect(rt.db_path)) as keeper:
             keeper.execute('PRAGMA journal_mode=WAL');keeper.commit();keeper.execute('SELECT 1 FROM sqlite_master').fetchone()
             root=Path(raw)/'candidate';root.mkdir(mode=0o700)
@@ -749,8 +757,8 @@ class LinuxTests(unittest.TestCase):
                         return native
                     with patch.object(worker,'_invoke',side_effect=diagnostic),patch.object(ack,'consume_supplier_history_ack',side_effect=consume_then_race):
                         if race:
-                            with self.assertRaisesRegex(Exception,'ready_repair_source_changed|query_input_changed|dated_ready_changed|native_source_changed'):worker.complete(MOMENT,backfill_dates=backfill,supplier_receipt=receipt,total_seconds=300)
-                        else:result=worker.complete(MOMENT,backfill_dates=backfill,supplier_receipt=receipt,total_seconds=300)
+                            with self.assertRaisesRegex(Exception,'ready_repair_source_changed|query_input_changed|dated_ready_changed|native_source_changed'):worker.complete(moment,backfill_dates=backfill,supplier_receipt=receipt,total_seconds=300)
+                        else:result=worker.complete(moment,backfill_dates=backfill,supplier_receipt=receipt,total_seconds=300)
                     self.assertIsNone(worker._process)
                     if not race:self.assertTrue(result['supplier_ack'])
             if race:
@@ -761,8 +769,8 @@ class LinuxTests(unittest.TestCase):
             # Existing Finance cost consumer, then its actual independent proof.
             with heavy_admitted(rt.runtime_dir,operation='cycle'),warehouse_functional_job_lock(rt.runtime_dir):
                 finance.recalculate_stale_cost_weeks()
-                self.assertTrue(processing.record_completion(rt,case.identity,now=MOMENT)['complete'])
-                if second:self.assertTrue(processing.record_completion(rt,case.second_identity,now=MOMENT)['complete'])
+                self.assertTrue(processing.record_completion(rt,case.identity,now=moment)['complete'])
+                if second:self.assertTrue(processing.record_completion(rt,case.second_identity,now=moment)['complete'])
             saved=financial.read_request(rt.runtime_dir,rt.db_path,'financial-historical-cost',request_scope='alice-key')['results'][0]['acceptance']
             self.assertTrue(saved['processing']['complete']);self.assertEqual(saved['state'],'completed')
             if second:
@@ -1361,6 +1369,110 @@ class SupplierReceiptReadbackTests(unittest.TestCase):
             return result
         with patch.object(dated,'book_lineage',side_effect=race),self.assertRaisesRegex(ValueError,'dated_book_observer_changed'):
             receipt.validate_sources_readonly(now=MOMENT)
+
+
+class SupplierNativeEditionIdentityTests(unittest.TestCase):
+    @staticmethod
+    def next_native(case,now):
+        from packages.application.warehouse_functional import WarehouseFunctionalBlock
+        native=WarehouseFunctionalBlock(runtime=case.runtime,timestamp_factory=lambda:now.isoformat())
+        payload=deepcopy(native._last_good_wb_payload())
+        payload['snapshot_date']=now.date().isoformat();payload['data']['fetched_at']=now.isoformat()
+        plan=native._build_plan(kind='hourly_wb_sync',wb_payload=payload)
+        native.apply_plan(plan,confirm_fingerprint=plan['plan_fingerprint'])
+
+    def fixture(self):
+        case=Tests();case.setUp();self.addCleanup(case.doCleanups);old=case.prepare()
+        def crash(point):
+            if point=='after_book':raise RuntimeError('own book ghost')
+        with self.assertRaisesRegex(RuntimeError,'own book ghost'):case.publish(old,inject=crash)
+        later=MOMENT+timedelta(hours=1);self.next_native(case,later)
+        new=h.prepare(case.runtime,case.identity,now=later)
+        self.assertNotEqual(new['attempt_id'],old['attempt_id'])
+        self.assertTrue(new['candidate']['recovery_inputs'])
+        for recovery in new['candidate']['recovery_inputs']:
+            day=recovery['day']
+            self.assertNotEqual(recovery['ghost_version'],new['candidate']['editions'][day]['version_id'])
+            self.assertEqual([{k:v for k,v in r.items() if k!='version_id'} for r in new['candidate']['editions'][day]['balances']],
+                [{k:v for k,v in r.items() if k!='version_id'} for r in old['candidate']['editions'][day]['balances']])
+        return case,old,new,later
+
+    def test_same_money_new_native_attempt_keeps_all_source_fences(self):
+        case,old,new,later=self.fixture()
+        with ready.readonly(case.runtime.db_path) as conn:stages.check_query_fence(conn,new['candidate']['source_inputs'])
+        receipt=case.publish(new)
+        self.assertEqual(set(receipt.validate_sources_readonly(now=later)['dated']),set(old['candidate']['effect_dates']))
+        with ready.readonly(case.runtime.db_path) as conn:
+            stages.check_query_fence(conn,new['candidate']['source_inputs'])
+            h._source_fence(conn,new,ready_before=False)
+            self.assertTrue(h.verified_retirement(conn,h.obligation_row(conn,new['candidate']['obligations'][0])))
+        recovery=new['candidate']['recovery_inputs'][-1];edition=new['candidate']['editions'][recovery['day']]
+        version=edition['version_id']
+        for sql,args in (
+            (f'UPDATE {stages.P}functional_versions SET created_at=? WHERE version_id=?',('changed',version)),
+            (f'UPDATE {stages.P}functional_balances SET capital_rub=? WHERE version_id=?',('999999',version))):
+            with self.subTest(sql=sql),closing(_connect(case.runtime.db_path)) as conn:
+                conn.execute(sql,args);conn.commit()
+                with self.assertRaisesRegex(ValueError,'dated_stage_readback_changed'):receipt.validate_sources_readonly(now=later)
+                conn.rollback()
+                # Restore the exact native fixture rows before the next case.
+                if 'functional_versions' in sql:conn.execute(f'UPDATE {stages.P}functional_versions SET created_at=? WHERE version_id=?',(edition['version']['created_at'],version))
+                else:
+                    for row in edition['balances']:
+                        conn.execute(f'UPDATE {stages.P}functional_balances SET capital_rub=? WHERE version_id=? AND warehouse_key=? AND nm_id=?',(row['capital_rub'],version,row['warehouse_key'],row['nm_id']))
+                conn.commit()
+        with closing(_connect(case.runtime.db_path)) as conn:
+            row={**edition['version'],'version_id':recovery['ghost_version'],'plan_fingerprint':fingerprint(['foreign',recovery['ghost_version']])}
+            conn.execute(f'INSERT INTO {stages.P}functional_versions({",".join(row)}) VALUES({",".join("?" for _ in row)})',tuple(row.values()));conn.commit()
+        with self.assertRaisesRegex(ValueError,'ready_repair_source_changed'):receipt.validate_sources_readonly(now=later)
+
+    def test_business_day_rollover_keeps_exact_prior_date_obligations(self):
+        case,old,new,later=self.fixture();case.publish(new)
+        tomorrow=MOMENT+timedelta(days=1);self.next_native(case,tomorrow)
+        numerical=candidate.prepare(case.runtime,case.identity,now=tomorrow)
+        self.assertEqual(numerical['functional']['business_date'],tomorrow.date().isoformat())
+        self.assertEqual(numerical['owed_dates'],new['candidate']['effect_dates'])
+        self.assertEqual(candidate.validate(numerical,runtime=case.runtime,now=tomorrow),numerical)
+        for day in new['candidate']['effect_dates']:
+            self.assertNotEqual(numerical['editions'][day]['version_id'],new['candidate']['editions'][day]['version_id'])
+            self.assertEqual(candidate.business_image(numerical['editions'][day]['balances']),candidate.business_image(new['candidate']['editions'][day]['balances']))
+
+    def test_new_committed_validation_failure_stops_pending(self):
+        case,old,new,later=self.fixture()
+        with heavy_admitted(case.runtime.runtime_dir,operation='cycle'),warehouse_functional_job_lock(case.runtime.runtime_dir), \
+                patch.object(h.SupplierHistory,'validate_sources_readonly',side_effect=ready.ReadyPublicationConflict('ready_repair_source_changed')), \
+                patch.object(h,'_checked',side_effect=AssertionError('committed failure swallowed')):
+            with self.assertRaisesRegex(RuntimeError,'supplier_history_committed_validation_failed'):
+                h.pending(case.runtime,now=later)
+        with ready.readonly(case.runtime.db_path) as conn:
+            row=conn.execute('SELECT state,diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+                (new['operation_id'],new['attempt_id'])).fetchone()
+            self.assertEqual(row['state'],'complete');self.assertNotIn('supplier_history_ack',json.loads(row['diagnostics_json']))
+
+    def test_complete_known_prior_algorithm_replans_after_new_native_generation(self):
+        case,old,new,later=self.fixture();case.publish(new)
+        prior=deepcopy(new);prior['candidate']['code_authority']=h.RETAINED_COMPLETE_CODE_AUTHORITY
+        prior['candidate']['manifest_digest']=h._large_fingerprint({k:v for k,v in prior['candidate'].items() if k!='manifest_digest'})
+        prior['manifest_digest']=h._large_fingerprint({k:v for k,v in prior.items() if k!='manifest_digest'})
+        with closing(_connect(case.runtime.db_path)) as conn:
+            conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET inputs_json=? WHERE operation_id=? AND attempt_id=?',
+                (canonical(prior),prior['operation_id'],prior['attempt_id']))
+            conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=? WHERE operation_id=? AND attempt_id=?',
+                (canonical({'supplier_history_replaced_by':h.replacement_link(prior)}),old['operation_id'],old['attempt_id']));conn.commit()
+        h._verify(prior,retained=True)
+        with self.assertRaisesRegex(ValueError,'formula_changed'):h._verify(prior)
+        after=later+timedelta(hours=1);self.next_native(case,after)
+        with heavy_admitted(case.runtime.runtime_dir,operation='cycle'),warehouse_functional_job_lock(case.runtime.runtime_dir):receipt=h.pending(case.runtime,now=after)
+        self.assertIsNotNone(receipt);successor=receipt.manifest
+        self.assertNotEqual(successor['attempt_id'],prior['attempt_id'])
+        self.assertEqual(successor['candidate']['owed_dates'],prior['candidate']['effect_dates'])
+        for day in prior['candidate']['effect_dates']:
+            self.assertNotEqual(successor['candidate']['editions'][day]['version_id'],prior['candidate']['editions'][day]['version_id'])
+            self.assertEqual(candidate.business_image(successor['candidate']['editions'][day]['balances']),candidate.business_image(prior['candidate']['editions'][day]['balances']))
+        self.assertEqual(set(receipt.validate_sources_readonly(now=after)['dated']),set(prior['candidate']['effect_dates']))
+        with ready.readonly(case.runtime.db_path) as conn:
+            rows=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(prior['operation_id'],prior['attempt_id'])).fetchone()
+            self.assertTrue(h.verified_retirement(conn,rows));self.assertNotIn('supplier_history_ack',json.loads(rows['diagnostics_json']))
 
 
 if __name__=='__main__':unittest.main()

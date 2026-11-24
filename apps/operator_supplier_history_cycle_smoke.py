@@ -47,9 +47,11 @@ class SeamTests(unittest.TestCase):
             validate_sources_readonly=lambda **kw:self.events.append('validate') or 'exact-seam-source')
         self.supplier._read=lambda:({'manifest_digest':'seam-only'},{'supplier_history_ack':{'manifest_digest':'seam-only','native':dict.fromkeys(self.supplier.publication_dates())}})
         token=SHEET_OPERATOR_JOB_ID.set('supplier-cycle');self.addCleanup(SHEET_OPERATOR_JOB_ID.reset,token)
-    def invoke(self, *, ff=None, supplier=None, finance=None, builder=None):
+    def invoke(self, *, ff=None, supplier=None, finance=None, builder=None, pending_error=None):
         def pending(*args,**kw):
-            require_warehouse_job_owner(self.rt.runtime_dir);self.events.append('supplier');return supplier
+            require_warehouse_job_owner(self.rt.runtime_dir);self.events.append('supplier')
+            if pending_error is not None:raise pending_error
+            return supplier
         def finish(*args,**kw):
             require_warehouse_job_owner(self.rt.runtime_dir);self.events.append('finance');return finance or finance_result()
         # This is a seam-only owner fixture; the LinuxTests below bind real /proc identity.
@@ -78,6 +80,12 @@ class SeamTests(unittest.TestCase):
         with self.assertRaisesRegex(CycleStageFailure,'supplier_history_completion_ack_missing'):
             self.invoke(supplier=self.supplier)
         self.assertNotIn('finance',self.events)
+    def test_committed_supplier_failure_never_starts_generic_history(self):
+        builder=Mock()
+        with self.assertRaisesRegex(RuntimeError,'supplier_history_committed_validation_failed'):
+            self.invoke(pending_error=RuntimeError('supplier_history_committed_validation_failed'),builder=builder)
+        builder.assert_not_called();self.assertNotIn('finance',self.events)
+
     def test_no_dated_owner_retains_original_ready_recheck(self):
         result,sp,finalize=self.invoke()
         self.assertEqual((sp,finalize),(1,0));self.assertEqual(self.entry._cycle_verify_ready.call_count,2)
