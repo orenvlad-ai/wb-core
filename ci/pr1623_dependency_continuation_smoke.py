@@ -158,6 +158,17 @@ class Tests(unittest.TestCase):
             self.assertEqual(c.run(self.client,self.target,'apply',p['preview_fingerprint'])['state'],'complete')
             self.assertEqual(before,self.invocations)
 
+    def test_main_drift_after_completion_cannot_finish_owner(self):
+        with ExitStack() as stack:
+            p=self.fixture(stack);real=r._publish_once
+            def drift(*args):
+                real(*args)
+                if args[-1].get('phase')=='metadata-complete' and args[-1].get('state')=='after':
+                    self.main.return_value={'trusted_main_sha':'e'*40}
+            stack.enter_context(patch.object(r,'_publish_once',side_effect=drift))
+            self.assertEqual(c.run(self.client,self.target,'apply',p['preview_fingerprint'])['state'],'ambiguous')
+            self.assertTrue(self.complete);self.finish.assert_not_called()
+
     def test_dependency_probe_uses_full_native_verifier_without_installer(self):
         source='header\nprint(json.dumps({"dependency_versions":versions}))'
         with patch.object(r,'_selective_live_contract_script',return_value=source):

@@ -190,6 +190,7 @@ def run(client, target, command, expected_fingerprint):
             if command=='preview':
                 return dict(schema=r.RECOVERY_SCHEMA,state='reviewable',operation_id=OPERATION,
                     preview_fingerprint=claims[0]['preview_fingerprint'],stages=['readback-only-finish-and-receipt'])
+            require(r.prove_repo_only_descendant(client,parent['source'])==runner,'main-drift')
             r._finish_deploy_protection(target,parent['source'])
             final=collect(target,parent,complete=True)
             require(r.prove_repo_only_descendant(client,parent['source'])==runner,'main-drift')
@@ -246,6 +247,7 @@ def run(client, target, command, expected_fingerprint):
         stage('metadata-complete',cmd['completion'],input_text=cmd['completion_input'])
         final=r.collect_prestate(target,MERGE,require_incomplete=False)
         require(final['finance_pilot']==parent['finance'],'finance-changed')
+        require(r.prove_repo_only_descendant(client,parent['source'])==runner,'main-drift')
         r._finish_deploy_protection(target,parent['source'])
         final=collect(target,parent,complete=True)
         require(r.prove_repo_only_descendant(client,parent['source'])==runner,'main-drift')
