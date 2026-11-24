@@ -817,7 +817,11 @@ class InventoryTimestampRecoveryTests(unittest.TestCase):
         self.assertNotEqual(new['cohort_refs'],old['candidate']['cohort_refs'])
         self.assertEqual(new['functional']['business_date'],tomorrow.date().isoformat())
         self.assertEqual(new['owed_dates'],old['candidate']['effect_dates'])
-        self.assertTrue(any(o['inputs_json']==encoded for o in new['obligations']))
+        matching = [item for item in new['obligations'] if item['attempt_id'] == old['attempt_id']]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]['inputs_ref'], h.retained_inputs_ref(encoded))
+        with ready.readonly(case.runtime.db_path) as conn:
+            self.assertEqual(canonical(h.load_obligation(conn, matching[0])), encoded)
         self.assertEqual(len(new['recovery_inputs']),len(old['candidate']['effect_dates']))
 
 
