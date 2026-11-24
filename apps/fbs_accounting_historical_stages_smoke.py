@@ -525,6 +525,20 @@ class NativeHistoricalStages(unittest.TestCase):
         forged=deepcopy(dated);proof=next(iter(forged['dates']['2026-09-09']['debit_proofs'].values()));proof.update(kind='proportional_native_aggregate',frozen={});forged['source_digest']=fingerprint(forged['dates'])
         with self.assertRaisesRegex(ValueError,'historical_dispatch_exact_debit_basis_required'):
             stages.build_dated_stage_revision(plan,capture=cap,dated=forged)
+        # A later saved date retains acceptances from the ORIGINAL capture
+        # window, including dates omitted from an effect-only recovery subset.
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_events SET business_date='2026-09-09',created_at='2026-09-09T11:00:00Z' WHERE event_id='LOCAL acceptance'")
+        with ready.readonly(self.db) as conn:
+            options=dict(db_path=self.db,book=plan['candidate_book'])
+            full=stages.capture_dated_stages(conn,**options,dates=plan['scope']['dates'])
+            single=stages.capture_dated_stages(conn,**options,dates=['2026-09-10'])
+            restored=stages.capture_dated_stages(conn,**options,dates=['2026-09-10'],source_date_from=min(plan['scope']['dates']))
+            self.assertTrue(full['dates']['2026-09-10']['wb_acceptance_proofs'])
+            self.assertEqual(single['dates']['2026-09-10']['wb_acceptance_proofs'],[])
+            self.assertEqual(restored['dates']['2026-09-10'],full['dates']['2026-09-10'])
+            with self.assertRaisesRegex(ValueError,'historical_stage_source_window_invalid'):
+                stages.capture_dated_stages(conn,**options,dates=['2026-09-10'],source_date_from='2026-09-11')
 
 
 class HistoricalDispatchValuationTests(unittest.TestCase):

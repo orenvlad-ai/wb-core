@@ -114,25 +114,32 @@ def retained_obligations(conn, natives, *, runtime, pinned=None):
     """Native persisted attempts are obligations, never borrowed History ack."""
     from packages.application import operator_supplier_history as history
     refs=[processing.ref(m['operation']) for m in natives];attempt=attempt_identity(natives)
+    header='p.operation_id,p.attempt_id,p.kind,p.state,p.expected_book,p.book_operation_id,p.book_version,p.after_digest,p.diagnostics_json,length(CAST(p.inputs_json AS BLOB)) AS inputs_bytes'
     if pinned is None:
         rows={}
         for ref in refs:
-            found=list(conn.execute("SELECT * FROM sheet_vitrina_v1_ready_publications p WHERE kind=? AND attempt_id<>? AND EXISTS(SELECT 1 FROM json_each(p.inputs_json,'$.candidate.cohort_refs') m WHERE json_extract(m.value,'$.operation_id')=? AND json_extract(m.value,'$.source_digest')=?) ORDER BY created_at,operation_id,attempt_id LIMIT ?",(history.CONTRACT,attempt,ref['operation_id'],ref['source_digest'],MAX_ATTEMPTS+1)))
+            found=list(conn.execute(f"SELECT {header} FROM sheet_vitrina_v1_ready_publications p WHERE kind=? AND attempt_id<>? AND EXISTS(SELECT 1 FROM json_each(p.inputs_json,'$.candidate.cohort_refs') m WHERE json_extract(m.value,'$.operation_id')=? AND json_extract(m.value,'$.source_digest')=?) ORDER BY created_at,operation_id,attempt_id LIMIT ?",(history.CONTRACT,attempt,ref['operation_id'],ref['source_digest'],MAX_ATTEMPTS+1)))
             require(len(found)<=MAX_ATTEMPTS,'attempt_scope_limit')
             rows.update({(r['operation_id'],r['attempt_id']):dict(r) for r in found})
         require(len(rows)<=MAX_ATTEMPTS,'attempt_scope_limit')
     else:
         require(len(pinned)<=MAX_ATTEMPTS,'attempt_scope_limit');rows={}
         for saved in pinned:
-            row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(saved['operation_id'],saved['attempt_id'])).fetchone()
+            row=conn.execute(f'SELECT {header} FROM sheet_vitrina_v1_ready_publications p WHERE operation_id=? AND attempt_id=?',(saved['operation_id'],saved['attempt_id'])).fetchone()
             require(row,'prior_attempt_missing');rows[(row['operation_id'],row['attempt_id'])]=dict(row)
-    result=[]
-    for key,row in sorted(rows.items()):
-        if pinned is None and history.verified_retirement(conn,row):continue
+    result=[];legacy_bytes=0
+    for key,selected in sorted(rows.items()):
+        require(type(selected['inputs_bytes']) is int and selected['inputs_bytes']<=history.MAX_PUBLICATION_BYTES,'prior_attempt_size_limit')
+        row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND length(CAST(inputs_json AS BLOB))<=?',(*key,history.MAX_PUBLICATION_BYTES)).fetchone()
+        require(row and all(row[name]==selected[name] for name in (*history.OBLIGATION_FIELDS,'diagnostics_json')),'prior_attempt_changed')
+        if pinned is None and history.verified_retirement(conn,row):
+            del row
+            continue
         if pinned is None and 'supplier_history_ack' in json.loads(row['diagnostics_json']):
             require(history.completed_row(row),'prior_history_ack_corrupt')
+            del row
             continue
-        manifest=json.loads(row['inputs_json']);history._verify(manifest)
+        manifest=json.loads(row['inputs_json']);history._verify(manifest,retained=True)
         require(row['kind']==history.CONTRACT and row['state'] in ('prepared','complete'),'prior_attempt_state_unknown')
         require(manifest['source_ref'] in manifest['candidate']['cohort_refs'] and (row['operation_id'],row['attempt_id'],row['expected_book'],row['book_operation_id'])==(manifest['operation_id'],manifest['attempt_id'],manifest['expected_book'],manifest['book_operation_id']),'prior_attempt_identity_changed')
         for member in manifest['candidate']['members']:
@@ -155,7 +162,12 @@ def retained_obligations(conn, natives, *, runtime, pinned=None):
         # actual native source publisher must have issued a newer version.
         current=natives[0]['version'];old_version=conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',(manifest['candidate']['functional']['version_id'],)).fetchone()
         require(old_version and current['version_id']!=old_version['version_id'] and (current['published_at'] or current['created_at'])>(old_version['published_at'] or old_version['created_at']),'native_attempt_not_superseded')
-        item={k:row[k] for k in ('operation_id','attempt_id','kind','state','inputs_json','expected_book','book_operation_id','book_version','after_digest')}
+        saved=next((v for v in pinned or [] if (v['operation_id'],v['attempt_id'])==key),None)
+        item={k:row[k] for k in history.OBLIGATION_FIELDS}
+        if saved is not None and 'inputs_json' in saved:
+            legacy_bytes+=selected['inputs_bytes'];require(legacy_bytes<=MAX_BYTES,'candidate_size_limit')
+            item['inputs_json']=row['inputs_json']
+        else:item['inputs_ref']=history.retained_inputs_ref(row['inputs_json'])
         item.update(manifest_digest=manifest['manifest_digest'],dates=manifest['candidate']['effect_dates'],diagnostics_json=row['diagnostics_json'])
         if pinned is not None:
             saved=next(v for v in pinned if (v['operation_id'],v['attempt_id'])==key)
@@ -164,6 +176,7 @@ def retained_obligations(conn, natives, *, runtime, pinned=None):
             item['diagnostics_json']=saved['diagnostics_json']
             require(item==saved,'prior_attempt_changed')
         result.append(item)
+        del manifest,row
     return result
 
 
@@ -203,34 +216,62 @@ def _ghost_quantity_rows(conn,prior,day,facts,queries,native_rows):
 
 def recovery_stage_book(conn,runtime,book,obligations,dates):
     """Only an exact own after-book ghost can reuse ORIGINAL saved stages."""
-    capture=deepcopy(book);recovery=[];queries=[];native_rows={}
-    for day in dates:
-        version=book['wb_days'][day]['version_id']
-        if conn.execute(f'SELECT 1 FROM {stages.P}functional_versions WHERE version_id=?',(version,)).fetchone():continue
-        matches=[]
-        for item in obligations:
-            prior=json.loads(item['inputs_json'])
-            if day in prior['candidate']['effect_dates'] and prior['candidate']['editions'][day]['version_id']==version and book_tuple(book,day)==book_tuple(prior['candidate']['candidate_book'],day):matches.append((item,prior))
-        require(len(matches)==1,'ghost_stage_owner_unproved');item,prior=matches[0]
+    # The stage reader never mutates a book. Copy only the four day maps that
+    # receive original immutable slices; do not duplicate the full FBS state.
+    capture={**book,**{field:dict(book[field]) for field in ('wb_days','retained_days','shared_days','presentations')}}
+    recovery=[];queries=[];native_rows={}
+    ghosts={day:book['wb_days'][day]['version_id'] for day in dates if not conn.execute(
+        f'SELECT 1 FROM {stages.P}functional_versions WHERE version_id=?',(book['wb_days'][day]['version_id'],)).fetchone()}
+    if not ghosts:return capture,recovery,queries
+    owners={day:0 for day in ghosts}
+    for item in obligations:
+        from packages.application.operator_supplier_history import load_obligation
+        prior=load_obligation(conn,item)
+        del prior['targets']  # Exact Ready images were verified; ghost replay does not consume them.
+        owned=[day for day,version in ghosts.items() if day in prior['candidate']['effect_dates']
+            and prior['candidate']['editions'][day]['version_id']==version
+            and book_tuple(book,day)==book_tuple(prior['candidate']['candidate_book'],day)]
+        if not owned:
+            del prior
+            continue
+        for day in owned:
+            owners[day]+=1;require(owners[day]==1,'ghost_stage_owner_unproved')
         from contextlib import closing
         with closing(sources.source.readonly(accounting.path(runtime.runtime_dir))) as ledger:
             row=ledger.execute('SELECT version,payload,previous_version FROM accounting_revisions WHERE operation_id=?',(prior['book_operation_id'],)).fetchone()
             require(row and row[0]==prior['after_book'] and row[2]==prior['expected_book'] and accounting.unpack(ledger,row[1])==prior['candidate']['candidate_book'],'ghost_book_revision_unproved')
+        # All ownership tuples and the complete own after-book were checked.
+        # Remaining replay consumes only the original saved stages.
+        del prior['candidate']['candidate_book']
+        ghost_quantities={day:[(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity'])))
+            for r in prior['candidate']['editions'][day]['balances']] for day in owned}
+        for edition in prior['candidate']['editions'].values():edition.pop('balances')
         original,_=accounting.load(runtime.runtime_dir,version=prior['expected_book'])
-        original_saved=prior['candidate']['editions'][day]['saved']
-        saved=stages.capture_dated_stages(conn,db_path=runtime.db_path,book=original,dates=[day],
-            read_model_mode=stages.read_model_capture_mode(original_saved))
-        require(saved['dates'][day]==prior['candidate']['editions'][day]['saved'],'ghost_original_stage_changed')
-        ghost=prior['candidate']['editions'][day]['balances'];facts=saved['dates'][day]['balances']
-        admitted=_ghost_quantity_rows(conn,prior,day,facts,queries,native_rows)
-        require([(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in ghost]==[(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in admitted],'ghost_quantity_changed')
-        # The old after-image proves ownership only. Physical quantities and
-        # frozen modern money come exclusively from the original saved facts.
-        for key,value in book_tuple(original,day).items():capture[key][day]=deepcopy(value)
-        recovery.append(dict(day=day,prior_operation=item['operation_id'],prior_attempt=item['attempt_id'],ghost_version=version,expected_book=prior['expected_book'],after_book=prior['after_book'],book_operation_id=prior['book_operation_id'],current_tuple=book_tuple(book,day),original_tuple=book_tuple(original,day),saved_digest=fingerprint(saved['dates'][day])))
-        for table,order in (('functional_versions','version_id'),('functional_balances','warehouse_key,nm_id'),('functional_read_models','warehouse_key')):
-            sql=f'SELECT * FROM {stages.P}{table} WHERE version_id=? ORDER BY {order}'
-            require(not list(conn.execute(sql,(version,))),'ghost_partial_stage_unknown');queries.append((sql,(version,)))
+        source_date_from=min(prior['candidate']['dates'])
+        require(source_date_from<=min(owned),'ghost_original_stage_window_changed')
+        groups={}
+        for day in owned:groups.setdefault(stages.read_model_capture_mode(prior['candidate']['editions'][day]['saved']),[]).append(day)
+        for mode,group in groups.items():
+            saved=stages.capture_dated_stages(conn,db_path=runtime.db_path,book=original,dates=group,
+                read_model_mode=mode,source_date_from=source_date_from)
+            for day in group:
+                version=ghosts[day]
+                require(saved['dates'][day]==prior['candidate']['editions'][day]['saved'],'ghost_original_stage_changed')
+                facts=saved['dates'][day]['balances']
+                admitted=_ghost_quantity_rows(conn,prior,day,facts,queries,native_rows)
+                require(ghost_quantities[day]==[(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in admitted],'ghost_quantity_changed')
+                # The old after-image proves ownership only. Quantities and
+                # frozen modern money come from the original saved facts.
+                for key,value in book_tuple(original,day).items():capture[key][day]=value
+                recovery.append(dict(day=day,prior_operation=item['operation_id'],prior_attempt=item['attempt_id'],ghost_version=version,expected_book=prior['expected_book'],after_book=prior['after_book'],book_operation_id=prior['book_operation_id'],current_tuple=book_tuple(book,day),original_tuple=book_tuple(original,day),saved_digest=fingerprint(saved['dates'][day])))
+                for table,order in (('functional_versions','version_id'),('functional_balances','warehouse_key,nm_id'),('functional_read_models','warehouse_key')):
+                    sql=f'SELECT * FROM {stages.P}{table} WHERE version_id=? ORDER BY {order}'
+                    require(not list(conn.execute(sql,(version,))),'ghost_partial_stage_unknown');queries.append((sql,(version,)))
+            del saved,facts,admitted
+        del original,prior,ghost_quantities,edition
+    require(all(count==1 for count in owners.values()),'ghost_stage_owner_unproved')
+    recovery.sort(key=lambda item:item['day'])
+    queries.sort(key=lambda item:(item[0],item[1]))
     return capture,recovery,queries
 
 
@@ -289,7 +330,8 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         queries=[query for m in natives for query in sources.source_queries(m['operation'])]
         queries.extend(recovery_queries)
         for item in obligations:
-            queries.append(('SELECT operation_id,attempt_id,kind,state,inputs_json,expected_book,book_operation_id,book_version,after_digest FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(item['operation_id'],item['attempt_id'])))
+            body='inputs_json' if 'inputs_json' in item else 'length(CAST(inputs_json AS BLOB))'
+            queries.append((f'SELECT operation_id,attempt_id,kind,state,{body},expected_book,book_operation_id,book_version,after_digest FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(item['operation_id'],item['attempt_id'])))
         from packages.application.warehouse_functional import _DOWNSTREAM_COST_ROWS_SQL
         queries.extend([(_DOWNSTREAM_COST_ROWS_SQL,()),(f'SELECT * FROM {sources.P}wb_supplies ORDER BY supply_id',())])
         for m in natives:

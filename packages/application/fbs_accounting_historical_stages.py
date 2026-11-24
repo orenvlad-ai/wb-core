@@ -118,7 +118,7 @@ def read_model_capture_mode(saved):
     return READ_MODEL_PROOFS
 
 
-def capture_dated_stages(conn, *, db_path, book, dates, read_model_mode='payloads'):
+def capture_dated_stages(conn, *, db_path, book, dates, read_model_mode='payloads', source_date_from=None):
     # Supplier cost revisions consume balances and rebuild read models. Their
     # saved evidence needs the validated exact payload digest, not another copy
     # of that unused presentation. Full source rows remain in the query fence.
@@ -127,6 +127,10 @@ def capture_dated_stages(conn, *, db_path, book, dates, read_model_mode='payload
             'historical_read_model_capture_mode_invalid')
     require(conn.in_transaction and conn.execute("PRAGMA query_only").fetchone()[0] == 1,
             "historical_stage_query_only_required")
+    if dates:
+        source_date_from=min(dates) if source_date_from is None else source_date_from
+        require(source_date_from<=min(dates) and source_date_from in book['wb_days'],
+                'historical_stage_source_window_invalid')
     result, queries = {}, []
     for day in dates:
         wb = book["wb_days"][day]
@@ -199,7 +203,7 @@ def capture_dated_stages(conn, *, db_path, book, dates, read_model_mode='payload
         wb_events=[]
         for nm in nm_ids:
             sql=f"SELECT * FROM {P}functional_events WHERE event_type='wb_final_acceptance' AND nm_id=? AND business_date>=? AND business_date<=? AND created_at<=? ORDER BY business_date,event_id"
-            args=(nm,min(dates),day,version['published_at'] or version['created_at'])
+            args=(nm,source_date_from,day,version['published_at'] or version['created_at'])
             count=conn.execute(f'SELECT count(*) FROM ({sql})',args).fetchone()[0]
             require(count<=MAX_ROWS,'historical_wb_acceptance_source_limit',day=day)
             events=[dict(r) for r in conn.execute(sql,args)];queries.append((sql,args))

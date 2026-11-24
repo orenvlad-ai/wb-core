@@ -903,8 +903,19 @@ class InitialAdmissionRecoveryTests(unittest.TestCase):
             value=deepcopy(old);row=next(r for r in value['candidate']['editions'][day]['balances'] if r['warehouse_key']==stage)
             row['quantity']=str(Decimal(row['quantity'])+1);changes.append(value)
         for index,value in enumerate(changes):
-            item=dict(inputs_json=canonical(value),operation_id=old['operation_id'],attempt_id=old['attempt_id'])
+            # A consistent forged stored envelope must still fail the native
+            # initial-admission/quantity proof after reference rehydration.
+            value['candidate']['manifest_digest']=h._large_fingerprint({k:v for k,v in value['candidate'].items() if k!='manifest_digest'})
+            value['manifest_digest']=h._large_fingerprint({k:v for k,v in value.items() if k!='manifest_digest'})
+            encoded=canonical(value)
+            with _connect(case.runtime.db_path) as conn:
+                conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET inputs_json=? WHERE operation_id=? AND attempt_id=?',
+                    (encoded,old['operation_id'],old['attempt_id']));conn.commit()
             with self.subTest(change=index),ready.readonly(case.runtime.db_path) as conn:
+                row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+                    (old['operation_id'],old['attempt_id'])).fetchone()
+                item={key:row[key] for key in h.OBLIGATION_FIELDS}
+                item.update(inputs_ref=h.retained_inputs_ref(encoded),manifest_digest=value['manifest_digest'],dates=value['candidate']['effect_dates'],diagnostics_json=row['diagnostics_json'])
                 with self.assertRaisesRegex(ValueError,'ghost_initial_admission_changed|ghost_quantity_changed'):
                     candidate.recovery_stage_book(conn,case.runtime,old['candidate']['candidate_book'],[item],[day])
 
@@ -1100,7 +1111,7 @@ class PendingCandidateBoundaryTests(unittest.TestCase):
                 with patch.object(ready,'readonly',readonly),patch.object(source,'_exists',return_value=True), \
                      patch.object(processing,'captured_cohort',return_value=['source']), \
                      patch.object(processing,'operation',return_value={'operation_id':'source'}), \
-                     patch.object(h,'_pending_check',side_effect=pending_check),patch.object(h,'_verify',lambda manifest:None), \
+                     patch.object(h,'_pending_check',side_effect=pending_check),patch.object(h,'_verify',lambda manifest,**kwargs:None), \
                      patch.object(h.json,'loads',side_effect=load_old),patch.object(h,'publish',publish), \
                      patch.object(candidate,'prepare',side_effect=prepare_candidate) as prepared, \
                      patch.object(h,'_prepare_publication',side_effect=lambda rt,value,**kw:{'candidate':value}) as publication:
