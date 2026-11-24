@@ -677,4 +677,92 @@ class LinuxTests(unittest.TestCase):
                 self.assertTrue(saved['processing']['complete']);self.assertEqual(saved['state'],'completed')
 
 
+class SupplierReadySelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.conn=sqlite3.connect(':memory:');self.conn.row_factory=sqlite3.Row
+        self.addCleanup(self.conn.close)
+        self.conn.executescript('''CREATE TABLE registry_upload_current_state(slot,bundle_version);
+            INSERT INTO registry_upload_current_state VALUES(1,'fixture');
+            CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version,as_of_date,snapshot_id,
+                activated_at,refreshed_at,plan_json,PRIMARY KEY(bundle_version,as_of_date));''')
+        self.body_keys=[]
+
+    def add(self,day,next_day,*,recovery=None,inferred=False,padding=''):
+        payload=asdict(make_plan(as_of_date=day,day=next_day))
+        if inferred:payload.pop('date_columns')
+        payload['metadata']={'local_padding':padding,**(recovery or {})}
+        body=canonical(payload)
+        self.conn.execute('INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?,?,?)',
+            ('fixture',day,payload['snapshot_id'],day+'T12:00:00Z',day+'T12:00:00Z',body))
+        return len(body.encode())
+
+    def readonly(self):
+        self.conn.commit();self.conn.execute('PRAGMA query_only=ON');self.conn.execute('BEGIN')
+        owner=self
+        class Observer:
+            def execute(self,sql,args=()):
+                if sql.startswith('SELECT * FROM '+ready.TABLE):owner.body_keys.append(tuple(args))
+                return owner.conn.execute(sql,args)
+        return Observer()
+
+    def parity(self,dates,today):
+        from packages.application.historical_dated_inputs import selected
+        conn=self.readonly();before=self.conn.total_changes
+        self.assertEqual(h._selected_ready(conn,dates,today),selected(self.conn,dates,today))
+        self.assertEqual(self.conn.total_changes,before)
+        self.assertEqual(self.conn.execute('PRAGMA query_only').fetchone()[0],1)
+        self.assertTrue(self.conn.in_transaction)
+
+    def test_exact_inferred_columns_and_original_source_order(self):
+        self.add('2026-09-07','2026-09-08',inferred=True)
+        self.add('2026-09-08','2026-09-09')
+        self.parity(['2026-09-07','2026-09-08','2026-09-09'],'2026-09-08')
+        self.assertEqual(self.body_keys,[('fixture','2026-09-08'),('fixture','2026-09-07')])
+
+    def test_functional_today_default_is_not_latest_or_wall_clock(self):
+        self.add('2026-09-07','2026-09-08');self.add('2026-09-09','2026-09-10')
+        self.parity(['2026-09-08'],'2026-09-07')
+        self.assertEqual(self.body_keys,[('fixture','2026-09-07')])
+
+    def test_covering_recovery_matches_native_selection(self):
+        from packages.application.web_vitrina_management_history import FACT_SOURCE,FACT_GROUPS
+        proof={'server_cell_presentation':{'SKU:1|ordersCount':{'2026-09-08':{
+            'source':FACT_SOURCE,'source_as_of_date':'2026-09-08','complete_source_groups':sorted(FACT_GROUPS)}}}}
+        self.add('2026-09-07','2026-09-08',recovery=proof)
+        self.add('2026-09-09','2026-09-10')
+        self.parity(['2026-09-08'],'2026-09-09')
+
+    def test_missing_and_unproven_covering_sources_still_fail_closed(self):
+        from packages.application.historical_dated_inputs import selected
+        self.add('2026-09-07','2026-09-08');self.add('2026-09-09','2026-09-10')
+        conn=self.readonly()
+        for dates in (['1900-01-01'],['2026-09-08']):
+            for selector in (h._selected_ready,selected):
+                with self.assertRaisesRegex(ValueError,'policy_history_dated_ready_inputs_missing'):
+                    selector(conn,dates,'2026-09-09')
+        self.assertEqual(self.body_keys,[])
+
+    def test_unrelated_archive_over_real_limit_never_loads_full_bodies(self):
+        selected_bytes=self.add('2026-09-07','2026-09-08')
+        padding='x'*(81*1024**2)
+        self.add('2025-01-01','2025-01-02',padding=padding)
+        self.add('2025-01-03','2025-01-04',padding=padding)
+        conn=self.readonly()
+        self.assertGreater(self.conn.execute('SELECT sum(length(CAST(plan_json AS BLOB))) FROM '+ready.TABLE).fetchone()[0],h.MAX_READY_SOURCE_BYTES)
+        result=h._selected_ready(conn,['2026-09-07'],'2026-09-07')
+        self.assertEqual(len(result),1);self.assertEqual(len(result[0][0]['plan_json'].encode()),selected_bytes)
+        self.assertEqual(self.body_keys,[('fixture','2026-09-07')])
+
+    def test_selected_body_and_header_limits_refuse_before_body_fetch(self):
+        selected_bytes=self.add('2026-09-07','2026-09-08')
+        conn=self.readonly()
+        with patch.object(h,'MAX_READY_SOURCE_BYTES',selected_bytes-1):
+            with self.assertRaisesRegex(ValueError,'policy_history_source_size_limit'):
+                h._selected_ready(conn,['2026-09-07'],'2026-09-07')
+        with patch.object(h,'MAX_READY_HEADER_BYTES',1):
+            with self.assertRaisesRegex(ValueError,'ready_header_size_limit'):
+                h._selected_ready(conn,['2026-09-07'],'2026-09-07')
+        self.assertEqual(self.body_keys,[])
+
+
 if __name__=='__main__':unittest.main()

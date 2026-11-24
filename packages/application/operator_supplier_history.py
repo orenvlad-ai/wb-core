@@ -20,6 +20,9 @@ from packages.application.sqlite_contention import connect_sqlite
 
 CONTRACT='supplier_cost_dated_publication_v1'
 MAX_COHORT=32
+MAX_READY_HEADERS=10000
+MAX_READY_HEADER_BYTES=8*1024**2
+MAX_READY_SOURCE_BYTES=160*1024**2
 require=sources.require
 EXPECTED_NATIVE={
     'supplier_exact_queue_pending','supplier_exact_functional_publication_pending',
@@ -89,8 +92,60 @@ def _verify(manifest):
     require(manifest['after_book']==fingerprint(manifest['candidate']['candidate_book']),'book_candidate_corrupt')
 
 
+def _selected_ready(conn,dates,today):
+    """Native bindings from bounded headers; only selected bodies are operands."""
+    from packages.application.historical_dated_inputs import require as dated_require
+    from packages.application.web_vitrina_window_v3 import _ReadyHeader,_select_bindings,has_complete_recovery
+    from packages.application.sheet_vitrina_v1 import _require_date_columns_or_infer
+    from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+    active=conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()
+    dated_require(active,'active_bundle_missing');bundle=active[0]
+    sql=f'''SELECT bundle_version,as_of_date,activated_at,refreshed_at,
+        json_extract(plan_json,'$.snapshot_id') AS snapshot_id,
+        json_extract(plan_json,'$.date_columns') AS dates_json,
+        (SELECT json_extract(value,'$.header') FROM json_each(plan_json,'$.sheets')
+         WHERE json_extract(value,'$.sheet_name')='DATA_VITRINA' LIMIT 1) AS header_json,
+        length(CAST(plan_json AS BLOB)) AS source_bytes FROM {ready.TABLE} WHERE bundle_version=?'''
+    count,size=conn.execute(f'''SELECT count(*),coalesce(sum(
+        length(CAST(coalesce(dates_json,'') AS BLOB))+length(CAST(coalesce(header_json,'') AS BLOB))+
+        length(CAST(coalesce(snapshot_id,'') AS BLOB))+
+        length(CAST(bundle_version||as_of_date||activated_at||refreshed_at AS BLOB))),0) FROM ({sql})''',(bundle,)).fetchone()
+    require(count<=MAX_READY_HEADERS and size<=MAX_READY_HEADER_BYTES,'ready_header_size_limit')
+    raw=[dict(r) for r in conn.execute(sql+' ORDER BY activated_at DESC,refreshed_at DESC,as_of_date DESC',(bundle,))]
+    headers=[];header_bytes=0
+    for row in raw:
+        header_bytes+=len(canonical(row).encode())
+        require(header_bytes<=MAX_READY_HEADER_BYTES,'ready_header_size_limit')
+        columns=_require_date_columns_or_infer({'date_columns':json.loads(row['dates_json']) if row['dates_json'] is not None else None},json.loads(row['header_json'] or '[]'))
+        headers.append(_ReadyHeader(bundle,row['as_of_date'],row['snapshot_id'],row['activated_at'],row['refreshed_at'],tuple(columns),'{}',0))
+    recovery={};recovery_bytes=0
+    def bounded_recovery(connection,header,day):
+        nonlocal recovery_bytes
+        if header.key not in recovery:
+            query=f"SELECT json_extract(plan_json,'$.metadata.server_cell_presentation') AS value FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?"
+            size=connection.execute(f'SELECT length(CAST(value AS BLOB)) FROM ({query})',header.key).fetchone()
+            recovery_bytes+=(size[0] or 0) if size else 0
+            dated_require(recovery_bytes<=MAX_READY_SOURCE_BYTES,'source_size_limit')
+            row=connection.execute(query,header.key).fetchone()
+            try:recovery[header.key]=json.loads(row[0] or '{}') if row else {}
+            except json.JSONDecodeError:recovery[header.key]={}
+        return has_complete_recovery({'server_cell_presentation':recovery[header.key]},day)
+    bindings,_=_select_bindings(conn,headers,dates,bundle,today,recovery_check=bounded_recovery)
+    source={binding.date:binding.source_key for binding in bindings}
+    dated_require(set(source)==set(dates) and all(source.values()),'dated_ready_inputs_missing')
+    keys=set(source.values())
+    dated_require(sum(row['source_bytes'] for row in raw if (bundle,row['as_of_date']) in keys)<=MAX_READY_SOURCE_BYTES,'source_size_limit')
+    result=[]
+    for header in headers:
+        if header.key not in keys:continue
+        row=dict(conn.execute(f'SELECT * FROM {ready.TABLE} WHERE bundle_version=? AND as_of_date=?',header.key).fetchone())
+        _deserialize_sheet_vitrina_plan(row['plan_json'])
+        result.append((row,sorted(day for day,key in source.items() if key==header.key)))
+    return result
+
+
 def _targets(runtime, numerical, *, now):
-    from packages.application.historical_dated_inputs import selected,dated_slice,book_lineage
+    from packages.application.historical_dated_inputs import dated_slice,book_lineage
     from packages.application.fbs_accounting_historical_publication import materialize_exact_dates
     from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan,_serialize_sheet_vitrina_plan
     from packages.application.inventory_quantity import resolve_plan_quantities,CONTRACT as QUANTITY_CONTRACT,EFFECTIVE_DATE as QUANTITY_EFFECTIVE_DATE
@@ -99,7 +154,7 @@ def _targets(runtime, numerical, *, now):
     after_book=fingerprint(numerical['candidate_book']);targets=[]
     with ready.readonly(runtime.db_path) as conn:
         dates=sorted({*numerical['effect_dates'],numerical['functional']['business_date']})
-        for row,days in selected(conn,dates,numerical['functional']['business_date']):
+        for row,days in _selected_ready(conn,dates,numerical['functional']['business_date']):
             target={'bundle_version':row['bundle_version'],'as_of_date':row['as_of_date']}
             plan=materialize_exact_dates(_deserialize_sheet_vitrina_plan(row['plan_json']),book=numerical['candidate_book'],version=after_book,runtime_dir=runtime.runtime_dir,target=target,dates=days,now=now,connection=conn)
             inventory=[]
@@ -246,12 +301,12 @@ class SupplierHistory:
         return dict(operation_id=self.operation_id,attempt_id=self.attempt_id,digest=self.manifest['manifest_digest'],dates=list(self.dates))
     def publication_dates(self):return self.dates
     def _validate_sources_conn(self,conn):
-        from packages.application.historical_dated_inputs import selected,dated_slice,book_lineage
+        from packages.application.historical_dated_inputs import dated_slice,book_lineage
         manifest=self.manifest;_fence(conn,manifest,ready_before=False)
         active,version=accounting.load(self.runtime.runtime_dir);expected=manifest['candidate']['candidate_book']
         require(all(active[field].get(day)==expected[field][day] for field in ('wb_days','retained_days','shared_days','presentations') for day in self.dates),'book_dates_changed')
         proof={}
-        for row,days in selected(conn,list(self.dates),manifest['candidate']['functional']['business_date']):
+        for row,days in _selected_ready(conn,list(self.dates),manifest['candidate']['functional']['business_date']):
             for day in days:
                 target=next(t for t in manifest['targets'] if day in t['dates'])
                 require(fingerprint(dated_slice(row['plan_json'],day))==target['dated_outputs'][day],'dated_ready_changed')
