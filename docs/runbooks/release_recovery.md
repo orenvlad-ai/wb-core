@@ -267,3 +267,44 @@ After successful recovery, explicitly resume the existing window and perform
 the separately reviewed canonical backup. Recovery completion alone is not
 proof that the backup or subsequent scheduled cycle succeeded. An uncertain
 recovery remains readback-only under the existing claim rules.
+
+## PR1623: exact storage preflight refusal before sync
+
+Release Runner `45470334066`, Gate `45468017296`, operation
+`release-v3-3d39b2cc0010ab71718b7e1fc93e214f`, merged
+`48aba616911767c1c9410d013f59cfbe258ce4c8` stopped at adapter line1208:
+the read-only root-storage preflight returned exit3 because available
+26,385,899,520 bytes was below the unchanged 26,843,545,600-byte reserve.
+The source ordering proves owner start, mkdir, sync and every later deploy
+stage were unentered. This is outside the generic post-sync recovery lane.
+
+After the blocking files have been safely moved and verified, use the existing
+**Post-merge Release Recovery** workflow with `release_run_id=45470334066`,
+first `mode=preview`. The exact lane verifies the original immutable failed
+job, blocked receipt, Gate/plan and merge lineage; the trusted runner may differ
+only by independently classified repo-only descendants. It requires the old
+complete `336345e6c9b08f6c2741523aa066f93c485a2f6e` runtime, fresh services,
+auth and Finance proof, and the original PREPARED owner's fingerprint, empty
+expected SHA, window and baseline. Native held-formula/quiet checks and the
+unchanged storage preflight must pass. Free bytes are checked live, not frozen
+into a preview fingerprint.
+
+Review the preview and supply its exact fingerprint with `mode=apply`. A durable
+recovery claim precedes another full prestate comparison. Only then does an
+isolated clean checkout of the original merge execute the unchanged canonical
+deploy once, with the original PR/head/operation identity. All normal storage,
+owner, dependency, systemd, activation, cleaner readiness and metadata guards
+remain enabled. The trusted repo-only runner remains checked out and verifies
+its main identity again before and after native owner finish. Complete runtime,
+Finance and same-window owner readback precede the terminal recovery receipt.
+
+Any existing claim prohibits another deploy, even after another storage or
+cleaner refusal. Repeated preview is read-only. Repeated apply may only verify
+already-complete exact runtime markers and unchanged Finance acceptance, finish
+the same owner idempotently, and publish/read back its terminal receipt. It never
+repeats sync, restart, activation or dependency work. Incomplete or indeterminate
+runtime remains ambiguous for a separately reviewed tail; do not rerun Release
+Runner, cancel ownership, change the baseline, or repeat mutation manually.
+Recovery never resumes `wbc0201-inventory-history-repair-20261124` or starts a
+business cycle. A recovery PR touching only `ci/` and this runbook is repo-only;
+it does not deploy a second runtime before the original operation is complete.
