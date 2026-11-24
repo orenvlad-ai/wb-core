@@ -1156,25 +1156,33 @@ class ReceiptMemoryBoundaryTests(unittest.TestCase):
             book=Tracked(deepcopy(expected));refs['active']=weakref.ref(book)
             return book,'active-version'
         def selected(*args):
-            self.assertIsNone(refs['active'](),'full active book retained during Ready selection')
             row=Tracked(bundle_version='fixture',as_of_date=FIRST,plan_json='{}');refs['row']=weakref.ref(row)
             return [(row,[FIRST])]
-        def lineage(*args):
+        def lineage(*args,**kwargs):
             value=Tracked({field:deepcopy(expected[field][FIRST]) for field in fields});refs['lineage']=weakref.ref(value)
             return value
+        @contextmanager
+        def prepared(*args):
+            class Books:
+                cache={}
+                observer=SimpleNamespace(execute=lambda *args:SimpleNamespace(fetchone=lambda:('active-version',)))
+                def guard(self):pass
+            books=Books();refs['prepared']=weakref.ref(books)
+            yield books
         def binding():
             for name,ref in refs.items():self.assertIsNone(ref(),name+' retained during receipt reread')
             return {'verified':'binding'}
         conn=SimpleNamespace(execute=lambda *args:SimpleNamespace(fetchone=lambda:{'version_id':'native'}))
-        with patch.object(h,'_fence'),patch.object(accounting,'load',side_effect=active_book), \
+        with patch.object(h,'_source_fence'),patch.object(receipt,'_read',return_value=(receipt.manifest,{})), \
+             patch.object(dated,'prepared_book_lineage',prepared),patch.object(accounting,'load',side_effect=active_book), \
              patch.object(h,'_selected_ready',side_effect=selected),patch.object(dated,'dated_slice',return_value={}), \
-             patch.object(dated,'book_lineage',side_effect=lineage),patch.object(stages,'_version_balances',return_value=[]), \
+             patch.object(dated,'book_lineage',lineage),patch.object(stages,'_version_balances',return_value=[]), \
              patch.object(receipt,'binding',side_effect=binding):
             result=receipt._validate_sources_conn(conn)
         self.assertEqual(result['binding'],{'verified':'binding'});self.assertEqual(result['active_book'],'active-version')
         self.assertEqual(set(result['dated']),{FIRST})
 
-    def test_receipt_sql_utf8_size_guard_precedes_fetch_without_python_encode(self):
+    def test_receipt_blob_utf8_size_guard_precedes_full_text_fetch_without_python_encode(self):
         from types import SimpleNamespace
         with TemporaryDirectory(prefix='supplier-receipt-size-') as raw:
             runtime=SimpleNamespace(runtime_dir=Path(raw),db_path=Path(raw)/'op.sqlite3')
@@ -1209,8 +1217,8 @@ class ReceiptMemoryBoundaryTests(unittest.TestCase):
                 self.assertEqual(fetched,['publication']);fetched.clear()
                 with patch.object(h,'MAX_PUBLICATION_BYTES',size-1),self.assertRaisesRegex(ValueError,'publication_not_complete'):
                     receipt._read()
-                self.assertEqual(fetched,[],'oversize publication crossed the SQL fetch guard')
-            self.assertTrue(any('length(CAST(inputs_json AS BLOB))' in sql for sql in statements))
+                self.assertEqual(fetched,[],'oversize publication crossed the actual-byte guard')
+            self.assertEqual(sum(sql.startswith('SELECT inputs_json FROM ') for sql in statements),1)
 
 
 class SupplierReceiptReadbackTests(unittest.TestCase):
@@ -1229,6 +1237,56 @@ class SupplierReceiptReadbackTests(unittest.TestCase):
                 self.assertEqual(load.call_count,1)
             self.assertEqual(receipt.validate_sources_readonly(now=MOMENT),first)
             self.assertEqual(verify.call_count,1)
+
+    def test_mutable_dates_cannot_narrow_or_reorder_the_verified_manifest_scope(self):
+        case,manifest=self.fixture();receipt=h.SupplierHistory(case.runtime,manifest['operation_id'],manifest['attempt_id'])
+        original=receipt.dates
+        for changed in ((),original[:-1],tuple(reversed(original)),list(original)):
+            receipt.dates=changed
+            for method in (receipt.binding,receipt.publication_dates,lambda:receipt.validate_sources_readonly(now=MOMENT)):
+                with self.subTest(dates=changed),self.assertRaisesRegex(ValueError,'receipt_scope_changed'):method()
+        receipt.dates=original;self.assertEqual(receipt.publication_dates(),original)
+
+    def test_retained_projection_reuses_only_verified_identity_with_fresh_rows_and_books(self):
+        import zlib
+        helper=ReplanTests();self.addCleanup(helper.doCleanups);case=helper.fixture();old=case.prepare()
+        def crash(point):
+            if point=='after_book':raise RuntimeError('old ghost')
+        with self.assertRaisesRegex(RuntimeError,'old ghost'):case.publish(old,inject=crash)
+        new,_,_=helper.followup(case,old);case.publish(new)
+        receipt=h.SupplierHistory(case.runtime,new['operation_id'],new['attempt_id'])
+        with patch.object(h,'load_obligation',wraps=h.load_obligation) as loaded:
+            first=receipt.validate_sources_readonly(now=MOMENT)
+            self.assertEqual(receipt.validate_sources_readonly(now=MOMENT),first)
+            self.assertEqual(loaded.call_count,1)
+        self.assertEqual(len(receipt._retained_proofs),1)
+        key,entry=next(iter(receipt._retained_proofs.items()));projection=entry[0]
+        # Even a recomputed memo seal cannot grant a different operation,
+        # original scope, or book relation than the pinned owner proof.
+        for index,value in ((0,'different-operation'),(3,projection[3][:-1]),(5,old['expected_book'])):
+            forged=tuple(value if n==index else original for n,original in enumerate(projection))
+            receipt._retained_proofs[key]=(forged,h._large_fingerprint(forged))
+            with self.assertRaisesRegex(ValueError,'ghost_book_revision_unproved'):receipt.validate_sources_readonly(now=MOMENT)
+        receipt._retained_proofs[key]=entry
+        with _connect(case.runtime.db_path) as conn:
+            row=conn.execute('SELECT rowid,inputs_json,diagnostics_json,book_version FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+                (old['operation_id'],old['attempt_id'])).fetchone()
+        altered=row['inputs_json'].replace('sha256:','sha257:',1);self.assertEqual(len(altered.encode()),len(row['inputs_json'].encode()))
+        for field,value,error in (('inputs_json',altered,'prior_attempt_changed'),('book_version','changed','prior_attempt_changed|ready_repair_source_changed'),
+                ('diagnostics_json',canonical({'supplier_history_ack':{}}),'prior_history_ack_changed'),
+                ('diagnostics_json',canonical({'supplier_history_replaced_by':{}}),'prior_attempt_retirement_changed')):
+            with _connect(case.runtime.db_path) as conn:
+                conn.execute(f'UPDATE sheet_vitrina_v1_ready_publications SET {field}=? WHERE rowid=?',(value,row['rowid']));conn.commit()
+            with self.subTest(field=field),self.assertRaisesRegex(ValueError,error):receipt.validate_sources_readonly(now=MOMENT)
+            with _connect(case.runtime.db_path) as conn:
+                conn.execute(f'UPDATE sheet_vitrina_v1_ready_publications SET {field}=? WHERE rowid=?',(row[field],row['rowid']));conn.commit()
+        with sqlite3.connect(accounting.path(case.runtime.runtime_dir)) as conn:
+            payload=conn.execute('SELECT payload FROM accounting_revisions WHERE version=?',(old['after_book'],)).fetchone()[0]
+            blob=json.loads(payload)['state']['baseline']
+            compressed=conn.execute('SELECT payload FROM accounting_blobs WHERE digest=?',(blob,)).fetchone()[0]
+            changed=json.loads(zlib.decompress(compressed));changed['changed-after-validation']=True
+            conn.execute('UPDATE accounting_blobs SET payload=? WHERE digest=?',(zlib.compress(canonical(changed).encode()),blob));conn.commit()
+        with self.assertRaisesRegex(ValueError,'fbs_accounting_blob_corrupt'):receipt.validate_sources_readonly(now=MOMENT)
 
     def test_warm_read_rejects_memory_code_row_metadata_retirement_and_stored_byte_tamper(self):
         case,manifest=self.fixture();receipt=h.SupplierHistory(case.runtime,manifest['operation_id'],manifest['attempt_id'])

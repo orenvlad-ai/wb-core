@@ -322,7 +322,7 @@ def _fence(conn,manifest,*,ready_before=True):
     _source_fence(conn,manifest,ready_before=ready_before)
 
 
-def _source_fence(conn,manifest,*,ready_before=True):
+def _source_fence(conn,manifest,*,ready_before=True,retained_proofs=None):
     ready.check_pinned_authority(conn,manifest['authority'])
     stages.check_query_fence(conn,manifest['candidate']['source_inputs'])
     stages.check_query_fence(conn,manifest['candidate']['query_fence'])
@@ -350,11 +350,30 @@ def _source_fence(conn,manifest,*,ready_before=True):
                 groups.setdefault(key,[]).append(recovery)
             for (operation,attempt,original_version,after_version,book_operation),group in groups.items():
                 prior=next(item for item in manifest['candidate']['obligations'] if item['operation_id']==operation and item['attempt_id']==attempt)
-                prior_manifest=load_obligation(conn,prior)
+                # Receipt-local memo retains only immutable scalar identities.
+                # Each reuse still reads/pins the full actual retained row and
+                # independently reloads/hash-verifies its native book below.
+                key=(manifest['manifest_digest'],operation,attempt,prior['manifest_digest'])
+                cached=retained_proofs.get(key) if retained_proofs is not None else None
+                if cached is None:
+                    prior_manifest=load_obligation(conn,prior)
+                    projection=(prior_manifest['operation_id'],prior_manifest['attempt_id'],prior_manifest['manifest_digest'],
+                                tuple(prior_manifest['candidate']['effect_dates']),prior_manifest['expected_book'],prior_manifest['after_book'],prior_manifest['book_operation_id'])
+                    del prior_manifest
+                    if retained_proofs is not None:retained_proofs[key]=(projection,_large_fingerprint(projection))
+                else:
+                    row=obligation_row(conn,prior);del row
+                    require(type(cached) is tuple and len(cached)==2 and type(cached[0]) is tuple
+                            and _large_fingerprint(cached[0])==cached[1],'prior_projection_changed')
+                    projection=cached[0]
+                require(projection==(operation,attempt,prior['manifest_digest'],tuple(prior['dates']),original_version,after_version,book_operation),
+                        'ghost_book_revision_unproved')
                 row=ledger.execute('SELECT version,payload,previous_version FROM accounting_revisions WHERE operation_id=?',(book_operation,)).fetchone()
-                revised=before if after_version==manifest['expected_book'] else accounting.load(runtime,version=after_version,connection=ledger)[0]
-                require(row and row[0]==after_version and row[2]==original_version and revised==prior_manifest['candidate']['candidate_book'],'ghost_book_revision_unproved')
-                del prior_manifest,revised,row
+                if after_version==manifest['expected_book']:
+                    revised,verified_version=before,manifest['expected_book']
+                else:revised,verified_version=accounting.load(runtime,version=after_version,connection=ledger)
+                require(row and row[0]==after_version and row[2]==original_version and verified_version==projection[5],'ghost_book_revision_unproved')
+                del revised,row
                 original=before if original_version==manifest['expected_book'] else accounting.load(runtime,version=original_version,connection=ledger)[0]
                 for recovery in group:
                     day=recovery['day']
@@ -449,7 +468,7 @@ class SupplierHistory:
     """This type, not FF or policy authority, enrolls the exact supplier dates."""
     def __init__(self,runtime,operation_id,attempt_id):
         self.runtime=runtime;self.operation_id=operation_id;self.attempt_id=attempt_id
-        self.manifest=self._read()[0];self.dates=tuple(self.manifest['candidate']['effect_dates'])
+        self.manifest=self._read()[0];self.dates=tuple(self.manifest['candidate']['effect_dates']);self._retained_proofs={}
     @staticmethod
     def _canonical_pin(manifest):
         # The C serializer avoids a second parsed image. Hash bounded UTF-8
@@ -476,6 +495,7 @@ class SupplierHistory:
             if hasattr(self,'_stored'):
                 # Exact stored bytes still match the fully verified cold read.
                 require(self._canonical_pin(self.manifest)==self._memory_pin,'receipt_changed')
+                require(type(self.dates) is tuple and self.dates==tuple(self.manifest['candidate']['effect_dates']),'receipt_scope_changed')
                 require(self.manifest['candidate']['code_authority']==candidate.code_authority(),'formula_changed')
                 return self.manifest,diagnostics
             encoded=conn.execute('SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE rowid=?',(observed[0],)).fetchone()[0]
@@ -490,11 +510,12 @@ class SupplierHistory:
     def binding(self):
         require(self._read()[0]==self.manifest,'receipt_changed')
         return dict(operation_id=self.operation_id,attempt_id=self.attempt_id,digest=self.manifest['manifest_digest'],dates=list(self.dates))
-    def publication_dates(self):return self.dates
+    def publication_dates(self):
+        self._read();return self.dates
     def _validate_sources_conn(self,conn):
         from packages.application.historical_dated_inputs import dated_slice,book_lineage,prepared_book_lineage
         self._read()
-        manifest=self.manifest;_source_fence(conn,manifest,ready_before=False)
+        manifest=self.manifest;_source_fence(conn,manifest,ready_before=False,retained_proofs=getattr(self,'_retained_proofs',None))
         expected=manifest['candidate']['candidate_book']
         selected=_selected_ready(conn,list(self.dates),manifest['candidate']['functional']['business_date'])
         proof={}
@@ -523,6 +544,7 @@ class SupplierHistory:
                     proof[day]=dict(ready_key=[row['bundle_version'],row['as_of_date']],ready_digest=ready.digest(row['plan_json']),dated_digest=target['dated_outputs'][day],functional_version=edition['version_id'])
                 del row
             books.guard()
+        del selected,books
         require(set(proof)==set(self.dates),'dated_scope_missing')
         return dict(binding=self.binding(),dated=proof,active_book=version)
     def validate_sources_readonly(self,*,now):
