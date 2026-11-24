@@ -259,6 +259,23 @@ class ReplanTests(unittest.TestCase):
         self.assertEqual(len(new['candidate']['recovery_inputs']),19)
         for day,edition in new['candidate']['editions'].items():self.assertEqual(edition['saved'],old['candidate']['editions'][day]['saved'])
         case.publish(new)
+    def test_legacy_payload_ghost_recovers_into_validated_model_proofs(self):
+        case=self.fixture();capture=stages.capture_dated_stages
+        def legacy(*args,**kwargs):
+            kwargs['read_model_mode']='payloads'
+            return capture(*args,**kwargs)
+        def crash(point):
+            if point=='after_book':raise RuntimeError('legacy own book crash')
+        with patch.object(stages,'capture_dated_stages',side_effect=legacy):
+            old=case.prepare()
+            with self.assertRaisesRegex(RuntimeError,'legacy own'):case.publish(old,inject=crash)
+        self.assertTrue(all('read_models' in e['saved'] for e in old['candidate']['editions'].values()))
+        new,_,_=self.followup(case,old)
+        self.assertEqual(len(new['candidate']['recovery_inputs']),19)
+        self.assertTrue(all('read_model_proofs' in e['saved'] for e in new['candidate']['editions'].values()))
+        for day,edition in new['candidate']['editions'].items():
+            self.assertEqual(edition['saved']['balances'],old['candidate']['editions'][day]['saved']['balances'])
+        case.publish(new)
     def test_same_prepared_attempt_clock_and_lost_response_resume_exactly(self):
         case=self.fixture();old=case.prepare()
         def crash(point):

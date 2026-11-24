@@ -26,6 +26,7 @@ STAGES = {"PRODUCTION":"production", "PRODUCTION_TO_FF":"china_to_ff", "FF":"ff"
           "FF_TO_WB":"ff_to_wb", "WB":"wb", "WB_ACCEPTANCE_DISCREPANCY":"wb_acceptance_discrepancy"}
 MAX_ROWS = 100000
 MAX_BYTES = 64 * 1024**2
+READ_MODEL_PROOFS = 'validated_read_model_payload_digests_v1'
 
 
 class HistoricalArchivedWbValuationUnavailable(ValueError):
@@ -97,7 +98,33 @@ def _applicability(proof, *, first, day, source):
     return 'pre_revision_dispatch' if debit_day<first else 'exact_frozen_native_money'
 
 
-def capture_dated_stages(conn, *, db_path, book, dates):
+def read_model_capture_mode(saved):
+    """Recover the exact saved representation, including legacy full payloads."""
+    require(('read_models' in saved) != ('read_model_proofs' in saved),
+            'historical_read_model_capture_shape_invalid')
+    if 'read_models' in saved:
+        require(type(saved['read_models']) is list and len(saved['read_models']) == 6
+                and all(type(row) is dict and 'payload_json' in row for row in saved['read_models']),
+                'historical_read_model_capture_shape_invalid')
+        return 'payloads'
+    require(type(saved['read_model_proofs']) is dict
+            and saved['read_model_proofs'].get('contract') == READ_MODEL_PROOFS
+            and set(saved['read_model_proofs']) == {'contract', 'rows'},
+            'historical_read_model_capture_shape_invalid')
+    rows=saved['read_model_proofs']['rows']
+    require(type(rows) is list and len(rows) == 6
+            and all(type(row) is dict and 'payload_digest' in row and 'payload_json' not in row for row in rows),
+            'historical_read_model_capture_shape_invalid')
+    return READ_MODEL_PROOFS
+
+
+def capture_dated_stages(conn, *, db_path, book, dates, read_model_mode='payloads'):
+    # Supplier cost revisions consume balances and rebuild read models. Their
+    # saved evidence needs the validated exact payload digest, not another copy
+    # of that unused presentation. Full source rows remain in the query fence.
+    # Other callers and legacy recovery retain their original representation.
+    require(read_model_mode in ('payloads', READ_MODEL_PROOFS),
+            'historical_read_model_capture_mode_invalid')
     require(conn.in_transaction and conn.execute("PRAGMA query_only").fetchone()[0] == 1,
             "historical_stage_query_only_required")
     result, queries = {}, []
@@ -180,6 +207,11 @@ def capture_dated_stages(conn, *, db_path, book, dates):
                 proof=_native_debit(conn,record=record,nm_id=nm,day=day,queries=queries)
                 wb_events.append(dict(event=event,native_debit=proof))
         result[day] = {"version":dict(version),"snapshot":snapshots[0],"balances":balances,"read_models":models,"debit_proofs":debit_proofs,"companions":companions,'wb_acceptance_proofs':wb_events}
+        if read_model_mode == READ_MODEL_PROOFS:
+            result[day].pop('read_models')
+            result[day]['read_model_proofs'] = dict(contract=READ_MODEL_PROOFS, rows=[
+                {**{key:value for key,value in model.items() if key != 'payload_json'},
+                 'payload_digest':ready.digest(model['payload_json'])} for model in models])
         require(len(canonical(result).encode()) <= MAX_BYTES, "historical_dated_stage_byte_limit")
         queries.extend((f"SELECT * FROM {P}{table} WHERE version_id=? ORDER BY {order}", (version_id,))
                        for table,order in (("functional_versions","version_id"),("wb_snapshots","snapshot_id"),

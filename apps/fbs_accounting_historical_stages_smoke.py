@@ -327,6 +327,61 @@ class NativeHistoricalStages(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"historical_complete_stage_models_missing"):
                 stages.capture_dated_stages(conn,db_path=self.db,book=plan["candidate_book"],dates=plan["scope"]["dates"])
 
+    def test_validated_model_proofs_preserve_money_and_exact_source_fence(self):
+        from packages.application.operator_supplier_history_candidate import business_image
+        _,cap,plan,legacy=self.fixture()
+        with ready.readonly(self.db) as conn:
+            compact=stages.capture_dated_stages(conn,db_path=self.db,book=plan['candidate_book'],
+                dates=plan['scope']['dates'],read_model_mode=stages.READ_MODEL_PROOFS)
+        self.assertEqual(compact['query_fence'],legacy['query_fence'])
+        for day,saved in compact['dates'].items():
+            self.assertEqual(stages.read_model_capture_mode(saved),stages.READ_MODEL_PROOFS)
+            self.assertEqual(stages.read_model_capture_mode(legacy['dates'][day]),'payloads')
+            for proof,model in zip(saved['read_model_proofs']['rows'],legacy['dates'][day]['read_models']):
+                self.assertEqual(proof,{**{k:v for k,v in model.items() if k!='payload_json'},
+                    'payload_digest':ready.digest(model['payload_json'])})
+            self.assertEqual({k:v for k,v in saved.items() if k!='read_model_proofs'},
+                {k:v for k,v in legacy['dates'][day].items() if k!='read_models'})
+        before=stages.build_dated_stage_revision(plan,capture=cap,dated=legacy)
+        after=stages.build_dated_stage_revision(plan,capture=cap,dated=compact)
+        for day in plan['scope']['dates']:
+            self.assertEqual(business_image(before['editions'][day]['balances']),
+                business_image(after['editions'][day]['balances']))
+        # Whitespace changes no parsed model quantity or money. Exact payload
+        # authority still changes and must refuse publication/recovery.
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_read_models SET payload_json=payload_json||' ' WHERE warehouse_key='production'")
+        with ready.readonly(self.db) as conn:
+            with self.assertRaisesRegex(ready.ReadyPublicationConflict,'ready_repair_source_changed'):
+                stages.check_query_fence(conn,compact['query_fence'])
+            fresh=stages.capture_dated_stages(conn,db_path=self.db,book=plan['candidate_book'],
+                dates=plan['scope']['dates'],read_model_mode=stages.READ_MODEL_PROOFS)
+        self.assertNotEqual(fresh['source_digest'],compact['source_digest'])
+
+    def test_model_proofs_cross_real_cumulative_limit_without_dropping_operands(self):
+        _,_,plan,_=self.fixture(end='2026-09-20')
+        padding='x'*(6*1024**2)
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            for version,payload in conn.execute("SELECT version_id,payload_json FROM sheet_vitrina_v1_warehouse_functional_read_models WHERE warehouse_key='production'").fetchall():
+                value=json.loads(payload);value['local_extra_presentation']=padding
+                body=canonical(value)
+                conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_read_models SET payload_json=?,payload_bytes=? WHERE version_id=? AND warehouse_key='production'",(body,len(body.encode()),version))
+        with ready.readonly(self.db) as conn:
+            with self.assertRaisesRegex(ValueError,'historical_dated_stage_byte_limit'):
+                stages.capture_dated_stages(conn,db_path=self.db,book=plan['candidate_book'],dates=plan['scope']['dates'])
+            compact=stages.capture_dated_stages(conn,db_path=self.db,book=plan['candidate_book'],
+                dates=plan['scope']['dates'],read_model_mode=stages.READ_MODEL_PROOFS)
+            stages.check_query_fence(conn,compact['query_fence'])
+        self.assertEqual(set(compact['dates']),set(plan['scope']['dates']))
+        self.assertLess(len(canonical(compact['dates']).encode()),stages.MAX_BYTES)
+        self.assertTrue(all(len(v['read_model_proofs']['rows'])==6 for v in compact['dates'].values()))
+
+    def test_model_capture_mode_refuses_ambiguous_and_unknown_saved_shapes(self):
+        for saved in ({},{'read_models':[],'read_model_proofs':{}},
+                      {'read_model_proofs':{'contract':'unknown','rows':[]}}):
+            with self.assertRaisesRegex(ValueError,'historical_read_model_capture_shape_invalid'):
+                stages.read_model_capture_mode(saved)
+
     def test_saved_sparse_zero_is_resolved_without_mutating_original_operands(self):
         book,cap,plan,dated=self.fixture()
         candidate=plan['candidate_book'];before=deepcopy(candidate)

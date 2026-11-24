@@ -174,7 +174,9 @@ def recovery_stage_book(conn,runtime,book,obligations,dates):
             row=ledger.execute('SELECT version,payload,previous_version FROM accounting_revisions WHERE operation_id=?',(prior['book_operation_id'],)).fetchone()
             require(row and row[0]==prior['after_book'] and row[2]==prior['expected_book'] and accounting.unpack(ledger,row[1])==prior['candidate']['candidate_book'],'ghost_book_revision_unproved')
         original,_=accounting.load(runtime.runtime_dir,version=prior['expected_book'])
-        saved=stages.capture_dated_stages(conn,db_path=runtime.db_path,book=original,dates=[day])
+        original_saved=prior['candidate']['editions'][day]['saved']
+        saved=stages.capture_dated_stages(conn,db_path=runtime.db_path,book=original,dates=[day],
+            read_model_mode=stages.read_model_capture_mode(original_saved))
         require(saved['dates'][day]==prior['candidate']['editions'][day]['saved'],'ghost_original_stage_changed')
         ghost=prior['candidate']['editions'][day]['balances'];facts=saved['dates'][day]['balances']
         require([(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in ghost]==[(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in facts],'ghost_quantity_changed')
@@ -227,7 +229,8 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         require(len(dates)<=sources.MAX_DATES,'date_scope_unavailable')
         require(all(d in book["wb_days"] and d in book["retained_days"] for d in dates), "dated_book_inputs_missing")
         stage_book,recovery,recovery_queries=recovery_stage_book(conn,runtime,book,obligations,dates)
-        dated = stages.capture_dated_stages(conn,db_path=runtime.db_path,book=stage_book,dates=dates) if dates else {
+        dated = stages.capture_dated_stages(conn,db_path=runtime.db_path,book=stage_book,dates=dates,
+            read_model_mode=stages.READ_MODEL_PROOFS) if dates else {
             "dates": {}, "query_fence": [], "source_digest": fingerprint({})}
         daily_index={}
         for m in natives:
