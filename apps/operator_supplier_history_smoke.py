@@ -194,7 +194,7 @@ class Tests(unittest.TestCase):
         with self.assertRaises(ValueError):self.publish(manifest)
         self.assertEqual(accounting.load(self.runtime.runtime_dir)[1],before)
 
-    def test_native_late_create_materializes_initial_source_and_companions(self):
+    def initial_admission_manifest(self):
         rt=self.runtime;ledger=CnyLedgerBlock(runtime=rt,timestamp_factory=lambda:NOW)
         ledger.create_opening_balance({'operation_date':'2026-07-04','cny_amount':100,'rub_value':1000})
         header={**HEADER,'shipment_id':'new-admission','created_at':NOW,'updated_at':NOW,'invoice_date':FIRST,
@@ -205,7 +205,10 @@ class Tests(unittest.TestCase):
         identity=accepted['acceptance']['operation_id']
         _save_payment(rt,'new-payment','new-admission',FIRST+'T12:00:00Z','100');ledger.replay_ledger(reason='late-native-create')
         intents.drain_supplier_preparation_intents(rt,shipment_ids=['source','new-admission']);publish_functional(rt);publish_accounting(rt)
-        manifest=h.prepare(rt,identity,now=MOMENT)
+        return h.prepare(rt,identity,now=MOMENT)
+
+    def test_native_late_create_materializes_initial_source_and_companions(self):
+        rt=self.runtime;manifest=self.initial_admission_manifest()
         admissions=[(day,p['proof']) for day,e in manifest['candidate']['editions'].items()
             for p in e['source_dependency']['supplier'] if p['proof']['kind']=='native_initial_pre_ff_supplier_admission']
         self.assertTrue(admissions)
@@ -765,6 +768,84 @@ class LinuxTests(unittest.TestCase):
             if second:
                 saved=financial.read_request(rt.runtime_dir,rt.db_path,second_request,request_scope='alice-key')['results'][0]['acceptance']
                 self.assertTrue(saved['processing']['complete']);self.assertEqual(saved['state'],'completed')
+
+
+class InitialAdmissionRecoveryTests(unittest.TestCase):
+    def fixture(self):
+        case=Tests();case.SECOND_SOURCE=True;case.setUp();self.addCleanup(case.doCleanups)
+        old=case.initial_admission_manifest()
+        self.assertTrue(any(p['proof']['kind']=='native_initial_pre_ff_supplier_admission'
+            for e in old['candidate']['editions'].values() for p in e['source_dependency']['supplier']))
+        def crash(point):
+            if point=='after_book':raise RuntimeError('initial admission book ghost')
+        with self.assertRaisesRegex(RuntimeError,'initial admission book ghost'):case.publish(old,inject=crash)
+        return case,old
+
+    def followup(self,case):
+        from packages.application.warehouse_functional import WarehouseFunctionalBlock
+        rt=case.runtime;tomorrow=MOMENT+timedelta(days=1)
+        accepted=execute(rt,'initial-ghost-next-day',[{'child_key':'expense','kind':'financial','subject_id':'initial-ghost-next-day'}],
+            lambda context:rt.save_supplier_financial_document(document=dict(document_id='initial-ghost-next-day',supplier_order_id='source',
+                document_type='logistics_invoice',uploaded_at=NOW,updated_at=NOW,document_date=FIRST,parse_status='confirmed',total_amount_rub=90),
+                expense_lines=[dict(line_id='initial-ghost-next-day',amount=90,amount_rub=90,currency='RUB',category='logistics',status='confirmed')]),owners=('source',))
+        with ready.readonly(rt.db_path) as conn:
+            identity=conn.execute(f'SELECT operation_id FROM {financial.SCOPES} WHERE parent_operation_id=?',(accepted['results'][0]['acceptance']['operation_id'],)).fetchone()[0]
+        intents.drain_supplier_preparation_intents(rt,shipment_ids=['source','second','new-admission'])
+        native=WarehouseFunctionalBlock(runtime=rt,timestamp_factory=lambda:tomorrow.isoformat())
+        # A new business day first owns a fresh fixture official observation;
+        # the targeted publisher must not bypass its stale-snapshot guard.
+        payload=deepcopy(native._last_good_wb_payload())
+        payload['snapshot_date']=tomorrow.date().isoformat();payload['data']['fetched_at']=tomorrow.isoformat()
+        sync=native._build_plan(kind='hourly_wb_sync',wb_payload=payload)
+        native.apply_plan(sync,confirm_fingerprint=sync['plan_fingerprint'])
+        return candidate.prepare(rt,identity,now=tomorrow),tomorrow
+
+    def test_initial_admission_book_ghost_recovers_new_attempt_next_day(self):
+        case,old=self.fixture();new,tomorrow=self.followup(case)
+        self.assertNotEqual(new['attempt_id'],old['attempt_id'])
+        self.assertEqual(new['functional']['business_date'],tomorrow.date().isoformat())
+        self.assertEqual(len(new['recovery_inputs']),len(old['candidate']['effect_dates']))
+        for day in old['candidate']['effect_dates']:
+            self.assertEqual(new['editions'][day]['saved'],old['candidate']['editions'][day]['saved'])
+            owned=[s for r in new['editions'][day]['balances'] for s in r['provenance'].get('source_records',[])
+                   if s.get('shipment_id')=='new-admission']
+            self.assertEqual(sum((Decimal(s['flow_quantity']) for s in owned),Decimal(0)),10)
+        self.assertEqual(candidate.validate(new,runtime=case.runtime,now=tomorrow),new)
+
+    def test_only_exact_prior_initial_deltas_can_explain_ghost_quantities(self):
+        case,old=self.fixture();day=old['candidate']['effect_dates'][0]
+        def admission(value):
+            return next(p['proof'] for p in value['candidate']['editions'][day]['source_dependency']['supplier']
+                        if p['proof']['kind']=='native_initial_pre_ff_supplier_admission')
+        changes=[]
+        value=deepcopy(old);admission(value)['quantity_by_nm']['1']='11';changes.append(value)
+        value=deepcopy(old);admission(value)['capital_by_nm']['1']='1001';changes.append(value)
+        value=deepcopy(old);admission(value)['source_records'][0]['flow_quantity']='11';changes.append(value)
+        value=deepcopy(old);admission(value)['kind']='not_an_initial_admission';changes.append(value)
+        for stage in ('production','wb'):
+            value=deepcopy(old);row=next(r for r in value['candidate']['editions'][day]['balances'] if r['warehouse_key']==stage)
+            row['quantity']=str(Decimal(row['quantity'])+1);changes.append(value)
+        for index,value in enumerate(changes):
+            item=dict(inputs_json=canonical(value),operation_id=old['operation_id'],attempt_id=old['attempt_id'])
+            with self.subTest(change=index),ready.readonly(case.runtime.db_path) as conn:
+                with self.assertRaisesRegex(ValueError,'ghost_initial_admission_changed|ghost_quantity_changed'):
+                    candidate.recovery_stage_book(conn,case.runtime,old['candidate']['candidate_book'],[item],[day])
+
+    def test_replayed_native_admission_proof_remains_in_writer_fence(self):
+        case,old=self.fixture();new,_=self.followup(case)
+        member=next(m for m in old['candidate']['members'] if m['source_ref']['shipment_id']=='new-admission')
+        with _connect(case.runtime.db_path) as conn:
+            with self.assertRaisesRegex(sqlite3.IntegrityError,'immutable'):
+                conn.execute(f'UPDATE {processing.FUNCTIONAL} SET proof_digest=? WHERE operation_id=? AND version_id=?',
+                             ('changed-after-prepare',member['source_ref']['operation_id'],member['functional']['version_id']))
+            row=conn.execute(f'SELECT warehouse_key,nm_id,provenance_json FROM {stages.P}functional_balances WHERE version_id=? LIMIT 1',
+                             (member['functional']['version_id'],)).fetchone()
+            provenance=json.loads(row['provenance_json']);provenance['changed_after_replay']=True
+            conn.execute(f'UPDATE {stages.P}functional_balances SET provenance_json=? WHERE version_id=? AND warehouse_key=? AND nm_id=?',
+                         (canonical(provenance),member['functional']['version_id'],row['warehouse_key'],row['nm_id']));conn.commit()
+        with ready.readonly(case.runtime.db_path) as conn:
+            with self.assertRaisesRegex(ready.ReadyPublicationConflict,'ready_repair_source_changed'):
+                stages.check_query_fence(conn,new['source_inputs'])
 
 
 class SupplierWbSourceAuthorityTests(unittest.TestCase):

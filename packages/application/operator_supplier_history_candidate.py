@@ -171,9 +171,39 @@ def book_tuple(book,day):
     return {key:book[key].get(day) for key in ('wb_days','retained_days','shared_days','presentations')}
 
 
+def _ghost_quantity_rows(conn,prior,day,facts,queries,native_rows):
+    """Replay only the exact initial admissions already proved by this owner.
+
+    A cost-only ghost keeps its original quantities. A first admission added
+    the invoice's physical source; verify that same pure admission again from
+    the original saved facts rather than treating any ghost delta as allowed.
+    """
+    rows=facts
+    for item in prior['candidate']['editions'][day]['source_dependency']['supplier']:
+        proof=item['proof']
+        if proof['kind']!='native_initial_pre_ff_supplier_admission':continue
+        members=[m for m in prior['candidate']['members'] if m['source_ref']==item['source_ref']]
+        require(len(members)==1 and proof['source_ref']==item['source_ref'] and proof['date']==day,
+                'ghost_initial_admission_changed')
+        member=members[0];functional=member['functional']
+        op=processing.operation(conn,member['source_ref']['operation_id'])
+        require(processing.ref(op)==member['source_ref'],'ghost_initial_admission_changed')
+        for version in (functional['origin_before_version_id'],functional['version_id']):
+            if version not in native_rows:
+                native_rows[version]=stages._version_balances(conn,version_id=version)
+                queries.append((f'SELECT * FROM {stages.P}functional_balances WHERE version_id=? ORDER BY warehouse_key,nm_id',(version,)))
+        queries.append((f'SELECT proof_json,proof_digest FROM {processing.FUNCTIONAL} WHERE operation_id=? AND version_id=?',
+                        (member['source_ref']['operation_id'],functional['version_id'])))
+        rows,actual=sources.dated_supplier_rows(rows,shipment=member['shipment'],day=day,native_context=dict(
+            operation=op,functional=functional,receipt_dependency=member['receipt_dependency'],
+            before_rows=native_rows[functional['origin_before_version_id']],after_rows=native_rows[functional['version_id']]))
+        require(actual==proof,'ghost_initial_admission_changed')
+    return rows
+
+
 def recovery_stage_book(conn,runtime,book,obligations,dates):
     """Only an exact own after-book ghost can reuse ORIGINAL saved stages."""
-    capture=deepcopy(book);recovery=[];queries=[]
+    capture=deepcopy(book);recovery=[];queries=[];native_rows={}
     for day in dates:
         version=book['wb_days'][day]['version_id']
         if conn.execute(f'SELECT 1 FROM {stages.P}functional_versions WHERE version_id=?',(version,)).fetchone():continue
@@ -192,7 +222,8 @@ def recovery_stage_book(conn,runtime,book,obligations,dates):
             read_model_mode=stages.read_model_capture_mode(original_saved))
         require(saved['dates'][day]==prior['candidate']['editions'][day]['saved'],'ghost_original_stage_changed')
         ghost=prior['candidate']['editions'][day]['balances'];facts=saved['dates'][day]['balances']
-        require([(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in ghost]==[(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in facts],'ghost_quantity_changed')
+        admitted=_ghost_quantity_rows(conn,prior,day,facts,queries,native_rows)
+        require([(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in ghost]==[(r['warehouse_key'],r['nm_id'],Decimal(str(r['quantity']))) for r in admitted],'ghost_quantity_changed')
         # The old after-image proves ownership only. Physical quantities and
         # frozen modern money come exclusively from the original saved facts.
         for key,value in book_tuple(original,day).items():capture[key][day]=deepcopy(value)
