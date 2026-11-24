@@ -39,7 +39,28 @@ class RecoveryTests(unittest.TestCase):
     def test_exact_failure_and_native_stage_order(self):
         log = failure_log()
         self.assertEqual(c.prove_failure(log, c.PROFILE['gate_run_id'], 'job')['exit_status'], 3)
-        self.assertTrue(c.source_proof())
+        # Candidate Gate checkouts are shallow. Exercise the actual checked-out
+        # adapter's ordering with a bounded historical Git fixture; the recovery
+        # workflow itself fetches full history and proves the real fixed refs.
+        adapter = (ROOT / c.CODE_PATHS[0]).read_text()
+        def historical_git(args):
+            if args[0] == 'diff':
+                self.assertEqual(args[2:4], [c.PREVIOUS, c.PROFILE['merge_sha']])
+                return SimpleNamespace(stdout='')
+            self.assertEqual(args, ['show', c.PROFILE['merge_sha'] + ':' + c.CODE_PATHS[0]])
+            return SimpleNamespace(stdout=adapter)
+        def historical_blob(args, **kwargs):
+            self.assertEqual(args[:2], ['git', 'show'])
+            ref, path = args[2].split(':', 1)
+            self.assertEqual(ref, c.PREVIOUS); self.assertIn(path, c.CODE_PATHS)
+            return SimpleNamespace(stdout=(ROOT / path).read_bytes())
+        with patch.object(r, '_git', side_effect=historical_git), patch.object(subprocess, 'run', side_effect=historical_blob):
+            self.assertEqual(set(c.source_proof()), set(c.CODE_PATHS))
+        with patch.object(r, '_git', return_value=SimpleNamespace(stdout='changed guard')):
+            with self.assertRaises(r.RecoveryError): c.source_proof()
+        adapter = adapter.replace('run_stage("sync", rsync_plan)', 'run_stage("sync", changed_plan)')
+        with patch.object(r, '_git', side_effect=historical_git):
+            with self.assertRaises(ValueError): c.source_proof()
         self.assertEqual(r._prove_failed_stage(log, c.PROFILE['gate_run_id'], 'job', release_run_id=c.RUN)['stage'],
                          'root-storage-preflight-before-owner-start')
         for before, after in [(b'1208', b'1268'), (b'exit status 3', b'exit status 255'),
