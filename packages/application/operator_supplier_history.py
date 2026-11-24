@@ -25,6 +25,23 @@ MAX_READY_HEADER_BYTES=8*1024**2
 MAX_READY_SOURCE_BYTES=256*1024**2  # Measured selected bodies: 192,995,022 UTF-8 bytes.
 MAX_PUBLICATION_BYTES=256*1024**2
 READY_JSON_ENCODING='supplier_ready_zlib_utf8_v1'
+RETAINED_INPUTS_SCHEMA='supplier_history_retained_inputs_v1'
+OBLIGATION_FIELDS=('operation_id','attempt_id','kind','state','expected_book','book_operation_id','book_version','after_digest')
+# Exact deployed 336345e6 algorithm, accepted only as retained supersession
+# evidence. It cannot authorize an old publication, a receipt or a History ACK.
+RETAINED_CODE_AUTHORITY={
+    'fbs_accounting_historical_history.py':'b7176006b91d533bd1a20a984a2524d669254de69331441a61178caae8b6f067',
+    'fbs_accounting_historical_publication.py':'ed9ef8047fb7c27d7468b40c6dc9493f5fa8ab6be50ceb2d59b32bc79c66930f',
+    'fbs_accounting_historical_stages.py':'70a6f4d95b6eba4622b5fad89b18f526c1ddc0bfdf67804de5a02a7ae5ed1fd5',
+    'historical_dated_inputs.py':'28fd39c17c21b54903455146bc7984d2907becfaf40721c9c4460747299d91cf',
+    'operator_supplier_history.py':'1b11176419e6d6827b656be3e8a11dd81188e846baa7e02610b1276c5975c637',
+    'operator_supplier_history_candidate.py':'346b3eccceeba5b7006f47afa9ca61424c95e3ea5a908cffb903dd843204b966',
+    'operator_supplier_history_sources.py':'72898532ef83384f72810cba28677107949750b603fe4f1a572fb0ff9eb4d614',
+    'operator_supplier_processing.py':'b8a1c78ad96ab92c5452f8a39e97d06d694bdb4b0c1cb638a70cb8d20aa15012',
+    'warehouse_business_projection.py':'f46303181835a039d60ce48bd1cde4a3be67e4ed37f1d8dfe17b8b1082537ee9',
+    'warehouse_functional.py':'aabd5e17025957e2ef01a6035dfb783899a41b6c65ec79f7c20053254aa4b4c0',
+    'warehouse_historical_recovery.py':'4b033bbc0781dfd78f3b19ac75b677d66059b088fde953e3091d891b5a1c443c',
+}
 require=sources.require
 EXPECTED_NATIVE={
     'supplier_exact_queue_pending','supplier_exact_functional_publication_pending',
@@ -91,6 +108,40 @@ def _large_fingerprint(value):
     return _stream_fingerprint(value)
 
 
+def retained_inputs_ref(text):
+    hashed=hashlib.sha256();size=0
+    for start in range(0,len(text),65536):
+        part=text[start:start+65536].encode('utf-8');size+=len(part);hashed.update(part)
+    require(size<=MAX_PUBLICATION_BYTES,'prior_attempt_size_limit')
+    return dict(schema=RETAINED_INPUTS_SCHEMA,utf8_bytes=size,sha256='sha256:'+hashed.hexdigest())
+
+
+def obligation_matches_row(item,row):
+    """Verify exact retained bytes and identity; diagnostics have their own CAS."""
+    require(row and row['kind']==CONTRACT and row['state'] in ('prepared','complete')
+        and all(key in item and row[key]==item[key] for key in OBLIGATION_FIELDS),'prior_attempt_changed')
+    require(('inputs_ref' in item)!=('inputs_json' in item),'prior_attempt_changed')
+    if 'inputs_ref' in item:
+        require(item['inputs_ref']==retained_inputs_ref(row['inputs_json']),'prior_attempt_changed')
+    else:require(item['inputs_json']==row['inputs_json'],'prior_attempt_changed')
+
+
+def obligation_row(conn,item):
+    row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND length(CAST(inputs_json AS BLOB))<=?',
+        (item['operation_id'],item['attempt_id'],MAX_PUBLICATION_BYTES)).fetchone()
+    obligation_matches_row(item,row)
+    return row
+
+
+def load_obligation(conn,item):
+    row=obligation_row(conn,item)
+    manifest=json.loads(row['inputs_json']);del row
+    _verify(manifest,retained=True)
+    require(manifest['manifest_digest']==item['manifest_digest'] and manifest['candidate']['effect_dates']==item['dates']
+        and all(manifest[key]==item[key] for key in ('operation_id','attempt_id','expected_book','book_operation_id')),'prior_attempt_changed')
+    return manifest
+
+
 def _publication_json_size(value):
     from packages.application.fbs_accounting_historical_publication import _json_size
     try:return _json_size(value,MAX_PUBLICATION_BYTES,'supplier_history_publication_size_limit')
@@ -140,10 +191,11 @@ def _target_after_digest(target):
     return ready.digest(_ready_json(target['after_json']))
 
 
-def _verify(manifest):
+def _verify(manifest,*,retained=False):
     require(manifest.get('contract')==CONTRACT and manifest.get('manifest_digest')==_large_fingerprint({k:v for k,v in manifest.items() if k!='manifest_digest'}),'publication_corrupt')
     require(manifest['operation_id']=='supplier-history:'+manifest['source_ref']['operation_id'],'publication_identity_changed')
-    require(manifest['candidate']['code_authority']==candidate.code_authority(),'formula_changed')
+    authority=manifest['candidate']['code_authority']
+    require(authority==candidate.code_authority() or (retained and authority==RETAINED_CODE_AUTHORITY),'formula_changed')
     require(sorted({*manifest['candidate']['effect_dates'],manifest['candidate']['functional']['business_date']})==sorted({d for t in manifest['targets'] for d in t['dates']}) and manifest['candidate']['effect_dates'],'publication_scope_changed')
     require(manifest['after_book']==_large_fingerprint(manifest['candidate']['candidate_book']),'book_candidate_corrupt')
     encoding=manifest.get('storage_encoding')
@@ -266,7 +318,12 @@ def _prepare_publication(runtime,numerical,*,now):
 
 
 def _fence(conn,manifest,*,ready_before=True):
-    _verify(manifest);ready.check_pinned_authority(conn,manifest['authority'])
+    _verify(manifest)
+    _source_fence(conn,manifest,ready_before=ready_before)
+
+
+def _source_fence(conn,manifest,*,ready_before=True,retained_proofs=None):
+    ready.check_pinned_authority(conn,manifest['authority'])
     stages.check_query_fence(conn,manifest['candidate']['source_inputs'])
     stages.check_query_fence(conn,manifest['candidate']['query_fence'])
     for ref in manifest['candidate']['cohort_refs']:
@@ -277,16 +334,52 @@ def _fence(conn,manifest,*,ready_before=True):
     if ready_before:
         for target in manifest['targets']:ready.check_expected(conn,_target_expected(target))
     check_obligations(conn,manifest,retired=not ready_before)
-    for recovery in manifest['candidate']['recovery_inputs']:
-        before,_=accounting.load(Path(manifest['authority']['runtime_dir']),version=manifest['expected_book'])
-        original,_=accounting.load(Path(manifest['authority']['runtime_dir']),version=recovery['expected_book'])
-        require(candidate.book_tuple(before,recovery['day'])==recovery['current_tuple'] and candidate.book_tuple(original,recovery['day'])==recovery['original_tuple'],'ghost_book_tuple_changed')
-        with closing(sources.source.readonly(accounting.path(Path(manifest['authority']['runtime_dir'])))) as ledger:
-            row=ledger.execute('SELECT version,payload,previous_version FROM accounting_revisions WHERE operation_id=?',(recovery['book_operation_id'],)).fetchone()
-            prior=next(item for item in manifest['candidate']['obligations'] if item['operation_id']==recovery['prior_operation'] and item['attempt_id']==recovery['prior_attempt'])
-            require(row and row[0]==recovery['after_book'] and row[2]==recovery['expected_book'] and accounting.unpack(ledger,row[1])==json.loads(prior['inputs_json'])['candidate']['candidate_book'],'ghost_book_revision_unproved')
-        current,version=accounting.load(Path(manifest['authority']['runtime_dir']))
-        require(version in (manifest['expected_book'],manifest['after_book']) and candidate.book_tuple(current,recovery['day'])==candidate.book_tuple(before if version==manifest['expected_book'] else manifest['candidate']['candidate_book'],recovery['day']),'ghost_current_tuple_changed')
+    recoveries=manifest['candidate']['recovery_inputs']
+    if recoveries:
+        runtime=Path(manifest['authority']['runtime_dir'])
+        # One owned book snapshot per fence; it closes before any book writer.
+        with accounting.readonly_book_connection(runtime) as ledger:
+            ledger.execute('BEGIN')
+            before,_=accounting.load(runtime,version=manifest['expected_book'],connection=ledger)
+            version=ledger.execute('SELECT version FROM accounting_current WHERE singleton=1').fetchone()[0]
+            require(version in (manifest['expected_book'],manifest['after_book']),'ghost_current_tuple_changed')
+            current=before if version==manifest['expected_book'] else accounting.load(runtime,version=version,connection=ledger)[0]
+            groups={}
+            for recovery in recoveries:
+                key=tuple(recovery[name] for name in ('prior_operation','prior_attempt','expected_book','after_book','book_operation_id'))
+                groups.setdefault(key,[]).append(recovery)
+            for (operation,attempt,original_version,after_version,book_operation),group in groups.items():
+                prior=next(item for item in manifest['candidate']['obligations'] if item['operation_id']==operation and item['attempt_id']==attempt)
+                # Receipt-local memo retains only immutable scalar identities.
+                # Each reuse still reads/pins the full actual retained row and
+                # independently reloads/hash-verifies its native book below.
+                key=(manifest['manifest_digest'],operation,attempt,prior['manifest_digest'])
+                cached=retained_proofs.get(key) if retained_proofs is not None else None
+                if cached is None:
+                    prior_manifest=load_obligation(conn,prior)
+                    projection=(prior_manifest['operation_id'],prior_manifest['attempt_id'],prior_manifest['manifest_digest'],
+                                tuple(prior_manifest['candidate']['effect_dates']),prior_manifest['expected_book'],prior_manifest['after_book'],prior_manifest['book_operation_id'])
+                    del prior_manifest
+                    if retained_proofs is not None:retained_proofs[key]=(projection,_large_fingerprint(projection))
+                else:
+                    row=obligation_row(conn,prior);del row
+                    require(type(cached) is tuple and len(cached)==2 and type(cached[0]) is tuple
+                            and _large_fingerprint(cached[0])==cached[1],'prior_projection_changed')
+                    projection=cached[0]
+                require(projection==(operation,attempt,prior['manifest_digest'],tuple(prior['dates']),original_version,after_version,book_operation),
+                        'ghost_book_revision_unproved')
+                row=ledger.execute('SELECT version,payload,previous_version FROM accounting_revisions WHERE operation_id=?',(book_operation,)).fetchone()
+                if after_version==manifest['expected_book']:
+                    revised,verified_version=before,manifest['expected_book']
+                else:revised,verified_version=accounting.load(runtime,version=after_version,connection=ledger)
+                require(row and row[0]==after_version and row[2]==original_version and verified_version==projection[5],'ghost_book_revision_unproved')
+                del revised,row
+                original=before if original_version==manifest['expected_book'] else accounting.load(runtime,version=original_version,connection=ledger)[0]
+                for recovery in group:
+                    day=recovery['day']
+                    require(candidate.book_tuple(before,day)==recovery['current_tuple'] and candidate.book_tuple(original,day)==recovery['original_tuple'],'ghost_book_tuple_changed')
+                    require(candidate.book_tuple(current,day)==candidate.book_tuple(before if version==manifest['expected_book'] else manifest['candidate']['candidate_book'],day),'ghost_current_tuple_changed')
+                del original
 
 
 def replacement_link(manifest):
@@ -299,23 +392,26 @@ def verified_retirement(conn,row):
     if 'supplier_history_replaced_by' not in diagnostics:return False
     link=diagnostics['supplier_history_replaced_by']
     require(isinstance(link,dict) and set(link)=={'operation_id','attempt_id','manifest_digest','reason'} and link['reason']=='native_cohort_superseded','retirement_link_corrupt')
-    new=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(link['operation_id'],link['attempt_id'])).fetchone()
+    new=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND length(CAST(inputs_json AS BLOB))<=?',(link['operation_id'],link['attempt_id'],MAX_PUBLICATION_BYTES)).fetchone()
     require(new and new['kind']==CONTRACT and new['state']=='complete','retirement_publication_missing')
     manifest=json.loads(new['inputs_json']);_verify(manifest)
     require(link==replacement_link(manifest) and new['book_version']==manifest['after_book'] and new['after_digest']==_target_after_digest(manifest['targets'][-1]),'retirement_publication_changed')
-    prior=json.loads(row['inputs_json']);_verify(prior)
-    require(any(item['operation_id']==row['operation_id'] and item['attempt_id']==row['attempt_id'] and item['inputs_json']==row['inputs_json'] and item['manifest_digest']==prior['manifest_digest'] for item in manifest['candidate']['obligations']) and set(prior['candidate']['effect_dates'])<=set(manifest['candidate']['effect_dates']) and 'supplier_history_ack' not in diagnostics,'retirement_obligations_changed')
+    prior=json.loads(row['inputs_json']);_verify(prior,retained=True)
+    items=[item for item in manifest['candidate']['obligations'] if item['operation_id']==row['operation_id'] and item['attempt_id']==row['attempt_id']]
+    require(len(items)==1 and items[0]['manifest_digest']==prior['manifest_digest'] and set(prior['candidate']['effect_dates'])<=set(manifest['candidate']['effect_dates']) and 'supplier_history_ack' not in diagnostics,'retirement_obligations_changed')
+    obligation_matches_row(items[0],row)
     return True
 
 
 def check_obligations(conn,manifest,*,retired=False):
     for item in manifest['candidate']['obligations']:
-        row=conn.execute('SELECT diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(item['operation_id'],item['attempt_id'])).fetchone()
-        require(row,'prior_attempt_missing');diagnostics=json.loads(row[0])
+        row=obligation_row(conn,item)
+        require(row,'prior_attempt_missing');diagnostics=json.loads(row['diagnostics_json'])
         require('supplier_history_ack' not in diagnostics,'prior_history_ack_changed')
         expected=json.loads(item['diagnostics_json'])
         if retired:expected['supplier_history_replaced_by']=replacement_link(manifest)
         require(diagnostics==expected,'prior_attempt_retirement_changed')
+        del row
 
 
 def retire_obligations(conn,manifest):
@@ -372,39 +468,83 @@ class SupplierHistory:
     """This type, not FF or policy authority, enrolls the exact supplier dates."""
     def __init__(self,runtime,operation_id,attempt_id):
         self.runtime=runtime;self.operation_id=operation_id;self.attempt_id=attempt_id
-        self.manifest=self._read()[0];self.dates=tuple(self.manifest['candidate']['effect_dates'])
+        self.manifest=self._read()[0];self.dates=tuple(self.manifest['candidate']['effect_dates']);self._retained_proofs={}
+    @staticmethod
+    def _canonical_pin(manifest):
+        # The C serializer avoids a second parsed image. Hash bounded UTF-8
+        # chunks, preserving the exact JSON distinction between bool/int/float.
+        encoded=canonical(manifest);hashed=hashlib.sha256()
+        for offset in range(0,len(encoded),65536):hashed.update(encoded[offset:offset+65536].encode())
+        return hashed.hexdigest()
+    def _observe(self,conn):
+        row=conn.execute('SELECT rowid,kind,state,book_version,after_digest FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+                         (self.operation_id,self.attempt_id)).fetchone()
+        require(row and row['kind']==CONTRACT and row['state']=='complete','publication_not_complete')
+        hashed=hashlib.sha256()
+        with conn.blobopen('sheet_vitrina_v1_ready_publications','inputs_json',row['rowid'],readonly=True) as blob:
+            size=len(blob);require(size<=MAX_PUBLICATION_BYTES,'publication_not_complete')
+            while chunk:=blob.read(65536):hashed.update(chunk)
+        observed=(*tuple(row),size,hashed.hexdigest())
+        require(not hasattr(self,'_stored') or observed==self._stored,'receipt_changed')
+        diagnostics=json.loads(conn.execute('SELECT diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE rowid=?',(row['rowid'],)).fetchone()[0])
+        require('supplier_history_replaced_by' not in diagnostics,'publication_superseded')
+        return observed,diagnostics
     def _read(self):
         with ready.readonly(self.runtime.db_path) as conn:
-            row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND kind=? AND state=? AND length(CAST(inputs_json AS BLOB))<=?',(self.operation_id,self.attempt_id,CONTRACT,'complete',MAX_PUBLICATION_BYTES)).fetchone()
-            require(row,'publication_not_complete')
-            manifest=json.loads(row['inputs_json']);_verify(manifest)
-            require('supplier_history_replaced_by' not in json.loads(row['diagnostics_json']),'publication_superseded')
-            require(manifest['operation_id']==self.operation_id and manifest['attempt_id']==self.attempt_id and row['book_version']==manifest['after_book'] and row['after_digest']==_target_after_digest(manifest['targets'][-1]),'publication_readback_changed')
-            return manifest,json.loads(row['diagnostics_json'])
+            observed,diagnostics=self._observe(conn)
+            if hasattr(self,'_stored'):
+                # Exact stored bytes still match the fully verified cold read.
+                require(self._canonical_pin(self.manifest)==self._memory_pin,'receipt_changed')
+                require(type(self.dates) is tuple and self.dates==tuple(self.manifest['candidate']['effect_dates']),'receipt_scope_changed')
+                require(self.manifest['candidate']['code_authority']==candidate.code_authority(),'formula_changed')
+                return self.manifest,diagnostics
+            encoded=conn.execute('SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE rowid=?',(observed[0],)).fetchone()[0]
+            manifest=json.loads(encoded);del encoded
+            _verify(manifest)
+            require(manifest['operation_id']==self.operation_id and manifest['attempt_id']==self.attempt_id and observed[3]==manifest['after_book']
+                and observed[4]==_target_after_digest(manifest['targets'][-1]),'publication_readback_changed')
+            # Legacy equivalent JSON may have different whitespace/order; pin
+            # its canonical image separately from the actual persisted bytes.
+            self._memory_pin=self._canonical_pin(manifest);self._stored=observed
+            return manifest,diagnostics
     def binding(self):
         require(self._read()[0]==self.manifest,'receipt_changed')
         return dict(operation_id=self.operation_id,attempt_id=self.attempt_id,digest=self.manifest['manifest_digest'],dates=list(self.dates))
-    def publication_dates(self):return self.dates
+    def publication_dates(self):
+        self._read();return self.dates
     def _validate_sources_conn(self,conn):
-        from packages.application.historical_dated_inputs import dated_slice,book_lineage
-        manifest=self.manifest;_fence(conn,manifest,ready_before=False)
-        active,version=accounting.load(self.runtime.runtime_dir);expected=manifest['candidate']['candidate_book']
-        require(all(active[field].get(day)==expected[field][day] for field in ('wb_days','retained_days','shared_days','presentations') for day in self.dates),'book_dates_changed')
-        del active  # Do not retain a full book while selecting Ready or rereading the receipt.
+        from packages.application.historical_dated_inputs import dated_slice,book_lineage,prepared_book_lineage
+        self._read()
+        manifest=self.manifest;_source_fence(conn,manifest,ready_before=False,retained_proofs=getattr(self,'_retained_proofs',None))
+        expected=manifest['candidate']['candidate_book']
+        selected=_selected_ready(conn,list(self.dates),manifest['candidate']['functional']['business_date'])
         proof={}
-        for row,days in _selected_ready(conn,list(self.dates),manifest['candidate']['functional']['business_date']):
-            for day in days:
-                target=next(t for t in manifest['targets'] if day in t['dates'])
-                require(fingerprint(dated_slice(row['plan_json'],day))==target['dated_outputs'][day],'dated_ready_changed')
-                lineage=book_lineage(self.runtime,row['plan_json'],day)
-                require(lineage=={field:expected[field][day] for field in ('wb_days','retained_days','shared_days','presentations')},'dated_book_binding_changed')
-                del lineage
-                edition=manifest['candidate']['editions'][day]
-                actual=conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',(edition['version_id'],)).fetchone()
-                require(actual and dict(actual)==edition['version'] and stages._version_balances(conn,version_id=edition['version_id'])==edition['balances'],'dated_stage_readback_changed')
-                del actual
-                proof[day]=dict(ready_key=[row['bundle_version'],row['as_of_date']],ready_digest=ready.digest(row['plan_json']),dated_digest=target['dated_outputs'][day],functional_version=edition['version_id'])
-            del row
+        with prepared_book_lineage(self.runtime,[(row['plan_json'],days) for row,days in selected]) as books:
+            version=(books.observer.execute('SELECT version FROM accounting_current WHERE singleton=1').fetchone()[0]
+                     if books.observer is not None else None)
+            fields=('wb_days','retained_days','shared_days','presentations')
+            if version is not None and all((version,day) in books.cache for day in self.dates):
+                require(all(books.book(version,day)[0][field].get(day)==expected[field][day]
+                            for field in fields for day in self.dates),'book_dates_changed')
+            else:
+                active,version=accounting.load(self.runtime.runtime_dir)
+                require(all(active[field].get(day)==expected[field][day] for field in fields for day in self.dates),'book_dates_changed')
+                del active
+            for row,days in selected:
+                for day in days:
+                    target=next(t for t in manifest['targets'] if day in t['dates'])
+                    require(fingerprint(dated_slice(row['plan_json'],day))==target['dated_outputs'][day],'dated_ready_changed')
+                    lineage=book_lineage(self.runtime,row['plan_json'],day,prepared=books)
+                    require(lineage=={field:expected[field][day] for field in fields},'dated_book_binding_changed')
+                    del lineage
+                    edition=manifest['candidate']['editions'][day]
+                    actual=conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',(edition['version_id'],)).fetchone()
+                    require(actual and dict(actual)==edition['version'] and stages._version_balances(conn,version_id=edition['version_id'])==edition['balances'],'dated_stage_readback_changed')
+                    del actual
+                    proof[day]=dict(ready_key=[row['bundle_version'],row['as_of_date']],ready_digest=ready.digest(row['plan_json']),dated_digest=target['dated_outputs'][day],functional_version=edition['version_id'])
+                del row
+            books.guard()
+        del selected,books
         require(set(proof)==set(self.dates),'dated_scope_missing')
         return dict(binding=self.binding(),dated=proof,active_book=version)
     def validate_sources_readonly(self,*,now):
@@ -436,9 +576,16 @@ class SupplierHistory:
 
 def publication_for(conn,source_ref):
     """Resolve ONLY the saved exact cohort membership, never all pending rows."""
-    rows=list(conn.execute("SELECT p.* FROM sheet_vitrina_v1_ready_publications p WHERE p.kind=? AND EXISTS(SELECT 1 FROM json_each(p.inputs_json,'$.candidate.cohort_refs') m WHERE json_extract(m.value,'$.operation_id')=? AND json_extract(m.value,'$.source_digest')=?) ORDER BY p.created_at DESC,p.rowid DESC LIMIT ?",(CONTRACT,source_ref['operation_id'],source_ref['source_digest'],candidate.MAX_ATTEMPTS+1)))
+    rows=list(conn.execute("SELECT p.operation_id,p.attempt_id,length(CAST(p.inputs_json AS BLOB)) AS inputs_bytes FROM sheet_vitrina_v1_ready_publications p WHERE p.kind=? AND EXISTS(SELECT 1 FROM json_each(p.inputs_json,'$.candidate.cohort_refs') m WHERE json_extract(m.value,'$.operation_id')=? AND json_extract(m.value,'$.source_digest')=?) ORDER BY p.created_at DESC,p.rowid DESC LIMIT ?",(CONTRACT,source_ref['operation_id'],source_ref['source_digest'],candidate.MAX_ATTEMPTS+1)))
     require(len(rows)<=candidate.MAX_ATTEMPTS,'attempt_scope_limit')
-    return next((row for row in rows if not verified_retirement(conn,row)),None)
+    for selected in rows:
+        require(type(selected['inputs_bytes']) is int and selected['inputs_bytes']<=MAX_PUBLICATION_BYTES,'prior_attempt_size_limit')
+        row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND length(CAST(inputs_json AS BLOB))<=?',
+            (selected['operation_id'],selected['attempt_id'],MAX_PUBLICATION_BYTES)).fetchone()
+        require(row,'prior_attempt_changed')
+        if not verified_retirement(conn,row):return row
+        del row
+    return None
 
 
 def completed_proof(conn,source_ref):
@@ -453,8 +600,8 @@ def completed_proof(conn,source_ref):
 def completed_row(row):
     """Validate one retained native ack; missing and corrupt are distinct."""
     if row['state']!='complete':return None
-    manifest=json.loads(row['inputs_json']);_verify(manifest)
-    diagnostics=json.loads(row['diagnostics_json'])
+    manifest=json.loads(row['inputs_json']);diagnostics=json.loads(row['diagnostics_json'])
+    _verify(manifest,retained='supplier_history_ack' not in diagnostics)
     if 'supplier_history_ack' not in diagnostics:return None
     ack=diagnostics['supplier_history_ack']
     require(isinstance(ack,dict) and ack,'history_ack_corrupt')
@@ -479,7 +626,7 @@ def pending(runtime,*,now):
                 _checked(runtime,identity,check['reason'],now,expected_check=check);continue
             prior_attempt=None
             if prior:
-                manifest=json.loads(prior['inputs_json']);del prior;_verify(manifest)
+                manifest=json.loads(prior['inputs_json']);del prior;_verify(manifest,retained=True)
                 prior_attempt=manifest['attempt_id'];receipt=None
                 try:
                     receipt=publish(runtime,manifest);receipt.validate_sources_readonly(now=now);return receipt
