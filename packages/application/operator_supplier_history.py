@@ -450,38 +450,79 @@ class SupplierHistory:
     def __init__(self,runtime,operation_id,attempt_id):
         self.runtime=runtime;self.operation_id=operation_id;self.attempt_id=attempt_id
         self.manifest=self._read()[0];self.dates=tuple(self.manifest['candidate']['effect_dates'])
+    @staticmethod
+    def _canonical_pin(manifest):
+        # The C serializer avoids a second parsed image. Hash bounded UTF-8
+        # chunks, preserving the exact JSON distinction between bool/int/float.
+        encoded=canonical(manifest);hashed=hashlib.sha256()
+        for offset in range(0,len(encoded),65536):hashed.update(encoded[offset:offset+65536].encode())
+        return hashed.hexdigest()
+    def _observe(self,conn):
+        row=conn.execute('SELECT rowid,kind,state,book_version,after_digest FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+                         (self.operation_id,self.attempt_id)).fetchone()
+        require(row and row['kind']==CONTRACT and row['state']=='complete','publication_not_complete')
+        hashed=hashlib.sha256()
+        with conn.blobopen('sheet_vitrina_v1_ready_publications','inputs_json',row['rowid'],readonly=True) as blob:
+            size=len(blob);require(size<=MAX_PUBLICATION_BYTES,'publication_not_complete')
+            while chunk:=blob.read(65536):hashed.update(chunk)
+        observed=(*tuple(row),size,hashed.hexdigest())
+        require(not hasattr(self,'_stored') or observed==self._stored,'receipt_changed')
+        diagnostics=json.loads(conn.execute('SELECT diagnostics_json FROM sheet_vitrina_v1_ready_publications WHERE rowid=?',(row['rowid'],)).fetchone()[0])
+        require('supplier_history_replaced_by' not in diagnostics,'publication_superseded')
+        return observed,diagnostics
     def _read(self):
         with ready.readonly(self.runtime.db_path) as conn:
-            row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND kind=? AND state=? AND length(CAST(inputs_json AS BLOB))<=?',(self.operation_id,self.attempt_id,CONTRACT,'complete',MAX_PUBLICATION_BYTES)).fetchone()
-            require(row,'publication_not_complete')
-            manifest=json.loads(row['inputs_json']);_verify(manifest)
-            require('supplier_history_replaced_by' not in json.loads(row['diagnostics_json']),'publication_superseded')
-            require(manifest['operation_id']==self.operation_id and manifest['attempt_id']==self.attempt_id and row['book_version']==manifest['after_book'] and row['after_digest']==_target_after_digest(manifest['targets'][-1]),'publication_readback_changed')
-            return manifest,json.loads(row['diagnostics_json'])
+            observed,diagnostics=self._observe(conn)
+            if hasattr(self,'_stored'):
+                # Exact stored bytes still match the fully verified cold read.
+                require(self._canonical_pin(self.manifest)==self._memory_pin,'receipt_changed')
+                require(self.manifest['candidate']['code_authority']==candidate.code_authority(),'formula_changed')
+                return self.manifest,diagnostics
+            encoded=conn.execute('SELECT inputs_json FROM sheet_vitrina_v1_ready_publications WHERE rowid=?',(observed[0],)).fetchone()[0]
+            manifest=json.loads(encoded);del encoded
+            _verify(manifest)
+            require(manifest['operation_id']==self.operation_id and manifest['attempt_id']==self.attempt_id and observed[3]==manifest['after_book']
+                and observed[4]==_target_after_digest(manifest['targets'][-1]),'publication_readback_changed')
+            # Legacy equivalent JSON may have different whitespace/order; pin
+            # its canonical image separately from the actual persisted bytes.
+            self._memory_pin=self._canonical_pin(manifest);self._stored=observed
+            return manifest,diagnostics
     def binding(self):
         require(self._read()[0]==self.manifest,'receipt_changed')
         return dict(operation_id=self.operation_id,attempt_id=self.attempt_id,digest=self.manifest['manifest_digest'],dates=list(self.dates))
     def publication_dates(self):return self.dates
     def _validate_sources_conn(self,conn):
-        from packages.application.historical_dated_inputs import dated_slice,book_lineage
-        manifest=self.manifest;_fence(conn,manifest,ready_before=False)
-        active,version=accounting.load(self.runtime.runtime_dir);expected=manifest['candidate']['candidate_book']
-        require(all(active[field].get(day)==expected[field][day] for field in ('wb_days','retained_days','shared_days','presentations') for day in self.dates),'book_dates_changed')
-        del active  # Do not retain a full book while selecting Ready or rereading the receipt.
+        from packages.application.historical_dated_inputs import dated_slice,book_lineage,prepared_book_lineage
+        self._read()
+        manifest=self.manifest;_source_fence(conn,manifest,ready_before=False)
+        expected=manifest['candidate']['candidate_book']
+        selected=_selected_ready(conn,list(self.dates),manifest['candidate']['functional']['business_date'])
         proof={}
-        for row,days in _selected_ready(conn,list(self.dates),manifest['candidate']['functional']['business_date']):
-            for day in days:
-                target=next(t for t in manifest['targets'] if day in t['dates'])
-                require(fingerprint(dated_slice(row['plan_json'],day))==target['dated_outputs'][day],'dated_ready_changed')
-                lineage=book_lineage(self.runtime,row['plan_json'],day)
-                require(lineage=={field:expected[field][day] for field in ('wb_days','retained_days','shared_days','presentations')},'dated_book_binding_changed')
-                del lineage
-                edition=manifest['candidate']['editions'][day]
-                actual=conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',(edition['version_id'],)).fetchone()
-                require(actual and dict(actual)==edition['version'] and stages._version_balances(conn,version_id=edition['version_id'])==edition['balances'],'dated_stage_readback_changed')
-                del actual
-                proof[day]=dict(ready_key=[row['bundle_version'],row['as_of_date']],ready_digest=ready.digest(row['plan_json']),dated_digest=target['dated_outputs'][day],functional_version=edition['version_id'])
-            del row
+        with prepared_book_lineage(self.runtime,[(row['plan_json'],days) for row,days in selected]) as books:
+            version=(books.observer.execute('SELECT version FROM accounting_current WHERE singleton=1').fetchone()[0]
+                     if books.observer is not None else None)
+            fields=('wb_days','retained_days','shared_days','presentations')
+            if version is not None and all((version,day) in books.cache for day in self.dates):
+                require(all(books.book(version,day)[0][field].get(day)==expected[field][day]
+                            for field in fields for day in self.dates),'book_dates_changed')
+            else:
+                active,version=accounting.load(self.runtime.runtime_dir)
+                require(all(active[field].get(day)==expected[field][day] for field in fields for day in self.dates),'book_dates_changed')
+                del active
+            for row,days in selected:
+                for day in days:
+                    target=next(t for t in manifest['targets'] if day in t['dates'])
+                    require(fingerprint(dated_slice(row['plan_json'],day))==target['dated_outputs'][day],'dated_ready_changed')
+                    lineage=book_lineage(self.runtime,row['plan_json'],day,prepared=books)
+                    require(lineage=={field:expected[field][day] for field in fields},'dated_book_binding_changed')
+                    del lineage
+                    edition=manifest['candidate']['editions'][day]
+                    actual=conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',(edition['version_id'],)).fetchone()
+                    require(actual and dict(actual)==edition['version'] and stages._version_balances(conn,version_id=edition['version_id'])==edition['balances'],'dated_stage_readback_changed')
+                    del actual
+                    proof[day]=dict(ready_key=[row['bundle_version'],row['as_of_date']],ready_digest=ready.digest(row['plan_json']),dated_digest=target['dated_outputs'][day],functional_version=edition['version_id'])
+                del row
+            books.guard()
         require(set(proof)==set(self.dates),'dated_scope_missing')
         return dict(binding=self.binding(),dated=proof,active_book=version)
     def validate_sources_readonly(self,*,now):

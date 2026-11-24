@@ -1213,4 +1213,96 @@ class ReceiptMemoryBoundaryTests(unittest.TestCase):
             self.assertTrue(any('length(CAST(inputs_json AS BLOB))' in sql for sql in statements))
 
 
+class SupplierReceiptReadbackTests(unittest.TestCase):
+    def fixture(self):
+        case=Tests();case.setUp();self.addCleanup(case.doCleanups)
+        manifest=case.prepare();case.publish(manifest)
+        return case,manifest
+
+    def test_cold_verify_once_warm_exact_readback_and_one_native_book_load(self):
+        case,manifest=self.fixture()
+        with patch.object(h,'_verify',wraps=h._verify) as verify:
+            receipt=h.SupplierHistory(case.runtime,manifest['operation_id'],manifest['attempt_id'])
+            receipt.binding()
+            with patch.object(accounting,'load',wraps=accounting.load) as load:
+                first=receipt.validate_sources_readonly(now=MOMENT)
+                self.assertEqual(load.call_count,1)
+            self.assertEqual(receipt.validate_sources_readonly(now=MOMENT),first)
+            self.assertEqual(verify.call_count,1)
+
+    def test_warm_read_rejects_memory_code_row_metadata_retirement_and_stored_byte_tamper(self):
+        case,manifest=self.fixture();receipt=h.SupplierHistory(case.runtime,manifest['operation_id'],manifest['attempt_id'])
+        stamp=receipt.manifest['created_at'];receipt.manifest['created_at']='in-memory-tamper'
+        with self.assertRaisesRegex(ValueError,'receipt_changed'):receipt.binding()
+        receipt.manifest['created_at']=stamp
+        ids=receipt.manifest['candidate']['queue_ref']['affected_nm_ids'];original=ids[0]
+        for aliased in (bool(original),float(original)):
+            ids[0]=aliased
+            with self.subTest(aliased_type=type(aliased).__name__),self.assertRaisesRegex(ValueError,'receipt_changed'):receipt.binding()
+            ids[0]=original
+        with patch.object(candidate,'code_authority',return_value={'changed':'code'}),self.assertRaisesRegex(ValueError,'formula_changed'):
+            receipt.binding()
+        with _connect(case.runtime.db_path) as conn:
+            saved=conn.execute('SELECT rowid,inputs_json,diagnostics_json,after_digest FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+                (manifest['operation_id'],manifest['attempt_id'])).fetchone();rowid=saved['rowid']
+        for field,value,error in (('after_digest','changed','receipt_changed'),
+                ('diagnostics_json',canonical({'supplier_history_replaced_by':{}}),'publication_superseded'),
+                ('inputs_json',' '+saved['inputs_json'],'receipt_changed')):
+            with _connect(case.runtime.db_path) as conn:
+                conn.execute(f'UPDATE sheet_vitrina_v1_ready_publications SET {field}=? WHERE rowid=?',(value,rowid));conn.commit()
+            with self.subTest(field=field),self.assertRaisesRegex(ValueError,error):receipt.binding()
+            with _connect(case.runtime.db_path) as conn:
+                conn.execute(f'UPDATE sheet_vitrina_v1_ready_publications SET {field}=? WHERE rowid=?',(saved[field],rowid));conn.commit()
+
+    def test_cold_and_warm_equivalent_noncanonical_stored_json_remain_supported(self):
+        case,manifest=self.fixture()
+        with _connect(case.runtime.db_path) as conn:
+            conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET inputs_json=? WHERE operation_id=? AND attempt_id=?',
+                (json.dumps(manifest,ensure_ascii=True,indent=1),manifest['operation_id'],manifest['attempt_id']));conn.commit()
+        receipt=h.SupplierHistory(case.runtime,manifest['operation_id'],manifest['attempt_id'])
+        self.assertEqual(receipt.manifest,manifest);self.assertEqual(receipt.binding()['digest'],manifest['manifest_digest'])
+
+    def test_warm_validation_keeps_ready_stage_source_and_current_book_fences(self):
+        case,manifest=self.fixture();receipt=h.SupplierHistory(case.runtime,manifest['operation_id'],manifest['attempt_id'])
+        receipt.validate_sources_readonly(now=MOMENT)
+        day=receipt.dates[0];version=manifest['candidate']['editions'][day]['version_id']
+        with _connect(case.runtime.db_path) as conn:
+            stamp=conn.execute(f'SELECT published_at FROM {stages.P}functional_versions WHERE version_id=?',(version,)).fetchone()[0]
+            conn.execute(f'UPDATE {stages.P}functional_versions SET published_at=? WHERE version_id=?',('changed',version));conn.commit()
+        with self.assertRaisesRegex(ValueError,'dated_stage_readback_changed'):receipt.validate_sources_readonly(now=MOMENT)
+        with _connect(case.runtime.db_path) as conn:
+            conn.execute(f'UPDATE {stages.P}functional_versions SET published_at=? WHERE version_id=?',(stamp,version));conn.commit()
+            row=conn.execute('SELECT bundle_version,as_of_date,plan_json FROM '+ready.TABLE+' LIMIT 1').fetchone()
+            payload=json.loads(row['plan_json']);sheet=next(s for s in payload['sheets'] if s['sheet_name']=='DATA_VITRINA')
+            sheet['rows'][0][sheet['header'].index(day)]='333'
+            conn.execute('UPDATE '+ready.TABLE+' SET plan_json=? WHERE bundle_version=? AND as_of_date=?',(canonical(payload),row['bundle_version'],row['as_of_date']));conn.commit()
+        with self.assertRaisesRegex(ValueError,'dated_ready_changed'):receipt.validate_sources_readonly(now=MOMENT)
+        with _connect(case.runtime.db_path) as conn:
+            conn.execute('UPDATE '+ready.TABLE+' SET plan_json=? WHERE bundle_version=? AND as_of_date=?',(row['plan_json'],row['bundle_version'],row['as_of_date']));conn.commit()
+            conn.execute("UPDATE sheet_vitrina_v1_supplier_shipments SET invoice_no=invoice_no||'changed' WHERE shipment_id='source'");conn.commit()
+        with self.assertRaisesRegex(ValueError,'ready_repair_source_changed'):receipt.validate_sources_readonly(now=MOMENT)
+        with sqlite3.connect(accounting.path(case.runtime.runtime_dir)) as conn:
+            conn.execute('UPDATE accounting_current SET version=? WHERE singleton=1',(manifest['expected_book'],));conn.commit()
+        # Restore the supplier header so this refusal specifically reaches the current book guard.
+        with _connect(case.runtime.db_path) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_supplier_shipments SET invoice_no=substr(invoice_no,1,length(invoice_no)-7) WHERE shipment_id='source'");conn.commit()
+        with self.assertRaisesRegex(ValueError,'book_dates_changed'):receipt.validate_sources_readonly(now=MOMENT)
+
+    def test_prepared_book_observer_rejects_concurrent_book_commit(self):
+        from packages.application import historical_dated_inputs as dated
+        case,manifest=self.fixture();receipt=h.SupplierHistory(case.runtime,manifest['operation_id'],manifest['attempt_id'])
+        original=dated.book_lineage;changed=[]
+        def race(*args,**kwargs):
+            result=original(*args,**kwargs)
+            if not changed:
+                import zlib
+                with sqlite3.connect(accounting.path(case.runtime.runtime_dir)) as conn:
+                    value={'concurrent':'native fixture blob'}
+                    conn.execute('INSERT INTO accounting_blobs VALUES(?,?)',(fingerprint(value),zlib.compress(canonical(value).encode())));conn.commit()
+                changed.append(True)
+            return result
+        with patch.object(dated,'book_lineage',side_effect=race),self.assertRaisesRegex(ValueError,'dated_book_observer_changed'):
+            receipt.validate_sources_readonly(now=MOMENT)
+
+
 if __name__=='__main__':unittest.main()
