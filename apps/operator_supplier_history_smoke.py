@@ -164,6 +164,27 @@ class Tests(unittest.TestCase):
         with self.assertRaises(ValueError):self.publish(manifest)
         receipt=financial.read_request(self.runtime.runtime_dir,self.runtime.db_path,'financial-historical-cost',request_scope='alice-key')['results'][0]['acceptance']
         self.assertTrue(receipt['durable_saved']);self.assertFalse(receipt['processing']['complete'])
+    def test_new_native_acceptance_after_prepare_refuses_empty_receipt_fence(self):
+        manifest=self.prepare();before=accounting.load(self.runtime.runtime_dir)[1]
+        self.assertEqual(manifest['candidate']['members'][0]['receipt_dependency']['kind'],'unaccepted')
+        self.runtime.create_ff_stock_operation(operation_id='LOCAL later acceptance',operation_type='receipt',
+            source_type='supplier_shipment',source_key='LOCAL actual receipt',source_object_id='source',
+            created_at=NOW,business_effective_date=DAY,lines=[dict(nm_id=1,quantity_delta=1)])
+        with ready.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(ready.ReadyPublicationConflict,'ready_repair_source_changed'):
+                stages.check_query_fence(conn,manifest['candidate']['source_inputs'])
+        with self.assertRaises(ValueError):self.publish(manifest)
+        self.assertEqual(accounting.load(self.runtime.runtime_dir)[1],before)
+
+    def test_acceptance_header_after_prepare_refuses_source_fence(self):
+        manifest=self.prepare();before=accounting.load(self.runtime.runtime_dir)[1]
+        with _connect(self.runtime.db_path) as conn:
+            conn.execute('UPDATE sheet_vitrina_v1_supplier_shipments SET actual_ff_acceptance_date=? WHERE shipment_id=?',(DAY,'source'));conn.commit()
+        with ready.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(ready.ReadyPublicationConflict,'ready_repair_source_changed'):
+                stages.check_query_fence(conn,manifest['candidate']['source_inputs'])
+        with self.assertRaises(ValueError):self.publish(manifest)
+        self.assertEqual(accounting.load(self.runtime.runtime_dir)[1],before)
     def test_generic_history_success_cannot_ack(self):
         receipt=self.publish(self.prepare())
         with self.assertRaisesRegex(Exception,'not_supervised'):receipt._acknowledge_verified_native({'completed':True})
@@ -675,6 +696,37 @@ class LinuxTests(unittest.TestCase):
             if second:
                 saved=financial.read_request(rt.runtime_dir,rt.db_path,second_request,request_scope='alice-key')['results'][0]['acceptance']
                 self.assertTrue(saved['processing']['complete']);self.assertEqual(saved['state'],'completed')
+
+
+class SupplierWbSourceAuthorityTests(unittest.TestCase):
+    def member(self,kind='unaccepted'):
+        return dict(source_ref=dict(operation_id='supplier-own',shipment_id='own',source_digest='sha256:own'),
+            shipment=dict(shipment_id='own',actual_ff_acceptance_date=''),
+            receipt_dependency=dict(kind=kind,operations=[],lines=[],documents=[]))
+
+    def test_unaccepted_source_preserves_all_wb_bytes_despite_foreign_daily_drift(self):
+        rows=[dict(warehouse_key='wb',nm_id=1,quantity='379',capital_rub='35672.00000000000000000000001',wac_rub='94.12',
+            provenance=dict(source_records=[dict(snapshot_id='saved-morning')]),quality='saved'),
+            dict(warehouse_key='wb',nm_id=2,quantity='5',capital_rub='25',wac_rub='5',provenance={'foreign':True})]
+        daily=[dict(as_of_date=DAY,nm_id=1,quantity='373',wac_rub='9999',capital_rub=str(373*9999),quality='foreign-evening')]
+        before=deepcopy((rows,daily));member=self.member()
+        after,proof=candidate._wb_rows(rows,daily=daily,day=DAY,ids=[1],members=[member])
+        self.assertEqual(canonical(after),canonical(rows));self.assertEqual((rows,daily),before)
+        self.assertEqual(proof[0]['kind'],'unaccepted_supplier_has_no_wb_cost_authority')
+        self.assertEqual(proof[0]['source_refs'],[member['source_ref']])
+        self.assertEqual(proof[0]['receipt_absence'][0]['dependency'],member['receipt_dependency'])
+
+    def test_accepted_unknown_mixed_and_unproven_cohorts_keep_strict_quantity_guard(self):
+        rows=[dict(warehouse_key='wb',nm_id=1,quantity='379',capital_rub='379',provenance={})]
+        daily=[dict(as_of_date=DAY,nm_id=1,quantity='373',wac_rub='1',capital_rub='373',quality='daily')]
+        invalid=self.member();invalid['shipment']['actual_ff_acceptance_date']=DAY
+        incomplete=self.member();incomplete['receipt_dependency'].pop('lines')
+        changed=self.member();changed['receipt_dependency']['operations']=[{'operation_id':'new-receipt'}]
+        cases=[None,[],[self.member('legacy_supplier_allocation')],[self.member('immutable_posted_supplier_receipt')],
+            [self.member('unknown')],[self.member(),self.member('legacy_supplier_allocation')],[invalid],[incomplete],[changed]]
+        for members in cases:
+            with self.subTest(members=members),self.assertRaisesRegex(ValueError,'dated_wb_quantity_changed'):
+                candidate._wb_rows(rows,daily=daily,day=DAY,ids=[1],members=members)
 
 
 class SupplierReadySelectionTests(unittest.TestCase):

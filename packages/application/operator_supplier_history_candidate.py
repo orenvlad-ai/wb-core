@@ -41,9 +41,21 @@ def business_image(rows):
         "wb_in_way_to_client", "wb_in_way_from_client")} for row in sorted(rows,key=lambda r:(r["warehouse_key"],r["nm_id"]))]
 
 
-def _wb_rows(rows, *, daily, day, ids):
+def _wb_rows(rows, *, daily, day, ids, members=None):
     """Only the actual correlated native daily cost can replace WB money."""
     result = deepcopy(rows)
+    # Supplier cost reaches the FF/WB pools only through a real native FF
+    # acceptance. An entirely unaccepted cohort owns pre-FF money only; a
+    # different same-date WB observation is not its monetary operand. Header
+    # and empty native acceptance sets are already pinned in source_inputs.
+    if members and all(m['receipt_dependency']['kind']=='unaccepted'
+            and all(m['receipt_dependency'].get(key)==[] for key in ('operations','lines','documents'))
+            and m['shipment'].get('actual_ff_acceptance_date')=='' for m in members):
+        return result,[dict(kind='unaccepted_supplier_has_no_wb_cost_authority',date=day,
+            source_refs=[m['source_ref'] for m in members],
+            receipt_absence=[dict(shipment_id=m['shipment']['shipment_id'],
+                actual_ff_acceptance_date=m['shipment']['actual_ff_acceptance_date'],
+                dependency=deepcopy(m['receipt_dependency'])) for m in members])]
     by_nm = {int(r["nm_id"]): r for r in daily if r["as_of_date"] == day}
     evidence = []
     for row in result:
@@ -299,7 +311,7 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
             rows,proof=sources.dated_supplier_rows(rows,shipment=member['shipment'],day=day)
             supplier_proof.append(dict(source_ref=member['source_ref'],proof=proof))
             member_evaluation[member['source_ref']['operation_id']]['dated'][day]=dict(before=before,after=fingerprint(business_image(rows)))
-        rows, wb_proof = _wb_rows(rows,daily=daily,day=day,ids=ids)
+        rows, wb_proof = _wb_rows(rows,daily=daily,day=day,ids=ids,members=members)
         evaluated[day] = {"before": fingerprint(business_image(saved["balances"])),
                           "after": fingerprint(business_image(rows)), "supplier": supplier_proof,
                           "ff": ff_revisions[day][1], "wb": wb_proof, "saved_version": saved["version"]["version_id"]}
