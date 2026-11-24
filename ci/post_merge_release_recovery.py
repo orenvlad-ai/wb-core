@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Fail-closed continuation for a proven post-merge deploy tail.
 
-The runner never merges or copies code. One exact predependency failure may
+The shared tail runner never merges or copies code. PR1623's separate exact
+pre-sync lane may invoke the original canonical deploy once only after proving
+that its original storage preflight refused before owner start and code sync.
+One exact predependency failure may
 restore only missing locked npm modules; it never repeats OS/Python/browser
 installation. One exact buyer-Chrome initial reserve refusal may skip the already
 verified installed browser and reuse the unchanged dependency closure. Its storage tail never restarts services; one exact b9 case resumes the canonical
@@ -505,6 +508,9 @@ def _prove_failed_stage(
     release_run_id: int = EXPECTED_ACTIVATION_RELEASE_RUN_ID,
 ) -> dict[str, Any]:
     text = raw_log.decode("utf-8", errors="replace")
+    if release_run_id == 45470334066:
+        from ci.pr1623_presync_recovery import prove_failure
+        return prove_failure(raw_log, gate_run_id, job_name)
     if cleaner_completion_case(case, release_run_id):
         bounded_listener = release_run_id == CLEANER_BOUNDED_LISTENER_RUN_ID
         required = (
@@ -2497,6 +2503,9 @@ def main() -> int:
         release.configure_ssh(Path(directory))
         if args.release_run_id == 39568090548:
             from ci.pr1483_preparation_continuation import run
+            result = run(client, target, args.command, args.preview_fingerprint)
+        elif args.release_run_id == 45470334066:
+            from ci.pr1623_presync_recovery import run
             result = run(client, target, args.command, args.preview_fingerprint)
         elif args.command == "preview":
             result = build_preview(client, args.release_run_id, target)
