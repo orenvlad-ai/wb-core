@@ -185,6 +185,34 @@ class Tests(unittest.TestCase):
                 stages.check_query_fence(conn,manifest['candidate']['source_inputs'])
         with self.assertRaises(ValueError):self.publish(manifest)
         self.assertEqual(accounting.load(self.runtime.runtime_dir)[1],before)
+
+    def test_native_late_create_materializes_initial_source_and_companions(self):
+        rt=self.runtime;ledger=CnyLedgerBlock(runtime=rt,timestamp_factory=lambda:NOW)
+        ledger.create_opening_balance({'operation_date':'2026-07-04','cny_amount':100,'rub_value':1000})
+        header={**HEADER,'shipment_id':'new-admission','created_at':NOW,'updated_at':NOW,'invoice_date':FIRST,
+            'shipment_date':FIRST,'actual_shipment_date':'','actual_ff_acceptance_date':'','invoice_no':'late-native-create','expenses_complete':0}
+        lines=[{**LINES[0],'line_id':'new-product','internal_nm_id':1}]
+        accepted=source.execute(rt,action='create',payload={'request_id':'late-native-create'},shipment_id='new-admission',
+            actor='alice',request_scope='alice-key',write=lambda context:rt.save_supplier_shipment(header=header,lines=lines,operator_request=context))
+        identity=accepted['acceptance']['operation_id']
+        _save_payment(rt,'new-payment','new-admission',FIRST+'T12:00:00Z','100');ledger.replay_ledger(reason='late-native-create')
+        intents.drain_supplier_preparation_intents(rt,shipment_ids=['source','new-admission']);publish_functional(rt);publish_accounting(rt)
+        manifest=h.prepare(rt,identity,now=MOMENT)
+        admissions=[(day,p['proof']) for day,e in manifest['candidate']['editions'].items()
+            for p in e['source_dependency']['supplier'] if p['proof']['kind']=='native_initial_pre_ff_supplier_admission']
+        self.assertTrue(admissions)
+        for day,proof in admissions:
+            edition=manifest['candidate']['editions'][day]
+            self.assertEqual(proof['source_ref']['action'],'create');self.assertEqual(proof['quantity_by_nm'],{'1':'10'})
+            state=next(r for r in edition['companions']['supplier_cost_states'] if r['shipment_id']=='new-admission')
+            self.assertEqual(state['version_id'],edition['version_id'])
+            retained=manifest['candidate']['candidate_book']['retained_days'][day]['rows']['1']['stages']['PRODUCTION']
+            self.assertEqual(retained['quantity'],'10');self.assertEqual(retained['capital_rub'],'1000')
+        receipt=self.publish(manifest);self.assertTrue(receipt.validate_sources_readonly(now=MOMENT)['dated'])
+        with ready.readonly(rt.db_path) as conn:
+            for day,_ in admissions:
+                version=manifest['candidate']['editions'][day]['version_id']
+                self.assertEqual(conn.execute('SELECT count(*) FROM '+stages.P+'supplier_cost_states WHERE version_id=? AND shipment_id=?',(version,'new-admission')).fetchone()[0],1)
     def test_generic_history_success_cannot_ack(self):
         receipt=self.publish(self.prepare())
         with self.assertRaisesRegex(Exception,'not_supervised'):receipt._acknowledge_verified_native({'completed':True})

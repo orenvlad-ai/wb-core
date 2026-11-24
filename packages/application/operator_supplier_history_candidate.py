@@ -285,17 +285,21 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         current_after = processing.balance_rows(conn,functional["version_id"],functional["queue_ref"]["affected_nm_ids"])
         current_evaluation = {"before_version":original_version,"after_version":functional["version_id"],
             "before_digest":fingerprint(business_image(current_before)),"after_digest":fingerprint(business_image(current_after))}
-        member_evaluation={}
+        member_evaluation={};native_contexts={}
         for member in members:
             own=member['source_ref'];proof=member['functional'];own_ids=proof['queue_ref']['affected_nm_ids']
-            before=[r for r in stages._version_balances(conn,version_id=proof['origin_before_version_id']) if r['nm_id'] in own_ids]
-            after=[r for r in stages._version_balances(conn,version_id=proof['version_id']) if r['nm_id'] in own_ids]
+            all_before=stages._version_balances(conn,version_id=proof['origin_before_version_id'])
+            before=[r for r in all_before if r['nm_id'] in own_ids]
+            all_after=stages._version_balances(conn,version_id=proof['version_id'])
+            after=[r for r in all_after if r['nm_id'] in own_ids]
             def contributions(rows):
                 return sorted([(r['warehouse_key'],r['nm_id'],str(s['flow_quantity']),str(s['flow_capital_rub'])) for r in rows for s in r['provenance'].get('source_records',[]) if s.get('shipment_id')==own['shipment_id']])
             prior,actual=contributions(before),contributions(after)
             independent=bool(prior or actual)
             no_change=(prior==actual) if independent else (len(members)==1 and business_image(before)==business_image(after))
             member_evaluation[own['operation_id']]=dict(current_before=fingerprint(prior),current_after=fingerprint(actual),independent_supplier_contributions=independent,current_no_change=no_change,dated={})
+            native_contexts[own['operation_id']]=dict(operation=next(m['operation'] for m in natives if m['operation']['operation_id']==own['operation_id']),
+                functional=proof,receipt_dependency=member['receipt_dependency'],before_rows=all_before,after_rows=all_after)
         ff_revisions={}
         for day in dates:
             after,proof,fence=sources.dated_ff_rows(conn,dated['dates'][day],shipment=shipment,dependency=dependency,day=day,cohort=members)
@@ -308,7 +312,8 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         rows=ff_revisions[day][0];supplier_proof=[]
         for member in members:
             before=fingerprint(business_image(rows))
-            rows,proof=sources.dated_supplier_rows(rows,shipment=member['shipment'],day=day)
+            rows,proof=sources.dated_supplier_rows(rows,shipment=member['shipment'],day=day,
+                native_context=native_contexts[member['source_ref']['operation_id']])
             supplier_proof.append(dict(source_ref=member['source_ref'],proof=proof))
             member_evaluation[member['source_ref']['operation_id']]['dated'][day]=dict(before=before,after=fingerprint(business_image(rows)))
         rows, wb_proof = _wb_rows(rows,daily=daily,day=day,ids=ids,members=members)
@@ -326,6 +331,9 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         wb = stages._cloned_wb_capture(version,snapshot,rows,day=day,nm_ids=book["wb_days"][day]["requested_nm_ids"])
         require(wb["complete"], "revised_wb_authority_incomplete")
         retained = deepcopy(book["retained_days"][day]);retained["wb_version_id"] = version_id
+        for member,proof in zip(members,supplier_proof):
+            if proof['proof']['kind']=='native_initial_pre_ff_supplier_admission':
+                require(set(proof['proof']['quantity_by_nm'])<=set(retained['rows']),'initial_supplier_admission_catalog_missing')
         by_key = {(r["warehouse_key"],str(r["nm_id"])):r for r in rows}
         for nm, row in retained["rows"].items():
             for stage in stages.RETAINED_STAGES:
@@ -342,6 +350,8 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
             state=member['functional']['cost_state'];sid=member['source_ref']['shipment_id']
             prior=next((r for r in companions['supplier_cost_states'] if r['shipment_id']==sid),None)
             if prior is not None:prior.update(state)
+            elif any(p['source_ref']==member['source_ref'] and p['proof']['kind']=='native_initial_pre_ff_supplier_admission' for p in supplier_proof):
+                companions['supplier_cost_states'].append(dict(version_id=version_id,created_at=now.isoformat(),**state))
         editions[day] = {"version_id":version_id,"version":version,"snapshot":snapshot,"saved":saved,
                         "balances":rows,"companions":companions,"source_dependency":evaluated[day]}
     if effects:
