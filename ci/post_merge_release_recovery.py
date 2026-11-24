@@ -2507,6 +2507,9 @@ def main() -> int:
         elif args.release_run_id == 45470334066:
             from ci.pr1623_presync_recovery import run
             result = run(client, target, args.command, args.preview_fingerprint)
+        elif args.release_run_id == 45473903471:
+            from ci.pr1623_dependency_continuation import run
+            result = run(client, target, args.command, args.preview_fingerprint)
         elif args.command == "preview":
             result = build_preview(client, args.release_run_id, target)
         else:
