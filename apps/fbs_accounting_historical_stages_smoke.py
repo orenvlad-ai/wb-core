@@ -382,6 +382,22 @@ class NativeHistoricalStages(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'historical_read_model_capture_shape_invalid'):
                 stages.read_model_capture_mode(saved)
 
+    def test_model_proofs_keep_full_source_utf8_bound_before_parsing(self):
+        _,_,plan,_=self.fixture();day=plan['scope']['date_from'];version='native-saved:'+day
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            model=json.loads(conn.execute("SELECT payload_json FROM sheet_vitrina_v1_warehouse_functional_read_models WHERE version_id=? AND warehouse_key='production'",(version,)).fetchone()[0])
+            model['local_unicode_presentation']='я'*(33*1024**2);body=canonical(model)
+            self.assertLess(len(body),stages.MAX_BYTES)
+            self.assertGreater(len(body.encode()),stages.MAX_BYTES)
+            conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_read_models SET payload_json=? WHERE version_id=? AND warehouse_key='production'",(body,version))
+        with ready.readonly(self.db) as conn:
+            model_reads=[]
+            conn.set_trace_callback(lambda sql:model_reads.append(sql) if sql.startswith('SELECT * FROM '+stages.P+'functional_read_models') else None)
+            with self.assertRaisesRegex(ValueError,'historical_complete_stage_models_missing'):
+                stages.capture_dated_stages(conn,db_path=self.db,book=plan['candidate_book'],
+                    dates=plan['scope']['dates'],read_model_mode=stages.READ_MODEL_PROOFS)
+            self.assertEqual(model_reads,[])
+
     def test_saved_sparse_zero_is_resolved_without_mutating_original_operands(self):
         book,cap,plan,dated=self.fixture()
         candidate=plan['candidate_book'];before=deepcopy(candidate)

@@ -139,7 +139,8 @@ def capture_dated_stages(conn, *, db_path, book, dates, read_model_mode='payload
         require(exact == wb and exact["complete"], "historical_saved_wb_authority_changed", day=day, source=version_id)
         count,size=conn.execute(f'SELECT count(*),coalesce(sum(length(provenance_json)+length(capital_rub)+length(quantity)),0) FROM {P}functional_balances WHERE version_id=?',(version_id,)).fetchone()
         require(count<=MAX_ROWS and size<=MAX_BYTES,'historical_saved_stage_size_limit',day=day)
-        count,size=conn.execute(f'SELECT count(*),coalesce(sum(length(payload_json)),0) FROM {P}functional_read_models WHERE version_id=?',(version_id,)).fetchone()
+        model_size='length(CAST(payload_json AS BLOB))' if read_model_mode==READ_MODEL_PROOFS else 'length(payload_json)'
+        count,size=conn.execute(f'SELECT count(*),coalesce(sum({model_size}),0) FROM {P}functional_read_models WHERE version_id=?',(version_id,)).fetchone()
         require(count==6 and size<=MAX_BYTES,'historical_complete_stage_models_missing',day=day)
         balances = _version_balances(conn, version_id=version_id)
         require(len(balances) <= MAX_ROWS, "historical_stage_row_limit", day=day)
