@@ -227,6 +227,33 @@ class Tests(unittest.TestCase):
                 version=manifest['candidate']['editions'][day]['version_id']
                 self.assertEqual(conn.execute('SELECT count(*) FROM '+stages.P+'supplier_cost_states WHERE version_id=? AND shipment_id=?',(version,'new-admission')).fetchone()[0],1)
             stages.capture_dated_stages(conn,db_path=rt.db_path,book=manifest['candidate']['candidate_book'],dates=manifest['candidate']['effect_dates'],read_model_mode=stages.READ_MODEL_PROOFS)
+
+    def test_native_decimal_parameters_json_proof_rebuild_and_exact_fence(self):
+        from packages.application.calculation_parameters import ensure_calculation_parameters_schema,DEFAULT_PROXY_PARAMETERS,PROXY_BLOCK_KEY
+        from packages.application.calculation_parameters_v4 import ensure_proxy_v4_schema,PROXY_V4_BLOCK_KEY,AUTOMATIC_RATE_FIELDS,PROXY_V4_FORMULA_VERSION
+        with _connect(self.runtime.db_path) as conn:
+            ensure_calculation_parameters_schema(conn);ensure_proxy_v4_schema(conn)
+            conn.execute('INSERT INTO sheet_vitrina_v1_calculation_parameter_versions VALUES(?,?,?,?,?,?,?,?,?)',
+                ('source-proxy3',PROXY_BLOCK_KEY,999,FIRST,canonical(DEFAULT_PROXY_PARAMETERS.public()),'fixture3','fixture','fixture',NOW))
+            values={field:'0' for field in AUTOMATIC_RATE_FIELDS}
+            values.update(buyout_rate='0.91',tax_rate='0.06',agent_remuneration_rate='0.38',source_week_ranges=[['2026-06-22','2026-06-28']],
+                buyout_order_count_weight='123.4500',finance_net_revenue_weight='456.7800',formula_version=PROXY_V4_FORMULA_VERSION)
+            conn.execute('INSERT INTO sheet_vitrina_v1_proxy_v4_parameter_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                ('source-proxy4',PROXY_V4_BLOCK_KEY,999,FIRST,'2026-06-22','2026-06-28','fixture-window',canonical(values),'fixture4','fixture','fixture',NOW));conn.commit()
+        manifest=self.prepare();proof=manifest['parameter_proof'][FIRST]
+        self.assertEqual(proof[0]['buyout_rate'],'0.91');self.assertEqual(proof[1]['buyout_order_count_weight'],'123.4500')
+        self.assertEqual(proof[1]['source_week_ranges'],[['2026-06-22','2026-06-28']])
+        self.assertEqual(manifest,json.loads(canonical(manifest)))
+        self.assertEqual(h._large_fingerprint(manifest),fingerprint(manifest))
+        self.assertEqual(h._publication_json_size(manifest),len(canonical(manifest).encode()))
+        targets,parameters=h._targets(self.runtime,manifest['candidate'],now=MOMENT)
+        self.assertEqual(targets,manifest['targets']);self.assertEqual(parameters,manifest['parameter_proof'])
+        with ready.readonly(self.runtime.db_path) as conn:h._fence(conn,manifest)
+        values['buyout_order_count_weight']='123.4501'
+        with _connect(self.runtime.db_path) as conn:
+            conn.execute('UPDATE sheet_vitrina_v1_proxy_v4_parameter_versions SET parameters_json=? WHERE version_id=?',(canonical(values),'source-proxy4'));conn.commit()
+        with ready.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(ValueError,'dated_parameters_changed'):h._fence(conn,manifest)
     def test_generic_history_success_cannot_ack(self):
         receipt=self.publish(self.prepare())
         with self.assertRaisesRegex(Exception,'not_supervised'):receipt._acknowledge_verified_native({'completed':True})
@@ -842,7 +869,7 @@ class SupplierReadySelectionTests(unittest.TestCase):
 
     def test_unrelated_archive_over_real_limit_never_loads_full_bodies(self):
         selected_bytes=self.add('2026-09-07','2026-09-08')
-        padding='x'*(81*1024**2)
+        padding='x'*(h.MAX_READY_SOURCE_BYTES//2+1024)
         self.add('2025-01-01','2025-01-02',padding=padding)
         self.add('2025-01-03','2025-01-04',padding=padding)
         conn=self.readonly()

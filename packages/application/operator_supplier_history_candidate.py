@@ -18,7 +18,7 @@ from packages.application.shared_sku_cost import build_shared_cost_day
 from packages.application.fbs_inventory_presentation import FbsInventorySnapshot
 
 CONTRACT = "supplier_cost_dated_candidate_v1"
-MAX_BYTES = 160*1024**2
+MAX_BYTES = 256*1024**2  # Measured complete numerical candidate: 179,002,069 bytes.
 MAX_COHORT = 32
 MAX_ATTEMPTS = 32
 require = sources.require
@@ -28,7 +28,8 @@ def code_authority():
     from packages.application import warehouse_functional, warehouse_historical_recovery, warehouse_business_projection
     from packages.application import historical_dated_inputs
     modules = (sources, warehouse_functional, warehouse_historical_recovery, warehouse_business_projection, historical_dated_inputs)
-    paths = [Path(m.__file__) for m in modules] + [Path(__file__), Path(__file__).with_name("operator_supplier_history.py"), Path(stages.__file__), Path(processing.__file__)]
+    paths = [Path(m.__file__) for m in modules] + [Path(__file__), Path(__file__).with_name("operator_supplier_history.py"), Path(stages.__file__), Path(processing.__file__),
+        Path(__file__).with_name('fbs_accounting_historical_publication.py'),Path(__file__).with_name('fbs_accounting_historical_history.py')]
     return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 
 
@@ -244,6 +245,7 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         dated = stages.capture_dated_stages(conn,db_path=runtime.db_path,book=stage_book,dates=dates,
             read_model_mode=stages.READ_MODEL_PROOFS) if dates else {
             "dates": {}, "query_fence": [], "source_digest": fingerprint({})}
+        del stage_book  # Captured immutable rows own the evidence; the full copy is no longer used.
         daily_index={}
         for m in natives:
             actual=processing.daily_rows(conn,m['queue'],functional['business_date'])
@@ -385,4 +387,4 @@ def validate(candidate, *, runtime, now):
         {k:v for k,v in candidate.items() if k!="manifest_digest"}), "candidate_corrupt")
     require(candidate["code_authority"] == code_authority(), "formula_changed")
     require(prepare(runtime,candidate["operation_id"],now=now,before_book=candidate["before_book"],cohort_refs=candidate['cohort_refs'],obligations=candidate['obligations']) == candidate, "independent_rebuild_changed")
-    return deepcopy(candidate)
+    return candidate  # Validation is non-mutating; the caller already owns this verified object.
