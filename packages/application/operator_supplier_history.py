@@ -251,7 +251,10 @@ def _targets(runtime, numerical, *, now,ready_encoding=READY_JSON_ENCODING):
 
 
 def prepare(runtime,operation_id,*,now):
-    numerical=candidate.prepare(runtime,operation_id,now=now)
+    return _prepare_publication(runtime,candidate.prepare(runtime,operation_id,now=now),now=now)
+
+
+def _prepare_publication(runtime,numerical,*,now):
     operation_id=numerical['operation_id']
     require(numerical['effect_dates'],'no_dated_effect')
     targets,parameters=_targets(runtime,numerical,now=now)
@@ -467,28 +470,33 @@ def pending(runtime,*,now):
         if not sources.source._exists(conn,processing.FUNCTIONAL):return None
         identities=processing.captured_cohort(conn)
     for identity in identities:
+        numerical=manifest=receipt=None
         try:
             with ready.readonly(runtime.db_path) as conn:
                 op=processing.operation(conn,identity)
                 check,prior=_pending_check(conn,op)
             if check is not None:
                 _checked(runtime,identity,check['reason'],now,expected_check=check);continue
+            prior_attempt=None
             if prior:
-                manifest=json.loads(prior['inputs_json']);_verify(manifest)
+                manifest=json.loads(prior['inputs_json']);del prior;_verify(manifest)
+                prior_attempt=manifest['attempt_id'];receipt=None
                 try:
                     receipt=publish(runtime,manifest);receipt.validate_sources_readonly(now=now);return receipt
                 except ValueError as exc:
                     if not isinstance(exc,(sources.SupplierHistoryError,ready.ReadyPublicationConflict)) and str(exc).split(':')[0] not in EXPECTED_NATIVE:raise
-                    # An actual newer native source publication must prove
-                    # supersession; candidate discovery preserves all owed
-                    # dates and refuses unknown/code/Ready-only drift.
-                    numerical=candidate.prepare(runtime,identity,now=now)
-                    require(numerical['obligations'] and numerical['attempt_id']!=manifest['attempt_id'],'native_attempt_not_superseded')
-                    return publish(runtime,prepare(runtime,identity,now=now))
+                # Leave the exception scope before rebuilding: its traceback
+                # can retain the failed publisher's complete old operands.
+                del manifest,receipt
             numerical=candidate.prepare(runtime,identity,now=now)
-            if not numerical['effect_dates']:
+            if prior_attempt is not None:
+                # Discovery must prove native supersession and preserve every
+                # owed date before a replacement publication is prepared.
+                require(numerical['obligations'] and numerical['attempt_id']!=prior_attempt,'native_attempt_not_superseded')
+            elif not numerical['effect_dates']:
+                del numerical
                 _checked(runtime,identity,'supplier_history_no_dated_effect',now);continue
-            return publish(runtime,prepare(runtime,identity,now=now))
+            return publish(runtime,_prepare_publication(runtime,numerical,now=now))
         except ValueError as exc:
             reason=str(exc)
             if not isinstance(exc,(sources.SupplierHistoryError,ready.ReadyPublicationConflict)) and reason.split(':')[0] not in EXPECTED_NATIVE:raise

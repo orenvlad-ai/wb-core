@@ -478,7 +478,7 @@ class SelectionTests(unittest.TestCase):
             corrupt['manifest_digest']=fingerprint(corrupt)
             prior={'inputs_json':canonical(corrupt)}
             receipt=object()
-            with patch.object(processing,'captured_cohort',return_value=['old','valid']),patch.object(processing,'operation',side_effect=lambda conn,key:{'operation_id':key,'action':'edit'}),patch.object(processing,'current',return_value=True),patch.object(processing,'ref',side_effect=lambda op:ref if op['operation_id']=='old' else {'operation_id':'valid'}),patch.object(h,'publication_for',side_effect=lambda conn,source:prior if source['operation_id']=='old' else None),patch.object(h,'completed_proof',return_value=None),patch.object(h,'_checked') as checked,patch.object(candidate,'prepare',return_value={'effect_dates':[FIRST]}),patch.object(h,'prepare',return_value={'new':'exact'}),patch.object(h,'publish',return_value=receipt):
+            with patch.object(processing,'captured_cohort',return_value=['old','valid']),patch.object(processing,'operation',side_effect=lambda conn,key:{'operation_id':key,'action':'edit'}),patch.object(processing,'current',return_value=True),patch.object(processing,'ref',side_effect=lambda op:ref if op['operation_id']=='old' else {'operation_id':'valid'}),patch.object(h,'publication_for',side_effect=lambda conn,source:prior if source['operation_id']=='old' else None),patch.object(h,'completed_proof',return_value=None),patch.object(h,'_checked') as checked,patch.object(candidate,'prepare',return_value={'effect_dates':[FIRST]}),patch.object(h,'_prepare_publication',return_value={'new':'exact'}),patch.object(h,'publish',return_value=receipt):
                 self.assertIs(h.pending(runtime,now=MOMENT),receipt)
             self.assertEqual(checked.call_args.args[2],'supplier_history_formula_changed')
             self.assertEqual(checked.call_args.kwargs['state'],'needs_attention')
@@ -496,7 +496,7 @@ class SelectionTests(unittest.TestCase):
             def numerical(rt,identity,*,now):
                 if identity=='valid':return {'effect_dates':[FIRST]}
                 with ready.readonly(rt.db_path) as conn:return candidate.native_cohort(conn,identity)
-            with patch.object(processing,'captured_cohort',return_value=['waiting','valid']),patch.object(processing,'operation',side_effect=lambda conn,key:{**op,'operation_id':key}),patch.object(processing,'current',return_value=True),patch.object(processing,'superseded',return_value=False),patch.object(candidate,'prepare',side_effect=numerical),patch.object(h,'prepare',return_value={'new':'exact'}),patch.object(h,'publish',return_value=receipt):
+            with patch.object(processing,'captured_cohort',return_value=['waiting','valid']),patch.object(processing,'operation',side_effect=lambda conn,key:{**op,'operation_id':key}),patch.object(processing,'current',return_value=True),patch.object(processing,'superseded',return_value=False),patch.object(candidate,'prepare',side_effect=numerical),patch.object(h,'_prepare_publication',return_value={'new':'exact'}),patch.object(h,'publish',return_value=receipt):
                 self.assertIs(h.pending(runtime,now=MOMENT),receipt)
                 with sqlite3.connect(runtime.db_path) as conn:
                     self.assertEqual(conn.execute(f'SELECT state,reason FROM {processing.ATTEMPTS}').fetchall(),[('processing','supplier_exact_queue_pending')])
@@ -995,6 +995,82 @@ class SupplierReadySelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'ready_header_size_limit'):
                 h._selected_ready(conn,['2026-09-07'],'2026-09-07')
         self.assertEqual(self.body_keys,[])
+
+
+class PendingCandidateBoundaryTests(unittest.TestCase):
+    def test_native_pending_replan_discovers_once_and_still_validates_independently(self):
+        helper=ReplanTests();self.addCleanup(helper.doCleanups);case=helper.fixture()
+        old=case.prepare();case.publish(old)
+        new,_,_=helper.followup(case,old);attempt=new['attempt_id'];del new
+        prepare=candidate.prepare;calls=[]
+        def observed(*args,**kwargs):
+            calls.append('validation' if 'cohort_refs' in kwargs else 'discovery')
+            return prepare(*args,**kwargs)
+        with patch.object(candidate,'prepare',observed), \
+             heavy_admitted(case.runtime.runtime_dir,operation='cycle'),warehouse_functional_job_lock(case.runtime.runtime_dir):
+            receipt=h.pending(case.runtime,now=MOMENT)
+        self.assertIsNotNone(receipt);self.assertEqual(receipt.attempt_id,attempt)
+        self.assertEqual(calls.count('discovery'),1);self.assertGreaterEqual(calls.count('validation'),1)
+        self.assertEqual(receipt.manifest['candidate']['owed_dates'],old['candidate']['effect_dates'])
+
+    def test_one_candidate_for_fresh_and_replan_without_old_exception_operands(self):
+        from types import SimpleNamespace
+        class Tracked(dict):pass
+        runtime=SimpleNamespace(db_path=Path('/isolated/op.sqlite3'))
+        @contextmanager
+        def readonly(path):yield object()
+        for fail_at in (None,'publish','validation'):
+            with self.subTest(fail_at=fail_at):
+                refs={};result=object()
+                numerical={'effect_dates':[FIRST],'attempt_id':'new','obligations':[{'old':'owed'}]}
+                def pending_check(*args):
+                    if fail_at is None:return None,None
+                    row=Tracked(inputs_json='old-json');refs['prior']=weakref.ref(row)
+                    return None,row
+                def load_old(value):
+                    self.assertEqual(value,'old-json')
+                    old=Tracked(attempt_id='old');refs['manifest']=weakref.ref(old)
+                    return old
+                def fail():
+                    large=Tracked(payload='old publisher operand');refs['failed_frame']=weakref.ref(large)
+                    raise ready.ReadyPublicationConflict('ready_target_changed:fixture')
+                class OldReceipt:
+                    def __init__(self,manifest):self.manifest=manifest
+                    def validate_sources_readonly(self,**kwargs):fail()
+                def publish(rt,manifest):
+                    if manifest.get('attempt_id')=='old':
+                        if fail_at=='publish':fail()
+                        receipt=OldReceipt(manifest);refs['receipt']=weakref.ref(receipt);return receipt
+                    self.assertIs(manifest['candidate'],numerical);return result
+                def prepare_candidate(*args,**kwargs):
+                    self.assertIsNone(sys.exception(),'replan stayed inside failed publisher except')
+                    for name,ref in refs.items():self.assertIsNone(ref(),name+' survived into numerical rebuild')
+                    return numerical
+                with patch.object(ready,'readonly',readonly),patch.object(source,'_exists',return_value=True), \
+                     patch.object(processing,'captured_cohort',return_value=['source']), \
+                     patch.object(processing,'operation',return_value={'operation_id':'source'}), \
+                     patch.object(h,'_pending_check',side_effect=pending_check),patch.object(h,'_verify',lambda manifest:None), \
+                     patch.object(h.json,'loads',side_effect=load_old),patch.object(h,'publish',publish), \
+                     patch.object(candidate,'prepare',side_effect=prepare_candidate) as prepared, \
+                     patch.object(h,'_prepare_publication',side_effect=lambda rt,value,**kw:{'candidate':value}) as publication:
+                    self.assertIs(h.pending(runtime,now=MOMENT),result)
+                    self.assertEqual(prepared.call_count,1);self.assertEqual(publication.call_count,1)
+                    self.assertIs(publication.call_args.args[1],numerical)
+
+    def test_no_dated_effect_skips_publication_preparation(self):
+        from types import SimpleNamespace
+        @contextmanager
+        def readonly(path):yield object()
+        with patch.object(ready,'readonly',readonly),patch.object(source,'_exists',return_value=True), \
+             patch.object(processing,'captured_cohort',return_value=['source']), \
+             patch.object(processing,'operation',return_value={'operation_id':'source'}), \
+             patch.object(h,'_pending_check',return_value=(None,None)), \
+             patch.object(candidate,'prepare',return_value={'effect_dates':[]}) as prepared, \
+             patch.object(h,'_prepare_publication',side_effect=AssertionError('no-op prepared publication')), \
+             patch.object(h,'_checked') as checked:
+            self.assertIsNone(h.pending(SimpleNamespace(db_path=Path('/isolated/op.sqlite3')),now=MOMENT))
+            self.assertEqual(prepared.call_count,1)
+            self.assertEqual(checked.call_args.args[2],'supplier_history_no_dated_effect')
 
 
 class ReceiptMemoryBoundaryTests(unittest.TestCase):

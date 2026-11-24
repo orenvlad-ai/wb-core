@@ -24,8 +24,8 @@ def legacy_manifest(manifest):
 
 @contextmanager
 def legacy_preparations():
-    prepare=h.prepare
-    with patch.object(h,'prepare',side_effect=lambda *args,**kwargs:legacy_manifest(prepare(*args,**kwargs))):
+    prepare=h._prepare_publication
+    with patch.object(h,'_prepare_publication',side_effect=lambda *args,**kwargs:legacy_manifest(prepare(*args,**kwargs))):
         yield
 
 
