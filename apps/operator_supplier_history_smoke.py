@@ -6,7 +6,7 @@ from datetime import datetime,date,timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import json,sqlite3,sys,unittest
+import json,sqlite3,sys,unittest,weakref
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from apps.operator_supplier_processing_smoke import seed,publish_functional,publish_accounting,NOW,MOMENT,DAY
@@ -995,6 +995,80 @@ class SupplierReadySelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'ready_header_size_limit'):
                 h._selected_ready(conn,['2026-09-07'],'2026-09-07')
         self.assertEqual(self.body_keys,[])
+
+
+class ReceiptMemoryBoundaryTests(unittest.TestCase):
+    def test_full_active_book_and_last_ready_operands_release_before_receipt_reread(self):
+        from types import SimpleNamespace
+        from packages.application import historical_dated_inputs as dated
+        class Tracked(dict):pass
+        refs={}
+        fields=('wb_days','retained_days','shared_days','presentations')
+        expected={field:{FIRST:{'value':field}} for field in fields}
+        receipt=object.__new__(h.SupplierHistory);receipt.runtime=SimpleNamespace(runtime_dir=Path('/isolated-fixture'))
+        receipt.dates=(FIRST,)
+        receipt.manifest={'candidate':{'candidate_book':expected,'functional':{'business_date':FIRST},
+            'editions':{FIRST:{'version_id':'native','version':{'version_id':'native'},'balances':[]}}},
+            'targets':[{'dates':[FIRST],'dated_outputs':{FIRST:fingerprint({})}}]}
+        def active_book(*args,**kwargs):
+            book=Tracked(deepcopy(expected));refs['active']=weakref.ref(book)
+            return book,'active-version'
+        def selected(*args):
+            self.assertIsNone(refs['active'](),'full active book retained during Ready selection')
+            row=Tracked(bundle_version='fixture',as_of_date=FIRST,plan_json='{}');refs['row']=weakref.ref(row)
+            return [(row,[FIRST])]
+        def lineage(*args):
+            value=Tracked({field:deepcopy(expected[field][FIRST]) for field in fields});refs['lineage']=weakref.ref(value)
+            return value
+        def binding():
+            for name,ref in refs.items():self.assertIsNone(ref(),name+' retained during receipt reread')
+            return {'verified':'binding'}
+        conn=SimpleNamespace(execute=lambda *args:SimpleNamespace(fetchone=lambda:{'version_id':'native'}))
+        with patch.object(h,'_fence'),patch.object(accounting,'load',side_effect=active_book), \
+             patch.object(h,'_selected_ready',side_effect=selected),patch.object(dated,'dated_slice',return_value={}), \
+             patch.object(dated,'book_lineage',side_effect=lineage),patch.object(stages,'_version_balances',return_value=[]), \
+             patch.object(receipt,'binding',side_effect=binding):
+            result=receipt._validate_sources_conn(conn)
+        self.assertEqual(result['binding'],{'verified':'binding'});self.assertEqual(result['active_book'],'active-version')
+        self.assertEqual(set(result['dated']),{FIRST})
+
+    def test_receipt_sql_utf8_size_guard_precedes_fetch_without_python_encode(self):
+        from types import SimpleNamespace
+        with TemporaryDirectory(prefix='supplier-receipt-size-') as raw:
+            runtime=SimpleNamespace(runtime_dir=Path(raw),db_path=Path(raw)/'op.sqlite3')
+            manifest=dict(contract=h.CONTRACT,storage_encoding=h.READY_JSON_ENCODING,operation_id='supplier-history:source',
+                attempt_id='attempt',source_ref={'operation_id':'source'},
+                candidate=dict(code_authority=candidate.code_authority(),effect_dates=[FIRST],functional={'business_date':FIRST},candidate_book={}),
+                targets=[dict(dates=[FIRST],expected=asdict(ready.ExpectedReady('fixture',FIRST,None)),after_json=h._pack_ready_json('{}'))],
+                after_book=h._large_fingerprint({}),unicode_padding='Ж😀'*100)
+            manifest['manifest_digest']=h._large_fingerprint(manifest)
+            encoded=canonical(manifest);raw_bytes=encoded.encode();size=len(raw_bytes)
+            self.assertGreater(size,len(encoded))
+            with closing(sqlite3.connect(runtime.db_path)) as conn,conn:
+                conn.execute('CREATE TABLE sheet_vitrina_v1_ready_publications(operation_id,attempt_id,kind,state,inputs_json,diagnostics_json,book_version,after_digest)')
+                conn.execute('INSERT INTO sheet_vitrina_v1_ready_publications VALUES(?,?,?,?,?,?,?,?)',
+                    (manifest['operation_id'],manifest['attempt_id'],h.CONTRACT,'complete',encoded,'{}',manifest['after_book'],ready.digest('{}')))
+            receipt=object.__new__(h.SupplierHistory);receipt.runtime=runtime
+            receipt.operation_id=manifest['operation_id'];receipt.attempt_id=manifest['attempt_id']
+            native=ready.readonly;fetched=[];statements=[]
+            class NoEncode(str):
+                def encode(self,*args,**kwargs):raise AssertionError('receipt allocated an extra UTF-8 publication copy')
+            def text(value):
+                if value==raw_bytes:fetched.append('publication')
+                return NoEncode(value.decode())
+            @contextmanager
+            def readonly(path):
+                with native(path) as conn:
+                    self.assertTrue(conn.in_transaction)
+                    conn.text_factory=text;conn.set_trace_callback(statements.append)
+                    yield conn
+            with patch.object(ready,'readonly',readonly):
+                with patch.object(h,'MAX_PUBLICATION_BYTES',size):self.assertEqual(receipt._read()[0],manifest)
+                self.assertEqual(fetched,['publication']);fetched.clear()
+                with patch.object(h,'MAX_PUBLICATION_BYTES',size-1),self.assertRaisesRegex(ValueError,'publication_not_complete'):
+                    receipt._read()
+                self.assertEqual(fetched,[],'oversize publication crossed the SQL fetch guard')
+            self.assertTrue(any('length(CAST(inputs_json AS BLOB))' in sql for sql in statements))
 
 
 if __name__=='__main__':unittest.main()

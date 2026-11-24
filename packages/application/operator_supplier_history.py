@@ -372,8 +372,8 @@ class SupplierHistory:
         self.manifest=self._read()[0];self.dates=tuple(self.manifest['candidate']['effect_dates'])
     def _read(self):
         with ready.readonly(self.runtime.db_path) as conn:
-            row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',(self.operation_id,self.attempt_id)).fetchone()
-            require(row and row['kind']==CONTRACT and row['state']=='complete' and len(row['inputs_json'].encode())<=MAX_PUBLICATION_BYTES,'publication_not_complete')
+            row=conn.execute('SELECT * FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=? AND kind=? AND state=? AND length(CAST(inputs_json AS BLOB))<=?',(self.operation_id,self.attempt_id,CONTRACT,'complete',MAX_PUBLICATION_BYTES)).fetchone()
+            require(row,'publication_not_complete')
             manifest=json.loads(row['inputs_json']);_verify(manifest)
             require('supplier_history_replaced_by' not in json.loads(row['diagnostics_json']),'publication_superseded')
             require(manifest['operation_id']==self.operation_id and manifest['attempt_id']==self.attempt_id and row['book_version']==manifest['after_book'] and row['after_digest']==_target_after_digest(manifest['targets'][-1]),'publication_readback_changed')
@@ -387,6 +387,7 @@ class SupplierHistory:
         manifest=self.manifest;_fence(conn,manifest,ready_before=False)
         active,version=accounting.load(self.runtime.runtime_dir);expected=manifest['candidate']['candidate_book']
         require(all(active[field].get(day)==expected[field][day] for field in ('wb_days','retained_days','shared_days','presentations') for day in self.dates),'book_dates_changed')
+        del active  # Do not retain a full book while selecting Ready or rereading the receipt.
         proof={}
         for row,days in _selected_ready(conn,list(self.dates),manifest['candidate']['functional']['business_date']):
             for day in days:
@@ -394,10 +395,13 @@ class SupplierHistory:
                 require(fingerprint(dated_slice(row['plan_json'],day))==target['dated_outputs'][day],'dated_ready_changed')
                 lineage=book_lineage(self.runtime,row['plan_json'],day)
                 require(lineage=={field:expected[field][day] for field in ('wb_days','retained_days','shared_days','presentations')},'dated_book_binding_changed')
+                del lineage
                 edition=manifest['candidate']['editions'][day]
                 actual=conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',(edition['version_id'],)).fetchone()
                 require(actual and dict(actual)==edition['version'] and stages._version_balances(conn,version_id=edition['version_id'])==edition['balances'],'dated_stage_readback_changed')
+                del actual
                 proof[day]=dict(ready_key=[row['bundle_version'],row['as_of_date']],ready_digest=ready.digest(row['plan_json']),dated_digest=target['dated_outputs'][day],functional_version=edition['version_id'])
+            del row
         require(set(proof)==set(self.dates),'dated_scope_missing')
         return dict(binding=self.binding(),dated=proof,active_book=version)
     def validate_sources_readonly(self,*,now):
