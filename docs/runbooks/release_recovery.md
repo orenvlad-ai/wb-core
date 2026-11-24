@@ -308,3 +308,45 @@ Runner, cancel ownership, change the baseline, or repeat mutation manually.
 Recovery never resumes `wbc0201-inventory-history-repair-20261124` or starts a
 business cycle. A recovery PR touching only `ci/` and this runbook is repo-only;
 it does not deploy a second runtime before the original operation is complete.
+
+## PR1623: exact unentered Chrome RAM guard after sync
+
+Recovery `45473903471` of the operation above reached adapter line1242, then
+`wb_buyer_chrome_runtime.install` line151 refused insufficient staging RAM.
+This guard precedes directory creation, package download/copy, profile adoption
+and extraction. The original owner remains `mutation_started`, same SHA/window/
+baseline, and deploy metadata remains incomplete. This failure does not permit
+another full deploy or a repeat of the earlier recovery claim.
+
+For this failed recovery run only, the same workflow accepts
+`release_run_id=45473903471`. Preview proves the original release/Gate/claim,
+the exact failed recovery source/artifact/job, every installed dependency and
+managed unit, original held/quiet owner and Finance acceptance. Its read-only
+Chrome validator verifies the pinned package, every packaged runtime entry and
+checksum, sandbox/link/permissions, private identity/profile permissions, idle
+pilot processes and library closure. Missing or corrupt installation refuses
+continuation; this lane cannot install or launch Chrome. The 3GiB requirement
+for a new staging operation is unchanged. Root storage reserve still applies.
+
+After review, apply with the exact preview fingerprint claims a new one-shot
+continuation and rechecks the complete prestate. It executes only the unentered
+canonical prepare/systemd/nginx/restart/reconcile/readback tail, then activation,
+the unchanged cleaner before-complete probe, metadata CAS and native owner
+finish. Exact source and repo-only main identity remain pinned. Existing child
+claims are readback-only; complete markers may authorize idempotent owner finish
+and terminal receipt, never another restart or activation. The parent claim and
+original operation are retained, and the maintenance baseline is never replaced.
+
+The native npm dependency stage also followed the Chrome guard and was unentered.
+When `node_modules` is entirely absent, this exact continuation may execute the
+canonical locked `npm ci --omit=dev --ignore-scripts` once under its new claim.
+It verifies the exact `ajv`/`ajv-formats` versions and compares the entire prestate
+apart from that one allowed missing-to-complete transition. Existing incomplete,
+symlinked or wrong-version modules refuse continuation. OS/Python/browser
+installers remain forbidden; an uncertain npm result is never resubmitted.
+
+Before apply, backing out this repository-only change is an ordinary Git revert
+and changes no runtime. After any uncertain tail result, keep the original
+maintenance window and owner held, inspect the same operation and recorded phase,
+and review a continuation for that exact remaining stage. There is no automatic
+rollback, owner cancellation, SHA change, installer replay or window resume.
