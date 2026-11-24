@@ -307,6 +307,12 @@ def capture_inventory_history_from_ready_plan(
     return result
 
 
+def _utc_storage_timestamp(value: str) -> str:
+    # Immutable intents may use datetime.isoformat()'s explicit UTC suffix.
+    # Change only that equivalent spelling; SQL retains its validity checks.
+    return value[:-6] + "Z" if isinstance(value, str) and value.endswith("+00:00") else value
+
+
 def append_inventory_history_capture(
     conn: sqlite3.Connection,
     *,
@@ -325,6 +331,7 @@ def append_inventory_history_capture(
     """Append one immutable component revision; identical evidence is idempotent."""
 
     _ensure_inventory_history_schema_ready(conn)
+    captured_at = _utc_storage_timestamp(captured_at)
     preview = preview_inventory_history_capture(
         business_date=business_date,
         capture_kind=capture_kind,
@@ -465,6 +472,7 @@ def append_inventory_history_finalization(
     """Append the accepted closed-day pointer, preserving prior revisions."""
 
     _ensure_inventory_history_schema_ready(conn)
+    finalized_at = _utc_storage_timestamp(finalized_at)
     capture = conn.execute(
         f"SELECT business_date,source_digest FROM {CAPTURES_TABLE} WHERE capture_id=?",
         (capture_id,),

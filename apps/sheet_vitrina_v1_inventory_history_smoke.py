@@ -53,12 +53,55 @@ BUNDLE_FIXTURE = (
 
 
 def main() -> int:
+    _utc_timestamp_write_boundary_smoke()
     _capture_and_supersession_smoke()
     _late_closed_date_ready_evidence_smoke()
     _current_ui_wb_operand_smoke()
     _realistic_window_smoke()
     print("sheet_vitrina_v1_inventory_history_smoke: OK")
     return 0
+
+
+def _utc_timestamp_write_boundary_smoke() -> None:
+    stamp="2026-11-24T18:06:39.456369"
+    arguments=dict(business_date="2026-11-12",capture_kind="accepted_refresh",formula_version="fixture",
+        facility_roster=[],source_manifest={"source":"immutable-native-fixture"},
+        components=[dict(scope_kind="TOTAL",scope_key="TOTAL",nm_id=None,component_kind="WB",component_id="WB",
+            state="exact",quantity=30,source_revision="native",provenance={"source":"saved"})])
+    identities=[]
+    for suffix in ("Z","+00:00"):
+        with sqlite3.connect(":memory:") as conn:
+            ensure_inventory_history_schema(conn)
+            before=json.dumps(arguments,sort_keys=True)
+            preview=inventory_history.preview_inventory_history_capture(**arguments,captured_at=stamp+suffix)
+            capture=append_inventory_history_capture(conn,**arguments,captured_at=stamp+suffix)
+            finalization=append_inventory_history_finalization(conn,business_date=arguments["business_date"],
+                capture_id=capture["capture_id"],finalization_identity="same-owned-intent",finalized_at=stamp+suffix,
+                provenance={"manifest_digest":"immutable"},expected_predecessor="")
+            assert capture["capture_id"]==preview["capture_id"] and capture["source_digest"]==preview["source_digest"]
+            assert conn.execute(f"SELECT captured_at FROM {CAPTURES_TABLE}").fetchone()[0]==stamp+"Z"
+            assert conn.execute(f"SELECT captured_at FROM {COMPONENTS_TABLE}").fetchone()[0]==stamp+"Z"
+            assert conn.execute(f"SELECT finalized_at FROM {FINALIZATIONS_TABLE}").fetchone()[0]==stamp+"Z"
+            assert conn.execute("SELECT julianday(?)=julianday(?)",(stamp+suffix,stamp+"Z")).fetchone()[0]==1
+            repeated=append_inventory_history_capture(conn,**arguments,captured_at=stamp+"+00:00")
+            assert repeated["capture_id"]==capture["capture_id"] and not repeated["inserted"]
+            assert json.dumps(arguments,sort_keys=True)==before
+            identities.append((capture["capture_id"],capture["source_digest"],finalization["finalization_digest"]))
+    assert identities[0]==identities[1],"timestamp spelling must not change source or finalization identity"
+    for invalid in (stamp+"+03:00",stamp+"-00:00",stamp,"not-a-timestamp+00:00","2026-11-24T99:06:39+00:00"):
+        with sqlite3.connect(":memory:") as conn:
+            ensure_inventory_history_schema(conn)
+            try:append_inventory_history_capture(conn,**arguments,captured_at=invalid)
+            except RuntimeError as exc:assert "capture readback failed" in str(exc)
+            else:raise AssertionError("invalid/non-UTC capture timestamp was admitted")
+            assert conn.execute(f"SELECT count(*) FROM {CAPTURES_TABLE}").fetchone()[0]==0
+            capture=append_inventory_history_capture(conn,**arguments,captured_at=stamp+"Z")
+            try:
+                append_inventory_history_finalization(conn,business_date=arguments["business_date"],capture_id=capture["capture_id"],
+                    finalization_identity="bad-time",finalized_at=invalid,provenance={},expected_predecessor="")
+            except RuntimeError as exc:assert "finalization readback failed" in str(exc)
+            else:raise AssertionError("invalid/non-UTC finalization timestamp was admitted")
+            assert conn.execute(f"SELECT count(*) FROM {FINALIZATIONS_TABLE}").fetchone()[0]==0
 
 
 def _capture_and_supersession_smoke() -> None:

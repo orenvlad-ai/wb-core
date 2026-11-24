@@ -770,6 +770,57 @@ class LinuxTests(unittest.TestCase):
                 self.assertTrue(saved['processing']['complete']);self.assertEqual(saved['state'],'completed')
 
 
+class InventoryTimestampRecoveryTests(unittest.TestCase):
+    def test_same_prepared_attempt_recovers_activated_book_without_changing_intent(self):
+        from packages.application import inventory_quantity
+        from packages.application import sheet_vitrina_v1_inventory_history as history
+        case=Tests();case.setUp();self.addCleanup(case.doCleanups)
+        # This July source fixture predates the September rollout. Admit its
+        # genuine native quantities for the test instead of skipping inventory.
+        with patch.object(inventory_quantity,'EFFECTIVE_DATE',FIRST):
+            manifest=case.prepare();encoded=canonical(manifest);authority=candidate.code_authority()
+            self.assertNotIn('sheet_vitrina_v1_inventory_history.py',authority)
+            inventory=[i for t in manifest['targets'] for i in t['inventory']]
+            self.assertTrue(inventory);self.assertTrue(any(i['closed'] for i in inventory))
+            self.assertTrue(all(i['captured_at'].endswith('+00:00') for i in inventory))
+            # Reproduce the deployed writer's suffix failure, after the
+            # immutable book commit and before the registry transaction commits.
+            with patch.object(history,'_utc_storage_timestamp',side_effect=lambda value:value):
+                with self.assertRaisesRegex(RuntimeError,'inventory history idempotent capture readback failed'):
+                    case.publish(manifest)
+            self.assertEqual(accounting.load(case.runtime.runtime_dir)[1],manifest['after_book'])
+            with ready.readonly(case.runtime.db_path) as conn:
+                saved=conn.execute('SELECT inputs_json,state FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+                    (manifest['operation_id'],manifest['attempt_id'])).fetchone()
+                self.assertEqual(saved['inputs_json'],encoded);self.assertEqual(saved['state'],'prepared')
+            receipt=case.publish(json.loads(encoded))
+            self.assertEqual(receipt.manifest,manifest);self.assertEqual(candidate.code_authority(),authority)
+            self.assertEqual(canonical(manifest),encoded)
+            with ready.readonly(case.runtime.db_path) as conn:
+                saved=conn.execute('SELECT inputs_json,state FROM sheet_vitrina_v1_ready_publications WHERE operation_id=? AND attempt_id=?',
+                    (manifest['operation_id'],manifest['attempt_id'])).fetchone()
+                self.assertEqual(saved['inputs_json'],encoded);self.assertEqual(saved['state'],'complete')
+                for table,column in ((history.CAPTURES_TABLE,'captured_at'),(history.COMPONENTS_TABLE,'captured_at'),
+                                     (history.FINALIZATIONS_TABLE,'finalized_at')):
+                    stamps=[r[0] for r in conn.execute(f'SELECT DISTINCT {column} FROM {table}')]
+                    self.assertTrue(stamps);self.assertTrue(all(s.endswith('Z') for s in stamps))
+            self.assertEqual(case.publish(manifest).binding(),receipt.binding())
+
+    def test_next_day_new_cohort_keeps_the_prepared_inventory_obligation(self):
+        from packages.application import inventory_quantity
+        helper=InitialAdmissionRecoveryTests();self.addCleanup(helper.doCleanups)
+        with patch.object(inventory_quantity,'EFFECTIVE_DATE',FIRST):
+            case,old=helper.fixture();encoded=canonical(old)
+            self.assertTrue(any(t['inventory'] for t in old['targets']))
+            new,tomorrow=helper.followup(case)
+        self.assertNotEqual(new['attempt_id'],old['attempt_id'])
+        self.assertNotEqual(new['cohort_refs'],old['candidate']['cohort_refs'])
+        self.assertEqual(new['functional']['business_date'],tomorrow.date().isoformat())
+        self.assertEqual(new['owed_dates'],old['candidate']['effect_dates'])
+        self.assertTrue(any(o['inputs_json']==encoded for o in new['obligations']))
+        self.assertEqual(len(new['recovery_inputs']),len(old['candidate']['effect_dates']))
+
+
 class NumericalDigestTests(unittest.TestCase):
     def test_stream_digest_matches_exact_canonical_normalized_json(self):
         from packages.application.fbs_accounting_historical_history import _stream_fingerprint
