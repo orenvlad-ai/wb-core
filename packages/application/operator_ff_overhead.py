@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+from packages.application.sqlite_contention import connect_sqlite
+
 TABLE = "sheet_vitrina_v1_ff_pool_overhead_confirmations"
 CANCELLATIONS = "sheet_vitrina_v1_ff_pool_overhead_cancellations"
 REPLACEMENTS = "sheet_vitrina_v1_ff_pool_overhead_replacements"
@@ -133,11 +135,15 @@ def ensure_schema(conn):
 
 
 def readonly(db_path):
-    conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only=ON")
-    conn.execute("BEGIN")
-    return conn
+    conn = connect_sqlite(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _exists(conn):
