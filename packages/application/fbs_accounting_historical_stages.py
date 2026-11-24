@@ -392,10 +392,16 @@ def _build_dated_stage_revision(plan, *, capture, dated):
         retained = deepcopy(candidate["retained_days"][day])
         retained["wb_version_id"] = version_id
         by_key = {(r["warehouse_key"],str(r["nm_id"])):r for r in balances}
+        # Retained cells use the native public projection, as capture_retained_stages
+        # does. Exact Decimal money remains in balances and the pinned WB capture.
+        public_metrics=_metric_rows(balances,affected_nm_ids=sorted(int(nm) for nm in retained['rows']))
         for nm,row in retained["rows"].items():
             for stage in RETAINED_STAGES:
                 r = by_key.get((STAGES[stage],nm))
-                row["stages"][stage].update(quantity=r["quantity"] if r else "0",capital_rub=r["capital_rub"] if r else "0",wac_rub=r["wac_rub"] if r else None,
+                metrics=public_metrics[int(nm)]['metrics']
+                row["stages"][stage].update(quantity=metrics[own_stage_metric_key(stage,'qty')] if r else "0",
+                    capital_rub=metrics[own_stage_metric_key(stage,'capital_rub')] if r else "0",
+                    wac_rub=metrics[own_stage_metric_key(stage,'unit_cost_rub')] if r else None,
                     revision_proof={"contract":CONTRACT,"saved_version":saved["version"]["version_id"],"revised_version":version_id,"source_set_digest":plan["derived_stage_applicability"]["source_set_digest"]})
         retained["source_digest"] = fingerprint({k:v for k,v in retained.items() if k!="source_digest"})
         candidate["retained_days"][day] = retained

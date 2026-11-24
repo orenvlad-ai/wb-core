@@ -32,7 +32,7 @@ from packages.application.fbs_snapshot_cost_sources import capture_current
 from packages.application.fbs_accounting_historical_sources import augment_native_requests
 
 
-def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt_clock=False,confirmation_actor=None,supplier_fractional_money=False,saved_last=None,quantity_overrides_by_day=None):
+def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt_clock=False,confirmation_actor=None,supplier_fractional_money=False,saved_last=None,quantity_overrides_by_day=None,long_wb_money=False):
     book,cap,receipt,_=native_writer_fixture(db,end=end,receipt_source_type=None if service_receipt else "china_acceptance_form",receipt_source_id="selected-shipment",service_receipt=service_receipt,
         advancing_receipt_clock=advancing_receipt_clock,confirmation_actor=confirmation_actor)
     saved_dates=sorted(book["state"]["periods"])
@@ -69,7 +69,7 @@ def native_stages_fixture(db, *, end=END,service_receipt=False,advancing_receipt
                 lines.append(row)
                 conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_balances VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                              (version,stage,nm,q,row["wac_rub"],c,q,row["quality"],0,wb,"0","0",canonical(row["provenance"])))
-            add("wb","500","100000",[dict(source="official_wb_snapshot",snapshot_id=watermark["snapshot_id"],snapshot_date=day,fetched_at=stamp)],wb="500")
+            add("wb","500","100000.1234567890123456789012345" if long_wb_money else "100000",[dict(source="official_wb_snapshot",snapshot_id=watermark["snapshot_id"],snapshot_date=day,fetched_at=stamp)],wb="500")
             add("ff","2000","300000",[dict(source="current_facility_pool_exact_projection",business_date=day,
                 locations=[dict(facility_id="A",pool="FBS",nm_id=1,quantity="1000",capital_rub="100000"),dict(facility_id="B",pool="FBS",nm_id=1,quantity="1000",capital_rub="200000")])])
             selected_money="200000.00000000000000000000002" if supplier_fractional_money else "200000"
@@ -302,7 +302,7 @@ class NativeHistoricalStages(unittest.TestCase):
         result=stages.build_dated_stage_revision(plan,capture=cap,dated=dated)
         day=plan["scope"]["date_from"]
         transit=result["candidate_book"]["presentations"][day]["rows"]["1"]["stages"]["PRODUCTION_TO_FF"]
-        self.assertEqual(transit["quantity"],"10");self.assertEqual(transit["capital_rub"],"500")
+        self.assertEqual(Decimal(transit["quantity"]),10);self.assertEqual(Decimal(transit["capital_rub"]),500)
         proof=result["editions"][day]["supplier_revision"][0]
         self.assertEqual(proof["removed_quantity"],"1000");self.assertEqual(proof["removed_capital_rub"],"200000")
         self.assertEqual((book,cap,plan,dated),before)
@@ -426,6 +426,19 @@ class NativeHistoricalStages(unittest.TestCase):
             self.assertEqual(Decimal(row['capital_rub']),Decimal('500.00000000000000000000001'))
             self.assertEqual(Decimal(edition['supplier_revision'][0]['removed_capital_rub']),Decimal('200000.00000000000000000000002'))
 
+    def test_fractional_public_projection_roundtrips_without_changing_native_money(self):
+        _,cap,plan,dated=self.fixture(supplier_fractional_money=True,long_wb_money=True)
+        result=stages.build_dated_stage_revision(plan,capture=cap,dated=dated)
+        with closing(sqlite3.connect(self.db)) as conn,conn:
+            conn.row_factory=sqlite3.Row;conn.execute('BEGIN IMMEDIATE');stages.publish_dated_stages(conn,manifest=result)
+        with ready.readonly(self.db) as conn:
+            captured=stages.capture_dated_stages(conn,db_path=self.db,book=result['candidate_book'],dates=plan['scope']['dates'])
+            for day,edition in result['editions'].items():
+                self.assertEqual(captured['dates'][day]['balances'],edition['balances'])
+                wb=next(r for r in edition['balances'] if r['warehouse_key']=='wb')
+                self.assertEqual(wb['capital_rub'],'100000.1234567890123456789012345')
+                self.assertEqual(Decimal(result['candidate_book']['presentations'][day]['rows']['1']['stages']['WB']['capital_rub']),Decimal(wb['capital_rub']))
+
     def test_missing_partial_foreign_or_unproven_operands_still_refuse(self):
         _,_,plan,_=self.fixture();day=plan['scope']['date_from']
         cases=[('reason','stage_projection_binding_mismatch'),('partial_quantity','0'),
@@ -465,7 +478,7 @@ class NativeHistoricalStages(unittest.TestCase):
         book,cap,plan,dated=self.fixture(end="2026-10-08")
         result=stages.build_dated_stage_revision(plan,capture=cap,dated=dated)
         self.assertEqual(len(result["editions"]),31)
-        self.assertEqual(result["candidate_book"]["presentations"]["2026-09-08"]["rows"]["1"]["stages"]["PRODUCTION_TO_FF"]["capital_rub"],"500")
+        self.assertEqual(Decimal(result["candidate_book"]["presentations"]["2026-09-08"]["rows"]["1"]["stages"]["PRODUCTION_TO_FF"]["capital_rub"]),500)
 
     def test_actual_native_frozen_dispatch_and_wb_acceptance_applicability(self):
         book,cap,plan,dated=self.fixture()
@@ -508,7 +521,7 @@ class NativeHistoricalStages(unittest.TestCase):
         result=stages.build_dated_stage_revision(plan,capture=cap,dated=dated)
         self.assertEqual(result['editions']['2026-09-09']['dispatch_applicability'][0]['applicability'],'exact_frozen_native_money')
         self.assertEqual(result['editions']['2026-09-10']['wb_acceptance_applicability'][0]['applicability'],'exact_frozen_native_money')
-        self.assertEqual(result['candidate_book']['retained_days']['2026-09-09']['rows']['1']['stages']['FF_TO_WB']['capital_rub'],'550')
+        self.assertEqual(Decimal(str(result['candidate_book']['retained_days']['2026-09-09']['rows']['1']['stages']['FF_TO_WB']['capital_rub'])),550)
         forged=deepcopy(dated);proof=next(iter(forged['dates']['2026-09-09']['debit_proofs'].values()));proof.update(kind='proportional_native_aggregate',frozen={});forged['source_digest']=fingerprint(forged['dates'])
         with self.assertRaisesRegex(ValueError,'historical_dispatch_exact_debit_basis_required'):
             stages.build_dated_stage_revision(plan,capture=cap,dated=forged)

@@ -335,11 +335,16 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
             if proof['proof']['kind']=='native_initial_pre_ff_supplier_admission':
                 require(set(proof['proof']['quantity_by_nm'])<=set(retained['rows']),'initial_supplier_admission_catalog_missing')
         by_key = {(r["warehouse_key"],str(r["nm_id"])):r for r in rows}
+        # Same presentation boundary as native capture_retained_stages; raw
+        # source balances and exact WB capture money retain their full precision.
+        public_metrics=stages._metric_rows(rows,affected_nm_ids=sorted(int(nm) for nm in retained['rows']))
         for nm, row in retained["rows"].items():
             for stage in stages.RETAINED_STAGES:
                 operand = by_key.get((stages.STAGES[stage],nm))
-                row["stages"][stage].update(quantity=operand["quantity"] if operand else "0",
-                    capital_rub=operand["capital_rub"] if operand else "0",wac_rub=operand["wac_rub"] if operand else None,
+                metrics=public_metrics[int(nm)]['metrics']
+                row["stages"][stage].update(quantity=metrics[stages.own_stage_metric_key(stage,'qty')] if operand else "0",
+                    capital_rub=metrics[stages.own_stage_metric_key(stage,'capital_rub')] if operand else "0",
+                    wac_rub=metrics[stages.own_stage_metric_key(stage,'unit_cost_rub')] if operand else None,
                     revision_proof={"contract":CONTRACT,"saved_version":saved["version"]["version_id"],"revised_version":version_id})
         retained["source_digest"] = fingerprint({k:v for k,v in retained.items() if k!="source_digest"})
         candidate["retained_days"][day] = retained;candidate["wb_days"][day] = wb

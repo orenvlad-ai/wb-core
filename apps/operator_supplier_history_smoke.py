@@ -30,7 +30,7 @@ from packages.application.warehouse_functional_lock import warehouse_functional_
 FIRST='2026-07-05'
 
 
-def install_native_saved_dates(rt):
+def install_native_saved_dates(rt,*,long_wb_money=False):
     """Saved dated fixtures use real immutable schemas/readers/presentations.
 
     Their initial money is copied from the actual native supplier publisher,
@@ -44,6 +44,14 @@ def install_native_saved_dates(rt):
         version=dict(conn.execute(f'SELECT * FROM {stages.P}functional_versions WHERE version_id=?',(current,)).fetchone())
         snapshot=dict(conn.execute(f'SELECT * FROM {stages.P}wb_snapshots WHERE version_id=?',(current,)).fetchone())
         balances=stages._version_balances(conn,version_id=current)
+        if long_wb_money:
+            from decimal import localcontext
+            with localcontext() as context:
+                context.prec=28  # Existing published WB WAC serialization contract.
+                for balance in balances:
+                    if balance['warehouse_key']=='wb':
+                        balance['capital_rub']='35673.01176443006162885432398'
+                        balance['wac_rub']=str(Decimal(balance['capital_rub'])/Decimal(balance['quantity']))
         companions={table:[dict(r) for r in conn.execute(f'SELECT * FROM {stages.P}{table} WHERE version_id=?',(current,))] for table in ('functional_ff_reservations','supplier_cost_states','unmatched_doprinato')}
         for day in dates[:-1]:
             stamp=day+'T12:00:00Z';vid='fixture-dated:'+day
@@ -119,7 +127,7 @@ class Tests(unittest.TestCase):
             rt.save_supplier_shipment(header=self.second_header,lines=self.second_lines)
             _save_payment(rt,'second-payment','second',FIRST+'T11:00:00Z','100');ledger.replay_ledger(reason='synthetic-second-dated')
         intents.drain_supplier_preparation_intents(rt,shipment_ids=owners);publish_functional(rt)
-        self.before=install_native_saved_dates(rt)
+        self.before=install_native_saved_dates(rt,long_wb_money=getattr(self,'LONG_WB_MONEY',False))
         result=execute(rt,'financial-historical-cost',[{'child_key':'expense','kind':'financial','subject_id':'extra-expense'}],lambda c:rt.save_supplier_financial_document(document=dict(document_id='extra-expense',supplier_order_id='source',document_type='logistics_invoice',uploaded_at=NOW,updated_at=NOW,document_date=FIRST,parse_status='confirmed',total_amount_rub=120),expense_lines=[dict(line_id='extra-line',amount=120,amount_rub=120,currency='RUB',category='logistics',status='confirmed')]))
         self.parent=result['results'][0]['acceptance']['operation_id']
         with ready.readonly(rt.db_path) as conn:self.identity=conn.execute(f'SELECT operation_id FROM {financial.SCOPES} WHERE parent_operation_id=?',(self.parent,)).fetchone()[0]
@@ -207,12 +215,18 @@ class Tests(unittest.TestCase):
             state=next(r for r in edition['companions']['supplier_cost_states'] if r['shipment_id']=='new-admission')
             self.assertEqual(state['version_id'],edition['version_id'])
             retained=manifest['candidate']['candidate_book']['retained_days'][day]['rows']['1']['stages']['PRODUCTION']
-            self.assertEqual(retained['quantity'],'10');self.assertEqual(retained['capital_rub'],'1000')
+            self.assertEqual(Decimal(str(retained['quantity'])),10);self.assertEqual(Decimal(str(retained['capital_rub'])),1000)
+            before_wb=[{k:v for k,v in r.items() if k!='version_id'} for r in edition['saved']['balances'] if r['warehouse_key']=='wb']
+            after_wb=[{k:v for k,v in r.items() if k!='version_id'} for r in edition['balances'] if r['warehouse_key']=='wb']
+            self.assertEqual(after_wb,before_wb)
+            if getattr(self,'LONG_WB_MONEY',False):
+                self.assertEqual(after_wb[0]['capital_rub'],'35673.01176443006162885432398')
         receipt=self.publish(manifest);self.assertTrue(receipt.validate_sources_readonly(now=MOMENT)['dated'])
         with ready.readonly(rt.db_path) as conn:
             for day,_ in admissions:
                 version=manifest['candidate']['editions'][day]['version_id']
                 self.assertEqual(conn.execute('SELECT count(*) FROM '+stages.P+'supplier_cost_states WHERE version_id=? AND shipment_id=?',(version,'new-admission')).fetchone()[0],1)
+            stages.capture_dated_stages(conn,db_path=rt.db_path,book=manifest['candidate']['candidate_book'],dates=manifest['candidate']['effect_dates'],read_model_mode=stages.READ_MODEL_PROOFS)
     def test_generic_history_success_cannot_ack(self):
         receipt=self.publish(self.prepare())
         with self.assertRaisesRegex(Exception,'not_supervised'):receipt._acknowledge_verified_native({'completed':True})
@@ -755,6 +769,10 @@ class SupplierWbSourceAuthorityTests(unittest.TestCase):
         for members in cases:
             with self.subTest(members=members),self.assertRaisesRegex(ValueError,'dated_wb_quantity_changed'):
                 candidate._wb_rows(rows,daily=daily,day=DAY,ids=[1],members=members)
+
+    def test_real_initial_admission_long_wb_money_publish_receipt_and_recapture(self):
+        fixture=Tests();fixture.LONG_WB_MONEY=True;fixture.setUp();self.addCleanup(fixture.doCleanups)
+        fixture.test_native_late_create_materializes_initial_source_and_companions()
 
 
 class SupplierReadySelectionTests(unittest.TestCase):
