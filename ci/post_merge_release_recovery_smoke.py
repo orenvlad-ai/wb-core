@@ -1955,6 +1955,7 @@ def test_existing_started_owner_apply_binding() -> None:
 def test_cleaner_completion_exact_evidence_and_no_replay(run_id=recovery.CLEANER_RELEASE_RUN_ID) -> None:
     case = recovery.RecoveryCase.STORAGE_TAIL
     profile = recovery.CLEANER_PROFILES[run_id]
+    bounded_listener = run_id == recovery.CLEANER_BOUNDED_LISTENER_RUN_ID
     assert recovery.recovery_case(run_id) is case
     assert recovery.recovery_case(run_id + 1) is recovery.RecoveryCase.STORAGE_TAIL
     raw = f'''python3 apps/github_release_runner.py run --workflow-run-id "{profile['gate_run_id']}" --output receipt.json
@@ -1964,14 +1965,34 @@ run_stage("readback",cleaner_precomplete_probe_command,allow_transport_reconcili
 ConnectionRefusedError
 subprocess.CalledProcessError: Command ['ssh', '{profile['operation_id']}', 'apps/search_cluster_cleaner_release_probe.py --phase before_complete --expected-sha {profile['merge_sha']}'] returned non-zero exit status 1.
 '''.encode()
+    if bounded_listener:
+        assert run_id == 45429927905 and profile == {
+            'pull_request': 1621, 'gate_run_id': 45425668063,
+            'base_sha': '62ef453c55f2faddc86c0661960d350084b9fbfd',
+            'head_sha': '7cca15e72938a5c98a12c7089f86c0984a432173',
+            'merge_sha': '336345e6c9b08f6c2741523aa066f93c485a2f6e',
+            'operation_id': 'release-v3-ef96969c1f11e80a3b8c784cbb1cc0e2',
+        }
+        command = 'python3 ci/github_release_runner.py run --workflow-run-id "$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"'
+        group = f'##[group]Run {command}\n{command}\nshell: /usr/bin/bash -e {{0}}\nenv:\n  GATE_RUN_ID: {profile["gate_run_id"]}\n##[endgroup]\n'
+        raw = group.encode() + raw.split(b'\n', 1)[1].replace(b'line 1282,', b'line 1285,').replace(
+            b'ConnectionRefusedError', b'line 30, in _listener_ready\nRuntimeError: cleaner listener not ready for before_complete')
     prove = lambda log, selected=run_id: recovery._prove_failed_stage(log, profile['gate_run_id'], 'One-shot deployed release', case=case, release_run_id=selected)
     assert prove(raw)['stage'] == 'cleaner-before-complete'
-    for bad in (raw.replace(b'1282', b'1281'), raw.replace(b'before_complete', b'after_complete'),
+    for bad in (raw.replace(b'1285' if bounded_listener else b'1282', b'1281'), raw.replace(b'before_complete', b'after_complete'),
                 raw.replace(b'skipped_maintenance', b'unknown'), raw.replace(b'exit status 1', b'exit status 255'),
                 raw + b'subprocess.CalledProcessError: Command X returned non-zero exit status 1.',
                 raw.replace(profile['merge_sha'].encode(), b'a' * 40),
                 raw.replace(str(profile['gate_run_id']).encode(), b'1')):
         expect_reason('failed-stage-not-exact-cleaner-completion', lambda bad=bad: prove(bad))
+    if bounded_listener:
+        for bad in (raw.replace(b'line 1285,', b'line 1282,'),
+                    raw.replace(b'line 30, in _listener_ready', b'line 31, in _listener_ready'),
+                    raw.replace(b'RuntimeError: cleaner listener not ready for before_complete', b'ConnectionRefusedError'),
+                    raw.replace(b'ci/github_release_runner.py', b'apps/github_release_runner.py'),
+                    raw.replace(b'##[endgroup]', b'  GATE_RUN_ID: 45425668063\n##[endgroup]'),
+                    raw.replace(b'  GATE_RUN_ID: 45425668063', b'  GATE_RUN_ID: 45425668064')):
+            expect_reason('failed-stage-not-exact-cleaner-completion', lambda bad=bad: prove(bad))
     expect_reason('failed-stage-not-root-storage-readback-exit3', lambda: prove(raw, run_id + 1))
     receipt = {'schema': recovery.release.RECEIPT_SCHEMA, 'state': 'blocked', 'reason': 'CalledProcessError',
                'release_kind': 'live_runtime', 'deployed_sha': None, **profile}

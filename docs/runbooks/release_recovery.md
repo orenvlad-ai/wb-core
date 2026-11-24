@@ -139,6 +139,25 @@ base/head/merge; immutable log обязан пройти те же провер�
 Восстановление продолжает исходную операцию только после успешного readback
 сервиса и cleaner; повтор deploy, restart и activation не разрешён.
 
+Только для выпуска 45429927905 (PR 1621, Gate 45425668063, base
+`62ef453c55f2faddc86c0661960d350084b9fbfd`, head
+`7cca15e72938a5c98a12c7089f86c0984a432173`, merge
+`336345e6c9b08f6c2741523aa066f93c485a2f6e`, operation
+`release-v3-ef96969c1f11e80a3b8c784cbb1cc0e2`) добавлен тот же completion-tail.
+Его immutable log доказывает единственный SSH exit 1 после
+`skipped_maintenance`, точную строку deploy 1285 и строку 30 `_listener_ready`
+с `RuntimeError: cleaner listener not ready for before_complete`.
+Сервис объявил готовность в 15:52:35 UTC, через 1,6 секунды после отказа.
+Canonical step `ci/github_release_runner.py` связывается с единственным
+`GATE_RUN_ID` в том же step; старые профили сохраняют прежние проверки.
+После восстановления listener штатный `preview` обязан повторно доказать
+исходный `mutation_started` owner, прежнее held/quiet окно, exact runtime,
+успешные service/auth/cleaner readbacks и сохранённый Finance pilot. Только
+`apply` с точным fingerprint этого preview допускает metadata completion CAS
+той же операции и final readback. Ручные restart, activation, повтор deploy
+или изменение metadata вместо workflow запрещены; uncertain claim остаётся
+только для readback. Новый профиль не разрешает автоматически возобновлять цикл.
+
 Успех подтверждают связанный recovery receipt, завершённая metadata, точная
 версия, сервисы и неизменный изолированный Finance pilot.
 
