@@ -147,6 +147,7 @@ base/head/merge; immutable log обязан пройти те же провер�
 Его immutable log доказывает единственный SSH exit 1 после
 `skipped_maintenance`, точную строку deploy 1285 и строку 30 `_listener_ready`
 с `RuntimeError: cleaner listener not ready for before_complete`.
+Сервис объявил готовность в 15:52:35 UTC, через 1,6 секунды после отказа.
 Canonical step `ci/github_release_runner.py` связывается с единственным
 `GATE_RUN_ID` в том же step; старые профили сохраняют прежние проверки.
 После восстановления listener штатный `preview` обязан повторно доказать
