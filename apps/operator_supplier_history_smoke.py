@@ -770,6 +770,32 @@ class LinuxTests(unittest.TestCase):
                 self.assertTrue(saved['processing']['complete']);self.assertEqual(saved['state'],'completed')
 
 
+class NumericalDigestTests(unittest.TestCase):
+    def test_stream_digest_matches_exact_canonical_normalized_json(self):
+        from packages.application.fbs_accounting_historical_history import _stream_fingerprint
+        value=json.loads(canonical({'utf8':('Кириллица 😀 \\"\n'*6000),
+            'types':[None,True,False,0,1,1.0,-0.0,'0.000000000000000000001'],
+            'rows':{'я':{'nm_id':1},'a':[]}}))
+        self.assertEqual(_stream_fingerprint(value),fingerprint(value))
+
+    def test_native_prepare_and_validate_never_use_full_candidate_serialization_for_digest(self):
+        case=Tests();case.setUp();self.addCleanup(case.doCleanups)
+        original=candidate.fingerprint
+        def small_fingerprint(value):
+            if isinstance(value,dict) and value.get('contract')==candidate.CONTRACT and 'candidate_book' in value:
+                self.fail('whole candidate must use the exact streaming digest')
+            return original(value)
+        with patch.object(candidate,'fingerprint',side_effect=small_fingerprint):
+            numerical=candidate.prepare(case.runtime,case.identity,now=MOMENT)
+            self.assertEqual(candidate.validate(numerical,runtime=case.runtime,now=MOMENT),numerical)
+        operands={k:v for k,v in numerical.items() if k!='manifest_digest'}
+        self.assertEqual(numerical['manifest_digest'],original(operands))
+        self.assertEqual(numerical,json.loads(canonical(numerical)))
+        corrupt=deepcopy(numerical);corrupt['manifest_digest']='sha256:'+'0'*64
+        with self.assertRaisesRegex(ValueError,'candidate_corrupt'):
+            candidate.validate(corrupt,runtime=case.runtime,now=MOMENT)
+
+
 class InitialAdmissionRecoveryTests(unittest.TestCase):
     def fixture(self):
         case=Tests();case.SECOND_SOURCE=True;case.setUp();self.addCleanup(case.doCleanups)

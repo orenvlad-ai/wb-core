@@ -409,12 +409,14 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         "code_authority":code_authority(),"created_at":now.isoformat()}
     require(len(canonical(result).encode()) <= MAX_BYTES, "candidate_size_limit")
     result=json.loads(canonical(result))
-    result["manifest_digest"] = fingerprint(result)
+    from packages.application.fbs_accounting_historical_history import _stream_fingerprint
+    result["manifest_digest"] = _stream_fingerprint(result)
     return result
 
 
 def validate(candidate, *, runtime, now):
-    require(candidate.get("contract") == CONTRACT and candidate.get("manifest_digest") == fingerprint(
+    from packages.application.fbs_accounting_historical_history import _stream_fingerprint
+    require(candidate.get("contract") == CONTRACT and candidate.get("manifest_digest") == _stream_fingerprint(
         {k:v for k,v in candidate.items() if k!="manifest_digest"}), "candidate_corrupt")
     require(candidate["code_authority"] == code_authority(), "formula_changed")
     require(prepare(runtime,candidate["operation_id"],now=now,before_book=candidate["before_book"],cohort_refs=candidate['cohort_refs'],obligations=candidate['obligations']) == candidate, "independent_rebuild_changed")
