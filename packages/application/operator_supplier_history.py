@@ -24,9 +24,7 @@ MAX_READY_HEADERS=10000
 MAX_READY_HEADER_BYTES=8*1024**2
 MAX_READY_SOURCE_BYTES=256*1024**2  # Measured selected bodies: 192,995,022 UTF-8 bytes.
 MAX_PUBLICATION_BYTES=160*1024**2
-# Local prototype remains opt-in until the full resource audit is reviewed.
 READY_JSON_ENCODING='supplier_ready_zlib_utf8_v1'
-READY_STORAGE_ENCODING=None
 require=sources.require
 EXPECTED_NATIVE={
     'supplier_exact_queue_pending','supplier_exact_functional_publication_pending',
@@ -218,7 +216,7 @@ def _selected_ready(conn,dates,today):
     return result
 
 
-def _targets(runtime, numerical, *, now,ready_encoding=None):
+def _targets(runtime, numerical, *, now,ready_encoding=READY_JSON_ENCODING):
     from packages.application.historical_dated_inputs import dated_slice,book_lineage
     from packages.application.fbs_accounting_historical_publication import materialize_exact_dates,_parameter_proof
     from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan,_serialize_sheet_vitrina_plan
@@ -256,10 +254,10 @@ def prepare(runtime,operation_id,*,now):
     numerical=candidate.prepare(runtime,operation_id,now=now)
     operation_id=numerical['operation_id']
     require(numerical['effect_dates'],'no_dated_effect')
-    targets,parameters=_targets(runtime,numerical,now=now,ready_encoding=READY_STORAGE_ENCODING)
+    targets,parameters=_targets(runtime,numerical,now=now)
     authority=json.loads(canonical(ready.capture_authority(runtime.runtime_dir)))
     result=dict(contract=CONTRACT,operation_id='supplier-history:'+operation_id,attempt_id=numerical['attempt_id'],source_ref=numerical['source_ref'],candidate=numerical,targets=targets,parameter_proof=parameters,expected_book=numerical['before_book'],after_book=_large_fingerprint(numerical['candidate_book']),created_at=now.isoformat(),authority=authority,book_operation_id='supplier-history-book:'+numerical['attempt_id'])
-    if READY_STORAGE_ENCODING is not None:result['storage_encoding']=READY_STORAGE_ENCODING
+    result['storage_encoding']=READY_JSON_ENCODING
     require(_publication_json_size(result)<=MAX_PUBLICATION_BYTES,'publication_size_limit')
     result['manifest_digest']=_large_fingerprint(result);_verify(result);return result
 

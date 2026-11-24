@@ -1,4 +1,5 @@
-"""Opt-in local prototype: exact bounded Ready operands, no eager expansion."""
+"""Default bounded Ready codec and native recovery of legacy plain operands."""
+from contextlib import contextmanager
 from copy import deepcopy
 import base64,hashlib,json,sqlite3,sys,unittest,zlib
 from pathlib import Path
@@ -7,6 +8,25 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from apps import operator_supplier_history_smoke as fixtures
 from packages.application import operator_supplier_history as h,ready_publication as ready
 from packages.application.fbs_snapshot_cost import canonical
+
+
+def legacy_manifest(manifest):
+    """Recreate the prior persisted wire shape without a production opt-out."""
+    manifest=deepcopy(manifest)
+    for target in manifest['targets']:
+        target['expected']['plan_json']=h._ready_json(target['expected']['plan_json'])
+        target['after_json']=h._ready_json(target['after_json'])
+    manifest.pop('storage_encoding',None)
+    manifest['manifest_digest']=h._large_fingerprint({k:v for k,v in manifest.items() if k!='manifest_digest'})
+    h._verify(manifest)
+    return manifest
+
+
+@contextmanager
+def legacy_preparations():
+    prepare=h.prepare
+    with patch.object(h,'prepare',side_effect=lambda *args,**kwargs:legacy_manifest(prepare(*args,**kwargs))):
+        yield
 
 
 class CodecTests(unittest.TestCase):
@@ -47,9 +67,10 @@ class NativeCodecTests(unittest.TestCase):
         case=fixtures.Tests();case.setUp();self.addCleanup(case.doCleanups);return case
 
     def test_native_byte_parity_publish_cold_read_retry_and_membership(self):
-        case=self.fixture();legacy=case.prepare()
-        with patch.object(h,'READY_STORAGE_ENCODING',h.READY_JSON_ENCODING):
-            packed=case.prepare()
+        case=self.fixture();packed=case.prepare();legacy=legacy_manifest(packed)
+        self.assertEqual(packed['storage_encoding'],h.READY_JSON_ENCODING)
+        rebuilt,parameters=h._targets(case.runtime,packed['candidate'],now=fixtures.MOMENT,ready_encoding=None)
+        self.assertEqual(rebuilt,legacy['targets']);self.assertEqual(parameters,legacy['parameter_proof'])
         self.assertEqual(packed['candidate'],legacy['candidate'])
         for original,stored in zip(legacy['targets'],packed['targets']):
             restored={**stored,'expected':{**stored['expected'],'plan_json':h._ready_json(stored['expected']['plan_json'])},
@@ -71,29 +92,38 @@ class NativeCodecTests(unittest.TestCase):
         # The legacy shape remains fully readable, including after_json bytes.
         h._verify(legacy)
 
-    def test_packed_intent_response_loss_resume(self):
+    def test_legacy_publish_cold_read_retry_and_membership(self):
+        case=self.fixture();legacy=legacy_manifest(case.prepare())
+        receipt=case.publish(legacy)
+        cold=h.SupplierHistory(case.runtime,legacy['operation_id'],legacy['attempt_id'])
+        self.assertEqual(cold.binding(),receipt.binding())
+        self.assertEqual(cold.validate_sources_readonly(now=fixtures.MOMENT),receipt.validate_sources_readonly(now=fixtures.MOMENT))
+        self.assertEqual(case.publish(json.loads(canonical(legacy))).binding(),receipt.binding())
+        with ready.readonly(case.runtime.db_path) as conn:
+            self.assertEqual(json.loads(h.publication_for(conn,legacy['source_ref'])['inputs_json']),legacy)
+
+    def test_legacy_intent_response_loss_resume(self):
         case=fixtures.ReplanTests();self.addCleanup(case.doCleanups)
-        with patch.object(h,'READY_STORAGE_ENCODING',h.READY_JSON_ENCODING):
+        with legacy_preparations():
             case.test_same_prepared_attempt_clock_and_lost_response_resume_exactly()
 
-    def test_packed_book_ghost_uses_original_saved_stages(self):
+    def test_legacy_book_ghost_uses_original_saved_stages(self):
         case=fixtures.ReplanTests();self.addCleanup(case.doCleanups)
-        with patch.object(h,'READY_STORAGE_ENCODING',h.READY_JSON_ENCODING):
+        with legacy_preparations():
             case.test_prepared_after_own_book_uses_original_stages()
 
-    def test_packed_completed_obligation_retirement(self):
+    def test_legacy_completed_obligation_retirement(self):
         case=fixtures.ReplanTests();self.addCleanup(case.doCleanups)
-        with patch.object(h,'READY_STORAGE_ENCODING',h.READY_JSON_ENCODING):
+        with legacy_preparations():
             case.test_actual_followup_keeps_root_new_attempt_all_original_dates()
 
     def test_legacy_book_ghost_to_packed_recovery(self):
         case=fixtures.CohortTests();self.addCleanup(case.doCleanups);native=case.fixture()
-        old=native.prepare()
+        old=legacy_manifest(native.prepare())
         def crash(point):
             if point=='after_book':raise RuntimeError('legacy book ghost')
         with self.assertRaisesRegex(RuntimeError,'legacy book ghost'):native.publish(old,inject=crash)
-        with patch.object(h,'READY_STORAGE_ENCODING',h.READY_JSON_ENCODING):
-            new,_,_=fixtures.ReplanTests.followup(native,old)
+        new,_,_=fixtures.ReplanTests.followup(native,old)
         self.assertTrue(new['candidate']['recovery_inputs'])
         self.assertNotIn('storage_encoding',old)
         self.assertEqual(new['storage_encoding'],h.READY_JSON_ENCODING)

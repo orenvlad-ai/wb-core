@@ -553,7 +553,7 @@ class PendingTransactionTests(unittest.TestCase):
             if kind=='source':conn.execute(f'UPDATE {intents.TABLE} SET source_fingerprint=?',('unknown-source',))
             if kind=='finance':
                 numerical=dict(code_authority=candidate.code_authority(),effect_dates=[FIRST],functional={'business_date':FIRST},candidate_book={},cohort_refs=[processing.ref(op)],editions={FIRST:{'version_id':'local-version'}})
-                manifest=dict(contract=h.CONTRACT,operation_id='supplier-history:'+identity,attempt_id='local-attempt',source_ref=processing.ref(op),candidate=numerical,targets=[{'dates':[FIRST],'after_json':'{}'}],after_book=fingerprint({}))
+                manifest=dict(contract=h.CONTRACT,storage_encoding=h.READY_JSON_ENCODING,operation_id='supplier-history:'+identity,attempt_id='local-attempt',source_ref=processing.ref(op),candidate=numerical,targets=[{'dates':[FIRST],'expected':asdict(ready.ExpectedReady('local-bundle',FIRST,None)),'after_json':h._pack_ready_json('{}')}],after_book=fingerprint({}))
                 manifest['manifest_digest']=fingerprint(manifest)
                 ack={'manifest_digest':manifest['manifest_digest'],'native':{FIRST:{'object_digest':'synthetic-object','edition_id':'synthetic-edition','functional_version':'local-version'}}}
                 ready.record_intent(conn,operation_id=manifest['operation_id'],attempt_id=manifest['attempt_id'],kind=h.CONTRACT,expected=None,inputs=manifest,expected_book='synthetic-before',book_required=True,ready_required=True,created_at=NOW)
