@@ -296,7 +296,7 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
             proof=m['functional'];identity=m['operation']['operation_id']
             queries.extend([(f'SELECT * FROM {processing.FUNCTIONAL} WHERE operation_id=? AND version_id=?',(identity,proof['version_id'])),
                 (f'SELECT * FROM {sources.P}warehouse_targeted_recalc_queue WHERE queue_id=?',(m['queue']['queue_id'],))])
-            for version in {proof['version_id'],proof['origin_before_version_id']}:
+            for version in sorted({proof['version_id'], proof['origin_before_version_id']}):
                 queries.extend([(f'SELECT * FROM {sources.P}warehouse_functional_versions WHERE version_id=?',(version,)),
                     (f'SELECT * FROM {sources.P}warehouse_functional_balances WHERE version_id=? ORDER BY warehouse_key,nm_id',(version,)),
                     (f'SELECT * FROM {sources.P}warehouse_supplier_cost_states WHERE version_id=? AND shipment_id=?',(version,m['operation']['shipment_id']))])
