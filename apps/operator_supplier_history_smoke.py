@@ -707,7 +707,10 @@ class LinuxTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'old supplier'):case.publish(old,inject=stop)
         else:receipt=case.publish(old)
         if unchanged:
-            moment+=timedelta(hours=1);SupplierNativeEditionIdentityTests.next_native(case,moment)
+            # A fresh native version, within the fixture's official stock age.
+            moment+=timedelta(seconds=10);SupplierNativeEditionIdentityTests.next_native(case,moment)
+            prepared=accounting.prepare(rt.runtime_dir,now=moment)
+            save(rt,rt.load_sheet_vitrina_ready_snapshot(),prepared=prepared,now=moment)
             fresh=h.prepare(rt,case.identity,now=moment);receipt=case.publish(fresh)
             self.assertEqual(set(receipt.dates),set(old['candidate']['effect_dates']))
             self.assertTrue(all(r['ghost_version']!=fresh['candidate']['editions'][r['day']]['version_id']
