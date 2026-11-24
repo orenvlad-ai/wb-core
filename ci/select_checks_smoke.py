@@ -17,6 +17,12 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "cycle_read_sqlite_contention_smoke": (
+        "packages/application/sqlite_contention.py",
+        "packages/application/warehouse_recovery_policy.py",
+        "packages/application/operator_ff_overhead.py",
+        "packages/application/fbs_current_snapshot_policy.py",
+    ),
     "hosted_runtime_storage_preflight_smoke": ("apps/registry_upload_http_entrypoint_hosted_runtime.py",),
     "sqlite_contention_smoke": ("packages/application/sqlite_contention.py",),
     "sqlite_schema_contention_smoke": ("packages/application/sqlite_contention.py",),

@@ -192,6 +192,11 @@
       "commands": [["python3", "apps/cycle_sqlite_contention_smoke.py"]],
       "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]
     },
+    "cycle_read_sqlite_contention": {
+      "patterns": ["packages/application/sqlite_contention.py", "packages/application/warehouse_recovery_policy.py", "packages/application/operator_ff_overhead.py", "packages/application/fbs_current_snapshot_policy.py", "apps/cycle_read_sqlite_contention_smoke.py"],
+      "commands": [["python3", "apps/cycle_read_sqlite_contention_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "operator_warehouse_contention": {
       "patterns": ["packages/application/operator_warehouse_documents.py", "apps/operator_warehouse_documents_contention_smoke.py"],
       "commands": [["python3", "apps/operator_warehouse_documents_contention_smoke.py"], ["python3", "apps/operator_warehouse_documents_smoke.py"]],
