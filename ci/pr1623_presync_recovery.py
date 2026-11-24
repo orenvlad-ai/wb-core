@@ -27,6 +27,7 @@ PROFILE = dict(pull_request=1623, gate_run_id=45468017296,
 WINDOW = 'wbc0201-inventory-history-repair-20261124'
 BASELINE = 'sha256:ccf821568b4f2a529cbe6e7df5343178da7fb5c9f659bba44268de4927b775d0'
 OWNER = 'sha256:8a0216040d13722ee4a5984a85bab2d451d7577fb1f4db653a8b9ec5c7a7c587'
+TARGET_RELATIVE = 'artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json'
 CODE_PATHS = (*r.RUNTIME_GUARD_PATHS,
     'apps/root_storage_policy.py',
     'packages/application/business_data_deploy_protection.py',
@@ -166,7 +167,8 @@ def canonical_deploy():
         env.update(WB_CORE_RELEASE_PR=str(PROFILE['pull_request']),
             WB_CORE_RELEASE_HEAD=PROFILE['head_sha'],
             WB_CORE_RELEASE_OPERATION_ID=PROFILE['operation_id'],
-            WB_CORE_RELEASE_DEFER_DEPLOY_OWNER_FINISH='true')
+            WB_CORE_RELEASE_DEFER_DEPLOY_OWNER_FINISH='true',
+            WB_CORE_HOSTED_RUNTIME_TARGET_FILE=str(checkout / TARGET_RELATIVE))
         subprocess.run([sys.executable, 'apps/registry_upload_http_entrypoint_hosted_runtime.py', 'deploy'],
             cwd=checkout, env=env, check=True)
 

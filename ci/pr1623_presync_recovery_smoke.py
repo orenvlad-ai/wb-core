@@ -194,6 +194,8 @@ class RecoveryTests(unittest.TestCase):
                 ('WB_CORE_RELEASE_OPERATION_ID', c.PROFILE['operation_id']), ('WB_CORE_RELEASE_DEFER_DEPLOY_OWNER_FINISH', 'true')]:
             self.assertEqual(kwargs['env'][key], value)
         self.assertNotEqual(kwargs['cwd'], r.ROOT)
+        self.assertEqual(kwargs['env']['WB_CORE_HOSTED_RUNTIME_TARGET_FILE'], str(kwargs['cwd'] / c.TARGET_RELATIVE))
+        self.assertTrue(Path(kwargs['env']['WB_CORE_HOSTED_RUNTIME_TARGET_FILE']).is_absolute())
         self.assertFalse(kwargs['cwd'].exists())
 
     def test_new_lane_is_repo_only_and_registered(self):
@@ -213,8 +215,12 @@ class RecoveryTests(unittest.TestCase):
                 return real_run(['git', *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
             git('init', '-q'); git('config', 'user.email', 'fixture@example.invalid'); git('config', 'user.name', 'Fixture')
             (repo / 'payload').write_text('original')
-            git('add', 'payload'); git('commit', '-qm', 'original'); exact = git('rev-parse', 'HEAD')
+            target_file = repo / c.TARGET_RELATIVE
+            target_file.parent.mkdir(parents=True)
+            target_file.write_text('{"target":"original-exact"}')
+            git('add', '.'); git('commit', '-qm', 'original'); exact = git('rev-parse', 'HEAD')
             (repo / 'payload').write_text('later repo-only runner')
+            target_file.write_text('{"target":"later"}')
             git('commit', '-qam', 'runner')
             calls = []
             def run(args, **kwargs):
@@ -222,6 +228,9 @@ class RecoveryTests(unittest.TestCase):
                 checkout = kwargs['cwd']
                 self.assertTrue((checkout / '.git').is_dir())
                 self.assertEqual((checkout / 'payload').read_text(), 'original')
+                selected_target = Path(kwargs['env']['WB_CORE_HOSTED_RUNTIME_TARGET_FILE'])
+                self.assertEqual(selected_target, checkout / c.TARGET_RELATIVE)
+                self.assertEqual(json.loads(selected_target.read_text()), {'target': 'original-exact'})
                 self.assertEqual(real_run(['git', 'rev-parse', 'HEAD'], cwd=checkout,
                     capture_output=True, check=True, text=True).stdout.strip(), exact)
                 calls.append(checkout)
