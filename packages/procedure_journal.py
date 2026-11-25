@@ -307,4 +307,3 @@ class JournalHTTPMixin:
             if self._journal_scope is not None:
                 self._journal_scope.__exit__(None, None, None)
                 self._journal_scope = None
-

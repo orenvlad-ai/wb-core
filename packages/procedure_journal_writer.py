@@ -23,4 +23,3 @@ def forward(incoming, sink="/run/systemd/journal/socket"):
 if __name__ == "__main__":
     with socket.socket(fileno=0) as channel:
         forward(channel)
-
