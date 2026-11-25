@@ -32,14 +32,24 @@ def offline_guard(violations):
 
 
 class ReplayClock:
-    def __init__(self, now):
+    def __init__(self, now, state_path=None):
+        from threading import Lock
+        from .state import read_json
+        self.state_path = state_path
+        self._lock = Lock()
         self.seconds = now.timestamp()
+        if state_path is not None and state_path.exists():
+            self.seconds = max(self.seconds, read_json(state_path)["seconds"])
 
     def time(self):
         return self.seconds
 
     def advance(self, seconds):
-        self.seconds += seconds
+        from .state import atomic_json
+        with self._lock:
+            self.seconds += seconds
+            if self.state_path is not None:
+                atomic_json(self.state_path, {"seconds": self.seconds})
 
 
 def seed_catalog(runtime, scenario, stamp):

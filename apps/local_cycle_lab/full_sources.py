@@ -131,7 +131,7 @@ class FullSourceContext:
         from packages.application.stocks_block import StocksBlock
         self.entry, self.replay, self.now = entry, replay, now
         self.tape = FullHttpTape(replay)
-        self.clock = ReplayClock(now)
+        self.clock = ReplayClock(now, entry.runtime.runtime_dir / "lab-provider-clock.json")
         self.finance_transport = CanonicalFinanceTransport(replay)
         self._real_finance_client = WbFinanceApiClient
         self.finance_client = self._finance_factory("lab-only", rate_gate_root=entry.runtime.runtime_dir)
