@@ -1530,6 +1530,10 @@
     },
     "web_vitrina_history_activation": {
       "patterns": [
+        "packages/application/ads_spend_presentation.py",
+        "packages/application/ads_spend_verification.py",
+        "packages/application/ads_snapshot_payload.py",
+        "packages/application/web_vitrina_history_live_adapter.py",
         "packages/application/historical_publication_retirement.py",
         "packages/application/historical_receipt_completion.py",
         "packages/application/web_vitrina_official_fbs.py",
