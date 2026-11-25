@@ -390,19 +390,20 @@ class _OwnedHistoryWorker:
         self._check()
         if self._process is not None:
             raise HistoryDelegationError("history_child_already_live")
-        config, runtime = self.config, self.runtime
+        config = self.config
         invocation = uuid4().hex
         seconds = min(240.0, float(config.budget_seconds) + PARENT_GRACE_SECONDS)
         if self._completion_deadline is not None:
             seconds = min(seconds, self._completion_deadline - time.monotonic())
         if self._completion_deadline is not None and seconds <= PARENT_GRACE_SECONDS:
             raise HistoryDelegationError("history_completion_total_deadline")
+        deadline = time.monotonic() + seconds
         with journal_log.span("history_transport", mode, invocation=invocation,
                               budget_ms=int(seconds * 1000)) as diag:
-            return self._exchange(mode, now, anchor, invocation, config, runtime, seconds, diag)
+            return self._exchange(mode, now, anchor, invocation, seconds, deadline, diag)
 
-    def _exchange(self, mode, now, anchor, invocation, config, runtime, seconds, diag):
-        deadline = time.monotonic() + seconds
+    def _exchange(self, mode, now, anchor, invocation, seconds, deadline, diag):
+        config, runtime = self.config, self.runtime
         parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         process = None
         paths = [Path(runtime.runtime_dir) / ".business-data-procedure-admission.lock",
