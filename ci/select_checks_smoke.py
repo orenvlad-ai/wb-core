@@ -809,6 +809,17 @@ def fbs_repair_dependency_checks():
     print("FBS repair dependencies: direct/sibling/actual diff keep exact openpyxl prerequisite OK")
 
 
+def fbs_forward_recovery_dependency_checks():
+    script = "apps/ff_pool_fbs_forward_recovery_smoke.py"
+    for path in ("packages/application/ff_pool_fbs_forward_recovery.py",
+                 "apps/ff_pool_fbs_forward_recovery.py", script):
+        plan = build_plan_from_paths(pull_request=1633, base=BASE, head=HEAD,
+            paths=[path], file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
+        verify_plan(plan)
+        assert plan["commands"].count(["python3", script]) == 1, plan
+        assert plan["pip"] == ["openpyxl==3.1.5"], plan
+
+
 def ads_dependency_checks():
     scripts = ["apps/ads_partial_adapter_smoke.py", "apps/ads_partial_publication_smoke.py"]
     for paths, expected in (
@@ -1187,6 +1198,7 @@ def main() -> None:
     payment_pdf_dependency_checks()
     fbs_overhead_presentation_dependency_checks()
     fbs_repair_dependency_checks()
+    fbs_forward_recovery_dependency_checks()
     ads_dependency_checks()
     buyout_percent_dependency_checks()
     finance_liquidity_checks()
