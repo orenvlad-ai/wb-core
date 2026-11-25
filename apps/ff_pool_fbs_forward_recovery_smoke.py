@@ -12,6 +12,7 @@ from pathlib import Path
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,57 @@ class _RecoveryClock:
         return f"2026-08-16T00:00:{self.index:02d}Z"
 
 
+def _plan_with_checked_ready_revisions(runner, source_db):
+    revisions = recovery_module.READY_INPUT_REVISIONS
+    with sqlite3.connect(source_db) as source:
+        source.execute(f"UPDATE {revisions} SET revision=37 WHERE source_table=?", (IDENTITY_PENDING_TABLE,))
+        source.commit()
+        initial = dict(source.execute(f"SELECT source_table,revision FROM {revisions}"))
+        expected = {name: initial[name] for name in recovery_module.PREVIEW_SCHEMA_TABLES if name in initial}
+        assert expected[IDENTITY_PENDING_TABLE] == 37
+        canonical_recover = recovery_module.recover_pinned_fbs_lifecycle
+
+        def check_scratch(scratch, **options):
+            assert dict(scratch.execute(f"SELECT source_table,revision FROM {revisions}")) == expected
+            result = canonical_recover(scratch, **options)
+            counter = scratch.execute(f"SELECT revision FROM {revisions} WHERE source_table=?", (IDENTITY_PENDING_TABLE,))
+            assert counter.fetchone()[0] == 38  # One order goes into identity quarantine.
+            return result
+
+        with patch.object(recovery_module, "recover_pinned_fbs_lifecycle", side_effect=check_scratch) as observed:
+            plan = runner.build_plan()
+        observed.assert_called_once()
+        assert dict(source.execute(f"SELECT source_table,revision FROM {revisions}")) == initial
+
+        # A damaged counter must be distinguished from a database predating Ready.
+        source.execute("BEGIN")
+        try:
+            source.execute(f"DELETE FROM {revisions} WHERE source_table=?", (IDENTITY_PENDING_TABLE,))
+            try:
+                recovery_module._projection_schema_evidence(source)
+            except FfPoolFbsForwardRecoveryError as exc:
+                assert exc.code == "preview_ready_revision_missing" and exc.details == IDENTITY_PENDING_TABLE
+            else:
+                raise AssertionError("missing Ready counter must block preview")
+
+            source.execute(f"DROP TABLE {revisions}")
+            try:
+                recovery_module._projection_schema_evidence(source)
+            except FfPoolFbsForwardRecoveryError as exc:
+                assert exc.code == "preview_projection_schema_missing" and revisions in exc.details
+            else:
+                raise AssertionError("Ready trigger without its target must block preview")
+            triggers = source.execute(
+                "SELECT name FROM sqlite_schema WHERE type='trigger' AND instr(lower(sql),?) > 0", (revisions,)
+            ).fetchall()
+            for (name,) in triggers:
+                source.execute(f'DROP TRIGGER "{name}"')
+            recovery_module._projection_schema_evidence(source)
+        finally:
+            source.rollback()
+    return plan
+
+
 def main() -> int:
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -104,7 +156,7 @@ def main() -> int:
                 ).fetchone()[0]
             ) == legacy_cursor
 
-        plan = runner.build_plan()
+        plan = _plan_with_checked_ready_revisions(runner, runtime.db_path)
         assert plan["apply_allowed"] is True
         boundary = plan["boundary"]
         cutoff = int(boundary["source_max_status_observation_sequence"])
@@ -187,6 +239,11 @@ def main() -> int:
                 ).fetchone()[0]
             )
             assert old_cursor_after == old_cursor
+            applied_counter = conn.execute(
+                f"SELECT revision FROM {recovery_module.READY_INPUT_REVISIONS} WHERE source_table=?",
+                (IDENTITY_PENDING_TABLE,),
+            ).fetchone()[0]
+            assert applied_counter == 38  # Matches the private preview.
             assert conn.execute(
                 f"SELECT COUNT(*) FROM {BACKLOG_RECOVERY_TARGETS_TABLE}"
             ).fetchone()[0] == 4
