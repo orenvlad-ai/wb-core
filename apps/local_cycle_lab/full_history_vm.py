@@ -46,11 +46,17 @@ def sync_source(destination="/opt/wbc-lab", archive=None):
                     fingerprint.update(name.encode() + b'\0' + hashlib.file_digest(source, 'sha256').digest())
                     source.seek(0)
                     out.addfile(out.gettarinfo(str(path), arcname=name), source)
-        identity = json.dumps({'git_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
-                               'tree_content_sha256': fingerprint.hexdigest()}).encode()
-        info = tarfile.TarInfo('local-lab-source.json')
-        info.size = len(identity)
-        out.addfile(info, io.BytesIO(identity))
+        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        dirty = bool(subprocess.check_output(
+            ['git', 'status', '--porcelain', '--', 'apps', 'packages', 'artifacts'], cwd=ROOT))
+        revision = fingerprint.hexdigest()[:40] if dirty else head
+        identity = {'git_head': head, 'tree_content_sha256': fingerprint.hexdigest(),
+                    'uncommitted_source': dirty, 'runtime_revision': revision}
+        for name, data in (('local-lab-source.json', json.dumps(identity).encode()),
+                           ('.wb-core-runtime-sha', (revision + '\n').encode())):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            out.addfile(info, io.BytesIO(data))
     with archive.open('rb') as stream:
         guest('sudo', 'tar', '-xzf', '-', '-C', destination, stdin=stream)
 

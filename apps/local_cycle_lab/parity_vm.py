@@ -89,15 +89,6 @@ def run_owned(fixture, output, stage):
     policy["storage_registry"]["filesystems"]["backup"].update(source=device, filesystem_uuid=uuid)
     write_file(root + "/storage.json", json.dumps(policy).encode())
     identity = read(source + "/local-lab-source.json")
-    dirty = bool(
-        subprocess.check_output(
-            ["git", "status", "--porcelain", "--", "apps", "packages", "artifacts"], cwd=ROOT
-        )
-    )
-    identity["uncommitted_source"] = dirty
-    sha = (identity["tree_content_sha256"][:40] if dirty else identity["git_head"]).encode()
-    write_file(root + "/revision", sha + b"\n")
-    guest("sudo", "touch", source + "/.wb-core-runtime-sha")
     guest("sudo", "install", "-m", "600", "-o", "wbc-lab", "/dev/null", root + "/fixture.json")
     with fixture.open("rb") as stream:
         guest(*as_lab, "tee", root + "/fixture.json", stdin=stream, stdout=subprocess.DEVNULL)
@@ -137,7 +128,6 @@ def run_owned(fixture, output, stage):
                 else ["--property=ProtectHome=yes", "--property=InaccessiblePaths=/run/user/" + uid]
             ),
             "--property=BindReadOnlyPaths=" + source + ":" + APP,
-            "--property=BindReadOnlyPaths=" + root + "/revision:" + APP + "/.wb-core-runtime-sha",
             "--property=BindReadOnlyPaths=" + root + "/contract.json:" + APP + "/" + CONTRACT,
             "--property=BindReadOnlyPaths=" + root + "/storage.json:" + APP + "/" + STORAGE,
             "--property=BindReadOnlyPaths=" + root + "/fixture.json:/var/lib/wbc-lab/parity-input.json",
