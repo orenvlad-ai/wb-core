@@ -309,9 +309,30 @@ Recovery never resumes `wbc0201-inventory-history-repair-20261124` or starts a
 business cycle. A recovery PR touching only `ci/` and this runbook is repo-only;
 it does not deploy a second runtime before the original operation is complete.
 
+## PR1626: same unentered storage preflight, backup reserve
+
+The same closed pre-sync profile accepts only original Release `45514713724`,
+Gate `45512517259`, PR1626 merge `a7fa3b894c18fc46d96883d0493a60d49f5c7e3a`,
+operation `release-v3-63b81852c1d07b3f1b83c45411ecd2d7`. Its immutable job proves
+adapter line1208 exited3 before owner start/sync: backup available58,428,649,472
+bytes was below the unchanged dynamic Finance replacement reserve59,018,551,296.
+The root role passed. No storage threshold or policy is changed by recovery.
+
+Use the same workflow with `release_run_id=45514713724`, preview then the exact
+reviewed fingerprint. The original PREPARED owner, empty expected SHA, exact old
+`48aba616911767c1c9410d013f59cfbe258ce4c8` runtime, held/quiet window
+`wbc0201-supplier-history-ready-pin-repair-20261125` and baseline
+`sha256:9d6f60aae1236e07f1fd5ad5aa25e15f95e76940ca11de8db2c8a02efa49dc13`
+remain mandatory. Independent capacity remediation must first pass all native
+storage roles. Preview/apply retain the same one-shot canonical deploy and
+readback-only existing-claim rules above, under the original operation identity.
+This case shares the existing pre-sync implementation; unknown runs, other
+failure stages, mutation_started owners and unreviewed source drift refuse.
+Recovery neither cleans files nor resumes the window nor starts a business cycle.
+
 ## PR1623: exact unentered Chrome RAM guard after sync
 
-Recovery `45473903471` of the operation above reached adapter line1242, then
+Recovery `45473903471` of the original PR1623 operation reached adapter line1242, then
 `wb_buyer_chrome_runtime.install` line151 refused insufficient staging RAM.
 This guard precedes directory creation, package download/copy, profile adoption
 and extraction. The original owner remains `mutation_started`, same SHA/window/
