@@ -808,7 +808,4 @@ main = guard_cli(default_runtime='.runtime/registry_upload')(main)
 
 
 if __name__ == "__main__":
-    from packages.procedure_journal import cli_scope
-
-    with cli_scope("sheet_vitrina_v1_auto_refresh_tick"):
-        raise SystemExit(main())
+    raise SystemExit(main())

@@ -47,6 +47,40 @@ class ProcedureJournalTests(unittest.TestCase):
         self.assertEqual(failed["error_kind"], "value")
         self.assertNotIn(secret, json.dumps(self.records))
 
+    def test_guarded_timers_leave_only_native_skip_before_and_after_lock(self):
+        from contextlib import redirect_stdout
+        import io
+        import runpy
+        from packages.application import business_data_procedure_admission as admission
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, REGISTRY_UPLOAD_RUNTIME_DIR=directory):
+            admission.initialize_admission(Path(directory))
+            for script in ("wb_buyer_authenticated_collect", "sheet_vitrina_v1_feedbacks_auto_complaints_tick",
+                           "sheet_vitrina_v1_health_tick"):
+                path = ROOT / "apps" / (script + ".py")
+                for states in ((True,), (False, True)):
+                    output = io.StringIO()
+                    with self.subTest(script=script, states=states), redirect_stdout(output), \
+                            patch.object(sys, "argv", [str(path)]), \
+                            patch.object(admission, "barrier_status", side_effect=[{"active": b} for b in states]):
+                        try:
+                            runpy.run_path(str(path), run_name="__main__")
+                        except SystemExit as exit_status:
+                            self.assertEqual(exit_status.code, 0)
+                    self.assertEqual(output.getvalue().splitlines(), [
+                        '{"status": "skipped_maintenance", "reason": "skipped_maintenance"}'])
+                    self.assertFalse(self.records)
+
+    def test_admitted_cli_reports_return_value_and_help_uses_no_writer(self):
+        from packages.application import business_data_procedure_admission as admission
+        with tempfile.TemporaryDirectory() as directory:
+            admission.initialize_admission(Path(directory))
+            result = admission.guarded_cli(lambda: 7, journal_name="test", argv=["--runtime-dir", directory])
+            self.assertEqual(result, 7)
+            self.assertEqual(self.records[-1]["returncode"], 7)
+            self.records.clear()
+            self.assertEqual(admission.guarded_cli(lambda: 0, journal_name="test", argv=["--help"]), 0)
+            self.assertFalse(self.records)
+
     def test_handler_keepalive_routes_and_status(self):
         class Handler(journal.JournalHTTPMixin, BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -119,7 +153,10 @@ class ProcedureJournalTests(unittest.TestCase):
                 continue
             marker = {"web_vitrina_history_group_repair": "with history_procedure_admission(args)",
                       "web_vitrina_owned_history_worker": "with child_scope("}.get(path.stem, "with cli_scope(")
-            self.assertIn(marker, text, path.name)
+            if marker == "with cli_scope(" and "main = guard_cli(" in text:
+                self.assertIn("from packages.application.business_data_procedure_admission import guard_cli", text)
+            else:
+                self.assertIn(marker, text, path.name)
 
 
 if __name__ == "__main__":

@@ -141,7 +141,4 @@ main = guard_cli(default_runtime='.runtime/registry_upload')(main)
 
 
 if __name__ == "__main__":
-    from packages.procedure_journal import cli_scope
-
-    with cli_scope("change_registry_observer"):
-        raise SystemExit(main())
+    raise SystemExit(main())

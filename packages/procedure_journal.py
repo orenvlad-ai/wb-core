@@ -243,12 +243,12 @@ def worker(fn):
 def cli_scope(name):
     with span("cli", name) as result:
         try:
-            yield
+            yield result
         except SystemExit as exc:
             result["returncode"] = exc.code if type(exc.code) is int else (0 if exc.code is None else 1)
             raise
         else:
-            result["returncode"] = 0
+            result.setdefault("returncode", 0)
 
 
 @functools.lru_cache(maxsize=1)

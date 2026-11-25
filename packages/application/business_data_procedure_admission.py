@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from packages import procedure_journal as journal_log
-
 from contextlib import contextmanager
 from contextvars import ContextVar
 import fcntl
@@ -174,7 +172,7 @@ def admission_idle(runtime_dir: Path) -> dict:
         os.close(fd)
 
 
-def guarded_cli(main: Callable, *, default_runtime: str = ".runtime/registry_upload", argv=None):
+def guarded_cli(main: Callable, *, default_runtime: str = ".runtime/registry_upload", argv=None, journal_name=None):
     """Guard a supported writer CLI before parsing constructs any writer."""
     args = sys.argv[1:] if argv is None else list(argv)
     if "--help" in args or "-h" in args:
@@ -187,7 +185,15 @@ def guarded_cli(main: Callable, *, default_runtime: str = ".runtime/registry_upl
             runtime = arg.split("=", 1)[1]
     try:
         with admitted_write(Path(runtime)):
-            return main()
+            if journal_name is None:
+                return main()
+            # A denied timer must emit only the native maintenance skip.
+            from packages.procedure_journal import cli_scope
+            with cli_scope(journal_name) as terminal:
+                result = main()
+                if result is not None:
+                    terminal["returncode"] = int(result) if isinstance(result, int) else 1
+                return result
     except MaintenanceAdmissionBlocked as exc:
         print(json.dumps({"status": "skipped_maintenance", "reason": str(exc)}))
         return 0
@@ -195,12 +201,18 @@ def guarded_cli(main: Callable, *, default_runtime: str = ".runtime/registry_upl
 
 def guard_cli(*, default_runtime: str = ".runtime/registry_upload"):
     def decorate(function):
+        journal_name = None
+        if function.__module__ == "__main__" and function.__name__ == "main":
+            source = Path(function.__code__.co_filename).resolve()
+            if source.parent == Path(__file__).resolve().parents[2] / "apps" and source.stem.isidentifier():
+                journal_name = source.stem
+
         @wraps(function)
         def guarded(*args, **kwargs):
             argv = kwargs.get("argv")
             if args and isinstance(args[0], (list, tuple)):
                 argv = args[0]
-            return guarded_cli(lambda: function(*args, **kwargs), default_runtime=default_runtime, argv=argv)
+            return guarded_cli(lambda: function(*args, **kwargs), default_runtime=default_runtime, argv=argv, journal_name=journal_name)
         return guarded
     return decorate
 
@@ -220,7 +232,7 @@ def thread_start_is_proven_absent(thread) -> bool:
 def admitted_thread(runtime_dir: Path, **options):
     """Retain an independently admitted async operation through target finally."""
     import threading
-    target = journal_log.worker(options.pop("target"))
+    target = options.pop("target")
     args = options.pop("args", ())
     kwargs = options.pop("kwargs", {})
     lease = AdmissionLease(runtime_dir, independent=True)
@@ -249,6 +261,8 @@ def admitted_thread(runtime_dir: Path, **options):
         finally:
             lease.close()
     try:
+        from packages.procedure_journal import worker
+        target = worker(target)
         return AdmittedThread(target=run, **options)
     except BaseException:
         lease.close()
