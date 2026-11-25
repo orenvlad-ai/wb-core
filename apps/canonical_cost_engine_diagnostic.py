@@ -23,10 +23,8 @@ from apps.canonical_cost_engine_backfill import (  # noqa: E402
     SOURCE_TABLES,
     _canonical_digest,
     _candidate_reconciliation,
-    _integrity_check,
     _layer_cost_continuity,
     _legacy_digest,
-    _sqlite_backup,
     _tables_digest,
 )
 from packages.application.canonical_cost_engine import (  # noqa: E402
@@ -38,6 +36,10 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
+)
+from packages.application.warehouse_recovery_policy import (  # noqa: E402
+    WarehouseRecoveryRegistry,
+    _connect_readonly,
 )
 
 
@@ -84,7 +86,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("runtime SQLite database does not exist")
     date_to = date.fromisoformat(str(args.date_to)).isoformat()
     inode = source_db.stat().st_ino
-    integrity = _integrity_check(source_db)
     source_digest = _tables_digest(source_db, SOURCE_TABLES)
     protected_digest = _tables_digest(source_db, PROTECTED_TABLES)
     legacy_digest = _legacy_digest(source_db)
@@ -97,7 +98,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             runtime_dir=Path(tmp) / "runtime"
         )
         candidate_runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
-        _sqlite_backup(source_db, candidate_runtime.db_path)
+        WarehouseRecoveryRegistry(
+            runtime_dir=runtime.runtime_dir, db_path=source_db,
+        ).write_disposable_domain_checkpoint(
+            candidate_runtime.db_path, purpose="canonical_cost_diagnostic", include_legacy_wb_cost=True,
+        )
         engine = CanonicalCostEngine(runtime=candidate_runtime)
 
         first_source = engine.source_anomaly_preflight(date_to=date_to)
@@ -550,6 +555,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 }
             ),
         )
+        with _connect_readonly(candidate_runtime.db_path) as conn:
+            integrity = [row[0] for row in conn.execute("PRAGMA integrity_check")]
+        if integrity != ["ok"]:
+            raise ValueError(f"Diagnostic candidate integrity check failed: {integrity}")
         coverage["integrity_preservation"] = _coverage(
             "PASS",
             len(SOURCE_TABLES) + len(PROTECTED_TABLES),
@@ -557,7 +566,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             [],
             _hash(
                 {
-                    "integrity": _integrity_check(candidate_runtime.db_path),
+                    "integrity": integrity[0],
                     "source": _tables_digest(candidate_runtime.db_path, SOURCE_TABLES),
                     "protected": _tables_digest(candidate_runtime.db_path, PROTECTED_TABLES),
                     "legacy": _legacy_digest(candidate_runtime.db_path),
@@ -674,7 +683,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 ),
             },
             "preservation": {
-                "integrity_check": integrity,
+                "integrity_check": "not_applicable_domain_checkpoint",
                 "source_inode": inode,
                 "source_digest": source_digest,
                 "protected_digest": protected_digest,

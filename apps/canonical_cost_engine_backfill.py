@@ -34,6 +34,7 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
     RecoveryState,
     WarehouseRecoveryRegistry,
+    _connect_readonly,
 )
 
 
@@ -727,8 +728,7 @@ def _replace_canonical_tables(
 
 
 def _canonical_digest(db_path: Path, *, date_from: str, date_to: str) -> str:
-    with closing(sqlite3.connect(db_path)) as conn:
-        conn.row_factory = sqlite3.Row
+    with _connect_readonly(db_path) as conn:
         return _canonical_digest_conn(conn, date_from=date_from, date_to=date_to)
 
 
@@ -760,8 +760,7 @@ def _canonical_digest_conn(conn: sqlite3.Connection, *, date_from: str, date_to:
 
 
 def _tables_digest(db_path: Path, tables: Iterable[str]) -> str:
-    with closing(sqlite3.connect(db_path)) as conn:
-        conn.row_factory = sqlite3.Row
+    with _connect_readonly(db_path) as conn:
         return _tables_digest_conn(conn, tables)
 
 
@@ -776,8 +775,7 @@ def _tables_digest_conn(conn: sqlite3.Connection, tables: Iterable[str]) -> str:
 
 
 def _legacy_digest(db_path: Path) -> str:
-    with closing(sqlite3.connect(db_path)) as conn:
-        conn.row_factory = sqlite3.Row
+    with _connect_readonly(db_path) as conn:
         return _legacy_digest_conn(conn)
 
 

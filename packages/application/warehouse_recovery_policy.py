@@ -11,7 +11,7 @@ backup is available only to explicitly allowlisted schema/store migrations.
 from __future__ import annotations
 
 import base64
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -1121,6 +1121,7 @@ class WarehouseRecoveryRegistry:
         destination: Path,
         *,
         purpose: str,
+        include_legacy_wb_cost: bool = False,
     ) -> dict[str, Any]:
         """Create a temporary warehouse-domain-only planning database.
 
@@ -1135,18 +1136,27 @@ class WarehouseRecoveryRegistry:
                 "disposable planning checkpoint cannot masquerade as recovery evidence"
             )
         final.parent.mkdir(parents=True, exist_ok=True)
-        tables, _ = self._domain_inventory()
-        result = self._write_domain_checkpoint(
-            temporary=Path(str(final) + TEMP_SUFFIX),
-            final=final,
-            table_names=tables,
-            operation_id="disposable_domain_checkpoint",
-            plan_fingerprint="sha256:"
-            + hashlib.sha256(str(purpose).encode("utf-8")).hexdigest(),
-            source_digest="planning_only",
-            source_watermarks={"purpose": str(purpose)},
-            schema_revision=str(REGISTRY_SCHEMA_VERSION),
-        )
+        # Inventory and data must describe the same committed SQLite snapshot.
+        with _connect_readonly(self.db_path) as source:
+            source.execute("BEGIN")
+            tables = _domain_table_names(source)
+            # The diagnostic compares with the published WB costs on its private
+            # copy. This table is outside the managed recovery/restore scope.
+            legacy_table = "sheet_vitrina_v1_wb_cost_daily_state"
+            if include_legacy_wb_cost and _table_exists(source, legacy_table):
+                tables.append(legacy_table)
+            result = self._write_domain_checkpoint(
+                temporary=Path(str(final) + TEMP_SUFFIX),
+                final=final,
+                table_names=tables,
+                source_connection=source,
+                operation_id="disposable_domain_checkpoint",
+                plan_fingerprint="sha256:"
+                + hashlib.sha256(str(purpose).encode("utf-8")).hexdigest(),
+                source_digest="planning_only",
+                source_watermarks={"purpose": str(purpose)},
+                schema_revision=str(REGISTRY_SCHEMA_VERSION),
+            )
         return {
             **result,
             "kind": "disposable_warehouse_domain_checkpoint",
@@ -3993,22 +4003,7 @@ class WarehouseRecoveryRegistry:
 
     def _domain_inventory(self) -> tuple[list[str], int]:
         with _connect_readonly(self.db_path) as conn:
-            names = [
-                str(row[0])
-                for row in conn.execute(
-                    """
-                    SELECT name FROM sqlite_master
-                    WHERE type='table' AND name NOT LIKE 'sqlite_%'
-                    ORDER BY name
-                    """
-                )
-                if _is_domain_table(str(row[0]))
-            ]
-            forbidden = sorted(set(names) & FINANCE_RAW_TABLES)
-            if forbidden:
-                raise RecoveryPolicyError(
-                    f"Finance raw reached T2 inventory: {forbidden}"
-                )
+            names = _domain_table_names(conn)
             index_names = [
                 str(row[0])
                 for row in conn.execute(
@@ -4073,6 +4068,7 @@ class WarehouseRecoveryRegistry:
         source_digest: str,
         source_watermarks: Mapping[str, Any],
         schema_revision: str,
+        source_connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         managed_recovery_path = any(
             _path_is_below(final, root) for root in self.recovery_roots
@@ -4089,7 +4085,8 @@ class WarehouseRecoveryRegistry:
             }
         temporary.unlink(missing_ok=True)
         read_bytes = 0
-        with _connect_readonly(self.db_path) as source, closing(
+        reader = nullcontext(source_connection) if source_connection is not None else _connect_readonly(self.db_path)
+        with reader as source, closing(
             sqlite3.connect(temporary)
         ) as target:
             os.chmod(temporary, 0o600)
@@ -4631,6 +4628,24 @@ def _parse_timestamp(value: str) -> datetime:
 def _operation_id(mutation_kind: str, plan_fingerprint: str) -> str:
     material = f"{str(mutation_kind).strip()}:{str(plan_fingerprint).strip()}"
     return "recovery_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
+def _domain_table_names(conn: sqlite3.Connection) -> list[str]:
+    names = [
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+            """
+        )
+        if _is_domain_table(str(row[0]))
+    ]
+    forbidden = sorted(set(names) & FINANCE_RAW_TABLES)
+    if forbidden:
+        raise RecoveryPolicyError(f"Finance raw reached T2 inventory: {forbidden}")
+    return names
 
 
 def _is_domain_table(name: str) -> bool:
