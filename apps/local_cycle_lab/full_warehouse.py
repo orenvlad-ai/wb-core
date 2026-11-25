@@ -273,7 +273,7 @@ def prepare(entry):
     functional = entry.warehouse_functional_block
     cutover = functional.build_cutover_plan()
     functional.apply_plan(cutover, confirm_fingerprint=cutover["plan_fingerprint"],
-                          backup_dir=runtime.runtime_dir / "lab-bootstrap-backups")
+                          backup_dir=runtime.runtime_dir / "backups" / "warehouse-recovery" / "lab-bootstrap")
     registry = entry.wb_fbs_warehouse_registry
     first_registry = registry.collect()
     binding = registry.preview_binding(dict(request_id="lab-bootstrap-binding", seller_warehouse_id=7001,
@@ -284,8 +284,9 @@ def prepare(entry):
     from packages.application.ff_pool_cutover_production import FfPoolCutoverProductionMutation
     env = runtime.runtime_dir / "lab-bootstrap.env"
     env.write_text("WB_FBS_COLLECTOR_ENABLED=true\n")
-    # The hash describes this synthetic fixture, not a claimed deployed release.
-    fixture_sha = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()
+    from packages.application import business_data_cycle_dispatch as dispatch
+    fixture_sha = (dispatch._identity(runtime.runtime_dir) if runtime.runtime_dir == dispatch.RUNTIME
+                   else hashlib.sha1(Path(__file__).read_bytes()).hexdigest())
     # The cutover's native compound boundary normalizes to whole seconds. Its
     # source.as_of must have the same precision on capture and revalidation.
     pool_stamp = lambda: datetime.fromisoformat(entry.activated_at_factory().replace("Z", "+00:00")).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -296,7 +297,7 @@ def prepare(entry):
         raise ValueError("synthetic facility cutover blocked: " + json.dumps(gate["blockers"], ensure_ascii=False))
     with _bootstrap_barrier(entry, gate["fingerprint"]) as (external, admission):
         result = pool.apply(gate, fingerprint=gate["fingerprint"], approval_reference="local-lab-synthetic-bootstrap",
-            actor="local-lab", backup_dir=runtime.runtime_dir / "lab-bootstrap-backups", external_barrier_evidence=external)
+            actor="local-lab", backup_dir=runtime.runtime_dir / "backups" / "warehouse-recovery" / "lab-bootstrap", external_barrier_evidence=external)
     sync = functional.build_sync_plan()
     functional.apply_plan(sync, confirm_fingerprint=sync["plan_fingerprint"])
     from packages.application import fbs_accounting_runtime as accounting

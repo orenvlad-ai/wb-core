@@ -9,6 +9,7 @@ import secrets
 import time
 from unittest.mock import patch
 
+from .cycle_warnings import check_warnings
 from .full_history import isolation_evidence, prepare_history, published_history
 from .state import atomic_json, read_json
 
@@ -21,12 +22,15 @@ def expect(condition, message):
 
 
 def manual_cycle(entry, config, output, number):
-    from packages.application.sheet_vitrina_v1_cycle import CycleReceiptStore, STAGES
-
     started = time.monotonic()
     receipt = entry._start_sheet_cycle_job(request_key=f"manual-cycle:local-expense-{number}",
         slot_utc=entry.now_factory().isoformat(), history_config=config)
     expect(receipt.get("cycle_id") and receipt.get("job_id"), f"Native admission refused: {receipt}")
+    return finish_cycle(entry, output, number, receipt, started)
+
+
+def finish_cycle(entry, output, number, receipt, started):
+    from packages.application.sheet_vitrina_v1_cycle import CycleReceiptStore
     store = CycleReceiptStore(entry.runtime.runtime_dir, entry.activated_at_factory)
     thread = entry.operator_jobs._threads[receipt["job_id"]]
     last = None
@@ -43,9 +47,7 @@ def manual_cycle(entry, config, output, number):
     (output / f"cycle-{number}.log").write_text(log)
     expect(receipt.get("status") in {"complete", "degraded"},
            f"Cycle {number} stopped at {receipt.get('current_stage')}: {receipt.get('error_code')}")
-    expect([s["stage"] for s in receipt["stages"]] == list(STAGES) and
-           all(s["status"] in {"complete", "degraded"} and s["versions"] for s in receipt["stages"]),
-           "Incomplete stage receipts")
+    check_warnings(receipt, number)
     expect(receipt["trigger_kind"] == "manual", "Manual cycle identity missing")
     versions = receipt["final_versions"]
     expect(versions.get("fbs_accounting_status") != "unavailable" and versions.get("fbs_book")
@@ -118,11 +120,12 @@ def verify_cells(publication, expected):
            "Stored History cells and their presentation differ from the operator table")
 
 
-def execute(work, *, repeat=True):
+def execute(work, *, repeat=True, runtime_path=None, prepare_only=False,
+            history_config=None, select_profile=None):
     from packages.adapters import registry_upload_http_entrypoint as web
     from packages.application import operator_ff_overhead
     from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-    from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint, SheetVitrinaV1OperatorJobStore
+    from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
     from .full_form import enter_expense
     from .full_sources import configure_sources
     from .full_warehouse import prepare, verify
@@ -132,6 +135,7 @@ def execute(work, *, repeat=True):
     expect(not isolation["host_mounts"], "Unexpected host mount in guest")
     os.umask(0o077)
     work.mkdir(mode=0o700, parents=True, exist_ok=False)
+    runtime_path = runtime_path or work / "runtime"
     origin = {"fixture_sha256": hashlib.sha256(SCENARIO.read_bytes()).hexdigest(), "variant": "normal",
               "lab_code_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                                   for path in sorted(SCENARIO.parent.glob("*.py"))}}
@@ -146,23 +150,22 @@ def execute(work, *, repeat=True):
         WB_CORE_WEB_AUTH_REQUIRED="1", WB_CORE_WEB_AUTH_USERNAME=username,
         WB_CORE_WEB_AUTH_PASSWORD_HASH=web._hash_pbkdf2_password(password),
         WB_CORE_WEB_AUTH_SESSION_SECRET=secrets.token_urlsafe(48),
-        REGISTRY_UPLOAD_RUNTIME_DIR=str(work / "runtime"))
+        REGISTRY_UPLOAD_RUNTIME_DIR=str(runtime_path))
     from .__main__ import run
     from .checks import verify as verify_initial_sources
     from .http import HttpTape
     bootstrap = Replay(scenario, "normal")
     with patch("urllib.request.urlopen", HttpTape(bootstrap).open):
-        seed = run(work / "runtime", scenario, bootstrap, True, work / "initial-rate-gate")
+        seed = run(runtime_path, scenario, bootstrap, True, work / "initial-rate-gate")
     origin["initial_ready"] = verify_initial_sources(seed, scenario, "normal")
-    atomic_json(work / "runtime" / "wbc-local-scenario.json",
+    atomic_json(runtime_path / "wbc-local-scenario.json",
                 {"fixture": origin["fixture_sha256"], "variant": "normal"})
     atomic_json(work / "input.json", origin)
-    runtime = RegistryUploadDbBackedRuntime(work / "runtime")
+    runtime = RegistryUploadDbBackedRuntime(runtime_path)
     from packages.application.business_data_procedure_admission import initialize_admission
     initialize_admission(runtime.runtime_dir)
-    config = prepare_history(runtime.runtime_dir)
-    with patch.object(SheetVitrinaV1OperatorJobStore, "resume_warehouse_pending", return_value=None):
-        entry = RegistryUploadHttpEntrypoint(runtime_dir=runtime.runtime_dir, runtime=runtime,
+    config = history_config or prepare_history(runtime.runtime_dir)
+    entry = RegistryUploadHttpEntrypoint(runtime_dir=runtime.runtime_dir, runtime=runtime,
             now_factory=now, activated_at_factory=stamp, refreshed_at_factory=stamp)
     entry.operator_jobs.enable_snapshot_admission(runtime.runtime_dir)
     expect(operator_ff_overhead.journal(runtime.db_path)["total"] == 0, "Expected empty source journal")
@@ -170,6 +173,8 @@ def execute(work, *, repeat=True):
         print("Preparing opening stock and cost", flush=True)
         opening = prepare(entry)
         atomic_json(work / "opening.json", opening)
+        if select_profile:
+            atomic_json(work / "profile.json", select_profile(entry))
         operation = enter_expense(entry, facility_id=opening["facility_id"], now=anchor,
                                   username=username, password=password, evidence_dir=work)
         before = operator_ff_overhead.read_acceptance(runtime.db_path, operation)
@@ -177,6 +182,8 @@ def execute(work, *, repeat=True):
                before["business_date"] == scenario["today"] and before["summary"]["scope"] == "FBS"
                and before["summary"]["amount_rub"] == "123.45", "Unexpected initial source receipt")
         atomic_json(work / "before.json", before)
+        if prepare_only:
+            return before
         results = []
         for number in range(1, 3 if repeat else 2):
             receipt, seconds = manual_cycle(entry, config, work, number)

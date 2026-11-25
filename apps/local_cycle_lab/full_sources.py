@@ -1,8 +1,8 @@
 """External response fixtures for native full-cycle execution.
 
-Only transport inputs and time are injected here. Finance ingestion, official
-FBS generation, supply reconciliation, stock validation and cycle proofs remain
-the production implementations. An empty supply response is explicit evidence
+Finance ingestion, official FBS generation, supply reconciliation, stock validation
+and cycle proofs use the production implementations. build_sources also injects
+prepared observations at several application block inputs; see source-map.md. An empty supply response is explicit evidence
 of no supplies in this synthetic fixture, not an unavailable source coerced to 0.
 """
 from copy import deepcopy

@@ -1,4 +1,5 @@
 """Enter the control expense through the native form inside the private Linux guest."""
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Thread
 
@@ -6,18 +7,27 @@ from packages.adapters import registry_upload_http_entrypoint as web
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 
 
-def enter_expense(entry, *, facility_id, now, username, password, evidence_dir: Path):
-    from playwright.sync_api import sync_playwright
-
-    config = RegistryUploadHttpEntrypointConfig(host="127.0.0.1", port=0,
+@contextmanager
+def serving(entry, port=0):
+    config = RegistryUploadHttpEntrypointConfig(host="127.0.0.1", port=port,
         upload_path=web.DEFAULT_UPLOAD_PATH, sheet_plan_path=web.DEFAULT_SHEET_PLAN_PATH,
         sheet_refresh_path="/v1/sheet-vitrina-v1/refresh", sheet_status_path=web.DEFAULT_SHEET_STATUS_PATH,
         sheet_operator_ui_path=web.DEFAULT_SHEET_OPERATOR_UI_PATH, runtime_dir=entry.runtime.runtime_dir)
     server = web.build_registry_upload_http_server(config, entrypoint=entry, advertise_window_v3=False)
-    server.service_actions = lambda: None  # Only explicit manual cycles run on this bench.
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        yield server
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def enter_expense(entry, *, facility_id, now, username, password, evidence_dir: Path):
+    from playwright.sync_api import sync_playwright
+
+    with serving(entry) as server:
         with sync_playwright() as automation:
             browser = automation.chromium.launch()
             try:
@@ -48,7 +58,3 @@ def enter_expense(entry, *, facility_id, now, username, password, evidence_dir: 
                 return operation
             finally:
                 browser.close()
-    finally:
-        server.shutdown()
-        thread.join()
-        server.server_close()

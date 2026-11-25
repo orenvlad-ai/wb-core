@@ -35,6 +35,7 @@ def zero_ad_metrics(node):
 class HttpTape:
     def __init__(self, replay):
         self.replay = replay
+        self.injected_errors = []
 
     def open(self, request, *, timeout=None):
         url = urlsplit(request.full_url)
@@ -51,6 +52,7 @@ class HttpTape:
             if key == "ads_compact" and entry["query"]["beginDate"] == self.replay.scenario["days"][0]:
                 if self.replay.variant == "missing":
                     self.replay.observe(key, {}, 0, pages=1, boundary="http_response")
+                    self.injected_errors.append((key, entry["query"]["beginDate"], 503))
                     raise HTTPError(request.full_url, 503, "offline fixture", {}, BytesIO(b"{}"))
                 if self.replay.variant == "zero":
                     zero_ad_metrics(payload)

@@ -29,11 +29,14 @@ def posted_ledger(runtime):
 
 
 class AttemptStore:
+    def __init__(self, output):
+        self.output = output
+
     def write(self, receipt):
-        atomic_json(CONTROL / "attempt.json", receipt)
+        atomic_json(self.output / "attempt.json", receipt)
 
 
-def invoke(entry, config, source, stage, checkpoint_hash):
+def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL):
     from packages.application.fbs_accounting_degraded import degraded_accounting_scope
     from packages.application.business_data_procedure_admission import admitted_write
     from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog
@@ -56,7 +59,7 @@ def invoke(entry, config, source, stage, checkpoint_hash):
                  history_config_fingerprint=config.fingerprint(), final_versions=versions,
                  stages=[dict(stage=stage, status="pending")])
     expect(fresh["history_config_fingerprint"] == source["history_config_fingerprint"], "History authority differs")
-    store = AttemptStore()
+    store = AttemptStore(output)
 
     def accepted(job_id):
         fresh["job_id"] = job_id
@@ -108,10 +111,10 @@ def invoke(entry, config, source, stage, checkpoint_hash):
     expect(job["job_id"] == fresh["job_id"], "Unexpected single flight")
     entry.operator_jobs._threads[job["job_id"]].join()
     log, _ = entry.operator_jobs.get_text(job["job_id"])
-    (CONTROL / "stage.log").write_text(log)
+    (output / "stage.log").write_text(log)
     terminal = entry.operator_jobs.get(job["job_id"])
     expect(terminal["status"] == "success", f"Stage job failed: {terminal.get('error') or terminal.get('message') or terminal}")
-    return read_json(CONTROL / "attempt.json")
+    return read_json(output / "attempt.json")
 
 
 def replay(stage):

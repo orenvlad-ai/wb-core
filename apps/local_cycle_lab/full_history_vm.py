@@ -30,15 +30,15 @@ def guest(*args, **kwargs):
     return lima('shell', '--workdir=/tmp', INSTANCE, *args, **kwargs)
 
 
-def sync_source():
+def sync_source(destination="/opt/wbc-lab", archive=None):
     # Only tracked application/fixture source and this lab's current Python
     # files. No git metadata, production runtime, env files, tokens or control.
     tracked = subprocess.check_output(['git', 'ls-files', '-z', 'apps', 'packages', 'artifacts'], cwd=ROOT).decode().split('\0')
     files = {ROOT / name for name in tracked if name}
     files.update((ROOT / 'apps/local_cycle_lab').glob('*.py'))
-    archive = ROOT / 'output/stage4-vm/source.tgz'
+    archive = archive or ROOT / 'output/stage4-vm/source.tgz'
     fingerprint = hashlib.sha256()
-    with tarfile.open(archive, 'w:gz') as out:
+    with tarfile.open(archive, 'w:gz', compresslevel=1) as out:
         for path in sorted(files):
             if path.is_file() and not path.is_symlink():
                 name = str(path.relative_to(ROOT))
@@ -52,7 +52,7 @@ def sync_source():
         info.size = len(identity)
         out.addfile(info, io.BytesIO(identity))
     with archive.open('rb') as stream:
-        guest('sudo', 'tar', '-xzf', '-', '-C', '/opt/wbc-lab', stdin=stream)
+        guest('sudo', 'tar', '-xzf', '-', '-C', destination, stdin=stream)
 
 
 def isolated(module: str, arguments: list[str]):
