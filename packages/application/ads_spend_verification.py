@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from io import BytesIO
 import json
+import math
 import re
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
@@ -34,6 +35,22 @@ def amount(value):
         return money.quantize(CENT)
     except InvalidOperation as exc:
         raise ValueError("invalid RUB spend") from exc
+
+
+def snapshot_amount(value):
+    """Decode native float aggregation without relaxing WB's exact cent amounts."""
+    try:
+        return amount(value)
+    except ValueError:
+        if (type(value) is not float or not math.isfinite(value) or value <= 0
+                or math.ulp(value) >= 0.000001):
+            raise
+        rounded = Decimal(str(value)).quantize(CENT)
+        # Only an adjacent binary float of a nonzero cent amount is eligible.
+        # Bound ULP independently so large floats cannot hide fractional kopecks.
+        if rounded == 0 or abs(value - float(rounded)) > math.ulp(value):
+            raise ValueError("invalid native RUB spend")
+        return amount(rounded)
 
 
 def product_rows(raw):
@@ -115,7 +132,7 @@ def observed(result, day):
     for item in result["items"]:
         nm = str(item.get("nm_id", item.get("nmId", "")))
         try:
-            totals[nm] += amount(item.get("ads_sum"))
+            totals[nm] += snapshot_amount(item.get("ads_sum"))
         except ValueError:
             invalid.add(nm)
     return {nm: total for nm, total in totals.items() if nm not in invalid}

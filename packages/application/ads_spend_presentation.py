@@ -1,7 +1,7 @@
 """Apply verified spend to native dated rows while preserving other quality reasons."""
 from dataclasses import replace
 
-from packages.application.ads_spend_verification import amount
+from packages.application.ads_spend_verification import snapshot_amount
 from packages.application.vitrina_economics import METRICS, SOURCE
 
 REASONS = {"no_product_row": "В дневной выгрузке WB нет строки по этой карточке.",
@@ -11,7 +11,7 @@ REASONS = {"no_product_row": "В дневной выгрузке WB нет ст�
 
 def same_spend(value, decision):
     try:
-        return amount(value) == decision.amount
+        return snapshot_amount(value) == decision.amount
     except ValueError:
         return False
 

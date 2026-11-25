@@ -2,7 +2,7 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:535b12e267ab1f7c4ded258e27965526ea34988f1ff904196f8d61a5a352b6e5",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:141e672b75dbc10f4e1fd738fdada228a3f27ac9f27d2f6833aa0623f428d70e",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
     "packages/application/sheet_vitrina_v1_web_vitrina.py": "a0dfe41c8fd399e76924f843402bb1b4bef99ef69d2a9a20b1f154d6091aabc6",
@@ -47,8 +47,8 @@
     "packages/application/vitrina_last_known_cost.py": "1776ff13ef1d9fdbae97fd604e64725f9caf512e5c7674dc4e6a0fb24d2bfb6c",
     "packages/application/fbo_forward_cost_consumers.py": "990c2b05895d53cbe0e059db6f453bf381ce57949c5e7e3daba6d281083f3cfa",
     "packages/application/fbo_forward_costs.py": "5438eb87e6fa8eba737eacb16aa1f3df283f4c74e1ebab4d10701a6afbc00c97",
-    "packages/application/ads_spend_presentation.py": "2c7262b579028b41ca76cf1ebfe447f82d8748d0fe5c8bc0178c68e086aa4aa3",
-    "packages/application/ads_spend_verification.py": "59b9d002fef9fb962273dc3af727a35533a5aca3c94431505305218373bb665a",
+    "packages/application/ads_spend_presentation.py": "e4fdbb8b9d32d73bc6726d19fd7e3c01819b22ab007fdf826815aed305d3e60e",
+    "packages/application/ads_spend_verification.py": "611949532c756637d5e35a6a22623c071821461713007c73868e9b37f4aff35a",
     "packages/application/ads_snapshot_payload.py": "d1d570b4f4d9dfa768f65616438fb56071891081cabb494026f7edb0d60ebbb3",
     "packages/application/web_vitrina_history_live_adapter.py": "717a87aa58e8b20304e8a849687d6b0771a54f80b5897cb3cea752140515822e"
   },

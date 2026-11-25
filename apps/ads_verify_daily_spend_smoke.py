@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from io import BytesIO
 import json
+import math
 import os
 import socket
 from pathlib import Path
@@ -24,7 +25,8 @@ from apps.production_apply_launcher import execute
 from apps.ads_sku_daily_spend_apply import DailySpendAdapter
 from packages.application.ads_spend_presentation import verified_presentation
 from packages.application.ads_spend_verification import (
-    HEADER, TABLE, check_receipt, digest, preview, product_rows, verified_days,
+    HEADER, TABLE, amount, snapshot_amount, observed, SpendDecision,
+    check_receipt, digest, preview, product_rows, verified_days,
 )
 from packages.application.partner_report import PartnerReportBlock
 from packages.application.vitrina_economics import SOURCE
@@ -86,6 +88,36 @@ def check_vitrina(proofs):
 
 
 def main():
+    # Persisted native aggregation uses float. Admit its adjacent cent value,
+    # while workbook values and meaningful discrepancies remain strict.
+    for value, expected in ((2739.8599999999997, "2739.86"), (2904.8199999999997, "2904.82"),
+                            (2419.7200000000003, "2419.72"), (2752.3599999999997, "2752.36"),
+                            (2608.7799999999997, "2608.78"), (2799.8199999999997, "2799.82"),
+                            (2479.2000000000003, "2479.20"), (0.1 + 0.2, "0.30")):
+        assert snapshot_amount(value) == Decimal(expected)
+        refused(lambda: amount(value))
+        refused(lambda: snapshot_amount(str(value)))
+        refused(lambda: snapshot_amount(Decimal(str(value))))
+        decision = SpendDecision("verified_sku_spend", amount=Decimal(expected))
+        from packages.application.ads_spend_presentation import same_spend
+        assert same_spend(value, decision)
+        assert not same_spend(value + 0.01, decision)
+        partial = dict(kind="incomplete", snapshot_date=DAY, diagnostics=dict(source_date=DAY,
+            zero_fill_applied=False, partial_observation_contract="ads_partial_observed_v1"),
+            items=[dict(nm_id=NM, ads_sum=value)])
+        assert observed(partial, DAY) == {NM: Decimal(expected)}
+    for value in (1.001, 1.009, -0.01, math.inf, math.nan, 1e100, math.nextafter(0.0, 1.0),
+                  math.nextafter(math.nextafter(1.0, math.inf), math.inf), 2**33 + 0.001):
+        refused(lambda: snapshot_amount(value))
+    assert snapshot_amount(0.0) == Decimal("0.00")
+    refused(lambda: product_rows(workbook([(NM, "317", 1.001)])))
+    with sqlite3.connect(":memory:") as native:
+        native.execute("CREATE TABLE temporal_source_slot_snapshots (source_key, snapshot_role, snapshot_date, payload_json)")
+        native.execute("INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?)", ("ads_compact",
+            "accepted_closed_day_snapshot", DAY, json.dumps(dict(partial, items=[dict(nm_id=NM, ads_sum=2752.3599999999997)]))))
+        for official, status in ((2752.36, "verified_sku_spend"), (2752.37, "spend_mismatch")):
+            daily = workbook([(NM, "317", official)])
+            assert preview(native, daily, receipt(daily, str(official)), SELLER, NOW, nm_id=NM)[0]["decisions"][NM] == status
     raw = workbook([(NM, "317", 30900), (NM, "318", 4), ("201", "317", 0)])
     info = receipt(raw, "daily-export")
     refused(lambda: check_receipt(dict(info, date_to="2026-07-10"), raw, SELLER, NOW))
