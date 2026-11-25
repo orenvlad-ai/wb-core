@@ -42,6 +42,11 @@
       "commands": [],
       "pip": ["openpyxl==3.1.5"]
     },
+    "partner_finance_diagnostic_imports": {
+      "scripts": ["apps/partner_finance_production_diagnostic_smoke.py"],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "buyout_percent_imports": {
       "scripts": ["apps/sheet_vitrina_v1_buyout_percent_smoke.py"],
       "commands": [],
@@ -1413,6 +1418,11 @@
       "pip": [
         "openpyxl==3.1.5"
       ]
+    },
+    "partner_finance_diagnostic": {
+      "patterns": ["packages/application/partner_finance_production_diagnostic.py"],
+      "commands": [["python3", "apps/partner_finance_production_diagnostic_smoke.py"]],
+      "pip": []
     },
     "process": {
       "patterns": [
