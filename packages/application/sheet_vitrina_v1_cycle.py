@@ -810,4 +810,7 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
                         item['completed_effects'] = dict(exc.completed_effects)
         _observe_terminal(receipt, exc)
         store.write(receipt)
+        if history_failure:
+            journal_log.event("history_failure", history_failure["reason_code"], history_failure["outcome"],
+                              cycle_id=receipt["cycle_id"], job_id=receipt.get("job_id"))
         raise
