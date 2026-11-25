@@ -36,12 +36,13 @@ class AttemptStore:
         atomic_json(self.output / "attempt.json", receipt)
 
 
-def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL):
+def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, collection_hash=None):
     from packages.application.fbs_accounting_degraded import degraded_accounting_scope
     from packages.application.business_data_procedure_admission import admitted_write
     from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog
     from packages.application.sheet_vitrina_v1_cycle import (
-        finance_raw_proof, require_cycle_business_date, run_rolling_history_stage,
+        STAGES, finance_raw_proof, require_cycle_business_date, run_closed_ready_stage,
+        run_final_ready_stage, run_rolling_history_stage,
     )
     from packages.application.web_vitrina_snapshot_admission import process_identity
 
@@ -51,13 +52,19 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL):
     # The warehouse may have refreshed the catalog once after source collection.
     fbs.update({key: versions[key] for key in fbs})
     finance = stages["finance_sources"]["versions"]
+    if stage not in (*SUPPORTED, "daily_projection"):
+        raise ValueError("Unsupported recovery stage")
+    suffix = stage == "daily_projection"
+    selected = ("daily_projection", "closed_ready", "final_ready", "rolling14") if suffix else (stage,)
+    if suffix:
+        expect(selected == STAGES[STAGES.index(stage):], "Native publication stage order changed")
     fresh = dict(schema="local_selected_stage_v1", cycle_id=uuid4().hex, source_cycle=source["cycle_id"],
                  source_job=source["job_id"], checkpoint_sha256=checkpoint_hash, replay_code=read_json(SOURCE_ID),
-                 scope="one_stage", current_stage=stage, business_date=source["business_date"],
+                 scope="publication_suffix" if suffix else "one_stage", current_stage=stage, business_date=source["business_date"],
                  slot_utc=entry.now_factory().isoformat(), owner_pid=os.getpid(),
                  process_identity=process_identity(os.getpid()), status="accepted",
                  history_config_fingerprint=config.fingerprint(), final_versions=versions,
-                 stages=[dict(stage=stage, status="pending")])
+                 stages=[dict(stage=name, status="pending") for name in selected])
     expect(fresh["history_config_fingerprint"] == source["history_config_fingerprint"], "History authority differs")
     store = AttemptStore(output)
 
@@ -65,44 +72,64 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL):
         fresh["job_id"] = job_id
         store.write(fresh)
 
+    def actions():
+        if stage == "warehouse":
+            raw = finance_raw_proof(entry)
+            expect(all(finance[key] == value for key, value in raw.items()), "Finance source changed")
+            from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
+            from packages.application.ready_publication import readonly
+            with readonly(entry.runtime.db_path) as conn:
+                observed = read_complete_official_fbs_stock(conn, universe=None, day=fresh["business_date"], now=entry.now_factory())
+            expect(observed["generation_id"] == fbs["fbs_generation"] and observed["generation_digest"] == fbs["fbs_digest"],
+                   "FBS generation changed")
+            yield entry._cycle_warehouse(store, fresh, fbs)
+            return
+        if suffix:
+            from .publication_checkpoint import restore as restore_collection
+            adapter, handle, closed = restore_collection(entry, source, output / "collection.json", collection_hash, finance, fbs)
+            yield entry._cycle_daily_projection()
+            dates, proof = run_closed_ready_stage(entry, fresh, adapter, handle, finance, fbs, closed)
+            yield proof
+            ready, proof = run_final_ready_stage(entry, fresh, adapter, handle, finance, fbs)
+            del handle
+            yield proof
+        else:
+            entry._cycle_validate_predecessors(finance, fbs, versions)
+            dates = tuple(json.loads(versions["closed_backfill_dates"]))
+            closed = ClosedBacklog(entry._cycle_sources()) if dates else None
+            ready = stages["final_ready"]["versions"]
+        yield run_rolling_history_stage(entry, store, fresh, config, ready=ready,
+            finance=finance, fbs=fbs, backfill_dates=dates, closed=closed)
+
     def worker(log):
         with entry._sheet_cycle_lock:
-            row = fresh["stages"][0]
+            row = None
             try:
                 entry._cycle_owned_worker_identity(fresh)
-                require_cycle_business_date(fresh["business_date"], entry.now_factory())
-                row.update(status="running", started_at=entry.activated_at_factory())
-                fresh["status"] = "running"
-                store.write(fresh)
-                with degraded_accounting_scope(entry.runtime, versions):
-                    if stage == "warehouse":
-                        raw = finance_raw_proof(entry)
-                        expect(all(finance[key] == value for key, value in raw.items()), "Finance source changed")
-                        from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
-                        from packages.application.ready_publication import readonly
-                        with readonly(entry.runtime.db_path) as conn:
-                            observed = read_complete_official_fbs_stock(conn, universe=None, day=fresh["business_date"], now=entry.now_factory())
-                        expect(observed["generation_id"] == fbs["fbs_generation"] and observed["generation_digest"] == fbs["fbs_digest"],
-                               "FBS generation changed")
-                        proof = entry._cycle_warehouse(store, fresh, fbs)
-                    else:
-                        entry._cycle_validate_predecessors(finance, fbs, versions)
-                        dates = tuple(json.loads(versions["closed_backfill_dates"]))
-                        closed = ClosedBacklog(entry._cycle_sources()) if dates else None
-                        proof = run_rolling_history_stage(entry, store, fresh, config, ready=stages["final_ready"]["versions"],
-                            finance=finance, fbs=fbs, backfill_dates=dates, closed=closed)
-                require_cycle_business_date(fresh["business_date"], entry.now_factory())
-                expect(proof.versions and all(isinstance(v, str) and v for v in proof.versions.values()),
-                       "Native stage proof missing")
-                fresh["status"] = "degraded" if proof.warnings else "complete"
-                row.update(status=fresh["status"], versions=proof.versions, warnings=list(proof.warnings))
-                versions.update(proof.versions)
+                steps = actions()
+                for row in fresh["stages"]:
+                    require_cycle_business_date(fresh["business_date"], entry.now_factory())
+                    row.update(status="running", started_at=entry.activated_at_factory())
+                    fresh.update(status="running", current_stage=row["stage"])
+                    store.write(fresh)
+                    with degraded_accounting_scope(entry.runtime, versions):
+                        proof = next(steps)
+                    require_cycle_business_date(fresh["business_date"], entry.now_factory())
+                    expect(proof.versions and all(isinstance(v, str) and v for v in proof.versions.values()),
+                           "Native stage proof missing")
+                    row.update(status="degraded" if proof.warnings else "complete", versions=proof.versions,
+                               warnings=list(proof.warnings), finished_at=entry.activated_at_factory())
+                    versions.update(proof.versions)
+                    store.write(fresh)
+                steps.close()
+                fresh.update(status="degraded" if any(s["warnings"] for s in fresh["stages"]) else "complete",
+                             current_stage="" if suffix else stage)
             except BaseException as exc:
                 fresh.update(status="failed", error_code=type(exc).__name__)
-                row["status"] = "failed"
+                if row is not None and row["status"] == "running":
+                    row.update(status="failed", finished_at=entry.activated_at_factory())
                 raise
             finally:
-                row["finished_at"] = entry.activated_at_factory()
                 store.write(fresh)
             return fresh
 

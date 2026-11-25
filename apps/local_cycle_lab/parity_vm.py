@@ -1,4 +1,4 @@
-"""Run manual dispatch, source rejection and in-place History recovery in the private Linux lab."""
+"""Run manual dispatch, source rejection and in-place stage recovery in the private Linux lab."""
 
 import argparse
 from datetime import datetime, timedelta
@@ -20,18 +20,18 @@ CONTRACT = "artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_
 UNITS = "/home/wbc-lab/.config/systemd/user"
 
 
-def run(fixture, output):
+def run(fixture, output, stage):
     lock = "/var/lib/wbc-lab/.parity-suite-active"
     guest("sudo", "-u", "wbc-lab", "mkdir", lock)
     try:
-        run_owned(fixture, output)
+        run_owned(fixture, output, stage)
     finally:
         # A surviving unit tree requires explicit cleanup before the next invocation.
         guest("sudo", "-u", "wbc-lab", "test", "!", "-e", UNITS)
         guest("sudo", "-u", "wbc-lab", "rmdir", lock)
 
 
-def run_owned(fixture, output):
+def run_owned(fixture, output, stage):
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     name = "parity-" + uuid4().hex
     root = "/var/lib/wbc-lab/runs/" + name
@@ -153,6 +153,8 @@ def run_owned(fixture, output):
             "-m",
             "apps.local_cycle_lab.parity_case",
             action,
+            "--interrupt-before",
+            stage,
         )
         guest(*command)
 
@@ -203,6 +205,7 @@ def run_owned(fixture, output):
         fields = ("ready_cells", "history_cells", "vitrina_cells", "history_dates")
         if (
             control["history_values"] != repaired["history_values"]
+            or control["tables"] != repaired["tables"]
             or operands(control["business"]) != operands(repaired["business"])
             or any(control["publication"][key] != repaired["publication"][key] for key in fields)
         ):
@@ -249,5 +252,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("private_fixture", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--interrupt-before", choices=("rolling14", "daily_projection"), default="rolling14")
     args = parser.parse_args()
-    run(args.private_fixture, args.output)
+    run(args.private_fixture, args.output, args.interrupt_before)

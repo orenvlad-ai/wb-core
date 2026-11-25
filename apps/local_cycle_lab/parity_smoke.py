@@ -4,6 +4,8 @@ from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+import json
 import unittest
 import sys
 
@@ -33,9 +35,59 @@ def receipt_for(missing_ads):
     return dict(business_date=day.isoformat(), status="degraded", stages=stages)
 
 
+class PublicationCheckpointTests(unittest.TestCase):
+    def test_native_status_and_nested_source_operands_survive_json(self):
+        from apps.local_cycle_lab.publication_checkpoint import pack, unpack
+        from packages.application.sheet_vitrina_v1_live_plan import LiveSourceStatus
+
+        status = LiveSourceStatus(
+            "prices",
+            "today_current",
+            "",
+            "2026-11-24",
+            "success",
+            "",
+            "",
+            "",
+            "",
+            "",
+            1,
+            1,
+            [],
+            "",
+            {"scope": {101: (1, 2)}},
+        )
+        identity = ("prices", "today_current", status.column_date, (101,), False)
+        payload = SimpleNamespace(items=[SimpleNamespace(nm_id=101)], diagnostics={"sources": (1, None)})
+        from packages.contracts.seller_funnel_snapshot_block import SellerFunnelSnapshotNotFound
+
+        funnel = SellerFunnelSnapshotNotFound("not_found", "missing")
+        object.__setattr__(funnel, "diagnostics", {"reason": "absent"})
+        self.assertEqual(vars(unpack(pack(funnel))), vars(funnel))
+        restored = unpack(json.loads(json.dumps(pack({identity: (status, payload)}))))
+        self.assertEqual(restored, {identity: (status, payload)})
+        with self.assertRaisesRegex(ValueError, "Duplicate checkpoint key"):
+            unpack(["map", [[1, 3], [1, 4]]])
+        with self.assertRaisesRegex(ValueError, "Unsupported checkpoint tag"):
+            unpack(["arbitrary-class", []])
+
+    def test_changed_checkpoint_fails_before_runtime_access(self):
+        from apps.local_cycle_lab.publication_checkpoint import restore
+        from apps.local_cycle_lab.stage_checkpoint import file_hash
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "collection.json"
+            path.write_text('{"slots":[]}')
+            sealed = file_hash(path)
+            path.write_text('{"slots":[1]}')
+            with self.assertRaisesRegex(ValueError, "checksum differs"):
+                restore(None, None, path, sealed, None, None)
+
+
 class WarningPolicyTests(unittest.TestCase):
     def test_provider_time_survives_process_restart(self):
         from apps.local_cycle_lab.__main__ import ReplayClock
+
         now = datetime(2026, 11, 24, 8, tzinfo=timezone.utc)
         with TemporaryDirectory() as directory:
             path = Path(directory) / "clock.json"
