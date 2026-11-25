@@ -179,6 +179,10 @@ def main():
     with ExitStack() as stack:
         tmp = Path(stack.enter_context(TemporaryDirectory(prefix="wbc-lab-")))
         path = tmp / "state" if args.state is None else args.state.absolute()
+        # Manual UI runtimes have a lifetime writer lock and may also live
+        # inside a reset archive. Only the supervisor can open their live DB.
+        if path.resolve().name == "runtime" and (path.resolve().parent / "lab.json").exists():
+            parser.error("Эта база принадлежит ручному стенду. Используйте local serve и кнопку проверки.")
         fresh = not path.exists()
         marker = path / "wbc-local-scenario.json"
         identity = {"fixture": hashlib.sha256(scenario_bytes).hexdigest(), "variant":args.variant}

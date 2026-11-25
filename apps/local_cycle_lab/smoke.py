@@ -98,6 +98,22 @@ class SourceBenchSmoke(unittest.TestCase):
         self.assertEqual(list(foreign.iterdir()), [foreign / "keep.txt"])
         self.assertEqual((foreign / "keep.txt").read_text(), "untouched")
 
+    def test_source_cli_respects_ui_writer_and_archives(self):
+        from .state import LabState
+        state = LabState((self.root / "manual").resolve())
+        identity = state.open(SCENARIO, "normal")
+        with state.writer():
+            state.runtime.mkdir()
+            output = cli("--state", state.runtime)
+            self.assertNotEqual(output.returncode, 0)
+            self.assertIn("принадлежит ручному стенду", output.stderr)
+            self.assertFalse(list(state.runtime.iterdir()))
+            state.reset(identity["id"])
+            archived_runtime = Path(state.identity()["previous_archive"]) / "runtime"
+            output = cli("--state", archived_runtime)
+            self.assertIn("принадлежит ручному стенду", output.stderr)
+            self.assertFalse(list(archived_runtime.iterdir()))
+
     def test_unplanned_http_method_query_and_body_have_no_fallback(self):
         for request in (
             Request("https://marketplace-api.wildberries.ru/api/v3/warehouses?extra=1"),

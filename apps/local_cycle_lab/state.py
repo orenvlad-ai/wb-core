@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import sqlite3
 from uuid import uuid4
 
@@ -49,23 +48,28 @@ class LabState:
         self._writer_fd = None
 
     def open(self, scenario, variant):
-        digest = hashlib.sha256(Path(scenario).read_bytes()).hexdigest()
-        if not self.root.exists():
+        source = Path(scenario).read_bytes()
+        digest = hashlib.sha256(source).hexdigest()
+        fresh = not self.root.exists()
+        if fresh:
             self.root.mkdir(parents=True, mode=0o700)
-            atomic_json(self.manifest, dict(schema=SCHEMA, id=uuid4().hex,
-                generation=uuid4().hex, fixture=digest, variant=variant, created_at=stamp()))
-            shutil.copyfile(scenario, self.root / "scenario.json")
-        data = self.identity()
-        if data["fixture"] != digest or data["variant"] != variant:
-            raise ValueError("Сценарий или вариант отличаются от сохранённого стенда")
-        for name in ("home", "tmp", "control", "runs", "archives"):
-            if name == "runs" and (self.root / "reset-transaction.json").exists():
-                continue  # Recovery must distinguish unmoved data from a new empty directory.
-            path = self.root / name
-            if path.is_symlink():
-                raise ValueError("Ссылка вместо каталога стенда: " + name)
-            path.mkdir(exist_ok=True, mode=0o700)
-        return data
+        else:
+            # Refuse a foreign directory before creating even a lock file.
+            self.identity()
+        with self.writer():
+            saved = self.root / "scenario.json"
+            if fresh:
+                saved.write_bytes(source)
+                atomic_json(self.manifest, dict(schema=SCHEMA, id=uuid4().hex,
+                    generation=uuid4().hex, fixture=digest, variant=variant, created_at=stamp()))
+            data = self.identity()
+            if data["fixture"] != digest or data["variant"] != variant or saved.read_bytes() != source:
+                raise ValueError("Сценарий или вариант отличаются от сохранённого стенда")
+            for name in ("home", "tmp", "control", "runs", "archives"):
+                if name == "runs" and (self.root / "reset-transaction.json").exists():
+                    continue  # Recovery distinguishes an unmoved directory from a new empty one.
+                (self.root / name).mkdir(exist_ok=True, mode=0o700)
+            return data
 
     def identity(self):
         data = read_json(self.manifest)

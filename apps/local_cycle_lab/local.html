@@ -1,21 +1,116 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Тестовая WBC</title><style>
-*{box-sizing:border-box}body{margin:0;background:#f5f7fa;color:#182337;font:14px system-ui,sans-serif}
-header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 18px;background:white;border-bottom:1px solid #dce2ec}
-header strong{margin-right:auto}button{border:1px solid #bfc9da;border-radius:7px;background:white;padding:8px 12px;color:inherit;cursor:pointer}
-button.primary{background:#244b9b;border-color:#244b9b;color:white}button:disabled{opacity:.5;cursor:wait}#notice{margin:8px 18px;color:#475569}
-details{margin:8px 18px}li{margin:6px 0}iframe{width:100%;height:calc(100vh - 165px);border:0;background:white}#message{white-space:pre-wrap}
-</style></head><body>
-<header><strong>Локальная WBC</strong><button class="primary" id="run">Проверить источники и витрину</button><button id="reload">Обновить интерфейс</button><button id="reset">Вернуть исходные данные</button></header>
-<p id="notice">Ручные документы сохраняются после закрытия. Полный цикл расчёта расходов ещё не подключён.</p>
-<details><summary>Запуски и результаты</summary><ol id="attempts"></ol></details><p id="message" role="status"></p>
-<iframe id="wbc" title="Интерфейс тестовой WBC" src="__WBC_UI__"></iframe>
-<script>
-const message=document.querySelector('#message'),run=document.querySelector('#run'),reset=document.querySelector('#reset');
-async function status(){try{const response=await fetch('/lab/status');if(!response.ok)throw Error('Не удалось прочитать состояние');const data=await response.json();run.disabled=reset.disabled=data.busy;const list=document.querySelector('#attempts');list.replaceChildren();for(const item of data.attempts){const row=document.createElement('li');row.textContent=`${item.started_at}: ${ {running:'выполняется',passed:'проверено',failed:'ошибка',interrupted:'прервано'}[item.status]||item.status}${item.error?' — '+item.error:''}`;list.append(row);}if(data.busy)message.textContent='Выполняется проверка. Можно просматривать WBC.';else if(data.attempts.length){const last=data.attempts.at(-1);message.textContent=last.status==='passed'?'Проверка источников и витрины пройдена.':last.error||'Предыдущий запуск прерван.';}}catch(error){message.textContent=error.message;}}
-async function command(path){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const data=await response.json();if(!response.ok)throw Error(data.error||'Ошибка запуска');return data;}
-run.onclick=async()=>{try{await command('/lab/run');message.textContent='Проверка запущена';await status();}catch(error){message.textContent=error.message;}};
-document.querySelector('#reload').onclick=()=>{document.querySelector('#wbc').src='__WBC_UI__';status();};
-reset.onclick=async()=>{if(!confirm('Вернуть исходные тестовые данные? Текущие документы и результаты будут перенесены в архив.'))return;try{await command('/lab/reset');run.disabled=reset.disabled=true;message.textContent='Подготавливаются исходные данные…';const timer=setInterval(async()=>{try{const r=await fetch('/lab/status');if(r.ok){clearInterval(timer);location.reload();}}catch{}},1500);}catch(error){message.textContent=error.message;}};
-status();setInterval(status,3000);
-</script></body></html>
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Тестовая WBC</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f7fa; color: #182337; font: 14px system-ui, sans-serif; }
+    header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 18px; background: white; border-bottom: 1px solid #dce2ec; }
+    header strong { margin-right: auto; }
+    button { border: 1px solid #bfc9da; border-radius: 7px; background: white; padding: 8px 12px; color: inherit; cursor: pointer; }
+    button.primary { background: #244b9b; border-color: #244b9b; color: white; }
+    button:disabled { opacity: .5; cursor: wait; }
+    p, details { margin: 8px 18px; }
+    #notice { color: #475569; }
+    li { margin: 6px 0; }
+    iframe { width: 100%; height: calc(100vh - 165px); border: 0; background: white; }
+    #message { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Локальная WBC</strong>
+    <button class="primary" id="run">Проверить источники и витрину</button>
+    <button id="reload">Обновить интерфейс</button>
+    <button id="reset">Вернуть исходные данные</button>
+  </header>
+  <p id="notice">Ручные документы сохраняются после закрытия. Расчёт себестоимости по ним ещё не подключён.</p>
+  <details><summary>Запуски и результаты</summary><ol id="attempts"></ol></details>
+  <p id="message" role="status"></p>
+  <iframe id="wbc" title="Интерфейс тестовой WBC" src="__WBC_UI__"></iframe>
+  <script>
+    const message = document.querySelector('#message');
+    const run = document.querySelector('#run');
+    const reset = document.querySelector('#reset');
+    const reload = document.querySelector('#reload');
+    const list = document.querySelector('#attempts');
+    const frame = document.querySelector('#wbc');
+    const labels = {running: 'выполняется', passed: 'проверено', failed: 'ошибка', interrupted: 'прервано'};
+    let resetting = false;
+
+    function lockControls(locked) {
+      run.disabled = reset.disabled = reload.disabled = locked;
+      frame.inert = locked;
+    }
+
+    async function refreshStatus() {
+      try {
+        const response = await fetch('/lab/status', {cache: 'no-store'});
+        if (!response.ok) throw Error('Не удалось прочитать состояние стенда.');
+        const data = await response.json();
+        if (data.generation !== labGeneration) {
+          location.reload();
+          return;
+        }
+        if (resetting) return;
+        lockControls(data.busy);
+        list.replaceChildren();
+        for (const item of data.attempts) {
+          const row = document.createElement('li');
+          const time = new Date(item.started_at).toLocaleString('ru-RU');
+          row.textContent = time + ' · ' + (labels[item.status] || item.status);
+          if (item.error) row.textContent += ' — ' + item.error;
+          list.append(row);
+        }
+        if (data.busy) {
+          message.textContent = 'Идёт проверка. Работа с документами возобновится после её завершения.';
+        } else if (data.attempts.length) {
+          const last = data.attempts.at(-1);
+          message.textContent = last.status === 'passed' ? 'Проверка источников и витрины пройдена.'
+            : last.error || 'Предыдущий запуск прерван.';
+        }
+      } catch (error) {
+        if (!resetting) message.textContent = error.message;
+      }
+    }
+
+    async function command(path) {
+      const response = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error || 'Ошибка запуска');
+    }
+
+    run.onclick = async () => {
+      lockControls(true);
+      try {
+        await command('/lab/run');
+        await refreshStatus();
+      } catch (error) {
+        lockControls(false);
+        message.textContent = error.message;
+      }
+    };
+    reload.onclick = () => {
+      frame.src = '__WBC_UI__';
+      refreshStatus();
+    };
+    reset.onclick = async () => {
+      if (!confirm('Вернуть исходные тестовые данные? Текущие документы и результаты будут перенесены в архив.')) return;
+      resetting = true;
+      lockControls(true);
+      try {
+        await command('/lab/reset');
+        message.textContent = 'Подготавливаются исходные данные…';
+      } catch (error) {
+        resetting = false;
+        lockControls(false);
+        message.textContent = error.message;
+      }
+    };
+    refreshStatus();
+    setInterval(refreshStatus, 2000);
+  </script>
+</body>
+</html>

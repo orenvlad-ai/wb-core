@@ -1,14 +1,14 @@
 """macOS acceptance: real sandbox, native form, restart, stage and archived reset."""
 import argparse
+import hashlib
 import json
-import os
 from pathlib import Path
-import signal
+import re
 import socket
 import sqlite3
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, TemporaryFile
 import time
 
 if __package__ in (None, ""):
@@ -45,9 +45,8 @@ def main():
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        base = f"http://127.0.0.1:{port}"
         process = None
-        log = (output / "server.log").open("w")
+        log = TemporaryFile(mode="w+")
 
         def start():
             nonlocal process
@@ -107,28 +106,54 @@ def main():
                 page.goto(start())
                 after = page.evaluate("async path=>(await(await fetch(path)).json()).operation", operation)
                 assert after == before, "native source receipt changed after restart"
+                native.locator('[data-unified-tab-button="warehouses"]').click()
+                native.locator('[data-warehouse-key="ff"]').click()
+                native.locator('[data-ff-pool-open]').click()
+                native.locator('[data-ff-pool-tab="workflow"]').click()
+                receipt.wait_for(state="visible")
+                assert receipt.get_attribute("data-ff-operation-receipt") == identity
 
                 # Do not rely on the native button's disabled state: repeat the
                 # exact confirmation identity through its real guarded route.
                 repeated = page.evaluate("""async id=>{const r=await fetch('/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/requests/'+id+'/confirm',
                   {method:'POST',headers:{'Content-Type':'application/json','X-WB-FF-Pool-CSRF':'1'},body:JSON.stringify({confirm:true})});return {status:r.status,body:await r.json()};}""", identity)
                 assert repeated["status"] == 200, repeated
-                page.locator("#run").click()
+                confirmation = repeated["body"]["acceptance"]
+                # The journal adds its own display and domain fields to this native receipt.
+                for key in ("operation_id", "request_id", "accepted_at", "state", "source_document", "summary"):
+                    assert confirmation[key] == before[key], key
+                assert page.evaluate("async path=>(await(await fetch(path)).json()).operation", operation) == before
+                with page.expect_response(lambda response: response.url.endswith("/lab/run")) as started:
+                    page.locator("#run").click()
+                assert started.value.status == 202
                 blocked = page.evaluate("""async()=>{const r=await fetch('/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/documents/overhead/preview',
                     {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});return {status:r.status,body:await r.json()};}""")
                 assert blocked["status"] == 409 and "Дождитесь" in blocked["body"]["error"], blocked
+                busy_get = page.evaluate("async()=>{const r=await fetch('/v1/sheet-vitrina-v1/seller-portal-session/check'); return {status:r.status,body:await r.json()};}")
+                assert busy_get["status"] == 409 and "Дождитесь" in busy_get["body"]["error"], busy_get
                 wait_for(lambda: page.evaluate("async()=>{const d=await(await fetch('/lab/status')).json();return !d.busy&&d.attempts.length&&d;}"))
                 stage = page.evaluate("async()=>await(await fetch('/lab/status')).json()")
                 assert stage["attempts"][-1]["status"] == "passed", stage
-                assert stage["attempts"][-1]["code_sha256"]
+                attempt = stage["attempts"][-1]
+                folder = state / "runs" / attempt["run_id"]
+                assert attempt["code_sha256"] and attempt["generation"] == read_json(state / "lab.json")["generation"]
+                for filename, key in (("state.sqlite3", "input_db_sha256"), ("result.json", "result_sha256")):
+                    assert hashlib.sha256((folder / filename).read_bytes()).hexdigest() == attempt[key]
+                assert read_json(folder / "scenario.json") == read_json(state / "scenario.json")
+                assert read_json(folder / "result.json")["verification"]["status"] == "passed"
+                def confirmations(db):
+                    with sqlite3.connect(db.as_uri() + "?mode=ro", uri=True) as conn:
+                        conn.execute("PRAGMA query_only=ON")
+                        return conn.execute("SELECT count(*) FROM sheet_vitrina_v1_ff_pool_overhead_confirmations").fetchone()[0]
+                assert confirmations(folder / "state.sqlite3") == 1
                 assert page.evaluate("async path=>(await(await fetch(path)).json()).operation", operation) == before
-                for path in ("/v1/sheet-vitrina-v1/web-vitrina/group-refresh", "/v1/sheet-vitrina-v1/health/recovery/start"):
+                for path in ("/v1/sheet-vitrina-v1/web-vitrina/group-refresh", "/v1/sheet-vitrina-v1/web-vitrina/health/recovery/start"):
                     assert page.evaluate("async path=>(await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status", path) == 409
 
                 # Kill only our disposable supervisor. The actual app must exit
                 # on parent death and never leave an unlocked live writer.
-                app_pid = read_json(state / "control/ready.json")["pid"]
-                process.kill(); process.wait(timeout=5)
+                process.kill()
+                process.wait(timeout=5)
                 def unlocked():
                     try:
                         with LabState(state).writer():
@@ -148,24 +173,40 @@ def main():
                     page.locator("#reset").click()
                 assert reset.value.status == 202
                 page.wait_for_function("old=>typeof labGeneration!=='undefined'&&labGeneration!==old", arg=old_generation, timeout=60000)
-                stale = page.evaluate("""async generation=>{const result={};for(const method of ['POST','PATCH','DELETE','PUT']){
-                  const r=await nativeFetch('/v1/not-a-route',{method,headers:{'Content-Type':'application/json','X-WBC-Lab-Generation':generation},body:'{}'});result[method]=r.status;}return result;}""", old_generation)
-                assert all(status == 409 for status in stale.values()), stale
+                stale = page.evaluate("""async generation => {
+                    const statuses = {};
+                    for (const method of ['POST', 'PATCH', 'DELETE', 'PUT']) {
+                        const response = await nativeFetch('/v1/sheet-vitrina-v1/warehouses/ff/facility-pools/documents/overhead/preview', {
+                            method, body: '{}',
+                            headers: {'Content-Type': 'application/json', 'X-WBC-Lab-Generation': generation}
+                        });
+                        statuses[method] = {status: response.status, error: (await response.json()).error};
+                    }
+                    return statuses;
+                }""", old_generation)
+                for rejected in stale.values():
+                    assert rejected == {"status": 409, "error": "Перезагрузите страницу тестового стенда"}, stale
+                assert page.evaluate("localStorage.getItem('wb.ffPool.lastRequestId.v1')") is None
                 assert page.evaluate("async path=>(await fetch(path)).status", operation) == 404
                 assert page.evaluate("async()=>await(await fetch('/lab/status')).json()")['attempts'] == []
                 archive = Path(read_json(state / "lab.json")["previous_archive"])
-                with sqlite3.connect((archive / "runtime/registry_upload_runtime.sqlite3").as_uri() + "?mode=ro", uri=True) as conn:
-                    conn.execute("PRAGMA query_only=ON")
-                    assert conn.execute("SELECT count(*) FROM sheet_vitrina_v1_ff_pool_overhead_confirmations").fetchone()[0] == 1
+                archived_count = confirmations(archive / "runtime/registry_upload_runtime.sqlite3")
+                assert archived_count == 1
+                assert read_json(archive / "runs" / attempt["run_id"] / "attempt.json") == attempt
                 assert not errors, errors
                 page.screenshot(path=str(output / "after-reset.png"), full_page=True)
                 (output / "acceptance.json").write_text(json.dumps(dict(isolation=isolation,
                     receipt_before=before, receipt_after=after, stage=stage,
+                    ui_receipt_restored=True, repeated_confirmation=confirmation["operation_id"],
                     supervisor_death_recovered=True, reset_archived=True, stale_methods=stale,
-                    browser_errors=errors), ensure_ascii=False, indent=2))
+                    browser_errors=errors, checkpoint_verified=True, archive_confirmations=archived_count,
+                    blocked_stage_post=blocked["status"], blocked_stage_get=busy_get["status"]), ensure_ascii=False, indent=2))
                 browser.close()
         finally:
             stop()
+            log.seek(0)
+            if args.output:
+                (output / "server.log").write_text(re.sub(r"\?access=[^\s]+", "", log.read()))
             log.close()
     print("local_cycle_lab browser: PASS (OS isolation parent+child, native source, restart, idempotent confirmation, stage/checkpoint, freeze, parent death, archived reset, stale methods)")
 

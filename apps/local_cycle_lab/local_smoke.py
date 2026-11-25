@@ -1,5 +1,4 @@
 """Portable lifecycle/receipt checks; macOS OS probes run in the real launcher."""
-from contextlib import contextmanager
 import json
 from pathlib import Path
 import subprocess
@@ -39,6 +38,14 @@ class LocalLifecycle(unittest.TestCase):
         with self.assertRaises(ValueError):
             LabState(foreign).open(self.scenario, "normal")
         self.assertEqual([p.name for p in foreign.iterdir()], ["keep"])
+
+    def test_changed_saved_scenario_and_concurrent_open_are_refused(self):
+        with self.state.writer():
+            with self.assertRaisesRegex(ValueError, "второй writer"):
+                LabState(self.state.root).open(self.scenario, "normal")
+        (self.state.root / "scenario.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "отличаются"):
+            self.state.open(self.scenario, "normal")
 
     def test_inherited_lifetime_lock_prevents_reset_after_supervisor_descriptor_closes(self):
         child = None

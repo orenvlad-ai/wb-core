@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import socket
@@ -83,9 +84,10 @@ def probe_main(args, child=False):
 
 def supervise(args):
     state = LabState(args.state)
-    identity = state.open(args.scenario, args.variant)
+    state.open(args.scenario, args.variant)
     with state.writer() as lock_fd:
         state.recover_reset()
+        identity = state.identity()
         if args.action == "reset":
             archive = state.reset(args.confirm)
             print("Исходные данные будут подготовлены при следующем запуске. Архив: " + str(archive))
@@ -188,22 +190,23 @@ class StageController:
         folder = self.state.root / "runs" / run_id
         try:
             folder.mkdir(mode=0o700)
-            self.thread = threading.Thread(target=self._run, args=(folder,), daemon=True)
+            item = dict(run_id=run_id, stage="sources_ready", status="running", started_at=stamp())
+            atomic_json(folder / "attempt.json", item)
+            self.thread = threading.Thread(target=self._run, args=(folder, item), daemon=True)
             self.thread.start()
         except BaseException:
             self.lock.release()
             raise
         return dict(run_id=run_id, accepted=True)
 
-    def _run(self, folder):
-        from .__main__ import run
-        from .checks import verify
-        from .http import HttpTape
-        from .sources import Replay
-        from unittest.mock import patch
-        from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-        item = dict(run_id=folder.name, stage="sources_ready", status="running", started_at=stamp())
+    def _run(self, folder, item):
         try:
+            from .__main__ import run
+            from .checks import verify
+            from .http import HttpTape
+            from .sources import Replay
+            from unittest.mock import patch
+            from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
             identity = self.state.identity()
             item.update(business_date=self.scenario["today"], fixture=identity["fixture"],
                         generation=identity["generation"], code_sha256=self.code_version,
@@ -225,8 +228,10 @@ class StageController:
             item.update(status="failed", error=f"{type(exc).__name__}: {exc}")
         finally:
             item["finished_at"] = stamp()
-            atomic_json(folder / "attempt.json", item)
-            self.lock.release()
+            try:
+                atomic_json(folder / "attempt.json", item)
+            finally:
+                self.lock.release()
 
 
 def serve(args):
@@ -297,20 +302,51 @@ def serve(args):
         server = web.build_registry_upload_http_server(config, entrypoint=entry, advertise_window_v3=False)
         original = server.RequestHandlerClass
         html_writer = web._write_html_response
-        json_writer = web._write_json_response
-
-        def write_json(handler, status, payload, **kwargs):
-            return json_writer(handler, web.HTTPStatus(status), payload, **kwargs)
-        stack.enter_context(patch.object(web, "_write_json_response", write_json))
-
         def write_html(handler, status, html, **kwargs):
-            banner = '<div style="padding:8px;background:#fef08a;color:#713f12;font:600 14px sans-serif">ТЕСТ · Локальная WBC · Данные ' + scenario["today"] + '</div>'
-            script = '<script>const labGeneration=' + json.dumps(identity["generation"]) + ';const nativeFetch=window.fetch;window.fetch=(url,options={})=>{const target=new URL(typeof url==="string"?url:url.url,location.href);if(target.origin===location.origin){options.headers=new Headers(options.headers||(url instanceof Request?url.headers:{}));options.headers.set("X-WBC-Lab-Generation",labGeneration);}return nativeFetch(url,options);};</script>'
+            banner = '<div id="wbc-lab-banner" style="padding:8px;background:#fef08a;color:#713f12;font:600 14px sans-serif">ТЕСТ · Локальная WBC · Данные ' + scenario["today"] + '</div>'
+            script = """<script>
+const labGeneration = %s;
+if (window !== window.top) {
+    document.addEventListener("DOMContentLoaded", () => document.getElementById("wbc-lab-banner").hidden = true);
+}
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (input, options = {}) => {
+    const request = input instanceof Request ? input : null;
+    const target = new URL(request ? request.url : input, location.href);
+    if (target.origin === location.origin) {
+        const headers = new Headers(options.headers ?? request?.headers);
+        headers.set("X-WBC-Lab-Generation", labGeneration);
+        options = {...options, headers};
+    }
+    return nativeFetch(input, options);
+};
+if (localStorage.getItem("wbc.lab.generation") !== labGeneration) {
+    localStorage.removeItem("wb.ffPool.lastRequestId.v1");
+    localStorage.removeItem("wb.ffPool.overheadConfirmation.v1");
+    localStorage.setItem("wbc.lab.generation", labGeneration);
+}
+</script>""" % json.dumps(identity["generation"])
             html = html.replace("</head>", script + "</head>", 1)
             index = html.find(">", html.find("<body")) + 1
             html = html[:index] + banner + html[index:]
             return html_writer(handler, status, html, **kwargs)
         stack.enter_context(patch.object(web, "_write_html_response", write_html))
+
+        # Some native GETs refresh a source or schedule work. Only expose the
+        # surfaces connected to this lab. During a stage no native handler runs.
+        native_reads = {
+            "/sheet-vitrina-v1/operations", "/v1/sheet-vitrina-v1/operations",
+            web.DEFAULT_WEB_AUTH_LOGIN_PATH, web.DEFAULT_WEB_AUTH_LOGOUT_PATH,
+            web.DEFAULT_SHEET_WEB_VITRINA_UI_PATH, web.DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+            web.DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH, web.DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH,
+            web.DEFAULT_WAREHOUSES_PATH + "/production", web.DEFAULT_WAREHOUSES_PATH + "/ff",
+            web.DEFAULT_WAREHOUSES_PATH + "/planning-inventory", web.DEFAULT_FF_INVENTORY_STATUS_PATH,
+            web.DEFAULT_FF_OVERHEAD_STATUS_PATH, web.DEFAULT_FF_POOL_PATH + "/capabilities",
+            web.DEFAULT_FF_POOL_FACILITIES_PATH, web.DEFAULT_FF_POOL_DOCUMENTS_PATH,
+            web.DEFAULT_FBO_NOTIFICATIONS_PATH, web.DEFAULT_FF_POOL_WB_WAREHOUSES_PATH,
+        }
+        request_path = re.escape(web.DEFAULT_FF_POOL_REQUESTS_PATH) + r"/(ffpdr_[a-f0-9]+)"
+        receipt_path = r"/v1/sheet-vitrina-v1/operations/ffpdr_[a-f0-9]+"
 
         class Handler(original):
             def log_message(self, *arguments):
@@ -323,7 +359,7 @@ def serve(args):
 
             def authenticated(self):
                 if not web._authenticated_web_user(self, web._web_auth_config()):
-                    web._write_json_response(self, 401, {"error": "Войдите в локальную WBC"})
+                    web._write_json_response(self, web.HTTPStatus.UNAUTHORIZED, {"error": "Войдите в локальную WBC"})
                     return False
                 return True
 
@@ -337,15 +373,35 @@ def serve(args):
                     if not self.authenticated():
                         return
                     if parsed.path == "/lab/status":
-                        web._write_json_response(self, 200, controller.status())
+                        web._write_json_response(self, web.HTTPStatus.OK, {**controller.status(), "generation": identity["generation"]})
                     else:
                         html = Path(__file__).with_name("local.html").read_text().replace("__WBC_UI__", web.DEFAULT_SHEET_WEB_VITRINA_UI_PATH)
                         web._write_html_response(self, web.HTTPStatus.OK, html)
                     return
+                if controller.lock.locked():
+                    self.stage_busy()
+                    return
+                if (parsed.path not in native_reads
+                        and not re.fullmatch(request_path + r"(?:/preview)?", parsed.path)
+                        and not re.fullmatch(receipt_path, parsed.path)):
+                    web._write_json_response(self, web.HTTPStatus.CONFLICT, {"error": "Этот раздел ещё не подключён к локальному стенду"})
+                    return
+                if parsed.path == web.DEFAULT_SHEET_WEB_VITRINA_READ_PATH and "window_format" in parse_qs(parsed.query):
+                    web._write_json_response(self, web.HTTPStatus.CONFLICT, {"error": "Оконный режим витрины ещё не подключён"})
+                    return
                 super().do_GET()
+
+            def stage_busy(self):
+                web._write_json_response(self, web.HTTPStatus.CONFLICT, {"error": "Дождитесь завершения этапа. Его результат появится в списке запусков."})
 
             def do_POST(self):
                 parsed = urlsplit(self.path)
+                if parsed.path == web.DEFAULT_WEB_AUTH_LOGIN_PATH:
+                    if controller.lock.locked():
+                        self.stage_busy()
+                    else:
+                        super().do_POST()
+                    return
                 if not self.mutation_allowed():
                     return
                 if parsed.path in {"/lab/run", "/lab/reset"}:
@@ -357,50 +413,46 @@ def serve(args):
                                 raise ValueError("Сначала дождитесь завершения фоновой задачи WBC")
                             result = controller.start()
                         else:
-                            if controller.status()["busy"]:
-                                raise ValueError("Дождитесь завершения этапа")
                             atomic_json(state.root / "control" / "reset.json", {"id": identity["id"], "generation": identity["generation"]})
-                            web._write_json_response(self, 202, {"resetting": True})
+                            web._write_json_response(self, web.HTTPStatus.ACCEPTED, {"resetting": True})
                             self.wfile.flush()
                             os._exit(RESET_EXIT)
-                        web._write_json_response(self, 202, result)
+                        web._write_json_response(self, web.HTTPStatus.ACCEPTED, result)
                     except ValueError as exc:
-                        web._write_json_response(self, 409, {"error": str(exc)})
+                        web._write_json_response(self, web.HTTPStatus.CONFLICT, {"error": str(exc)})
                     return
                 # Explicitly allow only the native source-acceptance workflow
                 # verified in this version. No hidden async launcher is exposed.
                 allowed = parsed.path in {web.DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH,
-                    web.DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH, web.DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
-                    "/login"}
-                prefix = web.DEFAULT_FF_POOL_REQUESTS_PATH + "/"
-                if parsed.path.startswith(prefix) and parsed.path.endswith("/confirm"):
-                    request_id = parsed.path[len(prefix):-len("/confirm")]
-                    status = entry.ff_pool_surface.request_status(request_id)
+                    web.DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH, web.DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH}
+                confirmed = re.fullmatch(request_path + "/confirm", parsed.path)
+                if confirmed:
+                    if not self.authenticated():
+                        return
+                    status = entry.ff_pool_surface.request_status(confirmed.group(1))
                     allowed = status.get("document_kind") == "pool_overhead"
                 if not allowed:
-                    web._write_json_response(self, 409, {"error": "В этой версии стенда доступны ручные накладные расходы и проверка источников/витрины. Остальные операции ещё не подключены."})
+                    web._write_json_response(self, web.HTTPStatus.CONFLICT, {"error": "В этой версии стенда доступны ручные накладные расходы и проверка источников/витрины. Остальные операции ещё не подключены."})
                     return
                 super().do_POST()
 
             def mutation_allowed(self):
-                if urlsplit(self.path).path == "/login":
-                    return True
                 if (self.headers.get("X-WBC-Lab-Generation") != identity["generation"]
                         or self.headers.get("Origin", "") != f"http://127.0.0.1:{args.port}"):
-                    web._write_json_response(self, 409, {"error": "Перезагрузите страницу тестового стенда"})
+                    web._write_json_response(self, web.HTTPStatus.CONFLICT, {"error": "Перезагрузите страницу тестового стенда"})
                     return False
-                if controller.status()["busy"]:
-                    web._write_json_response(self, 409, {"error": "Дождитесь завершения этапа; сейчас доступен просмотр"})
+                if controller.lock.locked():
+                    self.stage_busy()
                     return False
                 return True
 
             def do_PATCH(self):
                 if self.mutation_allowed():
-                    web._write_json_response(self, 409, {"error": "Этот вид изменения ещё не подключён к стенду"})
+                    web._write_json_response(self, web.HTTPStatus.CONFLICT, {"error": "Этот вид изменения ещё не подключён к стенду"})
 
             def do_DELETE(self):
                 if self.mutation_allowed():
-                    web._write_json_response(self, 409, {"error": "Этот вид изменения ещё не подключён к стенду"})
+                    web._write_json_response(self, web.HTTPStatus.CONFLICT, {"error": "Этот вид изменения ещё не подключён к стенду"})
 
             def do_PUT(self):
                 if self.mutation_allowed():

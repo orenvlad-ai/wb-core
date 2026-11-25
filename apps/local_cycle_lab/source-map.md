@@ -74,7 +74,7 @@ stock observers и самостоятельные расписания не за
 | Calculation/proxy parameters, mature buyout | CalculationParametersBlock / ProxyV4ParametersBlock; подтверждённое окно/формула/метод/дата | Штатные defaults и частичный maturity capture работают. Нет подтверждённой полноты unit economics без остальных операндов |
 | Temporal accepted/current/closed snapshots и closure states | Live-plan и ClosedBacklog; source/date/role, captured_at, exact payload proof/retry | **локально**: первый current capture 23-го, rollover 24-го, две даты. Неизвестный/failed payload не превращается в 0; повтор читает сохранённое состояние |
 | Buyer roster/runs/observations | Authenticated buyer daily projection; immutable day/roster и session proof | **локально**: seed через доменный API, не через браузер. Это независимое сохранённое наблюдение, не live внешний запрос цикла |
-| Документы поставщика, оплаты, поступления/перемещения/накладные расходы и файлы | Supplier/warehouse/FF ledgers, operator journals; document identity, quantity/value, business date/status/approval | **нет**: тестовый расход ещё не вводился через UI; файлы, open balances, outbox, idempotence и сохранение документа после перезапуска требуют этапов 3–4 |
+| Документы поставщика, оплаты, поступления/перемещения/накладные расходы и файлы | Supplier/warehouse/FF ledgers, operator journals; document identity, quantity/value, business date/status/approval | **штатный UI и локальная БД** для ручного FF-расхода 123,45 ₽. Проверяются accepted-квитанция, повторное подтверждение того же запроса, перезапуск и архив после сброса. Проводка, распределение, остатки, файлы и остальные типы документов ещё не покрыты |
 | FBS/FF opening quantities, valuation/cost layers и снапшоты бухгалтерии | Warehouse + fbs_snapshot_accounting + canonical cost resolver; полные qty/source versions/date | **нет**. Полученные probe 7 единиц не являются opening snapshot или ledger |
 | `own_product_capital` / внутренние проекции функционального склада | OwnProductCapitalBlock; бизнес-день, warehouse version, этапы/qty/cost/evidence | **локальное чтение без функционального снимка**, полноценный капитал не подтверждён |
 | Ready / History, receipts, registry/schema/source/material versions | CAS publisher, history worker, partner report; pins и exact date/bundle | Ready **реальная публикация и readback**. Owned History, 14-дневная история и экран/Excel партнёрского отчёта **не выполнены** |
@@ -110,7 +110,9 @@ CLI возвращает per-source calls/pages/rows/payload_json_bytes/request_
 число складских страниц и срок выполнения полной цепочки. Контрольные цифры
 публикуются с результатом локального запуска, отдельно от предположений о сервере.
 
-Следующий шаг — изолированная локальная WBC и проверка ручного документа. На Маке
-проверено Darwin arm64; docker/colima/orb/podman не найдены в PATH. Наличие другого
-Linux runtime не установлено. Требование Linux у owned history-worker сохраняется;
-нельзя подменить его проверки, чтобы объявить полный цикл принятым.
+На Mac проверена локальная WBC под sandbox-exec. В тесте один составной этап
+`sources_ready`; попытки, их входная БД и результаты сохраняются по поколениям.
+Следующий этап — контрольный полный цикл и проверка распределения ручного
+расхода. Повтор отдельных стадий потребует сохранённых входов и проверки их
+зависимостей. Для owned History сохраняется требование Linux; этот worker
+в приёмку интерфейса на Mac не входит.

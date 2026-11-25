@@ -184,7 +184,10 @@
   "groups": {
     "local_cycle_lab": {
       "patterns": ["apps/local_cycle_lab/**"],
-      "commands": [["python3", "-m", "apps.local_cycle_lab.smoke"]],
+      "commands": [
+        ["python3", "-m", "apps.local_cycle_lab.smoke"],
+        ["python3", "-m", "apps.local_cycle_lab.local_smoke"]
+      ],
       "pip": ["openpyxl==3.1.5"]
     },
     "sqlite_contention": {
