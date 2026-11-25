@@ -1821,6 +1821,7 @@
         "apps/web_vitrina_owned_history_worker.py",
         "apps/owned_history_worker_smoke.py",
         "packages/application/owned_history_native_ack.py",
+        "packages/application/owned_history_source_watch.py",
         "apps/owned_history_completion_smoke.py",
         "apps/owned_history_diagnostics_smoke.py",
         "apps/business_data_cycle_owned_integration_smoke.py",

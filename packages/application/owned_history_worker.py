@@ -161,6 +161,7 @@ class _OwnedHistoryWorker:
         self.pid, self.thread = os.getpid(), threading.current_thread()
         self._process = None
         self._closed = False
+        self._source_watch = None
         self._anchor = None
         self._capture_used = False
         self._portion_used = False
@@ -328,16 +329,28 @@ class _OwnedHistoryWorker:
         raise HistoryDelegationError("history_completion_portion_limit")
 
     def _verified_state(self, anchor):
+        from packages.application.owned_history_source_watch import HistorySourceWatch
+        if self._source_watch is not None:
+            self._source_watch.close()
+        self._source_watch = HistorySourceWatch(self.runtime.runtime_dir, self.runtime.db_path)
         result = self._invoke("verify", anchor["now"], anchor)
         if (result.get("status") != "complete" or result["result"].get("status") != "verified"
                 or result["result"].get("invocation") != result.get("invocation")):
             raise history_result_error("history_completion_readback_unproven", result, mode="verify")
+        self._source_watch.bind_directories(result["result"].pop("watch_directories", None))
+        self._check_verified_events()
         return result["result"]
+
+    def _check_verified_events(self):
+        if self._source_watch is None:
+            raise HistoryDelegationError("history_source_stamp_unsafe")
+        self._source_watch.check(error="history_source_changed_after_readback")
 
     def _finish_completion(self, observed, closed_receipt, *, portions):
         from packages.application.owned_history_native_ack import source_stamp
         if source_stamp(self.runtime.runtime_dir, self.runtime.db_path) != observed["source_stamp"]:
             raise HistoryDelegationError("history_source_changed_after_readback")
+        self._check_verified_events()
         if closed_receipt is not None:
             from packages.application.owned_history_native_ack import _VerifiedClosedHistory
             closed = observed.get("closed")
@@ -427,6 +440,10 @@ class _OwnedHistoryWorker:
                 "formula_epoch": config.formula_epoch,
                 "inner_seconds": min(float(config.budget_seconds), seconds - PARENT_GRACE_SECONDS),
                 "max_recomputes": config.max_recomputes, "anchor": anchor}
+            pass_fds = (child.fileno(), *self.lock_fds)
+            if mode == "verify":
+                cap["source_watch_fd"] = self._source_watch.fd
+                pass_fds += (self._source_watch.fd,)
             if time.monotonic() >= deadline:
                 raise HistoryDelegationError("history_budget_exhausted_before_spawn")
             # Retain the object BEFORE initialization: an exception after fork
@@ -440,7 +457,7 @@ class _OwnedHistoryWorker:
                 before_children = _thread_children()  # Refuse before launch if unavailable.
                 try:
                     process.__init__([sys_executable(), "-m", "apps.web_vitrina_owned_history_worker", str(child.fileno())],
-                        cwd=ROOT, pass_fds=(child.fileno(), *self.lock_fds), close_fds=True,
+                        cwd=ROOT, pass_fds=pass_fds, close_fds=True,
                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
                 except BaseException:
                     _recover_spawn_exception(process, before_children)
@@ -497,6 +514,8 @@ class _OwnedHistoryWorker:
             raise HistoryDelegationError("history_supervisor_owner_mismatch")
         if self._process is not None:
             _kill_reap(self._process)
+        if self._source_watch is not None:
+            self._source_watch.close()
         self._closed = True
 
 

@@ -450,17 +450,68 @@ conn.close()
                     path.write_bytes(b'new')
                     with self.assertRaisesRegex(HistoryDelegationError, 'history_source_changed_during_readback'):
                         stamp_after_derived_read(root, db, before)
-                    before = source_stamp(root, db)
-                    path.write_bytes(b'ABA')
-                    path.write_bytes(b'new')
-                    with self.assertRaisesRegex(HistoryDelegationError, 'history_source_changed_during_readback'):
-                        stamp_after_derived_read(root, db, before)
+                    from packages.application.owned_history_source_watch import HistorySourceWatch
+                    with closing(HistorySourceWatch(root, db)) as watch:
+                        watch.arm()
+                        before = source_stamp(root, db)
+                        path.write_bytes(b'ABA')
+                        path.write_bytes(b'new')
+                        with self.assertRaisesRegex(HistoryDelegationError, 'history_source_changed_during_readback'):
+                            watch.check(allow_operational_writes=True)
+                            stamp_after_derived_read(root, db, before)
             before = source_stamp(root, db)
             replacement = root / 'replacement'
             replacement.write_bytes(db.read_bytes())
             replacement.replace(db)
             with self.assertRaisesRegex(HistoryDelegationError, 'history_source_changed_during_readback'):
                 stamp_after_derived_read(root, db, before)
+
+
+@unittest.skipUnless(sys.platform == 'linux', 'requires Linux source events')
+class HistorySourceWatchTests(unittest.TestCase):
+    def test_transient_auxiliary_and_parent_handoff(self):
+        from packages.application.owned_history_source_watch import HistorySourceWatch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / 'operational.sqlite3'
+            db.write_bytes(b'initial')
+            policy = root / '.auto-updates-policy.json'
+            with closing(HistorySourceWatch(root, db)) as watch:
+                watch.arm()
+                policy.write_text('{}')
+                policy.unlink()
+                with self.assertRaises(HistoryDelegationError):
+                    watch.check(allow_operational_writes=True)
+            with closing(HistorySourceWatch(root, db)) as parent:
+                with closing(HistorySourceWatch(root, db, inherited=parent.fd)) as child:
+                    ids = child.arm()
+                    db.write_bytes(b'cleaner')
+                    child.check(allow_operational_writes=True)
+                    child.watch_current_files()
+                    child.check()
+                db.write_bytes(b'changed')
+                db.write_bytes(b'cleaner')
+                parent.bind_directories(ids)
+                for _ in range(2):
+                    with self.assertRaisesRegex(HistoryDelegationError, 'history_source_changed_after_readback'):
+                        parent.check(error='history_source_changed_after_readback')
+
+    def test_queue_overflow_and_directory_replacement_refuse(self):
+        from packages.application import owned_history_source_watch as events
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'state'
+            root.mkdir()
+            with closing(events.HistorySourceWatch(root, root / 'operational.sqlite3')) as watch:
+                watch.arm()
+                root.rename(root.with_name('old'))
+                root.mkdir()
+                with self.assertRaises(HistoryDelegationError):
+                    watch.check(allow_operational_writes=True)
+            with closing(events.HistorySourceWatch(root, root / 'operational.sqlite3')) as watch:
+                watch.arm()
+                overflow = events._HEADER.pack(-1, events._OVERFLOW, 0, 0)
+                with patch.object(events.os, 'read', return_value=overflow), self.assertRaises(HistoryDelegationError):
+                    watch.check(allow_operational_writes=True)
 
 
 @unittest.skipUnless(sys.platform == 'linux', 'actual inherited kernel authority required')
