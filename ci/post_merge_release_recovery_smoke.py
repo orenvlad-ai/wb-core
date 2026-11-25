@@ -1955,7 +1955,7 @@ def test_existing_started_owner_apply_binding() -> None:
 def test_cleaner_completion_exact_evidence_and_no_replay(run_id=recovery.CLEANER_RELEASE_RUN_ID) -> None:
     case = recovery.RecoveryCase.STORAGE_TAIL
     profile = recovery.CLEANER_PROFILES[run_id]
-    bounded_listener = run_id == recovery.CLEANER_BOUNDED_LISTENER_RUN_ID
+    bounded_listener = run_id in {recovery.CLEANER_BOUNDED_LISTENER_RUN_ID, recovery.PR1628_CLEANER_RELEASE_RUN_ID}
     assert recovery.recovery_case(run_id) is case
     assert recovery.recovery_case(run_id + 1) is recovery.RecoveryCase.STORAGE_TAIL
     raw = f'''python3 apps/github_release_runner.py run --workflow-run-id "{profile['gate_run_id']}" --output receipt.json
@@ -1966,13 +1966,20 @@ ConnectionRefusedError
 subprocess.CalledProcessError: Command ['ssh', '{profile['operation_id']}', 'apps/search_cluster_cleaner_release_probe.py --phase before_complete --expected-sha {profile['merge_sha']}'] returned non-zero exit status 1.
 '''.encode()
     if bounded_listener:
-        assert run_id == 45429927905 and profile == {
+        expected = {45429927905: {
             'pull_request': 1621, 'gate_run_id': 45425668063,
             'base_sha': '62ef453c55f2faddc86c0661960d350084b9fbfd',
             'head_sha': '7cca15e72938a5c98a12c7089f86c0984a432173',
             'merge_sha': '336345e6c9b08f6c2741523aa066f93c485a2f6e',
             'operation_id': 'release-v3-ef96969c1f11e80a3b8c784cbb1cc0e2',
-        }
+        }, 45604611131: {
+            'pull_request': 1628, 'gate_run_id': 45602270422,
+            'base_sha': '31d1e0e45baff14083e55e7385d4911e024e3541',
+            'head_sha': '3582976572c418919926946001628d008f359765',
+            'merge_sha': 'c46787a111c5b26a4f6428695eed9eb03afe1222',
+            'operation_id': 'release-v3-305323744b7ecac2ba7f77b192c06194',
+        }}
+        assert profile == expected[run_id]
         command = 'python3 ci/github_release_runner.py run --workflow-run-id "$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"'
         group = f'##[group]Run {command}\n{command}\nshell: /usr/bin/bash -e {{0}}\nenv:\n  GATE_RUN_ID: {profile["gate_run_id"]}\n##[endgroup]\n'
         raw = group.encode() + raw.split(b'\n', 1)[1].replace(b'line 1282,', b'line 1285,').replace(
@@ -1990,8 +1997,9 @@ subprocess.CalledProcessError: Command ['ssh', '{profile['operation_id']}', 'app
                     raw.replace(b'line 30, in _listener_ready', b'line 31, in _listener_ready'),
                     raw.replace(b'RuntimeError: cleaner listener not ready for before_complete', b'ConnectionRefusedError'),
                     raw.replace(b'ci/github_release_runner.py', b'apps/github_release_runner.py'),
-                    raw.replace(b'##[endgroup]', b'  GATE_RUN_ID: 45425668063\n##[endgroup]'),
-                    raw.replace(b'  GATE_RUN_ID: 45425668063', b'  GATE_RUN_ID: 45425668064')):
+                    raw.replace(b'##[endgroup]', f'  GATE_RUN_ID: {profile["gate_run_id"]}\n##[endgroup]'.encode()),
+                    raw.replace(f'  GATE_RUN_ID: {profile["gate_run_id"]}'.encode(),
+                                f'  GATE_RUN_ID: {profile["gate_run_id"] + 1}'.encode())):
             expect_reason('failed-stage-not-exact-cleaner-completion', lambda bad=bad: prove(bad))
     expect_reason('failed-stage-not-root-storage-readback-exit3', lambda: prove(raw, run_id + 1))
     receipt = {'schema': recovery.release.RECEIPT_SCHEMA, 'state': 'blocked', 'reason': 'CalledProcessError',

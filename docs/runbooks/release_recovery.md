@@ -161,6 +161,27 @@ Canonical step `ci/github_release_runner.py` связывается с един�
 Успех подтверждают связанный recovery receipt, завершённая metadata, точная
 версия, сервисы и неизменный изолированный Finance pilot.
 
+Этот же bounded-listener completion-путь отдельно разрешён для выпуска
+45604611131 (PR 1628, Gate 45602270422, base
+`31d1e0e45baff14083e55e7385d4911e024e3541`, head
+`3582976572c418919926946001628d008f359765`, merge
+`c46787a111c5b26a4f6428695eed9eb03afe1222`, operation
+`release-v3-305323744b7ecac2ba7f77b192c06194`). Immutable job log
+доказывает единственный SSH exit 1 на той же строке 1285, после успешных
+service/auth/storage checks и activation `skipped_maintenance`; строка 30
+`_listener_ready` сообщает `cleaner listener not ready for before_complete`.
+Последующее чтение canonical probe подтвердило готовый authenticated listener.
+
+Использовать `release-recovery.yml` с `release_run_id=45604611131`: сначала
+`mode=preview`, затем один `mode=apply` с проверенным fingerprint. Нужны исходные
+owner `mutation_started`, окно `wbc0213-partner-spend-release-2-20261125`, baseline
+`sha256:c090c4c94156ac5e29606967d38c2d8526ebf51787edafaa5beac478f704ec16`,
+exact runtime, живой cleaner и все прежние guards. Продолжаются только metadata
+CAS и конечные readbacks с завершением того же owner. Sync, restart, activation,
+установка зависимостей и повтор Release Runner запрещены. После complete receipt
+выполнить отдельный canonical formula-resume исходного окна. Этот recovery не
+записывает исторические подтверждения рекламных расходов.
+
 Для выпуска 42687135829 (PR 1604, Gate 42622619635, head
 `d88aff18833213ae4be3d48bbe8d86d905359f2a`, merge
 `8f32cd7f6fbc436770d4d297b7fb4dbc3486b719`, operation
