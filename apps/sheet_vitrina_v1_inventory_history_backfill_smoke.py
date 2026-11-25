@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -1043,20 +1043,26 @@ def _assert_historical_projection(
         f"SKU:{first_nm_id}|{inventory_planning_facility_metric_key('moscow')}"
     ].values_by_date[business_date] == ""
 
-    legacy_only = extend_rows_with_inventory_planning(
-        source_rows,
-        planning={"formula": {"version": "inventory_planning_v1"}},
-        history={},
-        date_columns=[business_date],
-        enabled_config=enabled_config,  # type: ignore[arg-type]
+    legacy_total, legacy_sku = source_rows
+    proven_wb_total = replace(
+        legacy_total,
+        presentation_by_date={business_date: {"source": "ready_snapshot.stock_total.wb_only"}},
     )
-    legacy_rows = {item.row_id: item for item in legacy_only}
-    assert legacy_rows[
-        "TOTAL|" + inventory_planning_total_metric_key(INVENTORY_WB_TOTAL_KEY)
-    ].values_by_date[business_date] == 30
-    assert legacy_rows[
-        "TOTAL|" + inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY)
-    ].values_by_date[business_date] == ""
+    for total_row, expected_wb in ((legacy_total, ""), (proven_wb_total, 30)):
+        legacy_only = extend_rows_with_inventory_planning(
+            [total_row, legacy_sku],
+            planning={"formula": {"version": "inventory_planning_v1"}},
+            history={},
+            date_columns=[business_date],
+            enabled_config=enabled_config,  # type: ignore[arg-type]
+        )
+        legacy_rows = {item.row_id: item for item in legacy_only}
+        assert legacy_rows[
+            "TOTAL|" + inventory_planning_total_metric_key(INVENTORY_WB_TOTAL_KEY)
+        ].values_by_date[business_date] == expected_wb
+        assert legacy_rows[
+            "TOTAL|" + inventory_planning_total_metric_key(COMBINED_TOTAL_ALIAS_KEY)
+        ].values_by_date[business_date] == ""
 
 
 def _dates(date_from: str, date_to: str) -> list[str]:
