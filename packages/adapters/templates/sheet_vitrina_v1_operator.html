@@ -15086,7 +15086,7 @@
       function formatPartnerBlocker(item) {
         const labels = {
           ads_date_missing:"Нет принятого рекламного snapshot",
-          ads_sku_coverage_missing:"Нет рекламы выбранного nmId в snapshot",
+          ads_sku_coverage_missing:"Не подтверждена полнота расхода по карточке",
           ads_value_invalid:"Некорректное значение рекламы",
           finance_week_missing:"Finance-неделя не загружена",
           finance_week_not_final:"Finance-неделя ещё не закрыта",
@@ -15099,6 +15099,9 @@
           common_expense_zero_revenue_base:"Общие расходы нельзя распределить при нулевой общей выручке"
         };
         const details = [];
+        if (item.verification === "no_product_row") details.push("в дневной выгрузке WB нет строки по карточке");
+        if (item.verification === "spend_mismatch") details.push("сумма расходится с дневным отчётом WB");
+        if (item.verification === "conflicting_exports") details.push("дневные выгрузки WB расходятся");
         if (item.date) details.push(String(item.date));
         if (item.week_start) details.push("неделя " + String(item.week_start));
         if (item.nm_id) details.push("nmId " + String(item.nm_id));

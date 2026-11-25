@@ -72,6 +72,7 @@ _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
     "ads_partial_publication_v1": (
         "apps.ads_partial_publication", "AdsPartialPublicationAdapter",
     ),
+    "ads_sku_daily_spend_v1": ("apps.ads_sku_daily_spend_apply", "DailySpendAdapter"),
     "ads_closed_day_recovery_v1": (
         "apps.ads_closed_day_recovery", "AdsClosedDayRecoveryAdapter",
     ),

@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
+from packages.application.ads_spend_verification import decisions_for_day
 from packages.application.wb_finance_weekly import (
     _decimal,
     _nomenclature_identity_index,
@@ -315,6 +316,7 @@ def _run_in_snapshot(
         )
         ads = _ads_for_week(
             conn,
+            seller_id=scope.seller_id,
             nm_id=nm_id,
             week_start=date.fromisoformat(week),
             week_end=date.fromisoformat(bounds["week_end"]),
@@ -905,6 +907,7 @@ def _record_invalid_raw(
 def _ads_for_week(
     conn: sqlite3.Connection,
     *,
+    seller_id: str,
     nm_id: str,
     week_start: date,
     week_end: date,
@@ -949,7 +952,14 @@ def _ads_for_week(
             if isinstance(item, dict)
             and str(item.get("nm_id", item.get("nmId", "")) or "") == nm_id
         ]
-        if kind == "empty":
+        verification = (decisions_for_day(conn, seller_id, day,
+                         hashlib.sha256(payload_text.encode()).hexdigest(), result).get(nm_id)
+                        if kind == "incomplete" else None)
+        if verification and verification.status == "verified_sku_spend":
+            covered += 1
+            total += verification.amount
+            source_hasher.update(json.dumps(verification.receipts).encode())
+        elif kind == "empty":
             confirmed_empty += 1
         elif kind == "success" and matched:
             try:

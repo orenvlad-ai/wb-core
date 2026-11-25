@@ -700,6 +700,13 @@ class SheetVitrinaV1WebVitrinaBlock:
                 rows = restore_official_quantity_groups(rows, groups=self.reporting_groups,
                     config=[x for x in current_state.config_v2 if x.enabled], metrics=metrics_by_key,
                     runtime=self.runtime, day=quantity_day)
+        from packages.application.ads_spend_presentation import verified_presentation
+        from packages.application.ads_spend_verification import verified_days
+        from packages.application.ready_publication import readonly
+        from packages.application.wb_incident_policy import canonical_seller_id
+        with readonly(self.runtime.db_path) as spend_conn:
+            proofs = verified_days(spend_conn, canonical_seller_id(), snapshot.date_columns)
+        rows = verified_presentation(rows, proofs)
         if output_row_ids is not None:
             rows = [row for row in rows if row.row_id in output_row_ids]
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
