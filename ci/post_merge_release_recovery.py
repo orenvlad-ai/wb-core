@@ -86,6 +86,7 @@ EXPECTED_ACTIVATION_MERGE_SHA = "7a9196e8af0d2113db7e42f0f4291fc2bc2c528c"
 # Exact final cleaner probe failed after activation had already skipped under pause.
 CLEANER_RELEASE_RUN_ID = 39635174275
 CLEANER_BOUNDED_LISTENER_RUN_ID = 45429927905
+PR1628_CLEANER_RELEASE_RUN_ID = 45604611131
 CLEANER_PROFILE = {
     "pull_request": 1486, "gate_run_id": 39630567883,
     "base_sha": "bde0f6cd47277ae3f44e3ea44b0b29f5629c1fb6",
@@ -116,6 +117,13 @@ CLEANER_PROFILES = {
         "head_sha": "7cca15e72938a5c98a12c7089f86c0984a432173",
         "merge_sha": "336345e6c9b08f6c2741523aa066f93c485a2f6e",
         "operation_id": "release-v3-ef96969c1f11e80a3b8c784cbb1cc0e2",
+    },
+    PR1628_CLEANER_RELEASE_RUN_ID: {
+        "pull_request": 1628, "gate_run_id": 45602270422,
+        "base_sha": "31d1e0e45baff14083e55e7385d4911e024e3541",
+        "head_sha": "3582976572c418919926946001628d008f359765",
+        "merge_sha": "c46787a111c5b26a4f6428695eed9eb03afe1222",
+        "operation_id": "release-v3-305323744b7ecac2ba7f77b192c06194",
     },
 }
 
@@ -512,7 +520,7 @@ def _prove_failed_stage(
         from ci.pr1623_presync_recovery import prove_failure
         return prove_failure(raw_log, gate_run_id, job_name, release_run_id=release_run_id)
     if cleaner_completion_case(case, release_run_id):
-        bounded_listener = release_run_id == CLEANER_BOUNDED_LISTENER_RUN_ID
+        bounded_listener = release_run_id in {CLEANER_BOUNDED_LISTENER_RUN_ID, PR1628_CLEANER_RELEASE_RUN_ID}
         required = (
             "line 1285, in deploy_current_checkout" if bounded_listener else "line 1282, in deploy_current_checkout",
             'run_stage("readback",cleaner_precomplete_probe_command,allow_transport_reconciliation=False)',
