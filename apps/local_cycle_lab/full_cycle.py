@@ -55,19 +55,24 @@ def manual_cycle(entry, config, output, number):
     return receipt, round(time.monotonic() - started, 3)
 
 
+def stored_ready_cells(entry, expected, day, *, as_of_date=None):
+    expect(any(key.startswith("SKU:") for key in expected) and
+           any(key.startswith("TOTAL|") for key in expected),
+           "The control must include SKU and total amounts")
+    plan = entry.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=as_of_date)
+    sheet = next(s for s in plan.sheets if s.sheet_name == "DATA_VITRINA")
+    offset = plan.date_columns.index(day) + 2
+    raw = {r[1]: r[offset] for r in sheet.rows if r[1] in expected}
+    return plan.snapshot_id, raw
+
+
 def publication_cells(entry, config, receipt, expected, day):
     """Read the stored Ready, rendered native table, and exact published History edition."""
     from packages.adapters import registry_upload_http_entrypoint as web
     from packages.application.web_vitrina_history_compiler import unpack_table
 
-    expect(any(key.startswith("SKU:") for key in expected) and
-           any(key.startswith("TOTAL|") for key in expected),
-           "The control must include SKU and total amounts")
     versions = receipt["final_versions"]
-    plan = entry.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=versions["as_of_date"])
-    sheet = next(s for s in plan.sheets if s.sheet_name == "DATA_VITRINA")
-    offset = plan.date_columns.index(day) + 2
-    raw = {r[1]: r[offset] for r in sheet.rows if r[1] in expected}
+    snapshot_id, raw = stored_ready_cells(entry, expected, day, as_of_date=versions["as_of_date"])
     page = entry.handle_sheet_web_vitrina_page_composition_request(
         page_route=web.DEFAULT_SHEET_WEB_VITRINA_UI_PATH, read_route=web.DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
         operator_route=web.DEFAULT_SHEET_OPERATOR_UI_PATH, date_from=day, date_to=day,
@@ -85,32 +90,35 @@ def publication_cells(entry, config, receipt, expected, day):
             rows = history.read(date_from=day, date_to=day, scope=scope, row_ids=keys, edition_id=edition_id)
             expect(rows["availability"][day], "Published day has no accepted Ready")
             saved.update({row["row_id"]: row["cells"][day] for row in rows["rows"]})
-    return {"ready_snapshot": plan.snapshot_id, "ready_publication": versions["publication_operation_id"],
+    return {"ready_snapshot": snapshot_id, "ready_publication": versions["publication_operation_id"],
             "ready_cells": raw, "vitrina_cells": visible, "history_cells": saved,
             "history_edition": edition_id, "history_day": edition["days"][day],
             "history_dates": sorted(edition["days"])}
 
 
+def verify_surface(surface, cells, expected):
+    expect(set(cells) == set(expected), f"{surface}: incomplete control rows")
+    for key, value in expected.items():
+        cell = cells[key]
+        numeric = cell if surface == "ready_cells" else cell[0]
+        expect(numeric not in ("", None), f"{surface}: missing {key}")
+        actual = Decimal(str(numeric))
+        wanted = Decimal(str(value))
+        if key.endswith(("_rub", "_rub_v1")):
+            actual = actual.quantize(Decimal("0.01"), ROUND_HALF_UP)
+            wanted = wanted.quantize(Decimal("0.01"), ROUND_HALF_UP)
+        expect(actual == wanted, f"{surface} {key}: expected {wanted}, observed {actual}")
+
+
 def verify_cells(publication, expected):
     # The rendered table and History store use [numeric value, display text, ...].
     for surface in ("ready_cells", "vitrina_cells", "history_cells"):
-        cells = publication[surface]
-        expect(set(cells) == set(expected), f"{surface}: incomplete control rows")
-        for key, value in expected.items():
-            cell = cells[key]
-            numeric = cell if surface == "ready_cells" else cell[0]
-            expect(numeric not in ("", None), f"{surface}: missing {key}")
-            actual = Decimal(str(numeric))
-            wanted = Decimal(str(value))
-            if key.endswith(("_rub", "_rub_v1")):
-                actual = actual.quantize(Decimal("0.01"), ROUND_HALF_UP)
-                wanted = wanted.quantize(Decimal("0.01"), ROUND_HALF_UP)
-            expect(actual == wanted, f"{surface} {key}: expected {wanted}, observed {actual}")
+        verify_surface(surface, publication[surface], expected)
     expect(publication["history_cells"] == publication["vitrina_cells"],
            "Stored History cells and their presentation differ from the operator table")
 
 
-def execute(work):
+def execute(work, *, repeat=True):
     from packages.adapters import registry_upload_http_entrypoint as web
     from packages.application import operator_ff_overhead
     from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -170,7 +178,7 @@ def execute(work):
                and before["summary"]["amount_rub"] == "123.45", "Unexpected initial source receipt")
         atomic_json(work / "before.json", before)
         results = []
-        for number in (1, 2):
+        for number in range(1, 3 if repeat else 2):
             receipt, seconds = manual_cycle(entry, config, work, number)
             business = verify(entry, operation)
             expected = opening["expected_cells"]
@@ -184,17 +192,18 @@ def execute(work):
                    current["source_document"] == before["source_document"], "Source posting not completed")
             expect(operator_ff_overhead.journal(runtime.db_path)["total"] == 1, "Duplicate source confirmation")
             results.append(item)
-        first, second = results
-        expect(first["cycle_id"] != second["cycle_id"] and first["job_id"] != second["job_id"],
-               "Second request reused the first job")
-        expect(first["business"] == second["business"], "Business documents or cost allocation changed on repeat")
-        expect(first["publication"]["ready_cells"] == second["publication"]["ready_cells"],
-               "Published expense values changed on repeat")
+        if repeat:
+            first, second = results
+            expect(first["cycle_id"] != second["cycle_id"] and first["job_id"] != second["job_id"],
+                   "Second request reused the first job")
+            expect(first["business"] == second["business"], "Business documents or cost allocation changed on repeat")
+            expect(first["publication"]["ready_cells"] == second["publication"]["ready_cells"],
+                   "Published expense values changed on repeat")
         expect(not replay.unexpected, f"Unexpected source requests: {replay.unexpected}")
         result = {"status": "passed", "source": origin, "isolation": isolation, "operation_id": operation,
                   "opening": opening, "cycles": results, "calls": replay.totals}
         atomic_json(work / "comparison.json", result)
-        print(f"Two full cycles verified for {operation}", flush=True)
+        print(f"Verified {len(results)} full cycle(s) for {operation}", flush=True)
         return result
 
 

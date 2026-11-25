@@ -6,6 +6,8 @@ because macOS Unix-domain socket paths cannot hold the full worktree path.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -35,10 +37,20 @@ def sync_source():
     files = {ROOT / name for name in tracked if name}
     files.update((ROOT / 'apps/local_cycle_lab').glob('*.py'))
     archive = ROOT / 'output/stage4-vm/source.tgz'
+    fingerprint = hashlib.sha256()
     with tarfile.open(archive, 'w:gz') as out:
         for path in sorted(files):
             if path.is_file() and not path.is_symlink():
-                out.add(path, arcname=path.relative_to(ROOT), recursive=False)
+                name = str(path.relative_to(ROOT))
+                with path.open('rb') as source:
+                    fingerprint.update(name.encode() + b'\0' + hashlib.file_digest(source, 'sha256').digest())
+                    source.seek(0)
+                    out.addfile(out.gettarinfo(str(path), arcname=name), source)
+        identity = json.dumps({'git_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+                               'tree_content_sha256': fingerprint.hexdigest()}).encode()
+        info = tarfile.TarInfo('local-lab-source.json')
+        info.size = len(identity)
+        out.addfile(info, io.BytesIO(identity))
     with archive.open('rb') as stream:
         guest('sudo', 'tar', '-xzf', '-', '-C', '/opt/wbc-lab', stdin=stream)
 

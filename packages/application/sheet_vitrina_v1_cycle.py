@@ -567,6 +567,44 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
                 raise
 
 
+def run_rolling_history_stage(entrypoint, store, receipt, history_config, *, ready, finance, fbs,
+                              backfill_dates, closed):
+    """Publish and acknowledge History under the current admitted worker's ownership."""
+    if history_config.fingerprint() != receipt['history_config_fingerprint']:
+        raise CycleStageFailure('cycle_history_contract_changed')
+    from packages.application.fbs_accounting_historical_history import pending_receipt
+    historical = (None if receipt['final_versions'].get('fbs_accounting_status') == 'unavailable'
+                  else pending_receipt(entrypoint.runtime))
+    def before_child():
+        from packages.application.cycle_memory import release_cycle_memory
+        receipt['history_memory_before_child'] = {
+            'business_date': receipt['business_date'], **release_cycle_memory()}
+        # The actual cycle owns this store and receipt. Persist telemetry
+        # before the child starts so a later OOM cannot erase the sample.
+        store.write(receipt)
+    kwargs=dict(backfill_dates=backfill_dates,closed_receipt=closed if backfill_dates else None,
+                before_child=before_child)
+    if historical is not None:
+        historical.freeze_scope(entrypoint.now_factory())
+        from datetime import datetime,timedelta
+        yesterday=(datetime.fromisoformat(receipt['business_date'])-timedelta(days=1)).date().isoformat()
+        kwargs.update(historical_receipt=historical,backfill_dates=tuple(sorted(set(backfill_dates)|{d for d in historical.publication_dates() if d<yesterday})))
+    proof = entrypoint._cycle_history(history_config, receipt, ready, **kwargs)
+    if backfill_dates:
+        value = closed.status()
+        if not value or any(value['dates'][day]['state'] != 'acknowledged' for day in backfill_dates):
+            raise CycleStageFailure('closed_native_ack_missing')
+    # The completed native proof is persisted by the outer stage before
+    # rollover. New-day predecessor admission belongs to the fresh epoch.
+    if current_business_date_iso(entrypoint.now_factory()) == receipt['business_date']:
+        try:
+            entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
+        except CycleDateRollover as exc:
+            if exc.expected_date != receipt['business_date']:
+                raise
+    return proof
+
+
 def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
     """Only the owning admitted worker calls this; no external-stage retries."""
     from packages.application.business_data_heavy_admission import require_heavy_owner
@@ -674,39 +712,8 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
             'closed_backfill_dates': canonical(backfill_dates),
             'closed_receipt_digest': digest(canonical(closed.status()))}, tuple(warnings))
     def history():
-        if history_config.fingerprint() != receipt['history_config_fingerprint']:
-            raise CycleStageFailure('cycle_history_contract_changed')
-        from packages.application.fbs_accounting_historical_history import pending_receipt
-        historical = (None if receipt['final_versions'].get('fbs_accounting_status') == 'unavailable'
-                      else pending_receipt(entrypoint.runtime))
-        def before_child():
-            from packages.application.cycle_memory import release_cycle_memory
-            receipt['history_memory_before_child'] = {
-                'business_date': receipt['business_date'], **release_cycle_memory()}
-            # The actual cycle owns this store and receipt. Persist telemetry
-            # before the child starts so a later OOM cannot erase the sample.
-            store.write(receipt)
-        kwargs=dict(backfill_dates=backfill_dates,closed_receipt=closed if backfill_dates else None,
-                    before_child=before_child)
-        if historical is not None:
-            historical.freeze_scope(entrypoint.now_factory())
-            from datetime import datetime,timedelta
-            yesterday=(datetime.fromisoformat(receipt['business_date'])-timedelta(days=1)).date().isoformat()
-            kwargs.update(historical_receipt=historical,backfill_dates=tuple(sorted(set(backfill_dates)|{d for d in historical.publication_dates() if d<yesterday})))
-        proof = entrypoint._cycle_history(history_config, receipt, ready, **kwargs)
-        if backfill_dates:
-            value = closed.status()
-            if not value or any(value['dates'][day]['state'] != 'acknowledged' for day in backfill_dates):
-                raise CycleStageFailure('closed_native_ack_missing')
-        # The completed native proof is persisted by the outer stage before
-        # rollover. New-day predecessor admission belongs to the fresh epoch.
-        if current_business_date_iso(entrypoint.now_factory()) == receipt['business_date']:
-            try:
-                entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
-            except CycleDateRollover as exc:
-                if exc.expected_date != receipt['business_date']:
-                    raise
-        return proof
+        return run_rolling_history_stage(entrypoint, store, receipt, history_config, ready=ready,
+            finance=finance, fbs=fbs, backfill_dates=backfill_dates, closed=closed)
     try:
         # A durable accepted cycle must terminalize even if constructing its
         # adapters fails before the first source action. Ownership above still
