@@ -17,7 +17,7 @@ from packages.application import operator_cny_documents as cny
 from packages.application import operator_supplier_financial as financial
 from packages.application import operator_operations as journal
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
-from packages.application.sqlite_contention import SQLITE_ATTEMPT_BUSY_TIMEOUT_MS
+from packages.application.sqlite_contention import ObservedSQLiteConnection, SQLITE_ATTEMPT_BUSY_TIMEOUT_MS
 from packages.adapters import registry_upload_http_entrypoint as http
 
 
@@ -47,8 +47,9 @@ def get_only_connect(connect, *args, **kwargs):
     assert kwargs.get('uri') is True and parse_qs(urlparse(str(database)).query).get('mode') == ['ro'], 'GET opens a source writer'
     conn = connect(*args, **kwargs)
     # The application's connection subclass is configured after connect() returns.
-    sqlite3.Connection.execute(conn, 'PRAGMA query_only=ON')
-    assert sqlite3.Connection.execute(conn, 'PRAGMA query_only').fetchone()[0] == 1
+    execute = super(ObservedSQLiteConnection, conn).execute if isinstance(conn, ObservedSQLiteConnection) else conn.execute
+    execute('PRAGMA query_only=ON')
+    assert execute('PRAGMA query_only').fetchone()[0] == 1
     def authorize(action, one, two, database, trigger):
         if action == sqlite3.SQLITE_PRAGMA:
             if one == 'busy_timeout' and two == str(SQLITE_ATTEMPT_BUSY_TIMEOUT_MS):
