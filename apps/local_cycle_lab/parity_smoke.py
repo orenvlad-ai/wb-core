@@ -5,8 +5,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import sys
 
-from .cycle_warnings import check_warnings, expected_warnings, UnexpectedCycleWarning
+if __package__ in (None, ""):
+    sys.path[0] = str(Path(__file__).resolve().parents[2])
+
+from apps.local_cycle_lab.cycle_warnings import check_warnings, expected_warnings, UnexpectedCycleWarning
 
 
 def receipt_for(missing_ads):
@@ -31,7 +35,7 @@ def receipt_for(missing_ads):
 
 class WarningPolicyTests(unittest.TestCase):
     def test_provider_time_survives_process_restart(self):
-        from .__main__ import ReplayClock
+        from apps.local_cycle_lab.__main__ import ReplayClock
         now = datetime(2026, 11, 24, 8, tzinfo=timezone.utc)
         with TemporaryDirectory() as directory:
             path = Path(directory) / "clock.json"
