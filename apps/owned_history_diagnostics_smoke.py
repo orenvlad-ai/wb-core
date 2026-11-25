@@ -4,6 +4,8 @@ import json
 import sqlite3
 from pathlib import Path
 import sys
+import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -12,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from apps import web_vitrina_owned_history_worker as child
 from apps import sheet_vitrina_v1_cycle_smoke as cycle_fixture
+from apps.owned_history_worker_smoke import simple_runtime
 from packages.application import owned_history_worker as supervisor
 from packages.application.owned_history_worker_capability import (
     HistoryDelegationError, history_child_failure,
@@ -30,12 +33,16 @@ SECRET = "provider-token-and-business-payload"
 
 class DiagnosticsTests(unittest.TestCase):
     def worker(self, response):
-        # Exercise real complete/capture/verify orchestration; no runtime or child
-        # is constructed. Linux kernel transport has its existing separate suite.
-        worker = supervisor._OwnedHistoryWorker.__new__(supervisor._OwnedHistoryWorker)
-        worker.operation = "cycle"
-        worker._completion_used = worker._capture_used = worker._portion_used = False
-        worker._anchor = worker._target = None
+        # Only admission and child replies are simulated. Initialize the supervisor
+        # normally so complete() can watch the disposable sources during readback.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        runtime = simple_runtime(directory.name)
+        config = SimpleNamespace(
+            runtime_contract=ROOT / "artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json"
+        )
+        worker = supervisor._OwnedHistoryWorker(runtime=runtime, config=config, cycle_owner=None, lock_fds=())
+        self.addCleanup(worker.close)
         worker._check = Mock()
         calls = []
         def invoke(mode, now, anchor):
@@ -47,7 +54,8 @@ class DiagnosticsTests(unittest.TestCase):
             if mode == "verify":
                 return {"status": "complete", "invocation": "verify-fixture",
                         "result": {"status": "verified", "invocation": "verify-fixture",
-                                   "terminal": False, "completed": {}}}
+                                   "terminal": False, "completed": {},
+                                   "watch_directories": worker._source_watch.arm()}}
             self.fail("unexpected portion replay")
         worker._invoke = invoke
         return worker, calls
