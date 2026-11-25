@@ -1,0 +1,784 @@
+{
+  "today": "2026-11-24",
+  "catalog": [
+    {
+      "nm_id": 101,
+      "enabled": true,
+      "display_name": "Тестовое стекло",
+      "group": "Clean",
+      "display_order": 1
+    }
+  ],
+  "days": [
+    "2026-11-23",
+    "2026-11-24"
+  ],
+  "history_ranges": [
+    [
+      "2026-11-17",
+      "2026-11-18"
+    ],
+    [
+      "2026-11-16",
+      "2026-11-17"
+    ]
+  ],
+  "finance_week": [
+    "2026-11-16",
+    "2026-11-22"
+  ],
+  "inputs": {
+    "seller_funnel_snapshot": {
+      "rows_path": "items",
+      "response": {
+        "date": "$day",
+        "count": 1,
+        "items": [
+          {
+            "nm_id": 101,
+            "name": "Тестовое стекло",
+            "vendor_code": "LAB-101",
+            "view_count": 120,
+            "open_card_count": 24,
+            "ctr": 20
+          }
+        ],
+        "source_fetched_at": "2026-11-24T08:00:00Z"
+      }
+    },
+    "web_source_snapshot": {
+      "rows_path": "items",
+      "response": {
+        "date_from": "$day",
+        "date_to": "$day",
+        "count": 1,
+        "items": [
+          {
+            "nm_id": 101,
+            "views_current": 120,
+            "ctr_current": 20,
+            "orders_current": 2,
+            "position_avg": 6
+          }
+        ],
+        "source_fetched_at": "2026-11-24T08:00:00Z"
+      }
+    },
+    "spp": {
+      "rows_path": "data.items",
+      "response": {
+        "snapshot_date": "$day",
+        "data": {
+          "items": [
+            {
+              "nmId": 101,
+              "spp_avg": 0.2,
+              "spp_count": 2
+            }
+          ]
+        }
+      },
+      "responses_by_day": {
+        "2026-11-23": {
+          "snapshot_date": "$day",
+          "data": {
+            "items": [
+              {
+                "nmId": 101,
+                "spp_avg": 0.1,
+                "spp_count": 2
+              }
+            ]
+          }
+        }
+      }
+    },
+    "spp_proxy": {
+      "rows_path": "data.items",
+      "response": {
+        "snapshot_date": "$day",
+        "data": {
+          "items": [
+            {
+              "nmId": 101,
+              "public_buyer_price": 320
+            }
+          ]
+        }
+      },
+      "responses_by_day": {
+        "2026-11-23": {
+          "snapshot_date": "$day",
+          "data": {
+            "items": [
+              {
+                "nmId": 101,
+                "public_buyer_price": 342
+              }
+            ]
+          }
+        }
+      }
+    },
+    "stocks": {
+      "rows_path": "data.rows",
+      "response": {
+        "snapshot_date": "$day",
+        "data": {
+          "rows": [
+            {
+              "nmId": 101,
+              "snapshot_date": "$day",
+              "snapshot_ts": "$day 08:00:00",
+              "regionName": "Центральный",
+              "stockCount": 12
+            }
+          ],
+          "warehouse_granularity_complete": false
+        },
+        "requested_nm_ids": [
+          101
+        ]
+      }
+    },
+    "sales_funnel_history": {
+      "rows_path": "data.rows",
+      "response": {
+        "date_from": "$start",
+        "date_to": "$end",
+        "data": {
+          "rows": [
+            [
+              "$day 08:00:00",
+              "$day",
+              101,
+              "openCount",
+              24
+            ],
+            [
+              "$day 08:00:00",
+              "$day",
+              101,
+              "cartCount",
+              4
+            ],
+            [
+              "$day 08:00:00",
+              "$day",
+              101,
+              "orderCount",
+              2
+            ],
+            [
+              "$day 08:00:00",
+              "$day",
+              101,
+              "orderSum",
+              800
+            ],
+            [
+              "$day 08:00:00",
+              "$day",
+              101,
+              "buyoutCount",
+              2
+            ],
+            [
+              "$day 08:00:00",
+              "$day",
+              101,
+              "buyoutPercent",
+              100
+            ]
+          ]
+        }
+      }
+    },
+    "onec_stocks": {
+      "rows_path": "items",
+      "response": {
+        "meta": {
+          "version": "1.0",
+          "marketplace": "WB",
+          "account_id": "000000001",
+          "date": "$day",
+          "generated_at": "$dayT08:00:00",
+          "currency": "RUB"
+        },
+        "items": [
+          {
+            "nmId": "101",
+            "product_1c_id": "LAB-1",
+            "vendor_code": "LAB-101",
+            "name": "Тестовое стекло",
+            "stages": {
+              "В_пути": {
+                "qty": 2,
+                "unit_cost_rub": 100,
+                "cost_total_rub": 200
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "finance_rows": [
+    {
+      "rrdId": 10,
+      "rrDate": "$day",
+      "nmId": 101,
+      "docTypeName": "Продажа",
+      "sellerOperName": "Продажа",
+      "retailPriceWithDisc": "400",
+      "deliveryService": "4",
+      "paidStorage": "2",
+      "acquiringFee": "3",
+      "commissionPercent": "0",
+      "deduction": "0",
+      "ppvzSalesCommission": "0",
+      "penalty": "0",
+      "additionalPayment": "0",
+      "cashbackAmount": "0"
+    },
+    {
+      "rrdId": 20,
+      "rrDate": "$day",
+      "nmId": 999,
+      "docTypeName": "Продажа",
+      "sellerOperName": "Продажа",
+      "retailPriceWithDisc": "100",
+      "paidStorage": "9",
+      "commissionPercent": "0",
+      "deliveryService": "0",
+      "deduction": "0",
+      "ppvzSalesCommission": "0",
+      "penalty": "0",
+      "additionalPayment": "0",
+      "acquiringFee": "0",
+      "cashbackAmount": "0"
+    }
+  ],
+  "authenticated_buyer": {
+    "wallet_price": 320,
+    "normal_price": 400,
+    "destination_context": {
+      "dest_id": 123
+    }
+  },
+  "promo_campaigns": [],
+  "http": [
+    {
+      "source": "prices_snapshot",
+      "method": "POST",
+      "host": "discounts-prices-api.wildberries.ru",
+      "path": "/api/v2/list/goods/filter",
+      "query": {},
+      "request": {
+        "nmList": [
+          101
+        ]
+      },
+      "rows_path": "data.listGoods",
+      "response": {
+        "data": {
+          "listGoods": [
+            {
+              "nmID": 101,
+              "vendorCode": "LAB-101",
+              "sizes": [
+                {
+                  "sizeID": 9001,
+                  "price": 500,
+                  "discountedPrice": 400
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "responses_by_day": {
+        "2026-11-23": {
+          "data": {
+            "listGoods": [
+              {
+                "nmID": 101,
+                "vendorCode": "LAB-101",
+                "sizes": [
+                  {
+                    "sizeID": 9001,
+                    "price": 500,
+                    "discountedPrice": 380
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "source": "sf_period",
+      "method": "POST",
+      "host": "seller-analytics-api.wildberries.ru",
+      "path": "/api/analytics/v3/sales-funnel/products",
+      "query": {},
+      "request": {
+        "selectedPeriod": {
+          "start": "2026-11-23",
+          "end": "2026-11-23"
+        },
+        "nmIds": [
+          101
+        ],
+        "limit": 1,
+        "offset": 0
+      },
+      "rows_path": "data.products",
+      "response": {
+        "data": {
+          "products": [
+            {
+              "product": {
+                "nmId": 101,
+                "feedbackRating": 4.8
+              },
+              "statistic": {
+                "selected": {
+                  "localizationPercent": 70
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "source": "sf_period",
+      "method": "POST",
+      "host": "seller-analytics-api.wildberries.ru",
+      "path": "/api/analytics/v3/sales-funnel/products",
+      "query": {},
+      "request": {
+        "selectedPeriod": {
+          "start": "2026-11-24",
+          "end": "2026-11-24"
+        },
+        "nmIds": [
+          101
+        ],
+        "limit": 1,
+        "offset": 0
+      },
+      "rows_path": "data.products",
+      "response": {
+        "data": {
+          "products": [
+            {
+              "product": {
+                "nmId": 101,
+                "feedbackRating": 4.8
+              },
+              "statistic": {
+                "selected": {
+                  "localizationPercent": 70
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "source": "card_rating",
+      "method": "POST",
+      "host": "seller-analytics-api.wildberries.ru",
+      "path": "/api/analytics/v2/item-rating",
+      "query": {},
+      "request": {
+        "currentPeriod": {
+          "start": "$rating_start",
+          "end": "$yesterday"
+        },
+        "nmIds": [
+          101
+        ],
+        "orderBy": {
+          "field": "feedbackCount",
+          "mode": "desc"
+        },
+        "isNotIncludeNmsWithoutSales": false,
+        "onlyShadowedNms": false,
+        "limit": 1000,
+        "offset": 0
+      },
+      "rows_path": "data.items",
+      "response": {
+        "data": {
+          "items": [
+            {
+              "nmId": 101,
+              "feedbackRating": {
+                "current": 4.8
+              }
+            }
+          ]
+        }
+      },
+      "responses_by_day": {
+        "2026-11-23": {
+          "data": {
+            "items": [
+              {
+                "nmId": 101,
+                "feedbackRating": {
+                  "current": 4.6
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "source": "ads_catalog",
+      "method": "GET",
+      "host": "advert-api.wildberries.ru",
+      "path": "/adv/v1/promotion/count",
+      "query": {},
+      "request": null,
+      "rows_path": "adverts",
+      "response": {
+        "all": 1,
+        "adverts": [
+          {
+            "status": 9,
+            "count": 1,
+            "advert_list": [
+              {
+                "advertId": 601
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source": "ads_bids",
+      "method": "GET",
+      "host": "advert-api.wildberries.ru",
+      "path": "/api/advert/v2/adverts",
+      "query": {
+        "ids": "601",
+        "statuses": "9"
+      },
+      "request": null,
+      "rows_path": "adverts",
+      "response": {
+        "adverts": [
+          {
+            "id": 601,
+            "bid_type": "manual",
+            "settings": {
+              "placements": {
+                "search": true,
+                "recommendations": false
+              }
+            },
+            "nm_settings": [
+              {
+                "nm_id": 101,
+                "bids_kopecks": {
+                  "search": 15000
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "responses_by_day": {
+        "2026-11-23": {
+          "adverts": [
+            {
+              "id": 601,
+              "bid_type": "manual",
+              "settings": {
+                "placements": {
+                  "search": true,
+                  "recommendations": false
+                }
+              },
+              "nm_settings": [
+                {
+                  "nm_id": 101,
+                  "bids_kopecks": {
+                    "search": 14000
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "source": "ads_compact",
+      "method": "GET",
+      "host": "advert-api.wildberries.ru",
+      "path": "/adv/v3/fullstats",
+      "query": {
+        "ids": "601",
+        "beginDate": "2026-11-23",
+        "endDate": "2026-11-23"
+      },
+      "request": null,
+      "rows_path": "",
+      "response": [
+        {
+          "advertId": 601,
+          "views": 100,
+          "clicks": 10,
+          "atbs": 4,
+          "orders": 2,
+          "sum": 60,
+          "sum_price": 800,
+          "days": [
+            {
+              "date": "2026-11-23",
+              "views": 100,
+              "clicks": 10,
+              "atbs": 4,
+              "orders": 2,
+              "sum": 60,
+              "sum_price": 800,
+              "apps": [
+                {
+                  "appType": 1,
+                  "views": 100,
+                  "clicks": 10,
+                  "atbs": 4,
+                  "orders": 2,
+                  "sum": 60,
+                  "sum_price": 800,
+                  "nms": [
+                    {
+                      "nmId": 101,
+                      "views": 100,
+                      "clicks": 10,
+                      "atbs": 4,
+                      "orders": 2,
+                      "sum": 60,
+                      "sum_price": 800
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "ads_compact",
+      "method": "GET",
+      "host": "advert-api.wildberries.ru",
+      "path": "/adv/v3/fullstats",
+      "query": {
+        "ids": "601",
+        "beginDate": "2026-11-24",
+        "endDate": "2026-11-24"
+      },
+      "request": null,
+      "rows_path": "",
+      "response": [
+        {
+          "advertId": 601,
+          "views": 100,
+          "clicks": 10,
+          "atbs": 4,
+          "orders": 2,
+          "sum": 60,
+          "sum_price": 800,
+          "days": [
+            {
+              "date": "2026-11-24",
+              "views": 100,
+              "clicks": 10,
+              "atbs": 4,
+              "orders": 2,
+              "sum": 60,
+              "sum_price": 800,
+              "apps": [
+                {
+                  "appType": 1,
+                  "views": 100,
+                  "clicks": 10,
+                  "atbs": 4,
+                  "orders": 2,
+                  "sum": 60,
+                  "sum_price": 800,
+                  "nms": [
+                    {
+                      "nmId": 101,
+                      "views": 100,
+                      "clicks": 10,
+                      "atbs": 4,
+                      "orders": 2,
+                      "sum": 60,
+                      "sum_price": 800
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "fbs_warehouses",
+      "method": "GET",
+      "host": "marketplace-api.wildberries.ru",
+      "path": "/api/v3/warehouses",
+      "query": {},
+      "request": null,
+      "rows_path": "",
+      "response": [
+        {
+          "id": 7001,
+          "officeId": 501,
+          "name": "Тестовый склад",
+          "isDeleting": false,
+          "isProcessing": false,
+          "cargoType": 1,
+          "deliveryType": 1
+        }
+      ]
+    },
+    {
+      "source": "fbs_offices",
+      "method": "GET",
+      "host": "marketplace-api.wildberries.ru",
+      "path": "/api/v3/offices",
+      "query": {},
+      "request": null,
+      "rows_path": "",
+      "response": [
+        {
+          "id": 501,
+          "name": "Тестовый офис",
+          "address": "Тестовый адрес",
+          "city": "Оренбург",
+          "federalDistrict": "Приволжский"
+        }
+      ]
+    },
+    {
+      "source": "fbs_stocks",
+      "method": "POST",
+      "host": "marketplace-api.wildberries.ru",
+      "path": "/api/v3/stocks/7001",
+      "query": {},
+      "request": {
+        "chrtIds": [
+          9001
+        ]
+      },
+      "rows_path": "stocks",
+      "response": {
+        "stocks": [
+          {
+            "chrtId": 9001,
+            "amount": 7
+          }
+        ]
+      }
+    },
+    {
+      "source": "content_catalog",
+      "method": "POST",
+      "host": "content-api.wildberries.ru",
+      "path": "/content/v2/get/cards/list",
+      "query": {},
+      "request": {
+        "settings": {
+          "cursor": {
+            "limit": 100
+          },
+          "filter": {
+            "withPhoto": -1
+          }
+        }
+      },
+      "rows_path": "cards",
+      "response": {
+        "cards": [
+          {
+            "nmID": 101,
+            "vendorCode": "LAB-101",
+            "title": "Тестовое стекло",
+            "updatedAt": "2026-11-24T08:00:00Z",
+            "sizes": [
+              {
+                "chrtID": 9001,
+                "skus": [
+                  "0000000000101"
+                ]
+              }
+            ]
+          }
+        ],
+        "cursor": {
+          "total": 1,
+          "nmID": 101,
+          "updatedAt": "2026-11-24T08:00:00Z"
+        }
+      }
+    }
+  ],
+  "bootstrap_days": [
+    "2026-11-22"
+  ],
+  "expected": {
+    "sku": 101,
+    "fbs_chrt_id": 9001,
+    "fbs_amount": 7,
+    "finance_week_rows": 2,
+    "storage_total": 11,
+    "closed_current_only": {
+      "card_rating": 4.6,
+      "price_seller_discounted": 380,
+      "spp": 0.1,
+      "spp_proxy": 0.1,
+      "ads_bid_search": 140
+    },
+    "today_current_only": {
+      "card_rating": 4.8,
+      "price_seller_discounted": 400,
+      "spp": 0.2,
+      "spp_proxy": 0.2,
+      "ads_bid_search": 150
+    },
+    "daily": {
+      "openCount": 24,
+      "orderCount": 2,
+      "orderSum": 800,
+      "fin_buyout_rub": 400,
+      "fin_delivery_rub": 4,
+      "fin_acquiring_fee": 3
+    },
+    "ads": {
+      "ads_views": 100,
+      "ads_clicks": 10,
+      "ads_atbs": 4,
+      "ads_orders": 2,
+      "ads_sum": 60,
+      "ads_sum_price": 800,
+      "ads_cpc": 6,
+      "ads_ctr": 0.1,
+      "ads_cr": 0.2,
+      "ads_drr": 0.075
+    },
+    "closed_stock": 12
+  }
+}

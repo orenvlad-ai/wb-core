@@ -182,6 +182,11 @@
     }
   },
   "groups": {
+    "local_cycle_lab": {
+      "patterns": ["apps/local_cycle_lab/**"],
+      "commands": [["python3", "-m", "apps.local_cycle_lab.smoke"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "sqlite_contention": {
       "patterns": ["packages/application/sqlite_contention.py", "apps/sqlite_schema_contention_smoke.py", "apps/sqlite_contention_smoke.py"],
       "commands": [["python3", "apps/sqlite_schema_contention_smoke.py"], ["python3", "apps/sqlite_contention_smoke.py"], ["python3", "apps/registry_upload_db_backed_runtime_smoke.py"], ["python3", "apps/web_vitrina_group_trigger_upgrade_smoke.py"], ["python3", "apps/ready_publication_smoke.py"]],
