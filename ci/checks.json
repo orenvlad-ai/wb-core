@@ -186,7 +186,8 @@
       "patterns": ["apps/local_cycle_lab/**"],
       "commands": [
         ["python3", "-m", "apps.local_cycle_lab.smoke"],
-        ["python3", "-m", "apps.local_cycle_lab.local_smoke"]
+        ["python3", "-m", "apps.local_cycle_lab.local_smoke"],
+        ["python3", "apps/local_cycle_lab/full_sources_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5"]
     },
