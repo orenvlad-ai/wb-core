@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.canonical_cost_engine_diagnostic import run  # noqa: E402
+from apps.canonical_cost_engine_preflight import run as run_preflight  # noqa: E402
 from apps.canonical_cost_engine_smoke import (  # noqa: E402
     _insert_fallback_production,
     _insert_ff_balance,
@@ -37,7 +38,23 @@ def main() -> int:
 def _clean_pipeline_is_reached() -> None:
     with TemporaryDirectory() as tmp:
         runtime = _runtime(Path(tmp), include_fallback=True)
+        with _connect(runtime.db_path) as conn:
+            conn.execute("""
+                INSERT INTO sheet_vitrina_v1_wb_cost_daily_state(
+                    as_of_date, nm_id, stock_qty, our_wb_unit_cost_rub, source_status, calculated_at, inputs_hash
+                ) VALUES ('2026-06-30', 111, 7, 125.25, 'confirmed', '2026-06-30', 'legacy-test')
+            """)
+            conn.commit()
+        preflight = run_preflight(_args(runtime))
         report = run(_args(runtime))
+        expected_legacy = {"as_of_date": "2026-06-30", "quantity": 7.0, "recognized_unit_cost_rub": 125.25}
+        if report["reconciliation"]["legacy_wb_comparison"] != expected_legacy:
+            raise AssertionError("diagnostic candidate lost the published WB reference costs")
+        if preflight["fingerprint"] != report["source_preflight"]["fingerprint"]:
+            raise AssertionError("preflight and diagnostic must evaluate the same source inputs")
+        for evidence in (preflight, report["preservation"]):
+            if evidence["integrity_check"] != "not_applicable_domain_checkpoint" or evidence["production_mutation"]:
+                raise AssertionError("source evidence must identify the domain checkpoint scope")
         if report["status"] != "ok" or not report["fixpoint"]["reached"]:
             raise AssertionError("clean diagnostic must reach a zero-blocker fixpoint")
         if report["rebuild"] is None or report["reconciliation"] is None:

@@ -17,9 +17,7 @@ if str(ROOT) not in sys.path:
 from apps.canonical_cost_engine_backfill import (  # noqa: E402
     PROTECTED_TABLES,
     SOURCE_TABLES,
-    _integrity_check,
     _legacy_digest,
-    _sqlite_backup,
     _tables_digest,
 )
 from packages.application.canonical_cost_engine import (  # noqa: E402
@@ -28,6 +26,9 @@ from packages.application.canonical_cost_engine import (  # noqa: E402
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
+)
+from packages.application.warehouse_recovery_policy import (  # noqa: E402
+    WarehouseRecoveryRegistry,
 )
 
 
@@ -44,7 +45,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if not source_db.exists():
         raise ValueError("runtime SQLite database does not exist")
     source_inode = source_db.stat().st_ino
-    integrity = _integrity_check(source_db)
     source_digest = _tables_digest(source_db, SOURCE_TABLES)
     protected_digest = _tables_digest(source_db, PROTECTED_TABLES)
     legacy_digest = _legacy_digest(source_db)
@@ -53,7 +53,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             runtime_dir=Path(temp_dir) / "runtime"
         )
         copy_runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
-        _sqlite_backup(source_db, copy_runtime.db_path)
+        WarehouseRecoveryRegistry(
+            runtime_dir=runtime.runtime_dir, db_path=source_db,
+        ).write_disposable_domain_checkpoint(
+            copy_runtime.db_path, purpose="canonical_cost_preflight",
+        )
         report = CanonicalCostEngine(runtime=copy_runtime).source_anomaly_preflight(
             date_to=args.date_to
         )
@@ -68,7 +72,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     return {
         **report,
         "scope": {"date_from": CUTOVER_DATE, "date_to": args.date_to},
-        "integrity_check": integrity,
+        "integrity_check": "not_applicable_domain_checkpoint",
         "source_inode": source_inode,
         "source_digest": source_digest,
         "protected_non_target_digest": protected_digest,

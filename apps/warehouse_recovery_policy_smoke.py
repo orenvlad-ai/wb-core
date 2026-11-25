@@ -107,6 +107,27 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_disposable_checkpoint_keeps_one_read_snapshot_during_writes(self) -> None:
+        destination = Path(self.temporary.name) / "candidate.sqlite"
+        table = "sheet_vitrina_v1_warehouse_functional_versions"
+        write_checkpoint = self.registry._write_domain_checkpoint
+
+        def write_after_inventory(**options):
+            with closing(sqlite3.connect(self.runtime.db_path)) as writer:
+                writer.execute(f"UPDATE {table} SET version_id='v2' WHERE version_id='v1'")
+                writer.commit()
+            return write_checkpoint(**options)
+
+        with patch.object(self.registry, "_write_domain_checkpoint", side_effect=write_after_inventory):
+            self.registry.write_disposable_domain_checkpoint(destination, purpose="concurrent_read")
+        with closing(sqlite3.connect(destination)) as copy:
+            self.assertEqual(copy.execute(f"SELECT version_id FROM {table}").fetchall(), [("v1",)])
+            self.assertIsNone(copy.execute(
+                "SELECT name FROM sqlite_schema WHERE name='wb_finance_weekly_raw_rows'"
+            ).fetchone())
+        with closing(sqlite3.connect(self.runtime.db_path)) as original:
+            self.assertEqual(original.execute(f"SELECT version_id FROM {table}").fetchall(), [("v2",)])
+
     def test_policy_table_is_total_and_fail_closed(self) -> None:
         table = registered_policy_table()
         self.assertEqual(len(table), len(OPERATION_POLICIES))
