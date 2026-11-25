@@ -22,13 +22,28 @@ from .full_history import isolation_evidence, published_history
 from .full_sources import configure_sources
 from .full_warehouse import verify
 from .sources import Replay
-from . import publication_checkpoint
+from . import publication_checkpoint, warehouse_post
 from .stage_replay import invoke, posted_ledger
 from .state import atomic_json, read_json
 
 WORK = Path("/var/lib/wbc-lab/parity-case/evidence")
 REQUEST = "local-expense-1"
 CRASH = 84
+BOUNDARIES = dict(
+    rolling14="before_history_effects",
+    daily_projection="before_daily_projection_effects",
+    warehouse="after_overhead_post_commit",
+)
+
+
+def add_interruption_argument(parser):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--interrupt-before", dest="stage", choices=("rolling14", "daily_projection"), default="rolling14"
+    )
+    group.add_argument(
+        "--interrupt-after-warehouse-post", dest="stage", action="store_const", const="warehouse"
+    )
 
 
 def db_identity(entry):
@@ -45,11 +60,15 @@ def checkpoint(entry, receipt, captures):
         cycle=receipt["cycle_id"],
         job=receipt["job_id"],
         stage=receipt["current_stage"],
-        boundary="before_history_effects" if stage == "rolling14" else "before_daily_projection_effects",
+        boundary=BOUNDARIES[stage],
         ledger=posted_ledger(entry.runtime),
         predecessors=receipt["final_versions"],
     )
-    if stage == "daily_projection":
+    if stage == "warehouse":
+        marker["warehouse_post"] = warehouse_post.unfinished(
+            entry, receipt, read_json(WORK / "before.json")["operation_id"]
+        )
+    if stage != "rolling14":
         marker["collection_sha256"] = publication_checkpoint.save(
             entry, receipt, captures, WORK / "collection.json"
         )
@@ -58,21 +77,49 @@ def checkpoint(entry, receipt, captures):
 
 
 @contextmanager
-def interrupt_before(entry, stage):
+def interrupt_cycle(entry, stage):
     # Native dispatch persists the running stage before it calls its first action.
     original_write = CycleReceiptStore.write
-    capture = publication_checkpoint.capture_collection() if stage == "daily_projection" else nullcontext()
-    with capture as captures:
+    capture = publication_checkpoint.capture_collection() if stage != "rolling14" else nullcontext()
+    with capture as captures, ExitStack() as hooks:
+        warehouse_receipt = None
 
         def write(store, receipt):
+            nonlocal warehouse_receipt
             original_write(store, receipt)
-            if receipt["status"] == "running" and receipt["current_stage"] == stage:
-                row = next(s for s in receipt["stages"] if s["stage"] == stage)
-                if row["status"] == "running":
+            if receipt["status"] != "running" or receipt["current_stage"] != stage:
+                return
+            row = next(s for s in receipt["stages"] if s["stage"] == stage)
+            if row["status"] == "running":
+                if stage == "warehouse":
+                    if row.get("durable_ref"):
+                        warehouse_receipt = receipt
+                else:
                     checkpoint(entry, receipt, captures)
 
-        with patch.object(CycleReceiptStore, "write", write):
-            yield
+        hooks.enter_context(patch.object(CycleReceiptStore, "write", write))
+        if stage == "warehouse":
+            service = warehouse_post.documents.FfPoolDocumentService
+            original_post = service._post_once_under_writer_lock
+            request_id = read_json(WORK / "before.json")["operation_id"]
+
+            def post(owner, identity, **kwargs):
+                result = original_post(owner, identity, **kwargs)
+                if identity == request_id and kwargs.get("defer_confirmed_overhead_projection"):
+                    expect(warehouse_receipt is not None, "No durable warehouse run at post")
+                    try:
+                        checkpoint(entry, warehouse_receipt, captures)
+                    except Exception:
+                        # The native drainer handles ordinary posting errors. A broken
+                        # test hook must stop this disposable branch immediately.
+                        import traceback
+
+                        traceback.print_exc()
+                        os._exit(85)
+                return result
+
+            hooks.enter_context(patch.object(service, "_post_once_under_writer_lock", post))
+        yield
 
 
 def history_values(config):
@@ -147,8 +194,7 @@ def values(entry, receipt, config):
     return dict(business=business, publication=publication, history_values=history, tables=tables)
 
 
-def recover(entry, config, store, stage):
-    marker = read_json(WORK / "interruption.json")
+def recover(entry, config, store, stage, marker):
     with serving(entry, 8765):
         status = dispatch.manual_status(dispatch.RUNTIME, REQUEST)
     source = store.read(marker["cycle"])
@@ -159,8 +205,7 @@ def recover(entry, config, store, stage):
         and status["receipt"]["job_id"] == source["job_id"] == marker["job"]
         and source["current_stage"] == marker["stage"] == stage
         and marker["pid"] != os.getpid()
-        and marker["boundary"]
-        == ("before_history_effects" if stage == "rolling14" else "before_daily_projection_effects")
+        and marker["boundary"] == BOUNDARIES[stage]
         and marker["db"] == db_identity(entry)
         and source["final_versions"] == marker["predecessors"]
         and source["stages"][index]["error_code"] == "outcome_uncertain"
@@ -172,9 +217,15 @@ def recover(entry, config, store, stage):
         not (config.candidate_root / "history/CURRENT.json").exists(), "Possible prior History publication"
     )
     ledger = posted_ledger(entry.runtime)
-    if stage == "daily_projection" or "ledger" in marker:
+    if stage != "rolling14" or "ledger" in marker:
         expect(ledger == marker["ledger"], "Posted ledger changed across restart")
-    if stage == "daily_projection":
+    warehouse = stage == "warehouse"
+    if warehouse:
+        before_post = warehouse_post.unfinished(
+            entry, source, read_json(WORK / "before.json")["operation_id"]
+        )
+        expect(before_post == marker["warehouse_post"], "Committed expense or warehouse receipt changed")
+    if stage != "rolling14":
         publication_checkpoint.read_sealed(WORK / "collection.json", marker["collection_sha256"])
     atomic_json(WORK / "interrupted-receipt.json", source)
     # An unknown outcome of this repair itself must be examined before another attempt.
@@ -200,7 +251,13 @@ def recover(entry, config, store, stage):
     started = time.monotonic()
     with ExitStack() as guards:
         guards.enter_context(patch("urllib.request.urlopen", reject("source HTTP")))
-        for name in ("_cycle_finance_sources", "_cycle_fbs_generation", "_cycle_warehouse"):
+        if warehouse:
+            replay = guards.enter_context(
+                warehouse_post.replay_sources(entry, source, before_post, ledger, reject)
+            )
+        else:
+            guards.enter_context(patch.object(entry, "_cycle_warehouse", reject("_cycle_warehouse")))
+        for name in ("_cycle_finance_sources", "_cycle_fbs_generation"):
             guards.enter_context(patch.object(entry, name, reject(name)))
         guards.enter_context(patch.object(SheetVitrinaCycleSources, "collect_sources", reject("api_sources")))
         original_collect = ClosedBacklog.collect
@@ -221,10 +278,28 @@ def recover(entry, config, store, stage):
             collection_hash=marker.get("collection_sha256"),
         )
     seconds = time.monotonic() - started
+    after_ledger = posted_ledger(entry.runtime)
+    warehouse_result = {}
+    if warehouse:
+        finished = warehouse_post.completed(entry, before_post, attempt)
+        warehouse_result = dict(
+            before=before_post, after=finished, source_calls={k: c["calls"] for k, c in replay.totals.items()}
+        )
+        # The confirmation has now advanced to completed. Its immutable identity
+        # and count are checked separately from its legitimate receipt update.
+        for name in ("ff_pool_documents", "ff_pool_movement_lines", "ff_pool_balances"):
+            expect(ledger[name] == after_ledger[name], "Recovered warehouse changed posted rows: " + name)
+        expect(
+            ledger["ff_pool_overhead_confirmations"]["rows"]
+            == after_ledger["ff_pool_overhead_confirmations"]["rows"]
+            == 1,
+            "Confirmation count changed",
+        )
+    else:
+        expect(ledger == after_ledger, "Publication replay changed the FF ledger")
     expect(
         not forbidden
         and attempt["job_id"] != source["job_id"]
-        and posted_ledger(entry.runtime) == ledger
         and [s["stage"] for s in attempt["stages"]] == list(STAGES[index:]),
         "Unexpected repair effects",
     )
@@ -252,6 +327,7 @@ def recover(entry, config, store, stage):
             completed_prefix=list(STAGES[:index]),
             executed=[dict(stage=s["stage"], status=s["status"]) for s in attempt["stages"]],
             forbidden_calls=forbidden,
+            warehouse_post=warehouse_result,
             collection_sha256=marker.get("collection_sha256"),
             closed_backfill_dates=json.loads(attempt["final_versions"]["closed_backfill_dates"]),
             original_status=source["status"],
@@ -262,6 +338,42 @@ def recover(entry, config, store, stage):
             original_pid=marker["pid"],
             recovery_pid=os.getpid(),
             observed_at=entry.now_factory().isoformat(),
+        ),
+    )
+
+
+def reject_changed_post(entry, config, store, marker):
+    from copy import deepcopy
+
+    expect(
+        not (WORK / "attempt.json").exists() and not (WORK / "publication-repair.claim").exists(),
+        "Negative control requires the original interrupted case",
+    )
+    changed = deepcopy(marker)
+    changed["warehouse_post"]["post"]["identity"]["document_id"] += "-other"
+    try:
+        recover(entry, config, store, "warehouse", changed)
+    except ValueError as exc:
+        if str(exc) != "Committed expense or warehouse receipt changed":
+            raise
+    else:
+        raise ValueError("Recovery accepted a different posted document")
+    original = store.read(marker["cycle"])
+    expect(
+        not (WORK / "attempt.json").exists()
+        and not (WORK / "publication-repair.claim").exists()
+        and posted_ledger(entry.runtime) == marker["ledger"]
+        and warehouse_post.unfinished(entry, original, read_json(WORK / "before.json")["operation_id"])
+        == marker["warehouse_post"],
+        "Rejected evidence affected the case",
+    )
+    atomic_json(
+        WORK / "rejected-post.json",
+        dict(
+            changed="document_id",
+            before_repair=True,
+            original_job=marker["job"],
+            original_run=marker["warehouse_post"]["warehouse"]["run_id"],
         ),
     )
 
@@ -315,8 +427,11 @@ def run(action, stage):
     )
     entry.operator_jobs.enable_snapshot_admission(dispatch.RUNTIME)
     store = CycleReceiptStore(dispatch.RUNTIME, stamp)
+    if action == "reject-post":
+        reject_changed_post(entry, config, store, read_json(WORK / "interruption.json"))
+        return
     if action == "recover":
-        recover(entry, config, store, stage)
+        recover(entry, config, store, stage, read_json(WORK / "interruption.json"))
         return
     day = read_json(SCENARIO)
     replay = Replay(day, "missing" if action == "negative" else "normal")
@@ -331,7 +446,12 @@ def run(action, stage):
                 return original(req, **kwargs)
             return io.tape.open(req, **kwargs)
 
-        fault = interrupt_before(entry, stage) if action == "crash" else nullcontext()
+        source_counts = {}
+        fault = nullcontext()
+        if action == "crash":
+            fault = interrupt_cycle(entry, stage)
+        elif stage == "warehouse" and action == "control":
+            fault = warehouse_post.observe_control(entry, replay, source_counts)
         with patch("urllib.request.urlopen", transport), serving(entry, 8765), fault:
             accepted = dispatch.launch(dispatch.RUNTIME, manual_request_id=request_id)
             expect(
@@ -375,6 +495,7 @@ def run(action, stage):
                 dict(
                     **values(entry, receipt, config),
                     seconds=seconds,
+                    warehouse_source_calls=source_counts,
                     job=receipt["job_id"],
                     status=receipt["status"],
                     dispatch=dict(
@@ -390,7 +511,9 @@ def run(action, stage):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("seed", "control", "crash", "recover", "negative", "repeat"))
-    parser.add_argument("--interrupt-before", choices=("rolling14", "daily_projection"), default="rolling14")
+    parser.add_argument(
+        "action", choices=("seed", "control", "crash", "recover", "negative", "repeat", "reject-post")
+    )
+    add_interruption_argument(parser)
     args = parser.parse_args()
-    run(args.action, args.interrupt_before)
+    run(args.action, args.stage)

@@ -105,9 +105,11 @@ def run_owned(fixture, output, stage):
     def unit(case, action):
         clock = read_seed_day + " 08:00:00 UTC"
         if action != "seed":
-            previous = {"recover": "interruption.json", "repeat": "recovered.json"}.get(
-                action, "seed-clock.json"
-            )
+            previous = {
+                "recover": "interruption.json",
+                "reject-post": "interruption.json",
+                "repeat": "recovered.json",
+            }.get(action, "seed-clock.json")
             saved = read(root + "/" + case + "/evidence/" + previous)
             clock = (datetime.fromisoformat(saved["observed_at"]) + timedelta(seconds=1)).strftime(
                 "%Y-%m-%d %H:%M:%S UTC"
@@ -153,8 +155,11 @@ def run_owned(fixture, output, stage):
             "-m",
             "apps.local_cycle_lab.parity_case",
             action,
-            "--interrupt-before",
-            stage,
+            *(
+                ["--interrupt-after-warehouse-post"]
+                if stage == "warehouse"
+                else ["--interrupt-before", stage]
+            ),
         )
         guest(*command)
 
@@ -173,6 +178,8 @@ def run_owned(fixture, output, stage):
                 raise
         else:
             raise RuntimeError("Interrupted daemon unexpectedly survived")
+        if stage == "warehouse":
+            unit("crash", "reject-post")
         unit("crash", "recover")
         control = read(root + "/control/evidence/uninterrupted.json")
         repaired = read(root + "/crash/evidence/recovered.json")
@@ -210,6 +217,11 @@ def run_owned(fixture, output, stage):
             or any(control["publication"][key] != repaired["publication"][key] for key in fields)
         ):
             raise ValueError("Recovered business values or publication differ from uninterrupted control")
+        if (
+            stage == "warehouse"
+            and control["warehouse_source_calls"] != repaired["warehouse_post"]["source_calls"]
+        ):
+            raise ValueError("Repaired warehouse source calls differ from its uninterrupted handler")
         unit("crash", "repeat")
         repeated = read(root + "/crash/evidence/repeat.json")
         if (
@@ -229,6 +241,8 @@ def run_owned(fixture, output, stage):
             recovered=repaired,
             repeat=repeated,
         )
+        if stage == "warehouse":
+            result["rejected_post"] = read(root + "/crash/evidence/rejected-post.json")
         atomic_json(output / "verification.json", result)
     finally:
         # Our user-unit directory was absent at entry. Its contents are generated only by this suite.
@@ -252,6 +266,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("private_fixture", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--interrupt-before", choices=("rolling14", "daily_projection"), default="rolling14")
+    from .parity_case import add_interruption_argument
+
+    add_interruption_argument(parser)
     args = parser.parse_args()
-    run(args.private_fixture, args.output, args.interrupt_before)
+    run(args.private_fixture, args.output, args.stage)

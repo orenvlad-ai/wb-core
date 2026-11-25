@@ -93,12 +93,25 @@ def save(entry, receipt, captures, path):
     )
     expect(sources.capital_reader is not None, "Missing native capital reader")
     data = {key: getattr(sources, key) for key in ("scope", "slots", "effects", "inputs")}
+    previous_material = {}
+    if receipt["current_stage"] == "warehouse":
+        # The interrupted run hasn't published its warehouse version yet. Bind the
+        # actual active predecessor at the post instead of fabricating a stage proof.
+        from packages.application.fbs_accounting_runtime import load
+
+        with readonly(entry.runtime.db_path) as conn:
+            (active,) = conn.execute(
+                "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+            )
+        _, book = load(entry.runtime.runtime_dir)
+        previous_material = dict(functional_version=active[0], fbs_book=book)
     with capture_build_inputs(entry.runtime.db_path, runtime_dir=entry.runtime.runtime_dir) as pins:
         pin_parameters(entry.runtime.db_path)
         atomic_json(
             path,
             dict(
                 format=1,
+                previous_material=previous_material,
                 source=read_json(SOURCE_ID),
                 cycle=receipt["cycle_id"],
                 job=receipt["job_id"],
@@ -131,8 +144,14 @@ def restore(entry, source, path, expected_hash, finance, fbs):
         "Checkpoint code, source or request differs",
     )
     versions = source["final_versions"]
+    previous_material = saved.get("previous_material", {})
+    required = {"functional_version", "fbs_book"} if source["current_stage"] == "warehouse" else set()
+    expect(
+        set(previous_material) == required and not previous_material.keys() & versions.keys(),
+        "Unexpected warehouse predecessors",
+    )
     entry._cycle_validate_predecessors(
-        finance, fbs, {**versions, "daily_projection_digest": saved["daily_digest"]}
+        finance, fbs, {**versions, **previous_material, "daily_projection_digest": saved["daily_digest"]}
     )
     adapter = entry._cycle_sources()
     closed = ClosedBacklog(adapter)

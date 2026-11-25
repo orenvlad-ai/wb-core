@@ -54,13 +54,18 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, col
     finance = stages["finance_sources"]["versions"]
     if stage not in (*SUPPORTED, "daily_projection"):
         raise ValueError("Unsupported recovery stage")
-    suffix = stage == "daily_projection"
+    resume_warehouse = stage == "warehouse" and collection_hash is not None
+    suffix = stage == "daily_projection" or resume_warehouse
     selected = ("daily_projection", "closed_ready", "final_ready", "rolling14") if suffix else (stage,)
+    scope = "publication_suffix" if suffix else "one_stage"
+    if resume_warehouse:
+        selected = ("warehouse", *selected)
+        scope = "warehouse_and_publication"
     if suffix:
         expect(selected == STAGES[STAGES.index(stage):], "Native publication stage order changed")
     fresh = dict(schema="local_selected_stage_v1", cycle_id=uuid4().hex, source_cycle=source["cycle_id"],
                  source_job=source["job_id"], checkpoint_sha256=checkpoint_hash, replay_code=read_json(SOURCE_ID),
-                 scope="publication_suffix" if suffix else "one_stage", current_stage=stage, business_date=source["business_date"],
+                 scope=scope, current_stage=stage, business_date=source["business_date"],
                  slot_utc=entry.now_factory().isoformat(), owner_pid=os.getpid(),
                  process_identity=process_identity(os.getpid()), status="accepted",
                  history_config_fingerprint=config.fingerprint(), final_versions=versions,
@@ -73,7 +78,7 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, col
         store.write(fresh)
 
     def actions():
-        if stage == "warehouse":
+        if stage == "warehouse" and not suffix:
             raw = finance_raw_proof(entry)
             expect(all(finance[key] == value for key, value in raw.items()), "Finance source changed")
             from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
@@ -87,6 +92,8 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, col
         if suffix:
             from .publication_checkpoint import restore as restore_collection
             adapter, handle, closed = restore_collection(entry, source, output / "collection.json", collection_hash, finance, fbs)
+            if resume_warehouse:
+                yield entry._cycle_warehouse(store, fresh, fbs)
             yield entry._cycle_daily_projection()
             dates, proof = run_closed_ready_stage(entry, fresh, adapter, handle, finance, fbs, closed)
             yield proof

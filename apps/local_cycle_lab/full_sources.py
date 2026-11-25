@@ -121,14 +121,31 @@ def configure_sources(entry, replay, now=None):
     return FullSourceContext(entry, replay, now or entry.now_factory())
 
 
+def bind_warehouse_sources(entry, opener, clock, now):
+    from packages.adapters.wb_fbs_orders import HttpBackedWbFbsOrdersSource
+    from packages.adapters.wb_content import HttpBackedWbContentSource
+    from packages.adapters.wb_supplies import HttpBackedWbSuppliesSource
+    from packages.adapters.stocks_block import HttpBackedStocksSource
+    from packages.application.stocks_block import StocksBlock
+    registry = entry.wb_fbs_warehouse_registry
+    registry.source = HttpBackedWbFbsOrdersSource(opener=opener, sleep_fn=clock.advance)
+    registry.catalog_source = HttpBackedWbContentSource(opener=opener)
+    entry.wb_fbs_orders.source = registry.source
+    entry.wb_fbs_orders.enabled = True
+    entry.wb_fbs_orders.unix_time_factory = lambda: now.timestamp()
+    entry.wb_supplies_block.source = HttpBackedWbSuppliesSource(opener=opener)
+    entry.wb_regional_supply_planning_block.source = entry.wb_supplies_block.source
+    source = HttpBackedStocksSource(opener=opener, reuse_ttl_seconds=0,
+        sleep_fn=clock.advance, monotonic_fn=clock.time, time_fn=clock.time,
+        now_factory=entry.now_factory)
+    # WarehouseFunctionalBlock captures through its opening block.
+    entry.warehouse_functional_block.opening.stocks_block = StocksBlock(source)
+    entry.warehouse_stocks_block.stocks_block = StocksBlock(source)
+
+
 class FullSourceContext:
     def __init__(self, entry, replay, now):
         from packages.adapters.wb_finance_api import WbFinanceApiClient
-        from packages.adapters.wb_fbs_orders import HttpBackedWbFbsOrdersSource
-        from packages.adapters.wb_content import HttpBackedWbContentSource
-        from packages.adapters.wb_supplies import HttpBackedWbSuppliesSource
-        from packages.adapters.stocks_block import HttpBackedStocksSource
-        from packages.application.stocks_block import StocksBlock
         self.entry, self.replay, self.now = entry, replay, now
         self.tape = FullHttpTape(replay)
         self.clock = ReplayClock(now, entry.runtime.runtime_dir / "lab-provider-clock.json")
@@ -140,20 +157,7 @@ class FullSourceContext:
         with sqlite3.connect(entry.runtime.db_path) as conn:
             conn.execute("UPDATE wb_finance_daily_config SET initial_day=? WHERE seller_id=?",
                          (replay.scenario["bootstrap_days"][0], entry.wb_finance_daily_block.seller_id))
-        registry = entry.wb_fbs_warehouse_registry
-        registry.source = HttpBackedWbFbsOrdersSource(opener=self.tape.open, sleep_fn=self.clock.advance)
-        registry.catalog_source = HttpBackedWbContentSource(opener=self.tape.open)
-        entry.wb_fbs_orders.source = registry.source
-        entry.wb_fbs_orders.enabled = True
-        entry.wb_fbs_orders.unix_time_factory = lambda: now.timestamp()
-        entry.wb_supplies_block.source = HttpBackedWbSuppliesSource(opener=self.tape.open)
-        entry.wb_regional_supply_planning_block.source = entry.wb_supplies_block.source
-        source = HttpBackedStocksSource(opener=self.tape.open, reuse_ttl_seconds=0,
-            sleep_fn=self.clock.advance, monotonic_fn=self.clock.time, time_fn=self.clock.time,
-            now_factory=entry.now_factory)
-        # WarehouseFunctionalBlock captures through its opening block.
-        entry.warehouse_functional_block.opening.stocks_block = StocksBlock(source)
-        entry.warehouse_stocks_block.stocks_block = StocksBlock(source)
+        bind_warehouse_sources(entry, self.tape.open, self.clock, now)
 
     def _finance_factory(self, token, **kwargs):
         if token != "lab-only":
