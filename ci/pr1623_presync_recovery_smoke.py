@@ -22,16 +22,17 @@ from packages.application import business_data_deploy_protection as deploy
 from packages.application import business_data_held_formula as formula
 
 
-def failure_log():
+def failure_log(release_run_id=c.RUN):
+    case=c._profile(release_run_id);profile=case['PROFILE']
     command = 'python3 ci/github_release_runner.py run --workflow-run-id "$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"'
     return ('##[group]Run ' + command + '\n' + command + '\nshell: /usr/bin/bash -e {0}\nenv:\n'
-        f'  GATE_RUN_ID: {c.PROFILE["gate_run_id"]}\n##[endgroup]\n'
+        f'  GATE_RUN_ID: {profile["gate_run_id"]}\n##[endgroup]\n'
         'line 1208, in deploy_current_checkout\n'
         'run_stage("root-storage-preflight", root_storage_commands["preflight"],\n'
         'allow_transport_reconciliation=False)\n'
-        '{"stage": "root-storage-preflight", "ok": false, "alerts": [{"available_bytes": 26385899520, '
-        '"required_reserve_bytes": 26843545600, "code": "storage_reserve_breach", "role": "root"}]}\n'
-        + json.dumps(dict(phase='prepared', fingerprint=c.OWNER, baseline=c.BASELINE, operation=c.PROFILE['operation_id']))
+        + json.dumps(dict(stage='root-storage-preflight',ok=False,alerts=[dict(available_bytes=case['AVAILABLE'],
+            required_reserve_bytes=case['RESERVE'],code='storage_reserve_breach',role=case['ROLE'])])) + '\n'
+        + json.dumps(dict(phase='prepared', fingerprint=case['OWNER'], baseline=case['BASELINE'], operation=profile['operation_id']))
         + "\nsubprocess.CalledProcessError: Command ['ssh'] returned non-zero exit status 3.\n").encode()
 
 
@@ -101,14 +102,15 @@ class RecoveryTests(unittest.TestCase):
                 path.write_bytes(b'changed')
                 with self.assertRaises(SystemExit): execute()
 
-    def fixture(self, stack):
+    def fixture(self, stack, *, release_run_id=c.RUN):
+        case=c._profile(release_run_id);profile=case['PROFILE']
         self.client = CommentsClient()
-        original = {**c.PROFILE, 'schema': r.release.RECEIPT_SCHEMA, 'state': 'blocked'}
+        original = {**profile, 'schema': r.release.RECEIPT_SCHEMA, 'state': 'blocked'}
         self.proof = dict(original_receipt=original, failure={'stage': 'exact'})
-        self.runner = dict(trusted_main_sha='f' * 40, target_merge_sha=c.PROFILE['merge_sha'])
-        self.prestate = dict(metadata={'commit': c.PREVIOUS, 'deployment_complete': True},
+        self.runner = dict(trusted_main_sha='f' * 40, target_merge_sha=profile['merge_sha'])
+        self.prestate = dict(metadata={'commit': case['PREVIOUS'], 'deployment_complete': True},
             metadata_sha256='old', main_pid=123, finance_pilot={'write_mode': 'readonly'})
-        self.final = {**self.prestate, 'metadata': {'commit': c.PROFILE['merge_sha'], 'deployment_complete': True}}
+        self.final = {**self.prestate, 'metadata': {'commit': profile['merge_sha'], 'deployment_complete': True}}
         self.target = SimpleNamespace(target_id='wb_core_eu_hosted_runtime_active')
         def mock(obj, name, **kwargs): return stack.enter_context(patch.object(obj, name, **kwargs))
         mock(c, 'evidence', return_value=self.proof)
@@ -116,10 +118,10 @@ class RecoveryTests(unittest.TestCase):
         self.owner = mock(c, 'collect_owner', return_value={'owner': 'exact'})
         self.storage = mock(c, 'storage_preflight', return_value={'ok': True})
         self.main = mock(r, 'prove_repo_only_descendant', return_value=self.runner)
-        self.readback = mock(r, 'collect_prestate', side_effect=lambda t, sha, **kw: deepcopy(self.prestate if sha == c.PREVIOUS else self.final))
+        self.readback = mock(r, 'collect_prestate', side_effect=lambda t, sha, **kw: deepcopy(self.prestate if sha == case['PREVIOUS'] else self.final))
         self.finish = mock(r, '_finish_deploy_protection', return_value={})
         self.deploy = mock(c, 'canonical_deploy')
-        return c.build_preview(self.client, self.target)
+        return c.build_preview(self.client, self.target, release_run_id=release_run_id)
 
     def test_one_deploy_exact_completion_and_repeat_readback(self):
         with ExitStack() as stack:
@@ -194,7 +196,7 @@ class RecoveryTests(unittest.TestCase):
             self.deploy.assert_not_called(); self.finish.assert_not_called()
         with ExitStack() as stack:
             preview = self.fixture(stack)
-            def drift(): self.main.return_value = {**self.runner, 'trusted_main_sha': 'e' * 40}
+            def drift(**kwargs): self.main.return_value = {**self.runner, 'trusted_main_sha': 'e' * 40}
             self.deploy.side_effect = drift
             self.assertEqual(c.run(self.client, self.target, 'apply', preview['preview_fingerprint'])['state'], 'ambiguous')
             self.deploy.assert_called_once(); self.finish.assert_not_called()
@@ -260,6 +262,76 @@ class RecoveryTests(unittest.TestCase):
                 with self.assertRaises(subprocess.CalledProcessError): c.canonical_deploy()
             self.assertEqual(len(calls), 1); self.assertFalse(calls[0].exists())
             self.assertEqual((repo / 'payload').read_text(), 'later repo-only runner')
+
+
+class Pr1626StorageRefusalTests(unittest.TestCase):
+    RUN=45514713724
+    def fixture(self,stack):
+        return RecoveryTests.fixture(self,stack,release_run_id=self.RUN)
+
+    def test_exact_backup_failure_cannot_admit_other_run_role_or_owner(self):
+        case=c._profile(self.RUN);profile=case['PROFILE'];raw=failure_log(self.RUN)
+        self.assertEqual(c.prove_failure(raw,profile['gate_run_id'],'job',release_run_id=self.RUN)['exit_status'],3)
+        self.assertEqual(r._prove_failed_stage(raw,profile['gate_run_id'],'job',release_run_id=self.RUN)['stage'],
+            'root-storage-preflight-before-owner-start')
+        for before,after in [(b'"backup"',b'"root"'),(str(case['RESERVE']).encode(),b'1'),
+                (case['OWNER'].encode(),c.OWNER.encode()),(case['BASELINE'].encode(),c.BASELINE.encode()),
+                (b'prepared',b'mutation_started'),(b'exit status 3',b'exit status 255'),
+                (b'allow_transport_reconciliation=False',b'allow_transport_reconciliation=True'),
+                (str(profile['gate_run_id']).encode(),str(c.PROFILE['gate_run_id']).encode())]:
+            with self.subTest(after=after),self.assertRaises(r.RecoveryError):
+                c.prove_failure(raw.replace(before,after),profile['gate_run_id'],'job',release_run_id=self.RUN)
+        for raw,gate,run in [(raw,profile['gate_run_id'],c.RUN),
+                (failure_log(),c.PROFILE['gate_run_id'],self.RUN),(raw,profile['gate_run_id'],1)]:
+            with self.subTest(run=run),self.assertRaises(r.RecoveryError):c.prove_failure(raw,gate,'job',release_run_id=run)
+
+    def test_one_canonical_deploy_uses_original_identity_and_correct_issue(self):
+        with ExitStack() as stack:
+            preview=self.fixture(stack)
+            self.assertEqual(preview['release_run_id'],self.RUN)
+            self.assertEqual(preview['recovery_case'],'pr1626-proven-unentered-presync')
+            with patch.object(r,'_publish_once',wraps=r._publish_once) as publish:
+                result=c.run(self.client,self.target,'apply',preview['preview_fingerprint'],release_run_id=self.RUN)
+                self.assertEqual(result['state'],'complete')
+                self.assertEqual([call.args[1] for call in publish.call_args_list],[1626,1626])
+            self.deploy.assert_called_once_with(release_run_id=self.RUN)
+            self.finish.assert_called_once_with(self.target,self.proof['original_receipt'])
+            self.assertEqual(c.run(self.client,self.target,'apply',preview['preview_fingerprint'],release_run_id=self.RUN)['state'],'complete')
+            self.deploy.assert_called_once()
+
+    def test_uncertain_existing_claim_has_no_deploy_replay(self):
+        with ExitStack() as stack:
+            preview=self.fixture(stack);self.deploy.side_effect=subprocess.CalledProcessError(255,['canonical'])
+            self.assertEqual(c.run(self.client,self.target,'apply',preview['preview_fingerprint'],release_run_id=self.RUN)['state'],'ambiguous')
+            self.readback.side_effect=r.RecoveryError('incomplete runtime')
+            self.assertEqual(c.run(self.client,self.target,'apply',preview['preview_fingerprint'],release_run_id=self.RUN)['state'],'ambiguous')
+            self.deploy.assert_called_once_with(release_run_id=self.RUN);self.finish.assert_not_called()
+
+    def test_stale_prestate_and_storage_refusal_cannot_claim(self):
+        with ExitStack() as stack:
+            preview=self.fixture(stack);self.prestate['main_pid']=124
+            with self.assertRaises(r.RecoveryError):c.run(self.client,self.target,'apply',preview['preview_fingerprint'],release_run_id=self.RUN)
+            self.assertFalse(self.client.values);self.deploy.assert_not_called()
+            self.storage.side_effect=r.RecoveryError('backup reserve still breached')
+            with self.assertRaises(r.RecoveryError):c.build_preview(self.client,self.target,release_run_id=self.RUN)
+            self.assertFalse(self.client.values)
+
+    def test_canonical_checkout_and_environment_bind_original_merge(self):
+        case=c._profile(self.RUN);profile=case['PROFILE'];calls=[]
+        def git(args):
+            if args[0]=='clone':(Path(args[-1])/'.git').mkdir(parents=True)
+            return SimpleNamespace(stdout=profile['merge_sha'])
+        with patch.object(r,'_git',side_effect=git),patch.object(subprocess,'run',side_effect=lambda args,**kw:calls.append((args,kw))):
+            c.canonical_deploy(release_run_id=self.RUN)
+        self.assertEqual(len(calls),1);args,kwargs=calls[0]
+        self.assertEqual(args[1:],['apps/registry_upload_http_entrypoint_hosted_runtime.py','deploy'])
+        self.assertEqual(kwargs['env']['WB_CORE_RELEASE_PR'],'1626')
+        self.assertEqual(kwargs['env']['WB_CORE_RELEASE_OPERATION_ID'],profile['operation_id'])
+        self.assertEqual(kwargs['env']['WB_CORE_RELEASE_HEAD'],profile['head_sha'])
+        self.assertEqual(kwargs['env']['WB_CORE_RELEASE_DEFER_DEPLOY_OWNER_FINISH'],'true')
+        self.assertEqual(kwargs['env']['WB_CORE_HOSTED_RUNTIME_TARGET_FILE'],str(kwargs['cwd']/c.TARGET_RELATIVE))
+        self.assertTrue(Path(kwargs['env']['WB_CORE_HOSTED_RUNTIME_TARGET_FILE']).is_absolute())
+
 
 
 if __name__ == '__main__':
