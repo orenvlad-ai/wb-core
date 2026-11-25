@@ -279,7 +279,15 @@ def main():
             return 2
         channel, cap = child_bootstrap(int(sys.argv[1]))
         try:
-            result = execute(cap)
+            from packages.procedure_journal import child_scope
+            with child_scope(cap.get("journal_parent"), cap["mode"], cap["invocation"]):
+                try:
+                    result = execute(cap)
+                finally:
+                    import resource
+                    from packages.procedure_journal import event
+                    event("history_worker", "resources", "sample",
+                          rss_peak_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         except Exception as exc:
             from packages.application.web_vitrina_history_store import HistoryUnavailable
             result = history_child_failure(exc, mode=cap["mode"], source_error=isinstance(exc, HistoryUnavailable))

@@ -339,4 +339,7 @@ def _print(report: Mapping[str, object], *, compact: bool) -> None:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("ff_inventory_reconciliation"):
+        raise SystemExit(main())

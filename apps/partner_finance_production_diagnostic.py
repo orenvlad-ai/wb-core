@@ -135,4 +135,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     return 0 if result.get("status") == "ready" else 3
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("partner_finance_production_diagnostic"):
+        raise SystemExit(main())

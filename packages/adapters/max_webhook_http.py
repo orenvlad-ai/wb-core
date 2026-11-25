@@ -32,7 +32,9 @@ def build_max_webhook_server(config: MaxWebhookConfig, *, port: int = MAX_WEBHOO
             self.inbox_healthy = False
             print("MAX webhook handler unavailable", file=sys.stderr)
 
-    class MaxWebhookHandler(BaseHTTPRequestHandler):
+    from packages.procedure_journal import JournalHTTPMixin
+
+    class MaxWebhookHandler(JournalHTTPMixin, BaseHTTPRequestHandler):
         def setup(self) -> None:
             super().setup()
             self.connection.settimeout(BODY_READ_SECONDS)

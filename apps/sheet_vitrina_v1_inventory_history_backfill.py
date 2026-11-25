@@ -2749,4 +2749,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("sheet_vitrina_v1_inventory_history_backfill"):
+        raise SystemExit(main())

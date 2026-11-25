@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from packages import procedure_journal as journal_log
+
 from contextlib import contextmanager
 from contextvars import ContextVar
 import fcntl
@@ -218,7 +220,7 @@ def thread_start_is_proven_absent(thread) -> bool:
 def admitted_thread(runtime_dir: Path, **options):
     """Retain an independently admitted async operation through target finally."""
     import threading
-    target = options.pop("target")
+    target = journal_log.worker(options.pop("target"))
     args = options.pop("args", ())
     kwargs = options.pop("kwargs", {})
     lease = AdmissionLease(runtime_dir, independent=True)

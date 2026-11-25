@@ -22,7 +22,9 @@ def build_supplier_view_server(runtime_dir: Path, *, port=8782, host="127.0.0.1"
     if host not in {"127.0.0.1", "::1"}:
         raise ValueError("supplier view listener must remain loopback-only")
 
-    class Handler(BaseHTTPRequestHandler):
+    from packages.procedure_journal import JournalHTTPMixin
+
+    class Handler(JournalHTTPMixin, BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass
 

@@ -22,4 +22,8 @@ def main():
         'total_metrics':snapshot.metrics()},ensure_ascii=False,indent=2))
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("fbs_inventory_presentation"):
+        main()

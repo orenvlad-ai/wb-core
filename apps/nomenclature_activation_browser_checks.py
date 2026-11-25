@@ -239,4 +239,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("nomenclature_activation_browser_checks"):
+        main()

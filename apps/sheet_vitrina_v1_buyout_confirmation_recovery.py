@@ -1121,4 +1121,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("sheet_vitrina_v1_buyout_confirmation_recovery"):
+        main()

@@ -609,4 +609,8 @@ def main() -> int:
         print(json.dumps(dict(status='blocked',error=dict(code=exc.code if isinstance(exc,CleanerError) else type(exc).__name__,message=' '.join(str(exc).split())[:300])),ensure_ascii=False,sort_keys=True));return 2
     print(json.dumps(result,ensure_ascii=False,sort_keys=True));return 0
 
-if __name__=='__main__':raise SystemExit(main())
+if __name__=='__main__':
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("search_cluster_cleaner_stage_e"):
+        raise SystemExit(main())

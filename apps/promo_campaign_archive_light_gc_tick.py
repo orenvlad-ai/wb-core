@@ -32,4 +32,7 @@ main = guard_cli(default_runtime='.runtime/registry_upload')(main)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("promo_campaign_archive_light_gc_tick"):
+        raise SystemExit(main())

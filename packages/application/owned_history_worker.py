@@ -5,6 +5,8 @@ No source acquisition or cycle replay occurs; the caller retains SH/heavy.
 """
 from __future__ import annotations
 
+from packages import procedure_journal as journal_log
+
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -99,6 +101,7 @@ def _kill_reap(process):
     if process.poll() is None:
         try:
             os.killpg(process.pid, signal.SIGKILL)
+            journal_log.event("history_transport", "cleanup", "sigkill_sent", pid_child=process.pid)
         except ProcessLookupError:
             pass
     # Never release leases while a possibly living worker remains. A delayed
@@ -310,6 +313,8 @@ class _OwnedHistoryWorker:
             # Always read the same exact CURRENT before another compile, even
             # when the transport outcome is unknown after a possible publish.
             observed = self._verified_state(anchor)
+            journal_log.event("history", "dated_readback", "verified", invocation=result.get("invocation"),
+                              completed=len(observed["completed"]), attempt=number)
             if number == 1 and intent:
                 progress = intent["baseline_completed"]
             if observed["terminal"]:
@@ -392,6 +397,11 @@ class _OwnedHistoryWorker:
             seconds = min(seconds, self._completion_deadline - time.monotonic())
         if self._completion_deadline is not None and seconds <= PARENT_GRACE_SECONDS:
             raise HistoryDelegationError("history_completion_total_deadline")
+        with journal_log.span("history_transport", mode, invocation=invocation,
+                              budget_ms=int(seconds * 1000)) as diag:
+            return self._exchange(mode, now, anchor, invocation, config, runtime, seconds, diag)
+
+    def _exchange(self, mode, now, anchor, invocation, config, runtime, seconds, diag):
         deadline = time.monotonic() + seconds
         parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         process = None
@@ -439,24 +449,36 @@ class _OwnedHistoryWorker:
             child.close()
             self._check()
             if time.monotonic() >= deadline:
+                diag.update(state="spawn_deadline", before_cleanup_rc=process.poll())
                 _kill_reap(process)
+                diag["returncode"] = process.returncode
                 return {"status": "outcome_unknown", "invocation": invocation,
                         "readback": terminal_readback(config.candidate_root, invocation, anchor)}
             cap.update(child_pid=process.pid, child_generation=process_generation(process.pid))
+            cap["journal_parent"] = journal_log.carrier()
+            diag.update(pid_child=process.pid, inner_ms=int(cap["inner_seconds"] * 1000))
             parent.settimeout(max(0.001, deadline - time.monotonic()))
             try:
                 # A failed send can follow delivery and actual publication.
                 # Resolve that ambiguity with the same post-reap readback.
+                phase = "send"
                 send_message(parent, cap)
+                phase = "receive"
                 response = receive_message(parent)
+                phase = "wait"
                 process.wait(timeout=max(0.001, deadline - time.monotonic()))
                 if (process.returncode != 0 or not isinstance(response, dict)
                         or response.get("invocation") != invocation or response.get("contract") != CONTRACT):
                     raise HistoryDelegationError("history_child_terminal_unproven")
-            except (OSError, ValueError, subprocess.TimeoutExpired, HistoryDelegationError):
+            except (OSError, ValueError, subprocess.TimeoutExpired, HistoryDelegationError) as exc:
+                reason = ("timeout" if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired))
+                          else "channel_closed" if isinstance(exc, HistoryDelegationError)
+                          and exc.args == ("history_capability_channel_closed",) else "failed")
+                diag.update(state=phase + "_" + reason, before_cleanup_rc=process.poll())
                 _kill_reap(process)
                 response = None
             self._check()
+            diag["returncode"] = process.returncode
             observed = terminal_readback(config.candidate_root, invocation, anchor)
             if response is None:
                 return {"status": "outcome_unknown", "invocation": invocation, "readback": observed}

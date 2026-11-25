@@ -90,4 +90,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    raise SystemExit(guarded_cli(main, default_runtime=str(ROOT / ".runtime" / "registry_upload")))
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("wb_supplies_backfill_live"):
+        raise SystemExit(guarded_cli(main, default_runtime=str(ROOT / ".runtime" / "registry_upload")))

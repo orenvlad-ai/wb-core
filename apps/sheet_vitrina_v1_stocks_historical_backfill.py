@@ -98,4 +98,7 @@ def _utc_timestamp() -> str:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("sheet_vitrina_v1_stocks_historical_backfill"):
+        main()

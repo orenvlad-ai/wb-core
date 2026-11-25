@@ -184,4 +184,7 @@ def _run_projection(
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("warehouse_historical_recovery"):
+        raise SystemExit(main())

@@ -34,4 +34,7 @@ main = guard_cli(default_runtime='.runtime/registry_upload')(main)
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("sheet_vitrina_v1_feedbacks_auto_complaints_tick"):
+        main()

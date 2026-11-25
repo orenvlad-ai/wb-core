@@ -1863,7 +1863,9 @@ class SkuInventoryBalanceBlock:
                         if claimed:
                             job_id, worker_token = claimed
                             try:
-                                self._run_live_job(job_id, worker_token)
+                                from packages.procedure_journal import span
+                                with span("worker", "inventory_balance_apply", job_id=job_id):
+                                    self._run_live_job(job_id, worker_token)
                             except Exception as exc:  # final worker containment
                                 self._mark_job_worker_error(job_id, worker_token, exc)
                             except BaseException:

@@ -1404,4 +1404,7 @@ def _emit_report(report: dict[str, Any], report_path: str) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("promo_campaign_archive_gc"):
+        main()

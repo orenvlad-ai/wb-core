@@ -5,6 +5,8 @@ posting and dated accounting publication remain separately evidenced effects.
 """
 from __future__ import annotations
 
+from packages import procedure_journal as journal_log
+
 from contextlib import closing, nullcontext, contextmanager
 from datetime import datetime, timezone
 import fcntl
@@ -299,6 +301,7 @@ def confirm_source(db_path, identity, *, now, current_day, actor=None, runtime_d
         conn.execute(f"INSERT INTO {TABLE}(request_id,source_json,source_digest,accepted_at,actor,state,updated_at) VALUES(?,?,?,?,?,'accepted',?)",
                      (canonical, serialized, _fingerprint(source), now, actor or request["actor"], now))
         conn.commit()
+    journal_log.event("receipt", "overhead_source", "accepted", receipt_id=canonical, day=current_day)
     return canonical
 
 

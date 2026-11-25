@@ -317,6 +317,11 @@ class MaxAckQueue:
         job = self._claim()
         if job is None:
             return None
+        from packages.procedure_journal import span
+        with span("worker", "max_ack_delivery"):
+            return self._run_claimed(job)
+
+    def _run_claimed(self, job):
         deadline = time.monotonic() + self.WORK_SECONDS
         submitted = job[4] in {'pending', 'unknown'}
         try:

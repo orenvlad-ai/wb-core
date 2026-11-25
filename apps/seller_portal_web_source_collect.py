@@ -122,9 +122,12 @@ def main():
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except Exception as exc:
-        reason = str(exc) if isinstance(exc, CollectorError) else type(exc).__name__
-        print('seller_source_collector_failed:' + reason, file=sys.stderr)
-        raise SystemExit(1) from None
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("seller_portal_web_source_collect"):
+        try:
+            main()
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, CollectorError) else type(exc).__name__
+            print('seller_source_collector_failed:' + reason, file=sys.stderr)
+            raise SystemExit(1) from None

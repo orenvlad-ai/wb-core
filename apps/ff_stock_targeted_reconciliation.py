@@ -261,4 +261,7 @@ def _print_report(report: dict[str, object], *, compact: bool) -> None:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("ff_stock_targeted_reconciliation"):
+        raise SystemExit(main())

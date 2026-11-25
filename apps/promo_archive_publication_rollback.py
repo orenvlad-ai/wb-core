@@ -45,4 +45,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("promo_archive_publication_rollback"):
+        raise SystemExit(main())

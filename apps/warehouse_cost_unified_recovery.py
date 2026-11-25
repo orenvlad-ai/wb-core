@@ -1416,4 +1416,7 @@ def _now() -> str:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("warehouse_cost_unified_recovery"):
+        raise SystemExit(main())

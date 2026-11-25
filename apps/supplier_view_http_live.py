@@ -10,13 +10,16 @@ from packages.adapters.supplier_view_http import build_supplier_view_server
 from packages.adapters.registry_upload_http_entrypoint import _web_auth_config
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    if not _web_auth_config()["enabled"]:
-        raise SystemExit("WebCore authentication is required for supplier views")
-    server = build_supplier_view_server(
-        Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", "/opt/wb-core-runtime/state")),
-        port=int(os.environ.get("SUPPLIER_VIEW_HTTP_PORT", "8782")))
-    try:
-        server.serve_forever()
-    finally:
-        server.server_close()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("supplier_view_http_live"):
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+        if not _web_auth_config()["enabled"]:
+            raise SystemExit("WebCore authentication is required for supplier views")
+        server = build_supplier_view_server(
+            Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", "/opt/wb-core-runtime/state")),
+            port=int(os.environ.get("SUPPLIER_VIEW_HTTP_PORT", "8782")))
+        try:
+            server.serve_forever()
+        finally:
+            server.server_close()

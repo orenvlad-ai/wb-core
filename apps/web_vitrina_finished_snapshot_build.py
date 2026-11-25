@@ -211,4 +211,7 @@ main = guard_cli(default_runtime='.runtime/registry_upload')(main)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("web_vitrina_finished_snapshot_build"):
+        raise SystemExit(main())

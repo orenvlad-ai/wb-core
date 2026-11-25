@@ -41,4 +41,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("ads_verify_daily_spend"):
+        main()

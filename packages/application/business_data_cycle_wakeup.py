@@ -296,7 +296,9 @@ class ServiceWakeup:
             return  # Invalid metadata fails closed, without a dispatch thread.
         def run():
             try:
-                coordinate(self.runtime, datetime.now(timezone.utc))
+                from packages.procedure_journal import span
+                with span("worker", "maintenance_cycle_wakeup"):
+                    coordinate(self.runtime, datetime.now(timezone.utc))
                 self.last_error = ''
             except Exception as exc:
                 self.last_error = type(exc).__name__ + ': ' + str(exc)

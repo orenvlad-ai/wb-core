@@ -19,6 +19,7 @@ import zlib
 from copy import deepcopy
 from datetime import date, timedelta
 
+from packages import procedure_journal as journal_log
 from packages.application.web_vitrina_history_compiler import CONTRACT, digest, dates_between
 
 
@@ -244,7 +245,8 @@ class HistoryStore:
                 usage = self._usage()
                 if usage >= self.max_store_bytes - 16 * 1024**2:
                     raise HistoryUnavailable("history_storage_limit")
-                unit = compile_day(day)
+                with journal_log.span("history_day", "compile", day=day):
+                    unit = compile_day(day)
                 if unit["date"] != day or unit["context_epoch"] != catalog["context_epoch"]:
                     raise ValueError("compiler context mismatch")
                 if set(unit["cells"]) != set(catalog["rows"]):
@@ -252,6 +254,7 @@ class HistoryStore:
                 pending["refs"][day] = self._write_day(unit)
                 recomputes += 1
                 _atomic(pending_path, pending)
+                journal_log.event("history_day", "checkpoint", "written", day=day)
             if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 return {"status": "pending", "recomputes": recomputes,
                     "completed": len(pending["refs"]), "total": len(vector["dates"])}
@@ -441,7 +444,8 @@ class HistoryStore:
                     return {"status": "pending", "recomputes": recomputes,
                         "completed": sum(proofs.get(d) == {"epoch": vector["epoch"],
                             "token": vector["dates"][d]} for d in scope), "total": len(scope), **status}
-                unit = compile_day(day)
+                with journal_log.span("history_day", "compile", day=day):
+                    unit = compile_day(day)
                 if unit["date"] != day or unit["context_epoch"] != catalog["context_epoch"]:
                     raise ValueError("compiler context mismatch")
                 if set(unit["cells"]) != set(catalog["rows"]):
@@ -451,6 +455,7 @@ class HistoryStore:
                 day_catalogs[day] = fresh_id
                 recomputes += 1
                 _atomic(pending_path, pending)
+                journal_log.event("history_day", "checkpoint", "written", day=day)
             if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 return {"status": "pending", "recomputes": recomputes, **status}
             if revalidate() != vector:

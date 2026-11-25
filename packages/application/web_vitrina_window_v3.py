@@ -1281,7 +1281,8 @@ class WindowV3Service:
             job_id = secrets.token_urlsafe(18)
             cancelled = Event()
             self._pending += 1
-            future = self._executor.submit(work, cancelled)
+            from packages.procedure_journal import worker
+            future = self._executor.submit(worker(work), cancelled)
             job = _WindowJob(job_id, owner_key, operation, session_id,
                              cancelled, future, time.monotonic())
             self._jobs[job_id] = job
