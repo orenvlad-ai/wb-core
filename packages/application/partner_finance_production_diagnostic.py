@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 from packages.application.ads_spend_verification import decisions_for_day
+from packages.application.wb_finance_payout import standalone_adjustment
 from packages.application.wb_finance_weekly import (
     _decimal,
     _nomenclature_identity_index,
@@ -32,7 +33,7 @@ from packages.application.wb_finance_weekly import (
 ZERO = Decimal("0")
 MONEY = Decimal("0.0001")
 RATIO = Decimal("0.000000000001")
-DIAGNOSTIC_VERSION = "partner_finance_production_diagnostic_v3_signed_categories"
+DIAGNOSTIC_VERSION = "partner_finance_production_diagnostic_v4_standalone_adjustments"
 ADS_SOURCE_KEY = "ads_compact"
 ADS_SOURCE_ROLE = "accepted_closed_day_snapshot"
 REQUIRED_SETTING_FIELDS = (
@@ -274,6 +275,8 @@ def _run_in_snapshot(
                 {"code": "common_expense_zero_revenue_base", "week_start": week}
             )
 
+        # Reproduce the former Partner allocation on the Finance amounts
+        # actually stored for this week, including their settlement sign.
         legacy_account_total = _decimal(
             account_metrics.get("profit_period_expenses")
         ) - _decimal(account_metrics.get("positive_adjustments"))
@@ -389,6 +392,7 @@ def _run_in_snapshot(
             )
             if resolved_nm == nm_id:
                 path = "direct"
+                payout_version = sku_metrics.get("payout_formula_version")
                 coefficient = Decimal("1")
                 selected_row_count += 1
             elif (
@@ -397,12 +401,14 @@ def _run_in_snapshot(
                 and str(raw.get("nmId") or "").strip() in {"", "0"}
             ):
                 path = "allocated_account"
+                payout_version = account_metrics.get("payout_formula_version")
                 coefficient = allocation_ratio or ZERO
                 account_row_count += 1
             else:
                 continue
             components = _expense_components(
                 raw,
+                payout_version=payout_version,
                 path=path,
                 coefficient=coefficient,
             )
@@ -990,6 +996,7 @@ def _ads_for_week(
 def _expense_components(
     raw: Mapping[str, Any],
     *,
+    payout_version: str | None,
     path: str,
     coefficient: Decimal,
 ) -> list[dict[str, Any]]:
@@ -1112,7 +1119,15 @@ def _expense_components(
 
     adjustment = _decimal(raw.get("additionalPayment"))
     if doc not in {"продажа", "возврат"} and adjustment:
-        system = -adjustment if adjustment > ZERO else abs(adjustment)
+        if payout_version == "wb_payout_v1":
+            income, charge = standalone_adjustment(raw)
+            system = charge - income
+        elif payout_version is None:
+            # Weekly projections written before wb_payout_v1 used the
+            # opposite sign for a standalone adjustment.
+            system = -adjustment
+        else:
+            raise PartnerFinanceDiagnosticError(f"unsupported Finance payout formula: {payout_version}")
         add(
             "wb_remuneration_adjustment",
             adjustment,
@@ -1120,7 +1135,7 @@ def _expense_components(
             "Штрафы/корректировки",
             classifier_bucket=(
                 "finance_field:positive_adjustment"
-                if adjustment > ZERO
+                if system < ZERO
                 else "finance_field:correction"
             ),
             partner_other=False,

@@ -20,6 +20,8 @@ if str(ROOT) not in sys.path:
 
 from packages.application.partner_finance_production_diagnostic import (  # noqa: E402
     DiagnosticScope,
+    PartnerFinanceDiagnosticError,
+    _expense_components,
     run_partner_finance_diagnostic,
 )
 from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock  # noqa: E402
@@ -72,10 +74,12 @@ def main() -> None:
             "account_finance_marketing_rub": "40.0000",
             "allocated_finance_marketing_rub": "20.0000",
             "finance_marketing_partner_other_contribution_rub": "0.0000",
-            "legacy_other_withholdings_rub": "53.5000",
+            # Direct 10 + half of (74 deductions + 30 services/penalties
+            # + 7 standalone charge - 10 transit/subscriptions/paid services).
+            "legacy_other_withholdings_rub": "60.5000",
             "partner_other_expenses_main_row_rub": "30.0000",
             "current_other_withholdings_rub": "22.0000",
-            "residual_without_finance_marketing_rub": "33.5000",
+            "residual_without_finance_marketing_rub": "40.5000",
             "parsed_partner_other_expenses_main_row_rub": "30.0000",
             "parsed_current_other_withholdings_rub": "22.0000",
             "parsed_partner_main_reconciliation_delta_rub": "0.0000",
@@ -86,6 +90,9 @@ def main() -> None:
                 raise AssertionError(f"{key}: {week.get(key)!r} != {value!r}")
         if week["allocation_coefficient"] != "0.500000000000":
             raise AssertionError(f"allocation coefficient mismatch: {week}")
+
+        _assert_account_adjustment(first, "finance_field:correction", "7.0000", "3.5000")
+        _assert_raw_adjustment_directions()
 
         negative = first["negative_deduction_evidence"]
         if (
@@ -203,6 +210,27 @@ def main() -> None:
         if _sha256(database) != digest_before:
             raise AssertionError("read-only diagnostic changed the runtime SQLite database")
 
+        # Install the account fields read by the diagnostic exactly as the
+        # pre-payout writer stored them for these same raw rows. Leave the SKU
+        # projection on its current version to exercise mixed stored versions.
+        with sqlite3.connect(database) as conn:
+            conn.execute("""
+                UPDATE wb_finance_weekly_sku_aggregates
+                SET metrics_json=json_set(json_remove(metrics_json,'$.payout_formula_version'),
+                    '$.profit_period_expenses','104.0000', '$.positive_adjustments','7.0000',
+                    '$.corrections','0.0000')
+                WHERE seller_id=? AND week_start=? AND nm_id='__account__'
+            """, (SELLER, WEEK.isoformat()))
+        historical_digest = _sha256(database)
+        historical = run_partner_finance_diagnostic(explicit_scope)
+        historical_week = historical["weeks"][0]
+        assert historical["status"] == "ready"
+        assert historical_week["legacy_other_withholdings_rub"] == "53.5000"
+        assert historical_week["residual_without_finance_marketing_rub"] == "33.5000"
+        assert historical_week["current_other_withholdings_rub"] == "22.0000"
+        _assert_account_adjustment(historical, "finance_field:positive_adjustment", "-7.0000", "-3.5000")
+        assert _sha256(database) == historical_digest
+
         with sqlite3.connect(database) as conn:
             conn.execute(
                 """DELETE FROM wb_finance_weekly_sku_aggregates
@@ -231,6 +259,36 @@ def main() -> None:
         "unknown-name evidence, missing-projection raw preservation, deterministic "
         "fingerprint, SQLite unchanged"
     )
+
+
+def _assert_account_adjustment(report, bucket, system, allocated):
+    groups = [g for g in report["operation_groups"] if g["finance_classifier_bucket"] == bucket]
+    assert len(groups) == 1
+    group = groups[0]
+    assert group["accounting_path"] == "allocated_account"
+    assert group["signed_source_sum_rub"] == "7.0000"
+    assert group["system_amount_sum_rub"] == system
+    assert group["allocated_amount_sum_rub"] == allocated
+    assert group["other_withholdings_contribution_rub"] == "0.0000"
+
+
+def _assert_raw_adjustment_directions():
+    row = {"additionalPayment": "-7"}
+    for version, bucket, amount in (
+        ("wb_payout_v1", "finance_field:positive_adjustment", Decimal("-7")),
+        (None, "finance_field:correction", Decimal("7")),
+    ):
+        options = dict(path="direct", coefficient=Decimal("1"), payout_version=version)
+        [component] = _expense_components(row, **options)
+        assert component["classifier_bucket"] == bucket and component["system_amount"] == amount
+        for doc in ("Продажа", "Возврат"):
+            assert not _expense_components({**row, "docTypeName": doc}, **options)
+    try:
+        _expense_components(row, path="direct", coefficient=Decimal("1"), payout_version="unknown")
+    except PartnerFinanceDiagnosticError:
+        pass
+    else:
+        raise AssertionError("an unknown payout convention must not assign a financial sign")
 
 
 def _assert_split_read_scope(
