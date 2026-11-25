@@ -38,6 +38,7 @@ from packages.application.wb_finance_weekly import (
     classify_deduction,
 )
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
+from packages.application.ads_spend_verification import decisions_for_day
 from packages.application.canonical_wb_cost_resolver import (
     CanonicalChannelCostSnapshot,
     resolve_channel_location_cost,
@@ -2266,7 +2267,17 @@ class PartnerReportBlock:
             source_digest = "sha256:" + hashlib.sha256(
                 str(source["payload_json"]).encode("utf-8")
             ).hexdigest()
-            if kind == "empty":
+            verification = None
+            if kind == "incomplete":
+                verification = decisions_for_day(
+                    conn, self.seller_id, day, source_digest.removeprefix("sha256:"), result
+                ).get(nm_id)
+            if verification and verification.status == "verified_sku_spend":
+                ads_sum = verification.amount
+                coverage = verification.status
+                matched = [{"advert_id": campaign, "ads_sum": value}
+                           for campaign, value in verification.campaigns]
+            elif kind == "empty":
                 ads_sum = ZERO
                 coverage = "confirmed_empty"
             elif kind == "success" and matched:
@@ -2296,12 +2307,13 @@ class PartnerReportBlock:
                         "date": day,
                         "nm_id": nm_id,
                         "source_kind": kind,
+                        **({"verification": verification.status} if verification else {}),
                     }
                 )
                 cursor += timedelta(days=1)
                 continue
             total += ads_sum
-            detail_items = matched if kind == "success" else [{}]
+            detail_items = [{}] if kind == "empty" else matched
             for item in detail_items:
                 rows.append(
                     {
@@ -2321,11 +2333,12 @@ class PartnerReportBlock:
                             item.get("placement", item.get("placement_name", "")) or ""
                         ),
                         "ads_sum": _decimal_text(
-                            _decimal(item["ads_sum"]) if kind == "success" else ZERO
+                            ZERO if kind == "empty" else _decimal(item["ads_sum"])
                         ),
                         "source_status": kind,
                         "envelope_origin": envelope_origin,
                         "coverage": coverage,
+                        **({"spend_receipts": verification.receipts} if verification else {}),
                         "source_digest": source_digest,
                     }
                 )

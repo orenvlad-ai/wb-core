@@ -250,6 +250,15 @@ class LiveNativeAdapter:
                             labels.append(row)
                             seen.add(row[1])
                 per_day = {day: {} for day in self.days}
+                from packages.application.ads_spend_verification import TABLE as spend_table, verified_days
+                from packages.application.wb_incident_policy import canonical_seller_id
+                if spend_table in tables:
+                    spend_days = verified_days(conn, canonical_seller_id(), self.days)
+                    for day, decisions in spend_days.items():
+                        per_day[day]["sku_spend_verification"] = digest({
+                            nm: [v.status, str(v.amount), v.receipts]
+                            for nm, v in decisions.items()
+                        })
                 publications = self._publication_proofs(conn, tables, bindings)
                 for binding in bindings:
                     per_day[binding.date]["ready"] = asdict(by_key[binding.source_key]) if binding.source_key else None
