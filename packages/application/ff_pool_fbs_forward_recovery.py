@@ -58,6 +58,7 @@ from packages.application.ff_pool_foundation import (
     RELATIONS_TABLE,
     canonical_decimal_text,
 )
+from packages.application.ready_publication import REVISIONS as READY_INPUT_REVISIONS
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
 )
@@ -1248,6 +1249,13 @@ def _build_preview_projection(
     tracker = _ProjectionTracker()
     for table in PREVIEW_SCHEMA_TABLES:
         _create_projection_table(source_conn, scratch, table)
+    # Keep the exact source counters before installing Ready's change triggers.
+    # An older source without Ready triggers can still be previewed as-is.
+    if READY_INPUT_REVISIONS in _table_names(source_conn):
+        _create_projection_table(source_conn, scratch, READY_INPUT_REVISIONS)
+        _copy_projection_in(
+            source_conn, scratch, READY_INPUT_REVISIONS, "source_table", PREVIEW_SCHEMA_TABLES, tracker,
+        )
 
     cutover_id = str(source["cutover_id"])
     target_rows = [dict(row) for row in source["target_rows"]]
@@ -1603,7 +1611,7 @@ def _remove_private_scratch(path: Path) -> None:
 
 
 def _projection_schema_objects(conn: sqlite3.Connection) -> list[dict[str, str]]:
-    table_names = set(PREVIEW_SCHEMA_TABLES)
+    table_names = {*PREVIEW_SCHEMA_TABLES, READY_INPUT_REVISIONS}
     rows = conn.execute(
         """SELECT type,name,tbl_name,sql FROM sqlite_master
            WHERE sql IS NOT NULL AND type IN ('table','index','trigger')
@@ -1626,13 +1634,27 @@ def _projection_schema_objects(conn: sqlite3.Connection) -> list[dict[str, str]]
 def _projection_schema_evidence(conn: sqlite3.Connection) -> dict[str, Any]:
     objects = _projection_schema_objects(conn)
     table_names = {item["name"] for item in objects if item["type"] == "table"}
-    missing = sorted(set(PREVIEW_SCHEMA_TABLES) - table_names)
+    ready_sources = {
+        item["table"] for item in objects
+        if item["type"] == "trigger" and READY_INPUT_REVISIONS in item["sql"].lower()
+    }
+    required = set(PREVIEW_SCHEMA_TABLES)
+    if ready_sources:
+        required.add(READY_INPUT_REVISIONS)
+    missing = sorted(required - table_names)
     if missing:
         raise FfPoolFbsForwardRecoveryError(
             "preview_projection_schema_missing",
             "Required coherent preview schema is incomplete",
             details=missing,
         )
+    for table in sorted(ready_sources):
+        if conn.execute(
+            f"SELECT 1 FROM {READY_INPUT_REVISIONS} WHERE source_table=?", (table,),
+        ).fetchone() is None:
+            raise FfPoolFbsForwardRecoveryError(
+                "preview_ready_revision_missing", "Ready trigger has no source revision counter", details=table,
+            )
     counts = {
         kind: sum(1 for item in objects if item["type"] == kind)
         for kind in ("table", "index", "trigger")
