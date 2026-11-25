@@ -283,6 +283,7 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
     require(book and book["active"], "accounting_not_active")
     with ready.readonly(runtime.db_path) as conn:
         natives=native_cohort(conn,operation_id,pinned=cohort_refs)
+        native_attempt=attempt_identity(natives)
         native=natives[0];operation_id=native['operation']['operation_id']
         op, functional = native["operation"], native["functional"]
         require(functional["business_date"] == current_business_date_iso(now), "current_publication_pending")
@@ -398,7 +399,9 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         if evaluated[day]["before"] == evaluated[day]["after"] and day not in owed:
             continue
         effects.append(day)
-        version_id = "supplier-cost:" + fingerprint([CONTRACT,processing.ref(op),day,rows,shipment])[7:]
+        # Native publication provenance changes immutable stage metadata even
+        # when money is identical; a prior ghost ID must remain absent.
+        version_id = "supplier-cost:" + fingerprint([CONTRACT,native_attempt,processing.ref(op),day,rows,shipment])[7:]
         for row in rows:row["version_id"] = version_id
         version, snapshot = stages._clone_rows(saved,version_id=version_id,day=day,
             published_at=now.isoformat(),balances=rows,source_digest=dated["source_digest"])
@@ -447,7 +450,7 @@ def prepare(runtime, operation_id, *, now, before_book=None, cohort_refs=None, o
         "before_book":before_version,"candidate_book":candidate,"editions":editions,
         "cohort_refs":[m['source_ref'] for m in members],"members":members,"member_evaluation":member_evaluation,
         "structural_no_effect":structural_no_effect,
-        "attempt_id":attempt_identity(natives),"obligations":obligations,"owed_dates":owed,"recovery_inputs":recovery,
+        "attempt_id":native_attempt,"obligations":obligations,"owed_dates":owed,"recovery_inputs":recovery,
         "code_authority":code_authority(),"created_at":now.isoformat()}
     require(len(canonical(result).encode()) <= MAX_BYTES, "candidate_size_limit")
     result=json.loads(canonical(result))

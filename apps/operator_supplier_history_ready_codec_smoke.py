@@ -167,6 +167,17 @@ class ObligationReferenceTests(unittest.TestCase):
             corrupt['manifest_digest']=h._large_fingerprint({k:v for k,v in corrupt.items() if k!='manifest_digest'})
             with self.subTest(name=name),self.assertRaisesRegex(ValueError,'formula_changed'):h._verify(corrupt,retained=True)
 
+    def test_deployed_completed_algorithm_is_exact_retained_evidence_only(self):
+        _,_,_,manifest=self.fixture()
+        manifest['candidate']['code_authority']=dict(h.RETAINED_COMPLETE_CODE_AUTHORITY)
+        manifest['manifest_digest']=h._large_fingerprint({k:v for k,v in manifest.items() if k!='manifest_digest'})
+        h._verify(manifest,retained=True)
+        with self.assertRaisesRegex(ValueError,'formula_changed'):h._verify(manifest)
+        for name in manifest['candidate']['code_authority']:
+            corrupt=deepcopy(manifest);corrupt['candidate']['code_authority'][name]='0'*64
+            corrupt['manifest_digest']=h._large_fingerprint({k:v for k,v in corrupt.items() if k!='manifest_digest'})
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'formula_changed'):h._verify(corrupt,retained=True)
+
     def test_body_identity_pin_limit_and_missing_source_fail_closed(self):
         conn,row,item,manifest=self.fixture()
         variants=[]
