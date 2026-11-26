@@ -3549,7 +3549,9 @@ class RegistryUploadHttpEntrypoint:
                 if policy_receipt is None:
                     materials = receipt.get('final_versions')
                     if materials is not None:
-                        self._cycle_validate_predecessors(materials, materials, materials)
+                        from packages.application.operator_supplier_history_cycle_material import source_predecessors
+                        finance, fbs = source_predecessors(receipt)
+                        self._cycle_validate_predecessors(finance, fbs, materials)
                     supplier_receipt = pending_supplier_history(self.runtime, now=self.now_factory())
                     if supplier_receipt is not None and materials is not None:
                         from packages.application.operator_supplier_history_cycle_material import prepare_supplier_material

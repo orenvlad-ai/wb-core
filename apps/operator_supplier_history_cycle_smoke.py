@@ -33,6 +33,11 @@ def host(rt, *, verify=None):
     return entry
 
 
+def source_stages():
+    return [{'stage': name, 'status': 'complete', 'versions': {name: name + '-source'}}
+            for name in ('finance_sources', 'fbs_generation')]
+
+
 def finance_result():
     return dict(status='already_current',non_target_preserved=True,post_verify_stale_week_count=0,
         accounting_version_unchanged=True,source_advanced_after_apply=False,supplier_operation_completion={'status':'ok'})
@@ -91,10 +96,32 @@ class SeamTests(unittest.TestCase):
         self.assertEqual((sp,finalize),(1,0));self.assertEqual(self.entry._cycle_verify_ready.call_count,2)
         self.assertNotIn('finance',self.events)
 
+    def test_history_reads_the_two_domain_proofs_and_only_an_admitted_catalog_refresh(self):
+        from packages.application.operator_supplier_history_cycle_material import source_predecessors
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
+        finance = {'daily_raw': 'raw'}
+        original = {'fbs_generation': 'old', 'fbs_digest': 'stock-before'}
+        refreshed = {'fbs_generation': 'new', 'fbs_digest': 'stock-after'}
+        stages = [{'stage': 'finance_sources', 'status': 'complete', 'versions': finance},
+                  {'stage': 'fbs_generation', 'status': 'complete', 'versions': original}]
+        receipt = {'stages': stages, 'final_versions': {**finance, **original, 'fbs_book': 'book'}}
+        self.assertEqual(source_predecessors(receipt), (finance, original))
+        receipt['fbs_catalog_refresh'] = {'status': 'complete', 'prior_versions': original, 'versions': refreshed}
+        receipt['final_versions'].update(refreshed)
+        self.assertEqual(source_predecessors(receipt), (finance, refreshed))
+        self.assertEqual(stages[1]['versions'], original)
+        receipt['final_versions']['daily_raw'] = 'foreign'
+        with self.assertRaisesRegex(CycleStageFailure, 'source_stage_binding_changed'):
+            source_predecessors(receipt)
+        receipt['fbs_catalog_refresh']['prior_versions'] = {}
+        with self.assertRaisesRegex(CycleStageFailure, 'source_stage_refresh_changed'):
+            source_predecessors(receipt)
+
     def test_foreign_predecessor_refuses_before_supplier_selection(self):
         from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
         receipt = {**cycle_receipt(), 'process_identity':'synthetic-seam-process',
-                   'final_versions': {'fbs_book': 'admitted'}}
+                   'stages': source_stages(), 'final_versions': {'fbs_book': 'admitted',
+                       'finance_sources':'finance_sources-source', 'fbs_generation':'fbs_generation-source'}}
         self.entry._cycle_validate_predecessors = Mock(side_effect=CycleStageFailure('cycle_material_version_changed'))
         with patch(__name__ + '.cycle_receipt', return_value=receipt):
             with self.assertRaisesRegex(CycleStageFailure, 'cycle_material_version_changed'):
@@ -228,7 +255,9 @@ class SupplierMaterialNativeTests(unittest.TestCase):
         untouched = images()
         before_book = accounting.load(rt.runtime_dir)[1]
         receipt = dict(cycle_id='native-material-cycle',job_id='supplier-cycle',business_date=DAY,
-                       final_versions={'fbs_book':before_book,'daily_projection_digest':digest(canonical(before_days))})
+                       stages=source_stages(), final_versions={'fbs_book':before_book,
+                           'daily_projection_digest':digest(canonical(before_days)),
+                           'finance_sources':'finance_sources-source', 'fbs_generation':'fbs_generation-source'})
         entry = host(rt); entry.wb_finance_daily_block = daily
         # Isolate the unrelated API/FBS predecessor seams. Book and complete
         # native daily reconstruction remain real, including approved overlay.

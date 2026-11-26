@@ -56,6 +56,23 @@ class SupplierMaterial:
                 'prepare_ms': self.prepare_ms, 'writer_ms': self.writer_ms}
 
 
+def source_predecessors(receipt):
+    """Recover the two domain proofs, including an admitted in-cycle FBS refresh."""
+    selected = [row for row in receipt.get('stages', ()) if row['stage'] in ('finance_sources', 'fbs_generation')]
+    _require(len(selected) == 2 and {row['stage'] for row in selected} == {'finance_sources', 'fbs_generation'}
+             and all(row['status'] in ('complete', 'degraded') for row in selected), 'source_stage_unproven')
+    stages = {row['stage']: row['versions'] for row in selected}
+    finance, fbs = stages['finance_sources'], stages['fbs_generation']
+    refresh = receipt.get('fbs_catalog_refresh')
+    if refresh:
+        _require(refresh.get('status') == 'complete' and refresh.get('prior_versions') == fbs,
+                 'source_stage_refresh_changed')
+        fbs = {**fbs, **refresh['versions']}
+    _require(finance and fbs and all(receipt['final_versions'].get(key) == value
+             for domain in (finance, fbs) for key, value in domain.items()), 'source_stage_binding_changed')
+    return finance, fbs
+
+
 def _versions(connection):
     versions = []
     for _, schema, filename in connection.execute('PRAGMA database_list'):
@@ -192,6 +209,7 @@ def prepare_supplier_material(entry, receipt, supplier):
     require_warehouse_job_owner(runtime)
     source, _ = supplier._read()
     bounds = receipt['final_versions']
+    finance, fbs = source_predecessors(receipt)
     before, after = bounds['fbs_book'], source['after_book']
     block = entry.wb_finance_daily_block
     with accounting.readonly_book_connection(runtime) as ledger:
@@ -210,7 +228,7 @@ def prepare_supplier_material(entry, receipt, supplier):
                 # Recover both sides from accepted raw reports on an already-applied retry.
                 previous = _old_reader(block, before, now)
                 original, updates, expected, prepare_ms = _prepare_aggregates(block, reader, previous)
-                entry._cycle_validate_predecessors(bounds, bounds, {**bounds, 'fbs_book': after},
+                entry._cycle_validate_predecessors(finance, fbs, {**bounds, 'fbs_book': after},
                                                    daily_days=original)
                 del previous, original
 
