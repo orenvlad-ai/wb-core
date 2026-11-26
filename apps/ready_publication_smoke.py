@@ -147,6 +147,39 @@ def committed_child(channel, root):
     checkpoint(channel, "ready_committed_before_ack")
 
 
+class SupplierQueryIndexTests(unittest.TestCase):
+    def test_existing_and_late_warehouse_sources_keep_their_ordered_pins(self):
+        from contextlib import closing
+        table = "sheet_vitrina_v1_warehouse_unmatched_doprinato"
+        query = f"SELECT * FROM {table} WHERE version_id=? ORDER BY unmatched_id"
+        requests = [(query, (version,)) for version in ("one", "two", "empty")]
+        with closing(sqlite3.connect(":memory:")) as conn:
+            publication.ensure_material_revisions(conn)
+            conn.execute(f"CREATE TABLE {table}(unmatched_id TEXT PRIMARY KEY,version_id TEXT,value INTEGER)")
+            conn.executemany(f"INSERT INTO {table} VALUES(?,?,?)",
+                             [("c", "two", 3), ("b", "one", 2), ("a", "two", 1)])
+            conn.commit()
+            expected = publication.pin_queries(conn, requests)
+            conn.execute("BEGIN")
+            publication.ensure_material_revisions(conn)
+            conn.rollback()
+            self.assertFalse(conn.execute("SELECT 1 FROM sqlite_master WHERE name='warehouse_unmatched_by_version'").fetchone())
+            publication.ensure_material_revisions(conn)
+            publication.ensure_material_revisions(conn)
+            self.assertEqual([row[2] for row in conn.execute("PRAGMA index_info(warehouse_unmatched_by_version)")],
+                             ["version_id", "unmatched_id"])
+            self.assertIn("SEARCH", conn.execute("EXPLAIN QUERY PLAN " + query, ("one",)).fetchone()[3])
+            publication.check_queries(conn, expected)
+            for sql in (f"UPDATE {table} SET value=4 WHERE unmatched_id='a'",
+                        f"DELETE FROM {table} WHERE unmatched_id='b'",
+                        f"INSERT INTO {table} VALUES('d','empty',5)"):
+                conn.execute(sql)
+                with self.assertRaises(publication.ReadyPublicationConflict):
+                    publication.check_queries(conn, expected)
+                conn.rollback()
+            publication.check_queries(conn, expected)
+
+
 class PublicationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()

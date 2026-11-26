@@ -9,14 +9,16 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 from types import SimpleNamespace
+from textwrap import dedent
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -83,8 +85,215 @@ def fake_spawn(code):
     return BodyProcess
 
 
+class SupplierPhaseBudgetTests(unittest.TestCase):
+    """Exercise the supervisor clock separately from the real supplier/FD integration."""
+
+    def exchange(self, mode, sequence, *, body_deadline=1000, owner_error=None):
+        from packages.application.owned_history_worker_capability import CONTRACT
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        runtime = simple_runtime(directory)
+        config = SimpleNamespace(budget_seconds=240, runtime_contract=ROOT /
+            "artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json")
+        owner = supervisor._OwnedHistoryWorker(runtime=runtime, config=config, cycle_owner=None, lock_fds=())
+        owner._completion_deadline = body_deadline
+        owner._check = Mock(side_effect=owner_error)
+        invocation = "a" * 32
+        identity = dict(contract=CONTRACT, invocation=invocation)
+        cap = dict(**identity, mode=mode, inner_seconds=235)
+        clock, frames, grants = [100.0], iter(sequence), []
+        self.grants = grants
+
+        def receive(channel, *, deadline):
+            stamp, body = next(frames)
+            clock[0] = stamp
+            return {**identity, **body}
+
+        with patch.object(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+             patch.object(supervisor, "receive_message", side_effect=receive), \
+             patch.object(supervisor, "send_message", side_effect=lambda channel, value: grants.append(value)):
+            response, deadline = owner._receive_supplier_reply(Mock(), cap, 240, 340, {})
+        return response["result"], deadline, grants
+
+    def test_supplier_preparation_leaves_a_full_derived_interval(self):
+        result, deadline, grants = self.exchange("portion", [
+            (300, {"phase": "derived_work"}), (449, {"result": {"status": "pending"}})])
+        self.assertEqual((result["status"], deadline), ("pending", 540))
+        self.assertEqual([(g["phase"], g["inner_deadline"]) for g in grants], [("derived_work", 535)])
+
+    def test_dated_writes_share_the_limit_with_source_and_catalog_preparation(self):
+        frames = [(270, {"phase": "derived_work"}), (335, {"phase": "dated_write"}),
+                  (540, {"result": {"status": "published"}})]
+        result, deadline, grants = self.exchange("portion", frames)
+        self.assertEqual((result["status"], deadline), ("published", 575))
+        self.assertEqual([g["inner_deadline"] for g in grants], [505, 570])
+        _, short, grants = self.exchange("portion", frames[:-1] + [(545, frames[-1][1])], body_deadline=550)
+        self.assertEqual((short, grants[-1]["inner_deadline"]), (550, 545))
+        _, limit, grants = self.exchange("portion", [(330, frames[0][1]), (475, frames[1][1]), frames[2]])
+        self.assertEqual((limit, grants[-1]["inner_deadline"]), (580, 575))
+        with self.assertRaises(HistoryDelegationError):
+            self.exchange("portion", [(200, {"phase": "dated_write"})])
+        with self.assertRaises(HistoryDelegationError):
+            self.exchange("portion", frames[:2] + [(370, {"phase": "dated_write"})])
+        with self.assertRaises(TimeoutError):
+            self.exchange("portion", [(200, {"phase": "derived_work"}), (441, {"phase": "dated_write"})])
+        with self.assertRaisesRegex(HistoryDelegationError, "history_parent_owner_changed"):
+            self.exchange("portion", frames[:2], owner_error=[None, HistoryDelegationError("history_parent_owner_changed")])
+        self.assertEqual([g["phase"] for g in self.grants], ["derived_work"])
+
+    def test_child_uses_only_the_bound_parent_deadline(self):
+        from apps.web_vitrina_owned_history_worker import _supplier_phase
+        from packages.application.owned_history_worker_capability import CONTRACT, receive_message, send_message
+        invocation = "a" * 32
+        cap = {"invocation": invocation, "inner_seconds": 235}
+        request = {"contract": CONTRACT, "invocation": invocation, "phase": "derived_work"}
+        now = time.monotonic()
+        for deadline, grant_invocation, accepted in [
+            (now + 45, invocation, True), (now - 1, invocation, False),
+            (now + 300, invocation, False), (now + 45, "b" * 32, False),
+        ]:
+            parent, child = socket.socketpair()
+            with self.subTest(deadline=deadline, identity=grant_invocation), parent, child:
+                send_message(parent, {**request, "invocation": grant_invocation, "inner_deadline": deadline})
+                if accepted:
+                    self.assertEqual(_supplier_phase(child, cap, "derived_work"), deadline)
+                else:
+                    with self.assertRaises(HistoryDelegationError):
+                        _supplier_phase(child, cap, "derived_work")
+                self.assertEqual(receive_message(parent), request)
+
+    def test_fragmented_frame_shares_one_deadline(self):
+        from packages.application import owned_history_worker_capability as capability
+        frame = Mock()
+        frame.recv.side_effect = [b"\x00", b"\x00\x00\x02", b"{}"]
+        clock = Mock(side_effect=[100, 101, 102, 103])
+        with patch.object(capability, "time", SimpleNamespace(monotonic=clock)):
+            self.assertEqual(capability.receive_message(frame, deadline=104), {})
+        self.assertEqual([call.args[0] for call in frame.settimeout.call_args_list], [4, 3, 2])
+        frame = Mock()
+        frame.recv.side_effect = [b"\x00", b"\x00\x00\x02"]
+        clock = Mock(side_effect=[100, 101, 104])
+        with patch.object(capability, "time", SimpleNamespace(monotonic=clock)), self.assertRaises(TimeoutError):
+            capability.receive_message(frame, deadline=104)
+        self.assertEqual(frame.recv.call_count, 2)
+
+    def test_changed_owner_cannot_grant_the_next_phase(self):
+        with self.assertRaisesRegex(HistoryDelegationError, "history_parent_owner_changed"):
+            self.exchange("portion", [(300, {"phase": "derived_work"})],
+                          owner_error=HistoryDelegationError("history_parent_owner_changed"))
+        self.assertEqual(self.grants, [])
+
+    def test_only_terminal_verify_may_claim_the_native_proof_interval(self):
+        terminal = {"status": "verified", "terminal": True, "supplier": {"native": {"fixture": {}}}}
+        result, end, grants = self.exchange("verify", [
+            (250, {"phase": "derived_work"}), (380, {"phase": "supplier_native_proof"}),
+            (485, {"result": terminal})], body_deadline=510)
+        self.assertEqual((result, end), (terminal, 510))
+        self.assertEqual(grants[-1]["inner_deadline"], 505)
+        _, end, grants = self.exchange("verify", [
+            (330, {"phase": "derived_work"}), (475, {"phase": "supplier_native_proof"}),
+            (570, {"result": terminal})])
+        self.assertEqual((end, grants[-1]["inner_deadline"]), (580, 575))
+        for mode, frames in [
+            ("portion", [(170, {"result": {"status": "pending"}})]),
+            ("verify", [(170, {"phase": "supplier_native_proof"})]),
+            ("portion", [(170, {"phase": "derived_work"}), (180, {"phase": "supplier_native_proof"})]),
+            ("verify", [(170, {"phase": "derived_work"}), (180, {"phase": "derived_work"})]),
+            ("verify", [(170, {"phase": "derived_work", "invocation": "b" * 32})]),
+            ("verify", [(170, {"phase": "derived_work"}), (200, {"result": terminal})]),
+            ("verify", [(170, {"phase": "derived_work"}), (180, {"phase": "supplier_native_proof"}),
+                        (190, {"result": {"status": "verified", "terminal": False}})]),
+        ]:
+            with self.subTest(mode=mode, frames=frames), self.assertRaises(HistoryDelegationError):
+                self.exchange(mode, frames)
+
+    def test_late_messages_and_exhausted_body_cannot_extend_work(self):
+        for frames, body_deadline in [
+            ([(341, {"phase": "derived_work"})], 1000),
+            ([(200, {"phase": "derived_work"}), (441, {"result": {"status": "pending"}})], 1000),
+            ([(338, {"phase": "derived_work"})], 340),
+        ]:
+            with self.subTest(frames=frames), self.assertRaises(TimeoutError):
+                self.exchange("portion", frames, body_deadline=body_deadline)
+        failure = {"status": "failed", "reason": "history_worker_binding_changed"}
+        result, deadline, grants = self.exchange("capture", [(169, {"result": failure})])
+        self.assertEqual((result, deadline, grants), (failure, 340, []))
+
+
 @unittest.skipUnless(sys.platform == "linux", "Linux kernel FD authority required")
 class LinuxWorkerSmoke(unittest.TestCase):
+    def test_native_proof_timeout_reaps_the_same_child_at_the_combined_limit(self):
+        from packages.application.owned_history_source_watch import HistorySourceWatch
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = simple_runtime(directory)
+            root = Path(directory) / "candidate"
+            note = Path(directory) / "phase-grant.json"
+            body = dedent(f"""
+                import json, os, sys, time
+                from pathlib import Path
+                from packages.application.owned_history_worker_capability import child_bootstrap
+                from apps.web_vitrina_owned_history_worker import _supplier_phase
+                channel, cap = child_bootstrap(int(sys.argv[1]))
+                time.sleep(1.4)
+                _supplier_phase(channel, cap, "derived_work")
+                time.sleep(1.4)
+                deadline = _supplier_phase(channel, cap, "supplier_native_proof")
+                Path({str(note)!r}).write_text(json.dumps([os.getpid(), deadline, time.monotonic()]))
+                time.sleep(30)
+            """)
+            with ownership(runtime, root, seconds=2) as worker, \
+                    patch.object(supervisor, "PARENT_GRACE_SECONDS", .3), \
+                    patch.object(supervisor, "_POPEN", fake_spawn(body)):
+                # The actual supplier fixture verifies typed receipt admission separately.
+                worker._supplier_receipt = object()
+                worker._completion_deadline = time.monotonic() + 30
+                worker._source_watch = HistorySourceWatch(runtime.runtime_dir, runtime.db_path)
+                start = time.monotonic()
+                result = worker._invoke("verify", NOW.isoformat(), None)
+                pid, inner_deadline, granted_at = json.loads(note.read_text())
+                self.assertLess(inner_deadline - granted_at, 1.8)
+                self.assertGreaterEqual(time.monotonic(), inner_deadline)
+                self.assertLess(time.monotonic() - start, 6.2)
+                self.assertEqual(result["status"], "outcome_unknown")
+                self.assertFalse(result["readback"]["publication_observed"])
+                self.assertFalse(Path(f"/proc/{pid}").exists())
+                self.assertIsNone(worker._process)
+                self.assertFalse(admission_idle(runtime.runtime_dir)["idle"])
+
+    def test_owner_loss_after_preparation_reaps_without_a_grant(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = simple_runtime(directory)
+            root = Path(directory) / "candidate"
+            prepared = Path(directory) / "prepared"
+            granted = Path(directory) / "granted"
+            body = dedent(f"""
+                import os, sys, time
+                from pathlib import Path
+                from packages.application.owned_history_worker_capability import child_bootstrap
+                from apps.web_vitrina_owned_history_worker import _supplier_phase
+                channel, cap = child_bootstrap(int(sys.argv[1]))
+                Path({str(prepared)!r}).write_text(str(os.getpid()))
+                _supplier_phase(channel, cap, "derived_work")
+                Path({str(granted)!r}).touch()
+                time.sleep(30)
+            """)
+            with ownership(runtime, root) as worker, patch.object(supervisor, "_POPEN", fake_spawn(body)):
+                worker._supplier_receipt = object()
+                worker._completion_deadline = time.monotonic() + 30
+                check = worker._check
+
+                def check_owner():
+                    check()
+                    if prepared.exists():
+                        raise HistoryDelegationError("history_parent_owner_changed")
+
+                with patch.object(worker, "_check", side_effect=check_owner), \
+                        self.assertRaisesRegex(HistoryDelegationError, "history_parent_owner_changed"):
+                    worker.capture(NOW)
+                self.assertFalse(granted.exists())
+                self.assertFalse(Path("/proc", prepared.read_text()).exists())
+                self.assertFalse(admission_idle(runtime.runtime_dir)["idle"])
+                self.assertIsNone(worker._process)
+
     def test_kernel_lock_proof_requires_actual_description(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "lock"
@@ -142,10 +351,13 @@ class LinuxWorkerSmoke(unittest.TestCase):
             code = 'from packages.application.owned_history_worker_capability import child_bootstrap; import sys; c,cap=child_bootstrap(int(sys.argv[1]));\nwhile True: pass'
             with ownership(runtime, root, seconds=.2) as worker, \
                     patch.object(supervisor, "PARENT_GRACE_SECONDS", .1), \
-                    patch.object(supervisor, "_POPEN", fake_spawn(code)):
+                    patch.object(supervisor, "_POPEN", fake_spawn(code)), \
+                    patch.object(supervisor, "send_message", wraps=supervisor.send_message) as sent:
                 start = time.monotonic()
                 result = worker.capture(NOW)
                 self.assertEqual(result["status"], "outcome_unknown")
+                self.assertEqual(sent.call_count, 1)
+                self.assertNotIn("supplier_phase_protocol", sent.call_args.args[1])
                 self.assertLess(time.monotonic() - start, 3)
                 self.assertIsNone(worker._process)
                 self.assertFalse(admission_idle(runtime.runtime_dir)["idle"])

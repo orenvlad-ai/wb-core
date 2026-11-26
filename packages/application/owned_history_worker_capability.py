@@ -17,10 +17,12 @@ import sqlite3
 import stat
 import struct
 import sys
+import time
 
 from packages.application.owned_history_mismatch_diagnostics import safe_mismatch
 
 CONTRACT = "owned_history_portion_fd_v1"
+SUPPLIER_PHASE_PROTOCOL = "owned_supplier_history_phases_v2"
 MAX_MESSAGE = 256 * 1024
 MAX_JSON_FILE = 16 * 1024 * 1024
 
@@ -41,6 +43,7 @@ HISTORY_ERROR_CODES = frozenset({
     'supplier_history_scope_changed',
     'supplier_history_worker_binding_changed',
     'supplier_history_worker_scope_changed',
+    'supplier_history_phase_unproven',
     'supplier_history_native_anchor_changed',
     'supplier_history_terminal_unproven',
     'supplier_history_ack_not_supervised',
@@ -367,10 +370,15 @@ def send_message(channel, value):
     channel.sendall(struct.pack("!I", len(data)) + data)
 
 
-def receive_message(channel):
+def receive_message(channel, *, deadline=None):
     def exact(size):
         result = bytearray()
         while len(result) < size:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                channel.settimeout(remaining)
             part = channel.recv(size - len(result))
             if not part:
                 raise HistoryDelegationError("history_capability_channel_closed")
@@ -379,7 +387,10 @@ def receive_message(channel):
     size = struct.unpack("!I", exact(4))[0]
     if not 0 < size <= MAX_MESSAGE:
         raise HistoryDelegationError("history_capability_message_oversized")
-    return json.loads(exact(size))
+    message = json.loads(exact(size))
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError()
+    return message
 
 
 def inherited_lock_proof(fd, *, mode, parent_pid):

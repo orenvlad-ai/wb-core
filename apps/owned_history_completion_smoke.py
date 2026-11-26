@@ -567,7 +567,12 @@ class CompletionTests(unittest.TestCase):
              patch('apps.web_vitrina_history_candidate_build.runtime_storage_admission'), \
              patch('apps.web_vitrina_finished_snapshot_build.systemd_admission',return_value='idle'):
             with supervisor.standalone_history_worker(runtime=runtime,config=config) as worker:
-                result = worker.complete(NOW, source_range=('2026-03-01','2026-04-20'),total_seconds=180,max_portions=1)
+                with patch.object(supervisor, "send_message", wraps=supervisor.send_message) as sent:
+                    result = worker.complete(NOW, source_range=('2026-03-01','2026-04-20'),total_seconds=180,max_portions=1)
+                self.assertTrue(sent.call_args_list)
+                for call in sent.call_args_list:
+                    self.assertNotIn("supplier_phase_protocol", call.args[1])
+                    self.assertNotIn("inner_deadline", call.args[1])
                 self.assertEqual(result['portions'],1)
                 self.assertEqual(len(worker._anchor['source_dates']),51)
                 self.assertEqual(len(worker._anchor['scope_dates']),14)

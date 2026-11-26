@@ -42,10 +42,26 @@ its first pre-write baseline: matching fresh-catalog/epoch/token day objects
 are verified and counted as prior reuse, never new progress. Unsafe/corrupt
 metadata or matching objects refuse without deleting evidence. Its new fixed
 target intent then makes every post-write/continuation check exact; an older
-unknown portion is never resubmitted. A count ceiling of 20 and total body deadline of 60 minutes are stop limits,
-not a completion guarantee or a three-hour SLA. Every portion remains within
-240 seconds including grace; capture20s, source32MiB, cache128MiB, store2GiB and
-max31 recomputes remain unchanged. An indivisible day that cannot finish stops.
+unknown portion is never resubmitted. The completion body has up to 60 minutes,
+20 portions and 31 recomputes per portion. Ordinary workers have one window
+of up to 240 seconds including grace. Each source capture pass has a 20-second
+limit. The source, cache and store limits are 32 MiB, 128 MiB and 2 GiB respectively. An
+indivisible day that cannot finish stops.
+
+When a cycle owns a validated `SupplierHistory` receipt, the child first
+checks its original sources and exact date scope. It then requests time for
+the derived work on the same invocation and inherited socket. A writing portion
+may request time for dated objects once the catalog, target and baseline have
+been checked, before saving its intent. Status-only paths use the current grant.
+Only a terminal verification may request the final supplier proof interval
+after checking the published objects. The parent checks ownership and the preceding deadline
+before each grant. Each phase has at most the configured window including
+five seconds of grace. All phases of one child share a limit of two such
+windows (at most 480 seconds) and the remaining completion body deadline.
+The journal records each phase and its budget under the invocation ID.
+A phase transition records zero dated progress. Continuation still requires
+the native readback below. The completion body starts after parent source
+validation. The parent records the acknowledgement after terminal verification.
 
 Timeout, crash or lost response is read back only after actual kill/reap. The
 first action after any portion is exact CURRENT/pending verification. A proven
