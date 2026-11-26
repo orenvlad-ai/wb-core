@@ -991,6 +991,23 @@ class SupplierWbSourceAuthorityTests(unittest.TestCase):
         self.assertEqual(proof[0]['source_refs'],[member['source_ref']])
         self.assertEqual(proof[0]['receipt_absence'][0]['dependency'],member['receipt_dependency'])
 
+    def test_completion_consumes_only_native_no_wb_authority_for_its_date_and_cohort(self):
+        from packages.application.operator_supplier_cost_proof import _supplier_has_no_dated_wb_authority
+        member = self.member()
+        other = {**self.member(), 'source_ref': {**member['source_ref'], 'operation_id': 'other'}}
+        _, proof = candidate._wb_rows([], daily=[], day=DAY, ids=[], members=[member, other])
+        refs = [member['source_ref'], other['source_ref']]
+        evaluation = {'cohort_refs': refs, 'evaluation': {DAY: {'wb': proof}}}
+        self.assertTrue(_supplier_has_no_dated_wb_authority(evaluation, DAY))
+        self.assertFalse(_supplier_has_no_dated_wb_authority(evaluation, FIRST))
+        for wrong in (None, {}, {**evaluation, 'cohort_refs': []},
+                      {**evaluation, 'cohort_refs': refs[:1]}):
+            self.assertFalse(_supplier_has_no_dated_wb_authority(wrong, DAY))
+        for invalid in ([], [*proof, *proof], [{**proof[0], 'date': FIRST}],
+                        [{**proof[0], 'kind': 'native_wb_cost'}]):
+            self.assertFalse(_supplier_has_no_dated_wb_authority(
+                {**evaluation, 'evaluation': {DAY: {'wb': invalid}}}, DAY))
+
     def test_accepted_unknown_mixed_and_unproven_cohorts_keep_strict_quantity_guard(self):
         rows=[dict(warehouse_key='wb',nm_id=1,quantity='379',capital_rub='379',provenance={})]
         daily=[dict(as_of_date=DAY,nm_id=1,quantity='373',wac_rub='1',capital_rub='373',quality='daily')]

@@ -33,6 +33,11 @@ def host(rt, *, verify=None):
     return entry
 
 
+def source_stages():
+    return [{'stage': name, 'status': 'complete', 'versions': {name: name + '-source'}}
+            for name in ('finance_sources', 'fbs_generation')]
+
+
 def finance_result():
     return dict(status='already_current',non_target_preserved=True,post_verify_stale_week_count=0,
         accounting_version_unchanged=True,source_advanced_after_apply=False,supplier_operation_completion={'status':'ok'})
@@ -91,6 +96,40 @@ class SeamTests(unittest.TestCase):
         self.assertEqual((sp,finalize),(1,0));self.assertEqual(self.entry._cycle_verify_ready.call_count,2)
         self.assertNotIn('finance',self.events)
 
+    def test_history_reads_the_two_domain_proofs_and_only_an_admitted_catalog_refresh(self):
+        from packages.application.operator_supplier_history_cycle_material import source_predecessors
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
+        finance = {'daily_raw': 'raw'}
+        original = {'fbs_generation': 'old', 'fbs_digest': 'stock-before'}
+        refreshed = {'fbs_generation': 'new', 'fbs_digest': 'stock-after'}
+        stages = [{'stage': 'finance_sources', 'status': 'complete', 'versions': finance},
+                  {'stage': 'fbs_generation', 'status': 'complete', 'versions': original}]
+        receipt = {'stages': stages, 'final_versions': {**finance, **original, 'fbs_book': 'book'}}
+        self.assertEqual(source_predecessors(receipt), (finance, original))
+        receipt['fbs_catalog_refresh'] = {'status': 'complete', 'prior_versions': original, 'versions': refreshed}
+        receipt['final_versions'].update(refreshed)
+        self.assertEqual(source_predecessors(receipt), (finance, refreshed))
+        self.assertEqual(stages[1]['versions'], original)
+        receipt['final_versions']['daily_raw'] = 'foreign'
+        with self.assertRaisesRegex(CycleStageFailure, 'source_stage_binding_changed'):
+            source_predecessors(receipt)
+        receipt['fbs_catalog_refresh']['prior_versions'] = {}
+        with self.assertRaisesRegex(CycleStageFailure, 'source_stage_refresh_changed'):
+            source_predecessors(receipt)
+
+    def test_foreign_predecessor_refuses_before_supplier_selection(self):
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
+        receipt = {**cycle_receipt(), 'process_identity':'synthetic-seam-process',
+                   'stages': source_stages(), 'final_versions': {'fbs_book': 'admitted',
+                       'finance_sources':'finance_sources-source', 'fbs_generation':'fbs_generation-source'}}
+        self.entry._cycle_validate_predecessors = Mock(side_effect=CycleStageFailure('cycle_material_version_changed'))
+        with patch(__name__ + '.cycle_receipt', return_value=receipt):
+            with self.assertRaisesRegex(CycleStageFailure, 'cycle_material_version_changed'):
+                self.invoke(supplier=self.supplier)
+        self.assertNotIn('supplier', self.events)
+        self.assertNotIn('finance', self.events)
+        self.assertFalse(any(isinstance(event, tuple) for event in self.events))
+
 
 def setup_cny(case):
     from apps.operator_supplier_processing_smoke import seed,publish_functional,publish_accounting
@@ -137,6 +176,65 @@ def current_ready(rt):
 
 
 class FinanceNoChangeTests(unittest.TestCase):
+    def test_approved_finance_reporting_source_is_bound_to_the_exact_book(self):
+        from packages.application.fbs_accounting_runtime import ActiveSharedCostSnapshot
+        from packages.application.operator_supplier_cost_proof import _finance_reporting_version
+        from packages.application.shared_sku_cost import SharedSkuCostSnapshot
+        from packages.application.vitrina_last_known_cost import ApprovedEstimateCostSnapshot
+
+        exact = ActiveSharedCostSnapshot([], effective_date='2026-10-15')
+        cells = {'1': {'2026-10-16': {'management_value': '12.50'}}}
+        report = ApprovedEstimateCostSnapshot(exact, cells)
+        block = SimpleNamespace(shared_cost_snapshot=exact, shared_cost_is_candidate=False)
+        self.assertEqual(_finance_reporting_version(block, exact.version_id), (exact.version_id, False))
+        block.shared_cost_snapshot = report
+        self.assertNotEqual(exact.version_id, report.version_id)
+        self.assertEqual(_finance_reporting_version(block, exact.version_id), (report.version_id, True))
+
+        foreign = ActiveSharedCostSnapshot([], effective_date='2026-10-14')
+        candidate = SharedSkuCostSnapshot([], effective_date=exact.effective_date)
+        other_wrapper = SimpleNamespace(exact=exact, metadata=report.metadata)
+        rejected = [(ApprovedEstimateCostSnapshot(foreign, cells), False),
+                    (ApprovedEstimateCostSnapshot(candidate, cells), False),
+                    (report, True), (exact, True), (other_wrapper, False), (None, False)]
+        for snapshot, is_candidate in rejected:
+            with self.subTest(snapshot=type(snapshot).__name__, candidate=is_candidate):
+                block.shared_cost_snapshot = snapshot
+                block.shared_cost_is_candidate = is_candidate
+                with self.assertRaisesRegex(ValueError, 'supplier_finance_accounting_version_mismatch'):
+                    _finance_reporting_version(block, exact.version_id)
+
+    def test_approved_finance_retains_only_a_reporting_version_stamp(self):
+        from packages.application.fbs_accounting_runtime import ActiveSharedCostSnapshot
+        from packages.application.operator_supplier_cost_proof import _finance_retained_stamp_no_change
+        from packages.application.vitrina_last_known_cost import ApprovedEstimateCostSnapshot
+
+        exact = ActiveSharedCostSnapshot([], effective_date='2026-10-15')
+        report = ApprovedEstimateCostSnapshot(exact, {'1': {'2026-10-16': {'management_value': '12.50'}}})
+        def image(metadata):
+            return {'wb_finance_weekly_cost_coverage': [{
+                'seller_id': 'canonical', 'week_start': '2026-11-09', 'week_end': '2026-11-15',
+                'quality_json': {'shared_cost': dict(metadata)},
+                'coverage_json': {'quality': {'shared_cost': dict(metadata)}, 'cogs_rub': '12.50'}}]}
+        current = image({**report.metadata(), 'version_id': 'sha256:' + 'a'*64})
+        expected = image(report.metadata())
+        def compare(before, after, allowed=True):
+            return _finance_retained_stamp_no_change(before, after, shared_version=report.version_id,
+                                                      approved_estimates=allowed)
+        differences = compare(current, expected)
+        self.assertEqual(len(differences), 2)
+        self.assertEqual({d['current_native_shared_version_id'] for d in differences}, {report.version_id})
+        foreign = {**report.metadata(), 'management_estimate_policy': 'unknown_policy'}
+        with self.assertRaisesRegex(ValueError, 'supplier_finance_global_stamp_unproven'):
+            compare(image(foreign), image(foreign))
+        with self.assertRaisesRegex(ValueError, 'supplier_finance_global_stamp_unproven'):
+            compare(current, expected, False)
+        with self.assertRaisesRegex(ValueError, 'supplier_finance_target_projection_pending'):
+            compare(image(exact.metadata()), expected)
+        current['wb_finance_weekly_cost_coverage'][0]['coverage_json']['cogs_rub'] = '13.00'
+        with self.assertRaisesRegex(ValueError, 'supplier_finance_target_projection_pending'):
+            compare(current, expected)
+
     def test_actual_native_images_only_two_stamps_and_adversarial_operands(self):
         from packages.application import operator_supplier_history as history,fbs_accounting_runtime as accounting
         from packages.application.operator_supplier_cost_proof import _finance_business_image,_finance_retained_stamp_no_change
@@ -188,6 +286,239 @@ class FinanceNoChangeTests(unittest.TestCase):
             image[coverage][0]['coverage_json']['quality']['shared_cost']['unknown']='same foreign metadata'
         with self.assertRaisesRegex(ValueError,'supplier_finance_global_stamp_unproven'):
             _finance_retained_stamp_no_change(both_current,both_expected,shared_version=version)
+
+
+class SupplierMaterialNativeTests(unittest.TestCase):
+    def test_real_supplier_book_repairs_only_daily_aggregates_before_history(self):
+        from packages.application import operator_supplier_history as history, fbs_accounting_runtime as accounting
+        from packages.application import operator_supplier_history_cycle_material as material
+        from packages.application.ready_publication import canonical, digest
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
+        from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
+        from packages.application.wb_finance_daily import WbFinanceDailyBlock
+        from apps.wb_finance_weekly_cost_cutover_smoke import _row
+        rt, identity, parent, original_book = setup_cny(self)
+        daily = WbFinanceDailyBlock(rt.runtime_dir, seller_id='canonical', now_factory=lambda:MOMENT)
+        daily.ensure_schema()
+        for index, day in enumerate((date(2026,7,20), date(2026,7,21)), 1):
+            daily._store_complete_raw(day, [_row(index,day.isoformat(),nm_id=1)], 'fixture-daily')
+        for day in (date(2026,7,20), date(2026,7,21)):
+            daily.project_pointer(day)
+        before_days = daily.build_daily_payload()['days']
+        self.assertEqual(len(before_days), 2)
+        self.assertTrue(all(row['status']=='completed' and row['metrics'] for row in before_days), str(before_days))
+        tables = ('wb_finance_daily_sync','wb_finance_daily_pointers','wb_finance_daily_raw_rows','wb_finance_daily_batches')
+        def images():
+            with closing(sqlite3.connect(daily.db_path)) as conn:
+                return {table:conn.execute('SELECT * FROM '+table+' ORDER BY rowid').fetchall() for table in tables}
+        untouched = images()
+        before_book = accounting.load(rt.runtime_dir)[1]
+        receipt = dict(cycle_id='native-material-cycle',job_id='supplier-cycle',business_date=DAY,
+                       stages=source_stages(), final_versions={'fbs_book':before_book,
+                           'daily_projection_digest':digest(canonical(before_days)),
+                           'finance_sources':'finance_sources-source', 'fbs_generation':'fbs_generation-source'})
+        entry = host(rt); entry.wb_finance_daily_block = daily
+        # Isolate the unrelated API/FBS predecessor seams. Book and complete
+        # native daily reconstruction remain real, including approved overlay.
+        def validate(finance, fbs, bounds, *, daily_block=None, daily_days=None):
+            days = daily_days if daily_days is not None else (daily_block or daily).build_daily_payload()['days']
+            if (accounting.load(rt.runtime_dir)[1] != bounds['fbs_book'] or
+                    digest(canonical(days)) != bounds['daily_projection_digest']):
+                def differences_in(left, right, path=''):
+                    if isinstance(left,dict) and isinstance(right,dict):
+                        return [item for key in sorted(set(left)|set(right))
+                                for item in differences_in(left.get(key),right.get(key),path+'.'+key)]
+                    return [] if left==right else [(path,left,right)]
+                differences = [item for prior,row in zip(before_days,days,strict=True)
+                               for item in differences_in(prior,row,row['day'])]
+                raise CycleStageFailure('cycle_material_version_changed:' + json.dumps(differences,default=str))
+            return days
+        entry._cycle_validate_predecessors = validate
+        with admitted_write(rt.runtime_dir), heavy_admitted(rt.runtime_dir,operation='cycle'), warehouse_functional_job_lock(rt.runtime_dir):
+            supplier = history.publish(rt, history.prepare(rt,identity,now=MOMENT))
+            self.assertNotEqual(accounting.load(rt.runtime_dir)[1], before_book)
+            self.assertTrue(all(row['status']=='stale_projection' for row in daily.build_daily_payload()['days']))
+            commit = material._commit_aggregates
+            def foreign_edit(*args, **kwargs):
+                with closing(sqlite3.connect(daily.db_path)) as conn, conn:
+                    conn.execute("UPDATE wb_finance_daily_sync SET last_error='foreign-edit' WHERE report_day='2026-07-20'")
+                return commit(*args,**kwargs)
+            with patch.object(material,'_commit_aggregates',side_effect=foreign_edit), \
+                    patch.object(daily,'_write_daily_aggregate',wraps=daily._write_daily_aggregate) as write:
+                with self.assertRaisesRegex(CycleStageFailure,'daily_sources_changed_before_commit'):
+                    material.prepare_supplier_material(entry,receipt,supplier)
+            write.assert_not_called()
+            with closing(sqlite3.connect(daily.db_path)) as conn, conn:
+                self.assertEqual(conn.execute("SELECT last_error FROM wb_finance_daily_sync WHERE report_day='2026-07-20'").fetchone()[0],'foreign-edit')
+                conn.execute("UPDATE wb_finance_daily_sync SET last_error=NULL WHERE report_day='2026-07-20'")
+            self.assertEqual(images(),untouched)
+            proof = material.prepare_supplier_material(entry,receipt,supplier)
+            after_days = daily.build_daily_payload()['days']
+            self.assertIsNotNone(proof)
+            self.assertEqual(proof.after_book,supplier.manifest['after_book'])
+            self.assertEqual(proof.after_daily,digest(canonical(after_days)))
+            self.assertEqual(set(proof.dates),{row['day'] for row in before_days})
+            self.assertTrue(all(row['status']=='completed' and row['metrics'] for row in after_days))
+            self.assertEqual(images(),untouched)
+            supplier.validate_sources_readonly(now=MOMENT)
+            with closing(sqlite3.connect(daily.db_path)) as conn:
+                aggregates = conn.execute('SELECT * FROM wb_finance_daily_aggregates ORDER BY report_day').fetchall()
+            with patch.object(daily, '_write_daily_aggregate', wraps=daily._write_daily_aggregate) as write:
+                repeated = material.prepare_supplier_material(entry,receipt,supplier)
+            write.assert_not_called()
+            self.assertEqual(repeated.after_daily,proof.after_daily)
+            self.assertEqual(repeated.dates,())
+            with closing(sqlite3.connect(daily.db_path)) as conn:
+                self.assertEqual(conn.execute('SELECT * FROM wb_finance_daily_aggregates ORDER BY report_day').fetchall(),aggregates)
+            # A matching pointer and cost-source stamp cannot launder a foreign
+            # derived amount during the write-free continuation.
+            with closing(sqlite3.connect(daily.db_path)) as conn, conn:
+                row = conn.execute('SELECT metrics_json FROM wb_finance_daily_aggregates WHERE report_day=?',('2026-07-20',)).fetchone()
+                metrics = json.loads(row[0]); metrics['cogs'] = '999999.0000'
+                conn.execute('UPDATE wb_finance_daily_aggregates SET metrics_json=? WHERE report_day=?',(json.dumps(metrics),'2026-07-20'))
+            with patch.object(daily, '_write_daily_aggregate', wraps=daily._write_daily_aggregate) as write:
+                with self.assertRaisesRegex(CycleStageFailure,'daily_repair_readback_changed'):
+                    material.prepare_supplier_material(entry,receipt,supplier)
+            write.assert_not_called()
+        self.assertEqual(receipt['final_versions']['fbs_book'], before_book)
+        self.assertEqual(receipt['final_versions']['daily_projection_digest'],digest(canonical(before_days)))
+
+
+class SupplierMaterialTransactionTests(unittest.TestCase):
+    """Real separate SQLite files exercise reservations, races and whole-batch rollback."""
+    def setUp(self):
+        from packages.application.wb_finance_daily import WbFinanceDailyBlock
+        from packages.application.finance_raw_storage import bind_generation_identity, ensure_operational_schema, ensure_raw_schema
+        from packages.application.storage_registry import StoreRegistry, build_manifest, atomic_write_manifest
+        tmp = TemporaryDirectory(prefix='supplier-material-tx-'); self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.op, self.raw = self.root/'operational.db', self.root/'raw.db'
+        with closing(sqlite3.connect(self.op)) as conn, conn:
+            conn.execute('CREATE TABLE wb_finance_daily_aggregates(seller_id,report_day,batch_id,content_hash,raw_row_count,formula_version,classifier_version,allocation_dependency_hash,cost_state_hash,cost_source_hash,metrics_json,coverage_json,unknown_reasons_json,report_ids_json,report_types_json,calculated_at,PRIMARY KEY(seller_id,report_day))')
+            conn.execute('CREATE TABLE marker(value)')
+            conn.row_factory=sqlite3.Row; ensure_operational_schema(conn)
+            bind_generation_identity(conn,logical_store='operational',generation_id='op-material',
+                                     generation_epoch='material',source_fingerprint='sha256:'+'a'*64)
+        with closing(sqlite3.connect(self.raw)) as conn, conn:
+            conn.execute('CREATE TABLE raw_pointer(value)')
+            conn.execute("INSERT INTO raw_pointer VALUES('original')")
+            conn.row_factory=sqlite3.Row; ensure_raw_schema(conn)
+            bind_generation_identity(conn,logical_store='finance_raw',generation_id='raw-material',
+                                     generation_epoch='material',source_fingerprint='sha256:'+'a'*64)
+        manifest=build_manifest(state='cutover',canonical_source='split',generation_epoch='material',
+            raw_generation_id='raw-material',raw_relative_path=self.raw.name,raw_watermark='0',
+            operational_generation_id='op-material',operational_relative_path=self.op.name,
+            operational_watermark='fixture',rollback_generation_id='monolith',source_fingerprint='sha256:'+'a'*64)
+        atomic_write_manifest(self.root/'storage_generation_manifest.json',manifest)
+        self.block = object.__new__(WbFinanceDailyBlock)
+        self.block.runtime_dir, self.block.seller_id, self.block.store_registry = self.root, 'canonical', StoreRegistry(self.root)
+        self.updates = [dict(day=date(2026,7,day), batch_id='batch-'+str(day), content_hash='raw-'+str(day),
+            raw_row_count=1, allocation_dependency_hash='allocation', cost_source_hash='source', cost_state_hash='cost',
+            metrics={'cogs':'10'}, coverage={'quality':'complete'}, unknown=[], spp={}, report_ids=['r'], report_types=[1])
+            for day in (20,21)]
+
+    def rows(self):
+        with closing(sqlite3.connect(self.op)) as conn, conn:
+            return conn.execute('SELECT * FROM wb_finance_daily_aggregates ORDER BY report_day').fetchall()
+
+    def commit(self, verify=lambda:None, clock=lambda:MOMENT):
+        from packages.application.operator_supplier_history_cycle_material import _commit_aggregates
+        return _commit_aggregates(self.block, self.block.store_registry.load(), self.updates, verify, clock, DAY)
+
+    def test_split_raw_and_operational_writers_are_reserved_at_handoff(self):
+        observed = []
+        def verify():
+            for path in (self.raw, self.op):
+                with closing(sqlite3.connect(path, timeout=0, isolation_level=None)) as peer:
+                    with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                        peer.execute('BEGIN IMMEDIATE')
+                    observed.append(path)
+        elapsed = self.commit(verify)
+        self.assertEqual(observed, [self.raw, self.op]); self.assertEqual(len(self.rows()), 2)
+        self.assertGreaterEqual(elapsed, 0)
+        for path in (self.raw, self.op):
+            with closing(sqlite3.connect(path, timeout=0)) as peer, peer:
+                peer.execute('BEGIN IMMEDIATE'); peer.rollback()
+
+    def test_foreign_commit_before_reservation_refuses_without_overwrite(self):
+        from packages.application.operator_supplier_history_cycle_material import _versions, _require
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
+        for path, statement in ((self.op, "INSERT INTO marker VALUES('foreign')"),
+                                (self.raw, "UPDATE raw_pointer SET value='foreign'")):
+            with self.subTest(store=path.name), closing(sqlite3.connect(path)) as observer:
+                token = _versions(observer)
+                with closing(sqlite3.connect(path)) as peer, peer: peer.execute(statement)
+                def verify(): _require(_versions(observer) == token, 'daily_sources_changed_before_commit')
+                with self.assertRaisesRegex(CycleStageFailure, 'daily_sources_changed_before_commit'):
+                    self.commit(verify)
+                self.assertEqual(self.rows(), [])
+
+    def test_second_write_failure_rolls_back_first_write_and_releases_raw(self):
+        original = self.block._write_daily_aggregate
+        written = []
+        def fail(writer, prepared, now):
+            original(writer, prepared, now); written.append(prepared['day'])
+            if len(written) == 2: raise RuntimeError('injected aggregate failure')
+        with patch.object(self.block, '_write_daily_aggregate', side_effect=fail):
+            with self.assertRaisesRegex(RuntimeError, 'injected aggregate failure'): self.commit()
+        self.assertEqual(len(written), 2); self.assertEqual(self.rows(), [])
+        with closing(sqlite3.connect(self.raw, timeout=0)) as peer, peer:
+            peer.execute('BEGIN IMMEDIATE'); peer.rollback()
+
+    def test_date_rollover_before_writer_refuses_without_aggregate_rows(self):
+        from datetime import timedelta
+        from packages.application.sheet_vitrina_v1_cycle import CycleDateRollover
+        with self.assertRaises(CycleDateRollover): self.commit(clock=lambda:MOMENT+timedelta(days=1))
+        self.assertEqual(self.rows(), [])
+
+    def test_date_rollover_during_batch_rolls_back_before_commit(self):
+        from datetime import timedelta
+        from packages.application.sheet_vitrina_v1_cycle import CycleDateRollover
+        current = [MOMENT]; original = self.block._write_daily_aggregate
+        def advance(writer, prepared, now):
+            original(writer, prepared, now); current[0] = MOMENT+timedelta(days=1)
+        with patch.object(self.block, '_write_daily_aggregate', side_effect=advance):
+            with self.assertRaises(CycleDateRollover): self.commit(clock=lambda:current[0])
+        self.assertEqual(self.rows(), [])
+
+    def test_exact_book_edge_rejects_foreign_parent_operation_and_descendant(self):
+        from packages.application.operator_supplier_history_cycle_material import _edge
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
+        with closing(sqlite3.connect(':memory:')) as ledger:
+            ledger.executescript("CREATE TABLE accounting_current(singleton,version); INSERT INTO accounting_current VALUES(1,'after'); CREATE TABLE accounting_revisions(operation_id,previous_version,version); INSERT INTO accounting_revisions VALUES('own','before','after');")
+            manifest = dict(after_book='after', expected_book='before', book_operation_id='own')
+            self.assertTrue(_edge(ledger, manifest, 'before'))
+            for changed in ({**manifest,'expected_book':'other'}, {**manifest,'book_operation_id':'other'},
+                            {**manifest,'after_book':'other'}):
+                with self.assertRaisesRegex(CycleStageFailure,'book_transition_changed'): _edge(ledger,changed,'before')
+            ledger.execute("UPDATE accounting_current SET version='descendant'")
+            with self.assertRaisesRegex(CycleStageFailure,'book_transition_changed'): _edge(ledger,manifest,'before')
+            ledger.execute("UPDATE accounting_current SET version='before'")
+            self.assertFalse(_edge(ledger,manifest,'before'))
+
+    def test_material_rejects_wrong_attempt_ack_edition_finance_and_owner(self):
+        from packages.application.operator_supplier_history_cycle_material import SupplierMaterial
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
+        value = SupplierMaterial('cycle','job','before','after','old-daily','new-daily','operation','attempt','manifest',('day',),1,1)
+        supplier = SimpleNamespace(operation_id='operation',attempt_id='attempt',dates=('day',))
+        history = dict(supplier_ack=True,edition_id='edition')
+        ack = dict(manifest_digest='manifest',native={'day':{'edition_id':'edition'}})
+        finance = dict(accounting_version_before='after',accounting_version='after')
+        value.attest(supplier,history,ack,finance)
+        for changed_supplier, changed_history, changed_ack, changed_finance in (
+            (SimpleNamespace(**{**vars(supplier),'attempt_id':'foreign'}),history,ack,finance),
+            (supplier,{**history,'supplier_ack':False},ack,finance),
+            (supplier,history,{**ack,'manifest_digest':'foreign'},finance),
+            (supplier,history,{**ack,'native':{'day':{'edition_id':'foreign'}}},finance),
+            (supplier,history,{**ack,'native':{'other':{'edition_id':'edition'}}},finance),
+            (supplier,history,ack,{**finance,'accounting_version':'foreign'})):
+            with self.assertRaisesRegex(CycleStageFailure,'material_completion_changed'):
+                value.attest(changed_supplier,changed_history,changed_ack,changed_finance)
+        receipt = dict(cycle_id='cycle',job_id='job',final_versions={'fbs_book':'before','daily_projection_digest':'old-daily'})
+        self.assertEqual(value.material(receipt)['fbs_book'],'after')
+        for changed in ({**receipt,'cycle_id':'foreign'}, {**receipt,'job_id':'foreign'},
+                        {**receipt,'final_versions':{'fbs_book':'foreign','daily_projection_digest':'old-daily'}}):
+            with self.assertRaisesRegex(CycleStageFailure,'material_owner_changed'): value.material(changed)
 
 
 class LinuxTests(unittest.TestCase):
