@@ -458,6 +458,46 @@ class NestedCleanerTests(unittest.TestCase):
             finally:
                 g.restore_apply(originals)
 
+    def test_consumed_nested_claim_only_reads_the_completion_and_finishes_its_owner(self):
+        from ci import pr1635_cleaner_evidence as n
+
+        source = n.PROFILE['PROFILE']
+        operation = r.recovery_operation_id(n.RUN, source)
+        fingerprint = 'a' * 64
+        client = CommentsClient()
+        claim = dict(operation_id=operation, state='claimed', source=source, preview_fingerprint=fingerprint)
+        r._publish_once(client, source['pull_request'], r._claim_marker(operation), claim)
+        finance = {'write_mode': 'example'}
+        evidence = dict(original_receipt=source, recovery_case=r.RecoveryCase.STORAGE_TAIL.value)
+        with ExitStack() as stack:
+            def mock(obj, name, **kwargs):
+                return stack.enter_context(patch.object(obj, name, **kwargs))
+            mock(r, 'collect_evidence', return_value=evidence)
+            mock(r, 'prove_repo_only_descendant', return_value={})
+            current = mock(r, 'collect_prestate')
+            stage = mock(r, '_run_stage', side_effect=AssertionError('A consumed claim cannot execute a stage'))
+            mock(n, 'FINANCE_SHA', new=r.digest(r.canonical_bytes(finance)))
+            owner = mock(n, 'verify_owner')
+            finish = mock(r, '_finish_deploy_protection', return_value={'finished': True})
+            def read():
+                return r.existing_recovery_readback(client, n.RUN, fingerprint, None)['state']
+            current.side_effect = r.RecoveryError('incomplete')
+            self.assertEqual(read(), 'ambiguous')
+            current.side_effect = None
+            current.return_value = {'finance_pilot': {'write_mode':'changed'}}
+            self.assertEqual(read(), 'ambiguous')
+            current.return_value = {'finance_pilot': finance}
+            owner.side_effect = r.RecoveryError('owner changed')
+            self.assertEqual(read(), 'ambiguous')
+            finish.assert_not_called()
+            owner.side_effect = None
+            self.assertEqual(read(), 'complete')
+            owner.assert_called_with(None, complete=True)
+            self.assertEqual(read(), 'complete')
+            self.assertEqual(len(client.values), 2)
+            stage.assert_not_called()
+
+
     def test_original_owner_finance_and_scope(self):
         from ci import pr1635_cleaner_evidence as n
         actual={'phase':'mutation_started','fingerprint':n.STARTED_OWNER}
