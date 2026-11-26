@@ -402,6 +402,19 @@ def read_correlated_native(conn, operation_id):
             "state": state, "allocation": allocation, "certification": certification}
 
 
+def _supplier_has_no_dated_wb_authority(evaluation, day):
+    """Use the native producer's own dated proof for a wholly unaccepted cohort."""
+    if not evaluation:
+        return False
+    refs = evaluation.get('cohort_refs')
+    evidence = evaluation.get('evaluation', {}).get(day, {}).get('wb', ())
+    if not refs or len(evidence) != 1:
+        return False
+    row = evidence[0]
+    return (row.get('kind') == 'unaccepted_supplier_has_no_wb_cost_authority'
+            and row.get('date') == day and row.get('source_refs') == refs)
+
+
 def read_native_proof(runtime, operation_id, *, seller_id="canonical", now=None, connection=None, handoff=None, stack=None, finance_cohort=None):
     from packages.application.shared_sku_cost_sources import capture_wb_component
     from packages.application import fbs_accounting_runtime as accounting, ready_publication
@@ -443,7 +456,8 @@ def read_native_proof(runtime, operation_id, *, seller_id="canonical", now=None,
         # admitted dated authority/book revision from the closed-history owner.
         for item in ([] if evaluation and evaluation.get('structural_no_effect') else daily):
             prior_day = item["as_of_date"]
-            if prior_day < day and Decimal(item["quantity"]) > 0:
+            if (prior_day < day and Decimal(item["quantity"]) > 0
+                    and not _supplier_has_no_dated_wb_authority(evaluation, prior_day)):
                 prior = book["wb_days"].get(prior_day)
                 if not prior or not prior["complete"]:
                     raise ValueError("supplier_historical_authority_required:"+prior_day)
