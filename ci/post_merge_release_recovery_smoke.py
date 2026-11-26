@@ -1955,7 +1955,10 @@ def test_existing_started_owner_apply_binding() -> None:
 def test_cleaner_completion_exact_evidence_and_no_replay(run_id=recovery.CLEANER_RELEASE_RUN_ID) -> None:
     case = recovery.RecoveryCase.STORAGE_TAIL
     profile = recovery.CLEANER_PROFILES[run_id]
-    bounded_listener = run_id in {recovery.CLEANER_BOUNDED_LISTENER_RUN_ID, recovery.PR1628_CLEANER_RELEASE_RUN_ID}
+    bounded_listener = run_id in {
+        recovery.CLEANER_BOUNDED_LISTENER_RUN_ID, recovery.PR1628_CLEANER_RELEASE_RUN_ID,
+        recovery.PR1639_CLEANER_RELEASE_RUN_ID,
+    }
     assert recovery.recovery_case(run_id) is case
     assert recovery.recovery_case(run_id + 1) is recovery.RecoveryCase.STORAGE_TAIL
     raw = f'''python3 apps/github_release_runner.py run --workflow-run-id "{profile['gate_run_id']}" --output receipt.json
@@ -1978,6 +1981,12 @@ subprocess.CalledProcessError: Command ['ssh', '{profile['operation_id']}', 'app
             'head_sha': '3582976572c418919926946001628d008f359765',
             'merge_sha': 'c46787a111c5b26a4f6428695eed9eb03afe1222',
             'operation_id': 'release-v3-305323744b7ecac2ba7f77b192c06194',
+        }, 45890843119: {
+            'pull_request': 1639, 'gate_run_id': 45883256251,
+            'base_sha': 'dfd82e9c7403df947857c1ce18910ad058afe0f2',
+            'head_sha': '7547039024d7155be47857e835093577e6de204b',
+            'merge_sha': 'fea41398877c6d9d0bf963c13c2a8b8482acc0ae',
+            'operation_id': 'release-v3-2b2f73f250d0f7d85617893111ce9c19',
         }}
         assert profile == expected[run_id]
         command = 'python3 ci/github_release_runner.py run --workflow-run-id "$GATE_RUN_ID" --output "$RUNNER_TEMP/release-receipt.json"'
