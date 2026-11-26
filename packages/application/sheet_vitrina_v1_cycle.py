@@ -16,6 +16,7 @@ from packages.application.ready_publication import canonical, digest, readonly
 from packages.application.web_vitrina_snapshot_admission import process_identity, _atomic
 from packages.business_time import current_business_date_iso
 from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog, ClosedBacklogConflict
+from packages.application.operator_supplier_history_cycle_material import SupplierMaterial
 
 OPERATION = 'cycle'
 HEAVY_OPERATIONS = ('auto_update', 'refresh', 'refresh_group', OPERATION)
@@ -95,6 +96,7 @@ class CycleHistoryConfig:
 class StageProof:
     versions: dict[str, str]
     warnings: tuple[dict[str, str | bool], ...] = ()
+    supplier_material: SupplierMaterial | None = None
 
 
 def _warning(source, policy):
@@ -606,14 +608,19 @@ def run_rolling_history_stage(entrypoint, store, receipt, history_config, *, rea
         value = closed.status()
         if not value or any(value['dates'][day]['state'] != 'acknowledged' for day in backfill_dates):
             raise CycleStageFailure('closed_native_ack_missing')
+    transition = proof.supplier_material if isinstance(proof, StageProof) else None
+    material = transition.material(receipt) if transition is not None else receipt['final_versions']
     # The completed native proof is persisted by the outer stage before
     # rollover. New-day predecessor admission belongs to the fresh epoch.
     if current_business_date_iso(entrypoint.now_factory()) == receipt['business_date']:
         try:
-            entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
+            entrypoint._cycle_validate_predecessors(finance, fbs, material)
         except CycleDateRollover as exc:
             if exc.expected_date != receipt['business_date']:
                 raise
+    if transition is not None:
+        return StageProof({**proof.versions, 'fbs_book': material['fbs_book'],
+                           'daily_projection_digest': material['daily_projection_digest']}, proof.warnings)
     return proof
 
 

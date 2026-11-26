@@ -87,6 +87,7 @@ EXPECTED_ACTIVATION_MERGE_SHA = "7a9196e8af0d2113db7e42f0f4291fc2bc2c528c"
 CLEANER_RELEASE_RUN_ID = 39635174275
 CLEANER_BOUNDED_LISTENER_RUN_ID = 45429927905
 PR1628_CLEANER_RELEASE_RUN_ID = 45604611131
+PR1639_CLEANER_RELEASE_RUN_ID = 45890843119
 PR1635_CLEANER_RECOVERY_RUN_ID = 45800208191
 CLEANER_PROFILE = {
     "pull_request": 1486, "gate_run_id": 39630567883,
@@ -125,6 +126,13 @@ CLEANER_PROFILES = {
         "head_sha": "3582976572c418919926946001628d008f359765",
         "merge_sha": "c46787a111c5b26a4f6428695eed9eb03afe1222",
         "operation_id": "release-v3-305323744b7ecac2ba7f77b192c06194",
+    },
+    PR1639_CLEANER_RELEASE_RUN_ID: {
+        "pull_request": 1639, "gate_run_id": 45883256251,
+        "base_sha": "dfd82e9c7403df947857c1ce18910ad058afe0f2",
+        "head_sha": "7547039024d7155be47857e835093577e6de204b",
+        "merge_sha": "fea41398877c6d9d0bf963c13c2a8b8482acc0ae",
+        "operation_id": "release-v3-2b2f73f250d0f7d85617893111ce9c19",
     },
 }
 
@@ -533,7 +541,9 @@ def _prove_failed_stage(
         from ci.pr1623_presync_recovery import prove_failure
         return prove_failure(raw_log, gate_run_id, job_name, release_run_id=release_run_id)
     if cleaner_completion_case(case, release_run_id):
-        bounded_listener = release_run_id in {CLEANER_BOUNDED_LISTENER_RUN_ID, PR1628_CLEANER_RELEASE_RUN_ID}
+        bounded_listener = release_run_id in {
+            CLEANER_BOUNDED_LISTENER_RUN_ID, PR1628_CLEANER_RELEASE_RUN_ID, PR1639_CLEANER_RELEASE_RUN_ID,
+        }
         required = (
             "line 1285, in deploy_current_checkout" if bounded_listener else "line 1282, in deploy_current_checkout",
             'run_stage("readback",cleaner_precomplete_probe_command,allow_transport_reconciliation=False)',

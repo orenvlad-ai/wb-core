@@ -838,10 +838,13 @@ class WbFinanceWeeklyBlock:
     def shared_cost_snapshot(self) -> SharedSkuCostSnapshot | None:
         return self._shared_cost_snapshot
 
+    def _load_published_cost_book(self):
+        from packages.application.fbs_accounting_runtime import load_shared
+        return load_shared(self.runtime_dir)
+
     def _pin_active_cost(self, manifest=None, *, observe_later=False):
         if not self.shared_cost_is_candidate:
-            from packages.application.fbs_accounting_runtime import load_shared
-            self._shared_cost_snapshot = load_shared(self.runtime_dir)
+            self._shared_cost_snapshot = self._load_published_cost_book()
             self._shared_cost_base = self._shared_cost_snapshot
             if self._shared_cost_snapshot is not None and not observe_later:
                 from packages.application.vitrina_last_known_cost import approved_reporting_snapshot

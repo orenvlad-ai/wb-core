@@ -130,7 +130,7 @@ def _finance_business_image(images):
     return result
 
 
-def _finance_retained_stamp_no_change(current, expected, *, shared_version):
+def _finance_retained_stamp_no_change(current, expected, *, shared_version, approved_estimates=False):
     """Native economic no-change can retain ONLY these two global stamps.
 
     Per-date source IDs/digests, signatures, money, quality and all unknown
@@ -163,8 +163,13 @@ def _finance_retained_stamp_no_change(current, expected, *, shared_version):
                             raise ValueError('supplier_finance_global_stamp_unproven')
                     if node is None:
                         continue
-                    if (set(node) != {'cost_method_version','policy_date','effective_date','version_id','candidate_only'}
-                            or node['cost_method_version'] != POLICY or node['candidate_only'] is not False):
+                    fields = {'cost_method_version','policy_date','effective_date','version_id','candidate_only'}
+                    if 'management_estimate_policy' in node:
+                        if not approved_estimates or node['management_estimate_policy'] != 'explicit_applied_same_sku_closed_cost_v1':
+                            raise ValueError('supplier_finance_global_stamp_unproven')
+                        fields.add('management_estimate_policy')
+                    if (set(node) != fields or node['cost_method_version'] != POLICY
+                            or node['candidate_only'] is not False):
                         raise ValueError('supplier_finance_global_stamp_unproven')
                     for field in ('policy_date','effective_date'):
                         try:
@@ -201,6 +206,21 @@ def _finance_retained_stamp_no_change(current, expected, *, shared_version):
     return differences
 
 
+def _finance_reporting_version(block, shared_version):
+    """Bind the published book and keep Finance's approved reporting source for projection."""
+    from packages.application.vitrina_last_known_cost import ApprovedEstimateCostSnapshot
+
+    if not shared_version:
+        return shared_version, False
+    snapshot = block.shared_cost_snapshot
+    approved = isinstance(snapshot, ApprovedEstimateCostSnapshot)
+    exact = snapshot.exact if approved else snapshot
+    if (block.shared_cost_is_candidate or exact is None or exact.metadata()['version_id'] != shared_version
+            or (approved and exact.metadata().get('candidate_only') is not False)):
+        raise ValueError('supplier_finance_accounting_version_mismatch')
+    return snapshot.metadata()['version_id'], approved
+
+
 def _finance_snapshot(block, conn, *, seller_id, queue_ref, shared_version, projections=None):
     from packages.application.wb_finance_weekly import _nomenclature_identity_index, _resolve_finance_nm_id, _operation_date
     aliases, ambiguous, _, _ = _nomenclature_identity_index(conn)
@@ -223,14 +243,12 @@ def _finance_snapshot(block, conn, *, seller_id, queue_ref, shared_version, proj
             raise ValueError("supplier_finance_operation_date_unknown")
         if day >= effective:
             targets.add((seller_id, row["week_start"], row["week_end"]))
-    if shared_version and (block.shared_cost_snapshot is None
-            or block.shared_cost_snapshot.metadata()["version_id"] != shared_version):
-        raise ValueError("supplier_finance_accounting_version_mismatch")
+    reporting_version, approved = _finance_reporting_version(block, shared_version)
     dependency = block._finance_source_dependency_fingerprint(conn, target_keys=targets, force_reload=True)
     current = block._finance_target_images(conn, targets)
     expected = {}
     for _, start, end in sorted(targets):
-        key = (shared_version, start, end)
+        key = (reporting_version, start, end)
         projection = projections.get(key) if projections is not None else None
         if projection is None:
             projection = block._build_week_target_projection(conn, week_start=date.fromisoformat(start), week_end=date.fromisoformat(end))
@@ -244,7 +262,8 @@ def _finance_snapshot(block, conn, *, seller_id, queue_ref, shared_version, proj
     expected_image = _finance_business_image(expected)
     stamp_differences = []
     if current_image != expected_image:
-        stamp_differences = _finance_retained_stamp_no_change(current_image, expected_image, shared_version=shared_version)
+        stamp_differences = _finance_retained_stamp_no_change(current_image, expected_image,
+            shared_version=reporting_version, approved_estimates=approved)
     result = {"status": "verified" if targets else "not_applicable", "seller_id": seller_id,
             "target_weeks": [list(key) for key in sorted(targets)],
             "source_dependency": dependency, "target_digest": source.digest(current_image),
@@ -402,6 +421,19 @@ def read_correlated_native(conn, operation_id):
             "state": state, "allocation": allocation, "certification": certification}
 
 
+def _supplier_has_no_dated_wb_authority(evaluation, day):
+    """Use the native producer's own dated proof for a wholly unaccepted cohort."""
+    if not evaluation:
+        return False
+    refs = evaluation.get('cohort_refs')
+    evidence = evaluation.get('evaluation', {}).get(day, {}).get('wb', ())
+    if not refs or len(evidence) != 1:
+        return False
+    row = evidence[0]
+    return (row.get('kind') == 'unaccepted_supplier_has_no_wb_cost_authority'
+            and row.get('date') == day and row.get('source_refs') == refs)
+
+
 def read_native_proof(runtime, operation_id, *, seller_id="canonical", now=None, connection=None, handoff=None, stack=None, finance_cohort=None):
     from packages.application.shared_sku_cost_sources import capture_wb_component
     from packages.application import fbs_accounting_runtime as accounting, ready_publication
@@ -443,7 +475,8 @@ def read_native_proof(runtime, operation_id, *, seller_id="canonical", now=None,
         # admitted dated authority/book revision from the closed-history owner.
         for item in ([] if evaluation and evaluation.get('structural_no_effect') else daily):
             prior_day = item["as_of_date"]
-            if prior_day < day and Decimal(item["quantity"]) > 0:
+            if (prior_day < day and Decimal(item["quantity"]) > 0
+                    and not _supplier_has_no_dated_wb_authority(evaluation, prior_day)):
                 prior = book["wb_days"].get(prior_day)
                 if not prior or not prior["complete"]:
                     raise ValueError("supplier_historical_authority_required:"+prior_day)

@@ -349,10 +349,7 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
         content_hash = prepared["content_hash"]
         raw_row_count = prepared["raw_row_count"]
         allocation_dependency_hash = prepared["allocation_dependency_hash"]
-        cost_source_hash = prepared["cost_source_hash"]
-        cost_state_hash = prepared["cost_state_hash"]
-        metrics, coverage, unknown = prepared["metrics"], prepared["coverage"], prepared["unknown"]
-        spp, report_ids, report_types = prepared["spp"], prepared["report_ids"], prepared["report_types"]
+        report_ids, report_types = prepared["report_ids"], prepared["report_types"]
         with closing(self._connect_daily_read()) as verifier:
             verifier.execute("BEGIN")
             pointer = verifier.execute(
@@ -401,34 +398,48 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
                  previous["first_loaded_at"] if previous and previous["first_loaded_at"] else now,
                  now, now if status == "loaded_preliminary" else None),
             )
-            writer.execute(
-                """INSERT INTO wb_finance_daily_aggregates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(seller_id,report_day) DO UPDATE SET
-                   batch_id=excluded.batch_id,content_hash=excluded.content_hash,
-                   raw_row_count=excluded.raw_row_count,
-                   formula_version=excluded.formula_version,
-                   classifier_version=excluded.classifier_version,
-                   allocation_dependency_hash=excluded.allocation_dependency_hash,
-                   cost_state_hash=excluded.cost_state_hash,
-                   cost_source_hash=excluded.cost_source_hash,
-                   metrics_json=excluded.metrics_json,coverage_json=excluded.coverage_json,
-                   unknown_reasons_json=excluded.unknown_reasons_json,
-                   report_ids_json=excluded.report_ids_json,
-                   report_types_json=excluded.report_types_json,
-                   calculated_at=excluded.calculated_at""",
-                (self.seller_id, day_text, batch_id, content_hash, raw_row_count,
-                 DAILY_FORMULA_VERSION, CLASSIFIER_VERSION, allocation_dependency_hash,
-                 cost_state_hash, cost_source_hash,
-                 json.dumps(metrics, ensure_ascii=False, sort_keys=True),
-                 json.dumps({**coverage, "spp": spp}, ensure_ascii=False, sort_keys=True, default=str),
-                 json.dumps(unknown, ensure_ascii=False),
-                 json.dumps(report_ids, ensure_ascii=False),
-                 json.dumps(report_types, ensure_ascii=False), now),
-            )
+            self._write_daily_aggregate(writer, prepared, now)
             writer.commit()
         return {"status": status, "report_day": day_text, "batch_id": batch_id,
                 "raw_row_count": raw_row_count, "report_ids": report_ids,
                 "report_types": report_types}
+
+    def _write_daily_aggregate(self, writer, prepared, now):
+        """Persist the projection computed from one accepted raw batch."""
+        day = prepared["day"]
+        day_text = day.isoformat()
+        batch_id = prepared["batch_id"]
+        content_hash = prepared["content_hash"]
+        raw_row_count = prepared["raw_row_count"]
+        allocation_dependency_hash = prepared["allocation_dependency_hash"]
+        cost_source_hash = prepared["cost_source_hash"]
+        cost_state_hash = prepared["cost_state_hash"]
+        metrics, coverage, unknown = prepared["metrics"], prepared["coverage"], prepared["unknown"]
+        spp, report_ids, report_types = prepared["spp"], prepared["report_ids"], prepared["report_types"]
+        writer.execute(
+            """INSERT INTO wb_finance_daily_aggregates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(seller_id,report_day) DO UPDATE SET
+               batch_id=excluded.batch_id,content_hash=excluded.content_hash,
+               raw_row_count=excluded.raw_row_count,
+               formula_version=excluded.formula_version,
+               classifier_version=excluded.classifier_version,
+               allocation_dependency_hash=excluded.allocation_dependency_hash,
+               cost_state_hash=excluded.cost_state_hash,
+               cost_source_hash=excluded.cost_source_hash,
+               metrics_json=excluded.metrics_json,coverage_json=excluded.coverage_json,
+               unknown_reasons_json=excluded.unknown_reasons_json,
+               report_ids_json=excluded.report_ids_json,
+               report_types_json=excluded.report_types_json,
+               calculated_at=excluded.calculated_at""",
+            (self.seller_id, day_text, batch_id, content_hash, raw_row_count,
+             DAILY_FORMULA_VERSION, CLASSIFIER_VERSION, allocation_dependency_hash,
+             cost_state_hash, cost_source_hash,
+             json.dumps(metrics, ensure_ascii=False, sort_keys=True),
+             json.dumps({**coverage, "spp": spp}, ensure_ascii=False, sort_keys=True, default=str),
+             json.dumps(unknown, ensure_ascii=False),
+             json.dumps(report_ids, ensure_ascii=False),
+             json.dumps(report_types, ensure_ascii=False), now),
+        )
 
     def _record_failure(self, day: date, status: str, error: str) -> None:
         now = self.now_factory().astimezone(timezone.utc)

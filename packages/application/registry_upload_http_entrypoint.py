@@ -3412,7 +3412,7 @@ class RegistryUploadHttpEntrypoint:
             return StageProof({'daily_projection_digest': digest(canonical(days)),
                 'daily_projection_report_proofs': proof.versions['daily_report_proofs']}, proof.warnings + tuple(missing))
 
-    def _cycle_validate_predecessors(self, finance, fbs, material):
+    def _cycle_validate_predecessors(self, finance, fbs, material, *, daily_days=None):
         from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure, finance_raw_proof, require_cycle_business_date
         from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
         from packages.application.ready_publication import readonly
@@ -3433,7 +3433,7 @@ class RegistryUploadHttpEntrypoint:
         with readonly(self.runtime.db_path) as conn:
             active = conn.execute('SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1').fetchone()
         _, version = load(self.runtime.runtime_dir)
-        days = self.wb_finance_daily_block.build_daily_payload()['days']
+        days = self.wb_finance_daily_block.build_daily_payload()['days'] if daily_days is None else daily_days
         if (not active or active[0] != material['functional_version'] or version != material['fbs_book']
                 or digest(canonical(days)) != material['daily_projection_digest']):
             raise CycleStageFailure('cycle_material_version_changed')
@@ -3538,7 +3538,7 @@ class RegistryUploadHttpEntrypoint:
         from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
         owner = RegistryUploadHttpEntrypoint._cycle_owned_worker_identity(self, receipt)
         self._cycle_verify_ready(ready)
-        policy_receipt = supplier_receipt = None
+        policy_receipt = supplier_receipt = supplier_material = None
         if (historical_receipt is None and hasattr(self.runtime, 'db_path')
                 and receipt.get('final_versions', {}).get('fbs_accounting_status') != 'unavailable'):
             from packages.application.operator_policy_history import pending as pending_policy_history
@@ -3547,7 +3547,15 @@ class RegistryUploadHttpEntrypoint:
             with warehouse_functional_job_lock(self.runtime.runtime_dir):
                 policy_receipt = pending_policy_history(self.runtime, now=self.now_factory())
                 if policy_receipt is None:
+                    materials = receipt.get('final_versions')
+                    if materials is not None:
+                        from packages.application.operator_supplier_history_cycle_material import source_predecessors
+                        finance, fbs = source_predecessors(receipt)
+                        self._cycle_validate_predecessors(finance, fbs, materials)
                     supplier_receipt = pending_supplier_history(self.runtime, now=self.now_factory())
+                    if supplier_receipt is not None and materials is not None:
+                        from packages.application.operator_supplier_history_cycle_material import prepare_supplier_material
+                        supplier_material = prepare_supplier_material(self, receipt, supplier_receipt)
         dated_options = {}
         dated_receipt = policy_receipt if policy_receipt is not None else supplier_receipt
         if dated_receipt is not None:
@@ -3589,6 +3597,9 @@ class RegistryUploadHttpEntrypoint:
                     raise CycleStageFailure('supplier_history_finance_unproven')
                 if supplier_receipt.validate_sources_readonly(now=self.now_factory()) != sources_before:
                     raise CycleStageFailure('supplier_history_completion_source_changed')
+                if supplier_material is not None:
+                    supplier_material.attest(supplier_receipt, proof, history_ack, completion)
+                    proof['supplier_material'] = canonical(supplier_material.publication())
             proof['supplier_completion'] = canonical(completion)
         if historical_receipt is not None:
             from packages.application.fbs_accounting_historical_cycle import finalize
@@ -3598,7 +3609,8 @@ class RegistryUploadHttpEntrypoint:
                 completion=finalize(self.runtime,config=config,now=self.now_factory())
             from packages.application.ready_publication import canonical
             proof['historical_completion']=canonical(completion)
-        return StageProof({'history_' + key: str(value) for key,value in proof.items()})
+        return StageProof({'history_' + key: str(value) for key,value in proof.items()},
+                          supplier_material=supplier_material)
 
     def _cycle_stock_monitor_tail(self, store, receipt):
         """Best effort under the existing worker lease; never masks core failure.

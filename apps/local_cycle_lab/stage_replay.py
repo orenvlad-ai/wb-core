@@ -29,16 +29,20 @@ def posted_ledger(runtime):
 
 
 class AttemptStore:
-    def __init__(self, output):
+    def __init__(self, output, attempt_stages):
         self.output = output
+        self.attempt_stages = attempt_stages
 
     def write(self, receipt):
-        atomic_json(self.output / "attempt.json", receipt)
+        attempt = {**receipt, "stages": self.attempt_stages}
+        atomic_json(self.output / "attempt.json", attempt)
+        return attempt
 
 
 def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, collection_hash=None):
     from packages.application.fbs_accounting_degraded import degraded_accounting_scope
     from packages.application.business_data_procedure_admission import admitted_write
+    from packages.application.operator_supplier_history_cycle_material import source_predecessors
     from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog
     from packages.application.sheet_vitrina_v1_cycle import (
         STAGES, finance_raw_proof, require_cycle_business_date, run_closed_ready_stage,
@@ -48,10 +52,8 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, col
 
     stages = {row["stage"]: row for row in source["stages"]}
     versions = dict(source["final_versions"])
-    fbs = {**stages["fbs_generation"]["versions"]}
-    # The warehouse may have refreshed the catalog once after source collection.
-    fbs.update({key: versions[key] for key in fbs})
-    finance = stages["finance_sources"]["versions"]
+    finance, fbs_source = source_predecessors(source)
+    fbs = dict(fbs_source)
     if stage not in (*SUPPORTED, "daily_projection"):
         raise ValueError("Unsupported recovery stage")
     resume_warehouse = stage == "warehouse" and collection_hash is not None
@@ -63,15 +65,22 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, col
         scope = "warehouse_and_publication"
     if suffix:
         expect(selected == STAGES[STAGES.index(stage):], "Native publication stage order changed")
+    prefix = source["stages"][:STAGES.index(stage)]
+    expect(tuple(row["stage"] for row in prefix) == STAGES[:STAGES.index(stage)]
+           and all(row["status"] in ("complete", "degraded") for row in prefix),
+           "Checkpoint lacks completed predecessor stages")
+    attempt_stages = [dict(stage=name, status="pending") for name in selected]
     fresh = dict(schema="local_selected_stage_v1", cycle_id=uuid4().hex, source_cycle=source["cycle_id"],
                  source_job=source["job_id"], checkpoint_sha256=checkpoint_hash, replay_code=read_json(SOURCE_ID),
                  scope=scope, current_stage=stage, business_date=source["business_date"],
                  slot_utc=entry.now_factory().isoformat(), owner_pid=os.getpid(),
                  process_identity=process_identity(os.getpid()), status="accepted",
                  history_config_fingerprint=config.fingerprint(), final_versions=versions,
-                 stages=[dict(stage=name, status="pending") for name in selected])
+                 stages=[*prefix, *attempt_stages])
+    if source.get("fbs_catalog_refresh"):
+        fresh["fbs_catalog_refresh"] = dict(source["fbs_catalog_refresh"])
     expect(fresh["history_config_fingerprint"] == source["history_config_fingerprint"], "History authority differs")
-    store = AttemptStore(output)
+    store = AttemptStore(output, attempt_stages)
 
     def accepted(job_id):
         fresh["job_id"] = job_id
@@ -114,7 +123,7 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, col
             try:
                 entry._cycle_owned_worker_identity(fresh)
                 steps = actions()
-                for row in fresh["stages"]:
+                for row in attempt_stages:
                     require_cycle_business_date(fresh["business_date"], entry.now_factory())
                     row.update(status="running", started_at=entry.activated_at_factory())
                     fresh.update(status="running", current_stage=row["stage"])
@@ -129,7 +138,7 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, col
                     versions.update(proof.versions)
                     store.write(fresh)
                 steps.close()
-                fresh.update(status="degraded" if any(s["warnings"] for s in fresh["stages"]) else "complete",
+                fresh.update(status="degraded" if any(s["warnings"] for s in attempt_stages) else "complete",
                              current_stage="" if suffix else stage)
             except BaseException as exc:
                 fresh.update(status="failed", error_code=type(exc).__name__)
@@ -137,8 +146,8 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, col
                     row.update(status="failed", finished_at=entry.activated_at_factory())
                 raise
             finally:
-                store.write(fresh)
-            return fresh
+                attempt = store.write(fresh)
+            return attempt
 
     with admitted_write(entry.runtime.runtime_dir):
         job = entry.operator_jobs.start(operation="cycle", runner=worker, on_accept=accepted)
@@ -148,7 +157,9 @@ def invoke(entry, config, source, stage, checkpoint_hash, *, output=CONTROL, col
     (output / "stage.log").write_text(log)
     terminal = entry.operator_jobs.get(job["job_id"])
     expect(terminal["status"] == "success", f"Stage job failed: {terminal.get('error') or terminal.get('message') or terminal}")
-    return read_json(output / "attempt.json")
+    attempt = read_json(output / "attempt.json")
+    expect(terminal["result"] == attempt, "Operator job and saved stage attempt differ")
+    return attempt
 
 
 def replay(stage):
