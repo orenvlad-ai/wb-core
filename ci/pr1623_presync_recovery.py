@@ -62,6 +62,19 @@ PRESYNC_PROFILES = {
         CASE='pr1626-proven-unentered-presync',
         PLAN='329c83aa1160aac8cfed74031593fe1e927f3a3c7d7fc48fbecb2aabe2f8e2a5',
         AVAILABLE=58428649472, RESERVE=59018551296, ROLE='backup'),
+    45797154129: dict(RUN=45797154129,
+        PREVIOUS='44f0a9966833350b807818489b809528ed781089',
+        PROFILE=dict(pull_request=1635, gate_run_id=45771933233,
+            base_sha='c009360f35b64200dfa4bcb811f4417a39a5bc95',
+            head_sha='f711cc112ae600d4848d87e451423b8ceed44cb3',
+            merge_sha='3d794cb301a7d0a1eeebf0ff67d53e91de922623',
+            operation_id='release-v3-59a3e6acfff3721c8acd4849fde28db1'),
+        WINDOW='wbc-history-pr1635-f711cc11-20261126',
+        BASELINE='sha256:e11085772368a5b39667e0f43a6dfdfdbb463e157f2b861d024edaf046da3c12',
+        OWNER='sha256:a038001cf6296053ebcc8377be27ad1b5b4bf14e2b4312ca3bf178346e0603df',
+        CASE='pr1635-proven-unentered-presync',
+        PLAN='0ea16772665218453671aeada850f7cf86009ba27cb832800d759d10bac27ee4',
+        AVAILABLE=60424671232, RESERVE=60811292672, ROLE='backup'),
 }
 
 

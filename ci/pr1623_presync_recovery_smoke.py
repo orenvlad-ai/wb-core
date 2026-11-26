@@ -266,6 +266,7 @@ class RecoveryTests(unittest.TestCase):
 
 class Pr1626StorageRefusalTests(unittest.TestCase):
     RUN=45514713724
+    PR=1626
     def fixture(self,stack):
         return RecoveryTests.fixture(self,stack,release_run_id=self.RUN)
 
@@ -275,6 +276,7 @@ class Pr1626StorageRefusalTests(unittest.TestCase):
         self.assertEqual(r._prove_failed_stage(raw,profile['gate_run_id'],'job',release_run_id=self.RUN)['stage'],
             'root-storage-preflight-before-owner-start')
         for before,after in [(b'"backup"',b'"root"'),(str(case['RESERVE']).encode(),b'1'),
+                (str(case['AVAILABLE']).encode(),b'2'),
                 (case['OWNER'].encode(),c.OWNER.encode()),(case['BASELINE'].encode(),c.BASELINE.encode()),
                 (b'prepared',b'mutation_started'),(b'exit status 3',b'exit status 255'),
                 (b'allow_transport_reconciliation=False',b'allow_transport_reconciliation=True'),
@@ -289,11 +291,11 @@ class Pr1626StorageRefusalTests(unittest.TestCase):
         with ExitStack() as stack:
             preview=self.fixture(stack)
             self.assertEqual(preview['release_run_id'],self.RUN)
-            self.assertEqual(preview['recovery_case'],'pr1626-proven-unentered-presync')
+            self.assertEqual(preview['recovery_case'],f'pr{self.PR}-proven-unentered-presync')
             with patch.object(r,'_publish_once',wraps=r._publish_once) as publish:
                 result=c.run(self.client,self.target,'apply',preview['preview_fingerprint'],release_run_id=self.RUN)
                 self.assertEqual(result['state'],'complete')
-                self.assertEqual([call.args[1] for call in publish.call_args_list],[1626,1626])
+                self.assertEqual([call.args[1] for call in publish.call_args_list],[self.PR,self.PR])
             self.deploy.assert_called_once_with(release_run_id=self.RUN)
             self.finish.assert_called_once_with(self.target,self.proof['original_receipt'])
             self.assertEqual(c.run(self.client,self.target,'apply',preview['preview_fingerprint'],release_run_id=self.RUN)['state'],'complete')
@@ -325,13 +327,25 @@ class Pr1626StorageRefusalTests(unittest.TestCase):
             c.canonical_deploy(release_run_id=self.RUN)
         self.assertEqual(len(calls),1);args,kwargs=calls[0]
         self.assertEqual(args[1:],['apps/registry_upload_http_entrypoint_hosted_runtime.py','deploy'])
-        self.assertEqual(kwargs['env']['WB_CORE_RELEASE_PR'],'1626')
+        self.assertEqual(kwargs['env']['WB_CORE_RELEASE_PR'],str(self.PR))
         self.assertEqual(kwargs['env']['WB_CORE_RELEASE_OPERATION_ID'],profile['operation_id'])
         self.assertEqual(kwargs['env']['WB_CORE_RELEASE_HEAD'],profile['head_sha'])
         self.assertEqual(kwargs['env']['WB_CORE_RELEASE_DEFER_DEPLOY_OWNER_FINISH'],'true')
         self.assertEqual(kwargs['env']['WB_CORE_HOSTED_RUNTIME_TARGET_FILE'],str(kwargs['cwd']/c.TARGET_RELATIVE))
         self.assertTrue(Path(kwargs['env']['WB_CORE_HOSTED_RUNTIME_TARGET_FILE']).is_absolute())
 
+
+
+class Pr1635StorageRefusalTests(Pr1626StorageRefusalTests):
+    RUN = 45797154129
+    PR = 1635
+
+    def test_backup_refusals_are_not_interchangeable(self):
+        previous_run = Pr1626StorageRefusalTests.RUN
+        for source, target in ((self.RUN, previous_run), (previous_run, self.RUN)):
+            gate = c._profile(target)['PROFILE']['gate_run_id']
+            with self.subTest(source=source, target=target), self.assertRaises(r.RecoveryError):
+                r._prove_failed_stage(failure_log(source), gate, 'job', release_run_id=target)
 
 
 if __name__ == '__main__':

@@ -516,7 +516,7 @@ def _prove_failed_stage(
     release_run_id: int = EXPECTED_ACTIVATION_RELEASE_RUN_ID,
 ) -> dict[str, Any]:
     text = raw_log.decode("utf-8", errors="replace")
-    if release_run_id in {45470334066, 45514713724}:
+    if release_run_id in {45470334066, 45514713724, 45797154129}:
         from ci.pr1623_presync_recovery import prove_failure
         return prove_failure(raw_log, gate_run_id, job_name, release_run_id=release_run_id)
     if cleaner_completion_case(case, release_run_id):
@@ -2512,7 +2512,7 @@ def main() -> int:
         if args.release_run_id == 39568090548:
             from ci.pr1483_preparation_continuation import run
             result = run(client, target, args.command, args.preview_fingerprint)
-        elif args.release_run_id in {45470334066, 45514713724}:
+        elif args.release_run_id in {45470334066, 45514713724, 45797154129}:
             from ci.pr1623_presync_recovery import run
             result = run(client, target, args.command, args.preview_fingerprint, release_run_id=args.release_run_id)
         elif args.release_run_id == 45473903471:
