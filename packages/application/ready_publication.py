@@ -322,6 +322,11 @@ def ensure_material_revisions(conn) -> None:
             raise
     conn.execute(f"CREATE TABLE IF NOT EXISTS {REVISIONS}(source_table TEXT PRIMARY KEY,revision INTEGER NOT NULL)")
     existing = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    # The supplier receipt pins this complete, ordered source for each dated
+    # warehouse version. Build its access path during native writer bootstrap.
+    if "sheet_vitrina_v1_warehouse_unmatched_doprinato" in existing:
+        conn.execute("CREATE INDEX IF NOT EXISTS warehouse_unmatched_by_version ON "
+                     "sheet_vitrina_v1_warehouse_unmatched_doprinato(version_id,unmatched_id)")
     for table in (*MATERIAL_TABLES, *INVENTORY_PREPARATION_TABLES):
         if table not in existing:
             continue

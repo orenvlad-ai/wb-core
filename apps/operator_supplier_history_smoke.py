@@ -758,12 +758,34 @@ class LinuxTests(unittest.TestCase):
                                     conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE bundle_version=? AND as_of_date=?',(canonical(payload),row[0],row[1]))
                                 conn.commit()
                         return native
-                    with patch.object(worker,'_invoke',side_effect=diagnostic),patch.object(ack,'consume_supplier_history_ack',side_effect=consume_then_race):
+                    phase_grants = []
+                    original_send = supervisor.send_message
+
+                    def record_grant(channel, message):
+                        if "inner_deadline" in message:
+                            phase_grants.append((message["invocation"], message["phase"]))
+                        return original_send(channel, message)
+
+                    with (
+                        patch.object(worker, "_invoke", side_effect=diagnostic),
+                        patch.object(ack, "consume_supplier_history_ack", side_effect=consume_then_race),
+                        patch.object(supervisor, "send_message", side_effect=record_grant),
+                    ):
                         if race:
                             with self.assertRaisesRegex(Exception,'ready_repair_source_changed|query_input_changed|dated_ready_changed|native_source_changed'):worker.complete(moment,backfill_dates=backfill,supplier_receipt=receipt,total_seconds=300)
                         else:result=worker.complete(moment,backfill_dates=backfill,supplier_receipt=receipt,total_seconds=300)
                     self.assertIsNone(worker._process)
-                    if not race:self.assertTrue(result['supplier_ack'])
+                    if not race:
+                        self.assertTrue(result['supplier_ack'])
+                        native_proofs = [inv for inv, phase in phase_grants if phase == "supplier_native_proof"]
+                        self.assertEqual(len(native_proofs), 1)
+                        dated = [inv for inv, phase in phase_grants if phase == "dated_write"]
+                        self.assertTrue(dated)
+                        for invocation in dated:
+                            self.assertEqual([phase for inv, phase in phase_grants if inv == invocation],
+                                             ["derived_work", "dated_write"])
+                        self.assertEqual([phase for inv, phase in phase_grants if inv == native_proofs[0]],
+                                         ["derived_work", "supplier_native_proof"])
             if race:
                 self.assertNotIn('supplier_history_ack',receipt._read()[1]);return
             with ready.readonly(rt.db_path) as conn:proof=h.completed_proof(conn,receipt.manifest['source_ref'])

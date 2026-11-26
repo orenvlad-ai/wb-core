@@ -351,6 +351,33 @@ This case shares the existing pre-sync implementation; unknown runs, other
 failure stages, mutation_started owners and unreviewed source drift refuse.
 Recovery neither cleans files nor resumes the window nor starts a business cycle.
 
+## PR1635 history publication release
+
+Release Runner `45797154129` stopped at the same storage preflight before owner
+start and sync. Its immutable job records 60,424,671,232 bytes available on the
+backup volume and a required reserve of 60,811,292,672 bytes. Gate `45771933233`
+admitted merge `3d794cb301a7d0a1eeebf0ff67d53e91de922623` under operation
+`release-v3-59a3e6acfff3721c8acd4849fde28db1`.
+
+After restoring and verifying capacity, preview recovery for `45797154129`.
+The old complete runtime must still be `44f0a9966833350b807818489b809528ed781089`.
+The original prepared owner must hold `wbc-history-pr1635-f711cc11-20261126`
+with its original baseline and an empty expected SHA. Review the preview
+fingerprint and apply it once. The canonical deploy, same-owner completion,
+Finance readback and existing-claim rules above apply unchanged.
+
+Recovery `45800208191` consumed that deploy claim. Its adapter finished the
+restart and activation readback, then timed out at the final cleaner listener
+check on line 1285. For this exact nested run, use Post-merge Release Recovery
+with `release_run_id=45800208191`. Preview verifies both GitHub runs, the
+original bot claim, the failed recovery artifact and job log, and the installed
+merge. It requires the same held window, started owner, unchanged Finance,
+and a successful native cleaner check. Compare the preview fingerprint before
+apply. The remaining write is the guarded deploy-metadata completion against
+the reviewed bytes and service PID, followed by native owner finish. A consumed
+continuation claim permits only final readback and finish. Once confirmed, the
+parent recovery can record its terminal receipt using its original fingerprint.
+
 ## PR1623: exact unentered Chrome RAM guard after sync
 
 Recovery `45473903471` of the original PR1623 operation reached adapter line1242, then

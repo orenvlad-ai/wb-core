@@ -266,6 +266,7 @@ class RecoveryTests(unittest.TestCase):
 
 class Pr1626StorageRefusalTests(unittest.TestCase):
     RUN=45514713724
+    PR=1626
     def fixture(self,stack):
         return RecoveryTests.fixture(self,stack,release_run_id=self.RUN)
 
@@ -275,6 +276,7 @@ class Pr1626StorageRefusalTests(unittest.TestCase):
         self.assertEqual(r._prove_failed_stage(raw,profile['gate_run_id'],'job',release_run_id=self.RUN)['stage'],
             'root-storage-preflight-before-owner-start')
         for before,after in [(b'"backup"',b'"root"'),(str(case['RESERVE']).encode(),b'1'),
+                (str(case['AVAILABLE']).encode(),b'2'),
                 (case['OWNER'].encode(),c.OWNER.encode()),(case['BASELINE'].encode(),c.BASELINE.encode()),
                 (b'prepared',b'mutation_started'),(b'exit status 3',b'exit status 255'),
                 (b'allow_transport_reconciliation=False',b'allow_transport_reconciliation=True'),
@@ -289,11 +291,11 @@ class Pr1626StorageRefusalTests(unittest.TestCase):
         with ExitStack() as stack:
             preview=self.fixture(stack)
             self.assertEqual(preview['release_run_id'],self.RUN)
-            self.assertEqual(preview['recovery_case'],'pr1626-proven-unentered-presync')
+            self.assertEqual(preview['recovery_case'],f'pr{self.PR}-proven-unentered-presync')
             with patch.object(r,'_publish_once',wraps=r._publish_once) as publish:
                 result=c.run(self.client,self.target,'apply',preview['preview_fingerprint'],release_run_id=self.RUN)
                 self.assertEqual(result['state'],'complete')
-                self.assertEqual([call.args[1] for call in publish.call_args_list],[1626,1626])
+                self.assertEqual([call.args[1] for call in publish.call_args_list],[self.PR,self.PR])
             self.deploy.assert_called_once_with(release_run_id=self.RUN)
             self.finish.assert_called_once_with(self.target,self.proof['original_receipt'])
             self.assertEqual(c.run(self.client,self.target,'apply',preview['preview_fingerprint'],release_run_id=self.RUN)['state'],'complete')
@@ -325,12 +327,191 @@ class Pr1626StorageRefusalTests(unittest.TestCase):
             c.canonical_deploy(release_run_id=self.RUN)
         self.assertEqual(len(calls),1);args,kwargs=calls[0]
         self.assertEqual(args[1:],['apps/registry_upload_http_entrypoint_hosted_runtime.py','deploy'])
-        self.assertEqual(kwargs['env']['WB_CORE_RELEASE_PR'],'1626')
+        self.assertEqual(kwargs['env']['WB_CORE_RELEASE_PR'],str(self.PR))
         self.assertEqual(kwargs['env']['WB_CORE_RELEASE_OPERATION_ID'],profile['operation_id'])
         self.assertEqual(kwargs['env']['WB_CORE_RELEASE_HEAD'],profile['head_sha'])
         self.assertEqual(kwargs['env']['WB_CORE_RELEASE_DEFER_DEPLOY_OWNER_FINISH'],'true')
         self.assertEqual(kwargs['env']['WB_CORE_HOSTED_RUNTIME_TARGET_FILE'],str(kwargs['cwd']/c.TARGET_RELATIVE))
         self.assertTrue(Path(kwargs['env']['WB_CORE_HOSTED_RUNTIME_TARGET_FILE']).is_absolute())
+
+
+
+class Pr1635StorageRefusalTests(Pr1626StorageRefusalTests):
+    RUN = 45797154129
+    PR = 1635
+
+    def test_backup_refusals_are_not_interchangeable(self):
+        previous_run = Pr1626StorageRefusalTests.RUN
+        for source, target in ((self.RUN, previous_run), (previous_run, self.RUN)):
+            gate = c._profile(target)['PROFILE']['gate_run_id']
+            with self.subTest(source=source, target=target), self.assertRaises(r.RecoveryError):
+                r._prove_failed_stage(failure_log(source), gate, 'job', release_run_id=target)
+
+
+class NestedCleanerTests(unittest.TestCase):
+    def test_exact_job_and_parent_artifact(self):
+        import zipfile
+        from ci import pr1635_cleaner_evidence as n
+
+        source = {**n.PROFILE['PROFILE'], 'state': 'blocked'}
+        operation = r.recovery_operation_id(n.ORIGINAL_RUN, source)
+        finance = {'write_mode': 'example'}
+        claim = dict(state='claimed', operation_id=operation, source=source,
+                     preview_fingerprint=n.PREVIEW, finance_acceptance=finance)
+        marker = r._claim_marker(operation)
+        body = marker + '\n```json\n' + json.dumps(claim) + '\n```'
+        comment = dict(id=n.CLAIM_COMMENT, user=dict(login='github-actions[bot]', id=41898282),
+                       performed_via_github_app=dict(slug='github-actions'), body=body)
+        run = dict(id=n.RUN, name='Post-merge Release Recovery', path='.github/workflows/release-recovery.yml',
+                   event='workflow_dispatch', run_attempt=1, head_sha=n.RUNNER, head_branch='main',
+                   status='completed', conclusion='failure', repository={'full_name': r.REPOSITORY},
+                   head_repository={'full_name': r.REPOSITORY})
+        receipt = dict(schema=r.RECOVERY_SCHEMA, state='ambiguous', operation_id=operation, source=source,
+                       preview_fingerprint=n.PREVIEW, reason='CalledProcessError',
+                       recovery='readback-only; never repeat canonical deploy')
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as archive:
+            archive.writestr('recovery-receipt.json', json.dumps(receipt))
+        raw_archive = buf.getvalue()
+        artifact = dict(id=n.ARTIFACT, workflow_run={'id': n.RUN}, name=f'release-recovery-{n.ORIGINAL_RUN}-{n.RUN}',
+                        expired=False, digest='sha256:' + r.digest(raw_archive))
+        failed = dict(id=n.JOB, name=n.JOB_NAME, status='completed', conclusion='failure',
+                      steps=[dict(name=n.STEP_NAME, conclusion='failure')])
+        gate = source['gate_run_id']
+        log = ('{"status": "skipped_maintenance", "reason": "skipped_maintenance"}\n'
+               'line 30, in _listener_ready\nRuntimeError: cleaner listener not ready for before_complete\n'
+               'line 1285, in deploy_current_checkout\n'
+               'run_stage("readback",cleaner_precomplete_probe_command,allow_transport_reconciliation=False)\n'
+               f"subprocess.CalledProcessError: Command {source['operation_id']} apps/search_cluster_cleaner_release_probe.py"
+               f" --phase before_complete --expected-sha {source['merge_sha']} returned non-zero exit status 1.\n").encode()
+        payload = {f'/actions/runs/{n.RUN}': run,
+                   f'/actions/runs/{n.RUN}/artifacts?per_page=100': {'artifacts': [artifact]},
+                   f'/actions/runs/{n.RUN}/jobs?filter=latest&per_page=100': {'jobs': [failed]},
+                   f'/issues/comments/{n.CLAIM_COMMENT}': comment, '/issues/1635/comments?per_page=100&page=1': [comment]}
+        data = {f'/actions/artifacts/{n.ARTIFACT}/zip': raw_archive, f'/actions/jobs/{n.JOB}/logs': log}
+        def read(method, path, *, raw):
+            self.assertEqual((method, raw), ('GET', True))
+            return data[path]
+        client = SimpleNamespace(repository=r.REPOSITORY, get=payload.__getitem__, request=read)
+        with patch.object(c, 'evidence', return_value={'original_receipt': source, 'failure': {'stage':'pre-sync'}}) as parent, \
+                patch.object(n, 'ARCHIVE_SHA', r.digest(raw_archive)), patch.object(n, 'LOG_SHA', r.digest(log)), \
+                patch.object(n, 'FINANCE_SHA', r.digest(r.canonical_bytes(finance))):
+            proof=r.collect_evidence(client, n.RUN)
+            self.assertEqual(proof['failure']['parent_run'], n.ORIGINAL_RUN)
+            parent.assert_called_once_with(client, release_run_id=n.ORIGINAL_RUN)
+            self.assertEqual(r._prove_failed_stage(log, gate, n.JOB_NAME, release_run_id=n.RUN)['exit_status'], 1)
+            for record, key, bad in ((run,'event','workflow_run'), (run,'run_attempt',2), (run,'head_sha','other'),
+                    (artifact,'digest','sha256:other'), (artifact['workflow_run'],'id',n.ORIGINAL_RUN),
+                    (failed,'id',n.JOB+1), (failed['steps'][0],'name','other'), (comment['user'],'login','other'),
+                    (comment,'body',body.replace(n.PREVIEW,'wrong')), (comment,'body',body.replace('example','drift')),
+                    (data,f'/actions/jobs/{n.JOB}/logs',log+b'exit status 255'),
+                    (data,f'/actions/artifacts/{n.ARTIFACT}/zip',raw_archive+b'other')):
+                old=record[key]
+                with self.subTest(key=key), self.assertRaises(r.RecoveryError):
+                    record[key]=bad
+                    r.collect_evidence(client,n.RUN)
+                record[key]=old
+            for bad in (log.replace(b'before_complete',b'after_complete'),log.replace(b'1285',b'1290'),
+                        log.replace(b'exit status 1',b'exit status 255'),log+b'subprocess.CalledProcessError: Command X'):
+                with patch.object(n,'LOG_SHA',r.digest(bad)),self.assertRaises(r.RecoveryError):
+                    n.prove_job(bad,gate,n.JOB_NAME)
+
+    def test_one_cas_and_no_activation_or_restart(self):
+        from apps.registry_upload_http_entrypoint_hosted_runtime import load_hosted_runtime_target
+        from ci import post_merge_release_recovery_smoke as g, pr1635_cleaner_evidence as n
+        target=load_hosted_runtime_target(r.TARGET_FILE)
+        built=r.build_stage_commands(target,n.PROFILE['PROFILE']['merge_sha'],'a'*64,123,release_run_id=n.RUN)
+        self.assertNotIn('activation',built)
+        self.assertNotIn('normal_activation_tail',built)
+        self.assertIn('--phase before_complete',built['cleaner_precomplete_probe'][-1])
+        for probe, owner_drift in ((0,False),(1,False),(0,True)):
+            v=g.preview()
+            v['release_run_id']=n.RUN
+            owner={'owner':{'phase':'mutation_started'}}
+            v['existing_started_owner']=owner
+            activation={'status':'skipped_maintenance','reason':'skipped_maintenance'}
+            v['activation_completion_proof']=activation
+            client=g.CommentsClient()
+            calls, originals=g.patch_apply(cleaner_status=probe,value=v)
+            try:
+                with ExitStack() as stack:
+                    def mock(obj,key,**kw):
+                        return stack.enter_context(patch.object(obj,key,**kw))
+                    mock(r,'collect_existing_started_owner',return_value=owner)
+                    mock(r,'_resume_started_deploy_protection',return_value=[])
+                    mock(r,'collect_completed_activation',return_value=activation)
+                    mock(r,'_protect_deploy_command',side_effect=lambda t,s,cmd: cmd)
+                    finish=mock(r,'_finish_deploy_protection',return_value={'ok':True})
+                    mock(n,'verify_finance')
+                    check_owner=mock(n,'verify_owner')
+                    mock(n,'verify_before',side_effect=r.RecoveryError('owner drift') if owner_drift else None)
+                    result=r.apply_recovery(client,v,g.FINGERPRINT,target)
+                    with self.assertRaises(r.RecoveryError):
+                        r.apply_recovery(client,v,g.FINGERPRINT,target)
+                    ok=not probe and not owner_drift
+                    self.assertEqual(result['state'],'complete' if ok else 'ambiguous')
+                    self.assertEqual(calls.count('completion'),int(ok))
+                    self.assertEqual(finish.call_count,int(ok))
+                    self.assertEqual(check_owner.call_count,2*int(ok))
+                    self.assertNotIn('activation',calls)
+                    self.assertNotIn('restart',calls)
+            finally:
+                g.restore_apply(originals)
+
+    def test_consumed_nested_claim_only_reads_the_completion_and_finishes_its_owner(self):
+        from ci import pr1635_cleaner_evidence as n
+
+        source = n.PROFILE['PROFILE']
+        operation = r.recovery_operation_id(n.RUN, source)
+        fingerprint = 'a' * 64
+        client = CommentsClient()
+        claim = dict(operation_id=operation, state='claimed', source=source, preview_fingerprint=fingerprint)
+        r._publish_once(client, source['pull_request'], r._claim_marker(operation), claim)
+        finance = {'write_mode': 'example'}
+        evidence = dict(original_receipt=source, recovery_case=r.RecoveryCase.STORAGE_TAIL.value)
+        with ExitStack() as stack:
+            def mock(obj, name, **kwargs):
+                return stack.enter_context(patch.object(obj, name, **kwargs))
+            mock(r, 'collect_evidence', return_value=evidence)
+            mock(r, 'prove_repo_only_descendant', return_value={})
+            current = mock(r, 'collect_prestate')
+            stage = mock(r, '_run_stage', side_effect=AssertionError('A consumed claim cannot execute a stage'))
+            mock(n, 'FINANCE_SHA', new=r.digest(r.canonical_bytes(finance)))
+            owner = mock(n, 'verify_owner')
+            finish = mock(r, '_finish_deploy_protection', return_value={'finished': True})
+            def read():
+                return r.existing_recovery_readback(client, n.RUN, fingerprint, None)['state']
+            current.side_effect = r.RecoveryError('incomplete')
+            self.assertEqual(read(), 'ambiguous')
+            current.side_effect = None
+            current.return_value = {'finance_pilot': {'write_mode':'changed'}}
+            self.assertEqual(read(), 'ambiguous')
+            current.return_value = {'finance_pilot': finance}
+            owner.side_effect = r.RecoveryError('owner changed')
+            self.assertEqual(read(), 'ambiguous')
+            finish.assert_not_called()
+            owner.side_effect = None
+            self.assertEqual(read(), 'complete')
+            owner.assert_called_with(None, complete=True)
+            self.assertEqual(read(), 'complete')
+            self.assertEqual(len(client.values), 2)
+            stage.assert_not_called()
+
+
+    def test_original_owner_finance_and_scope(self):
+        from ci import pr1635_cleaner_evidence as n
+        actual={'phase':'mutation_started','fingerprint':n.STARTED_OWNER}
+        started={'owner':actual,'quiet':True,'baseline_unit_changes':{}}
+        finance={'example':'exact'}
+        with patch.object(n,'FINANCE_SHA',r.digest(r.canonical_bytes(finance))), \
+                patch.object(n,'verify_owner',return_value=actual),patch.object(c,'storage_preflight') as gate:
+            n.verify_before(None,{'finance_pilot':finance},started)
+            gate.assert_called_once()
+            for state, owner in (({},started),(finance,None),(finance,{**started,'quiet':False}),
+                                 (finance,{**started,'baseline_unit_changes':{'timer':'changed'}})):
+                with self.assertRaises(r.RecoveryError):
+                    n.verify_before(None,{'finance_pilot':state},owner)
+            gate.assert_called_once()
 
 
 
