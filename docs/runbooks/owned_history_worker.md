@@ -79,6 +79,16 @@ or native capture. Stamps supplement exact native digests; they do not replace
 them or make source plus receipt one atomic transaction. Receipt proofs describe
 the checked edition/source version; later source drift invalidates latest view.
 
+On Linux the supervisor also holds a nonblocking inotify queue. Its authenticated
+verify child watches the source directories and existing file inodes before
+reading. During immutable object hashing, the operational database may receive
+ordinary commits and its WAL may rotate. The other sources stay fixed. All
+watched sources stay fixed during the final native checks and until the parent
+consumes the proof. A change followed by restoration also invalidates the proof.
+Loss of the watch or overflow of its queue requires fresh verification. This
+additional check covers local filesystem operations observed by inotify. Native
+revision, digest and physical stamp checks continue to apply.
+
 Ordinary `web_vitrina_history_candidate_build` enters history SH/heavy before
 constructors and delegates through the same fixed child. It retains its original
 source range and one-portion/240-second outer ceiling. Its hidden `--worker`

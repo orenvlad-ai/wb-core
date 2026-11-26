@@ -161,6 +161,12 @@ rewritten. Multiple completions are accumulated independently; subsequent fresh
 readbacks cannot erase earlier proofs, and an earlier invocation changing during
 another service's proof refuses before any receipt is accepted.
 
+The journaled runtime keeps these timer entrypoints byte-identical. Its source
+proof binds the reviewed admission, journal and journal writer files together.
+The older installation retains its original exact source-hash receipt. For an
+admitted CLI the journal records its result. A timer denied during maintenance
+has only the ordinary systemd start/skip/deactivate/finish evidence.
+
 Complaints has explicit runtime argv. Health omits it, so its stronger no-effects
 argument also uses the pinned CLI control flow: before `_execute_health_tick`,
 environment/cookie loading and runtime construction only read/compute; once its

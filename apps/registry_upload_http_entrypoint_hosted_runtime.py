@@ -15806,4 +15806,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("registry_upload_http_entrypoint_hosted_runtime"):
+        raise SystemExit(main())

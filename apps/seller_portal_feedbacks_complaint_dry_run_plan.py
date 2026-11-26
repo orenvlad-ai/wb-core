@@ -3363,4 +3363,7 @@ def compact_stdout_report(report: Mapping[str, Any]) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("seller_portal_feedbacks_complaint_dry_run_plan"):
+        main()

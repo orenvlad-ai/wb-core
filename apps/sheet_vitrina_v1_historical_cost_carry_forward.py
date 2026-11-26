@@ -1984,4 +1984,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("sheet_vitrina_v1_historical_cost_carry_forward"):
+        raise SystemExit(main())

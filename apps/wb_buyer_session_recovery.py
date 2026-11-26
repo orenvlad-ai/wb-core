@@ -1252,4 +1252,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("wb_buyer_session_recovery"):
+        main()

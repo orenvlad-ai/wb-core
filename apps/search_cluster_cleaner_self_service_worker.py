@@ -215,7 +215,8 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
                     heartbeat.start()
                     try:
                         from packages.application.business_data_procedure_admission import admitted_write
-                        with admitted_write(runtime_dir):
+                        from packages.procedure_journal import span
+                        with span("worker", "cleaner_ready_cycle"), admitted_write(runtime_dir):
                             coordinator.release_terminal_unsent_scans()
                             busy=ready_cycle(coordinator,batch_coordinator,daily)
                     finally:
@@ -248,4 +249,8 @@ def main() -> None:
     run(runtime_dir=args.runtime_dir,env_file=args.env_file,admission_dir=args.admission_dir)
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("search_cluster_cleaner_self_service_worker"):
+        main()

@@ -103,4 +103,7 @@ def _find_mt103_pdf() -> Path | None:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("supplier_financial_documents_mt103_probe"):
+        main()

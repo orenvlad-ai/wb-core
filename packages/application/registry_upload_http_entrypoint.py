@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from packages import procedure_journal as journal_log
+
 from packages.application.sheet_vitrina_v1_card_rating import extend_metrics_with_card_rating
 
 from copy import deepcopy
@@ -11732,7 +11734,7 @@ class SheetVitrinaV1OperatorJobStore:
                 return self._warehouse_pending_picker
             if not business_write_is_blocked(runtime_dir) and not journal.needs_pickup():
                 return None
-            thread = threading.Thread(target=pick, daemon=True, name="warehouse-pending-picker")
+            thread = threading.Thread(target=journal_log.worker(pick), daemon=True, name="warehouse-pending-picker")
             self._warehouse_pending_picker = thread
             try:
                 thread.start()
@@ -11918,9 +11920,10 @@ class SheetVitrinaV1OperatorJobStore:
                 job_id = uuid4().hex
                 job = SheetVitrinaV1OperatorJob(job_id=job_id, operation=operation,
                     status='running', started_at=self.timestamp_factory())
-                options = dict(target=self._run, args=(job_id, runner), daemon=True)
+                run_job = journal_log.bind(self._run)
+                options = dict(target=run_job, args=(job_id, runner), daemon=True)
                 if heavy is not None:
-                    options.update(target=_run_heavy_worker, args=(heavy, self._run, job_id, runner))
+                    options.update(target=_run_heavy_worker, args=(heavy, run_job, job_id, runner))
                 thread = (admitted_thread(self.runtime_dir, **options) if self.runtime_dir is not None
                     else threading.Thread(**options))
             except BaseException as exc:
@@ -12122,7 +12125,12 @@ class SheetVitrinaV1OperatorJobStore:
         try:
             token = SHEET_OPERATOR_JOB_ID.set(job_id)
             try:
-                result = runner(lambda message: self._append_log(job_id, message))
+                operation = self._jobs[job_id].operation
+                if operation not in {"cycle", "refresh", "auto_update", "refresh_group", "session_check",
+                                     "session_recovery_start", "supplier_factual_date_correction"}:
+                    operation = "other"
+                with journal_log.span("operator_job", operation, job_id=job_id):
+                    result = runner(lambda message: self._append_log(job_id, message))
             except BaseException as exc:
                 self._append_log(job_id, f"Ошибка: {exc}")
                 with self._lock:

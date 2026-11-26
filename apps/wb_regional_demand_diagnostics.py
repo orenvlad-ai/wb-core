@@ -242,4 +242,7 @@ def _current_stock_by_nm_from_last_result(payload: Mapping[str, Any]) -> dict[in
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("wb_regional_demand_diagnostics"):
+        main()

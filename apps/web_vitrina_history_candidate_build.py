@@ -122,6 +122,14 @@ def finished_builder_slot(source):
 
 @contextmanager
 def history_procedure_admission(args):
+    from packages.procedure_journal import span
+    name = "history_group_repair" if hasattr(args, "expected_base") else "history_candidate_build"
+    with span("procedure", name), _history_admission(args):
+        yield
+
+
+@contextmanager
+def _history_admission(args):
     if getattr(args, "maintenance_window_id", ""):
         status = barrier_status(args.runtime_dir)
         if not (args.manual and status.get("active") is True
@@ -320,4 +328,7 @@ def build_owned_cycle_history(*, runtime, config, cycle_owner, now,
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("web_vitrina_history_candidate_build"):
+        raise SystemExit(main())

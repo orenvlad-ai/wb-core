@@ -362,4 +362,7 @@ def _run_command(args: list[str]) -> str:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("factory_order_sales_history_reconcile"):
+        main()

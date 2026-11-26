@@ -326,4 +326,7 @@ def _collect_metric_keys(value: Any) -> set[str]:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("sheet_vitrina_v1_metric_retirement_production_ui_flow"):
+        main()

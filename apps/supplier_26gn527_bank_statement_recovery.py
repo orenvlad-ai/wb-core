@@ -435,4 +435,7 @@ def _hash(value: Any) -> str:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("supplier_26gn527_bank_statement_recovery"):
+        raise SystemExit(main())

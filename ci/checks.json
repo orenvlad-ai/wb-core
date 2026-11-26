@@ -13,6 +13,11 @@
       "pip": ["openpyxl==3.1.5"]
     },
     "historical_fbo_documents": {"scripts": ["apps/fbs_historical_fbo_action_smoke.py", "apps/fbs_historical_fbo_publication_smoke.py", "apps/fbs_historical_fbo_ready_smoke.py", "apps/sheet_vitrina_v1_fulfillment_services_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"]},
+    "fbs_forward_recovery_imports": {
+      "scripts": ["apps/ff_pool_fbs_forward_recovery_smoke.py"],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "fbs_native_attachment_imports": {"scripts": ["apps/fbs_historical_fbo_native_smoke.py", "apps/fbs_temporary_allocation_action_smoke.py", "apps/fbs_temporary_allocation_repair_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "operator_supplier_bounded_imports": {"scripts": ["apps/historical_dated_inputs_smoke.py", "apps/operator_supplier_release_scope_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]},
     "operator_complaint_http_imports": {"scripts": ["apps/operator_complaint_runs_http_smoke.py", "apps/operator_complaint_runs_browser_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
@@ -39,6 +44,11 @@
         "apps/ads_partial_adapter_smoke.py",
         "apps/ads_partial_publication_smoke.py"
       ],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "partner_finance_diagnostic_imports": {
+      "scripts": ["apps/partner_finance_production_diagnostic_smoke.py"],
       "commands": [],
       "pip": ["openpyxl==3.1.5"]
     },
@@ -182,6 +192,11 @@
     }
   },
   "groups": {
+    "fbs_forward_recovery": {
+      "patterns": ["packages/application/ff_pool_fbs_forward_recovery.py"],
+      "commands": [["python3", "apps/ff_pool_fbs_forward_recovery_smoke.py"]],
+      "pip": []
+    },
     "sqlite_contention": {
       "patterns": ["packages/application/sqlite_contention.py", "apps/sqlite_schema_contention_smoke.py", "apps/sqlite_contention_smoke.py"],
       "commands": [["python3", "apps/sqlite_schema_contention_smoke.py"], ["python3", "apps/sqlite_contention_smoke.py"], ["python3", "apps/registry_upload_db_backed_runtime_smoke.py"], ["python3", "apps/web_vitrina_group_trigger_upgrade_smoke.py"], ["python3", "apps/ready_publication_smoke.py"]],
@@ -1414,6 +1429,11 @@
         "openpyxl==3.1.5"
       ]
     },
+    "partner_finance_diagnostic": {
+      "patterns": ["packages/application/partner_finance_production_diagnostic.py"],
+      "commands": [["python3", "apps/partner_finance_production_diagnostic_smoke.py"]],
+      "pip": []
+    },
     "process": {
       "patterns": [
         ".github/workflows/**",
@@ -1789,6 +1809,11 @@
         "openpyxl==3.1.5"
       ]
     },
+    "procedure_journal": {
+      "patterns": ["packages/procedure_journal*.py", "apps/procedure_journal_smoke.py", "packages/application/business_data_procedure_admission.py", "packages/application/sheet_vitrina_v1_cycle.py"],
+      "commands": [["python3", "apps/procedure_journal_smoke.py"]],
+      "pip": []
+    },
     "owned_history_worker": {
       "patterns": [
         "packages/application/owned_history_worker.py",
@@ -1796,6 +1821,7 @@
         "apps/web_vitrina_owned_history_worker.py",
         "apps/owned_history_worker_smoke.py",
         "packages/application/owned_history_native_ack.py",
+        "packages/application/owned_history_source_watch.py",
         "apps/owned_history_completion_smoke.py",
         "apps/owned_history_diagnostics_smoke.py",
         "apps/business_data_cycle_owned_integration_smoke.py",

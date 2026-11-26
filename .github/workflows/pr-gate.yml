@@ -76,7 +76,9 @@ jobs:
     name: Checks
     needs: [plan]
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # A cross-cutting plan can contain over 300 serial checks. Individual
+    # command deadlines remain enforced by the trusted harness.
+    timeout-minutes: 150
     steps:
       - name: Checkout trusted harness
         uses: actions/checkout@v5

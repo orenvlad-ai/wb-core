@@ -93,4 +93,8 @@ def main() -> None:
     print(json.dumps(check(phase=args.phase,expected_sha=args.expected_sha,runtime_dir=args.runtime_dir,admission_dir=args.admission_dir),sort_keys=True))
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("search_cluster_cleaner_release_probe"):
+        main()

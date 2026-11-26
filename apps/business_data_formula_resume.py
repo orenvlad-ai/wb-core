@@ -62,4 +62,7 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("business_data_formula_resume"):
+        raise SystemExit(main())

@@ -2032,4 +2032,7 @@ def _iso_at(value: datetime) -> str:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("seller_portal_relogin_session"):
+        main()

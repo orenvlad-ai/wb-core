@@ -327,6 +327,10 @@ class WebCoreDataMcpGateway:
         row_count: int = 0,
         error_code: str = "",
     ) -> None:
+        from packages.procedure_journal import event as journal_event
+        safe_state = status if status in {"started", "ok", "late_after_timeout", "error", "timeout", "overloaded"} else "other"
+        journal_event("mcp_tool", tool if tool in APPROVED_TOOL_NAMES else "other", safe_state,
+                      job_id=request_id, elapsed_ms=duration_ms, count=row_count)
         self._audit(
             {
                 "schema_version": AUDIT_SCHEMA_VERSION,

@@ -79,7 +79,7 @@ class FormulaResumeTests(unittest.TestCase):
         if guarded_buyer:
             boot = self.proc / 'sys/kernel/random/boot_id'; boot.parent.mkdir(parents=True)
             boot.write_text('11111111-2222-3333-4444-555555555555\n')
-            for relative in formula.BUYER_GUARD_SOURCES:
+            for relative in {**formula.BUYER_GUARD_SOURCES, **formula.JOURNALED_GUARD_SOURCES}:
                 path = self.app / relative; path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes((ROOT / relative).read_bytes())
             native_read = formula._buyer_native_read
@@ -468,7 +468,7 @@ class FormulaResumeTests(unittest.TestCase):
             self.systemd.states[timer]['is_active'] = 'inactive'
             with self.assertRaises(RuntimeError):formula._observe(self.runtime, plan, **self.options)
             self.systemd.states[timer]['is_active'] = 'active'
-            for relative in formula.BUYER_GUARD_SOURCES:
+            for relative in {**formula.BUYER_GUARD_SOURCES, **formula.JOURNALED_GUARD_SOURCES}:
                 path = self.app / relative; original = path.read_bytes(); path.write_bytes(original + b'\n# foreign\n')
                 with self.assertRaisesRegex(RuntimeError, 'admission source'):formula._observe(self.runtime, plan, **self.options)
                 path.write_bytes(original)

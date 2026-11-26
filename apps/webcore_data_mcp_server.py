@@ -329,7 +329,8 @@ class BoundedToolExecutor:
                 self._slots.release()
 
         try:
-            return self._executor.submit(run)
+            from packages.procedure_journal import bind
+            return self._executor.submit(bind(run))
         except Exception:
             self._slots.release()
             raise
@@ -420,7 +421,9 @@ def _build_handler(
     gateway: WebCoreDataMcpGateway,
     tool_executor: BoundedToolExecutor,
 ) -> type[BaseHTTPRequestHandler]:
-    class WebCoreDataMcpHandler(BaseHTTPRequestHandler):
+    from packages.procedure_journal import JournalHTTPMixin
+
+    class WebCoreDataMcpHandler(JournalHTTPMixin, BaseHTTPRequestHandler):
         server_version = f"{SERVER_NAME}/{SERVER_VERSION}"
 
         def do_OPTIONS(self) -> None:  # noqa: N802
@@ -1503,4 +1506,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("webcore_data_mcp_server"):
+        raise SystemExit(main())

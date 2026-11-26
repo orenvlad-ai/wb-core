@@ -77,4 +77,8 @@ def main() -> None:
     print(json.dumps({k:v for k,v in result.items() if k not in {"source_hashes","mismatches"}},ensure_ascii=False,indent=2))
     if mismatches:raise SystemExit(1)
 
-if __name__=="__main__":main()
+if __name__=="__main__":
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("search_cluster_cleaner_replay"):
+        main()

@@ -69,4 +69,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("shared_sku_cost"):
+        raise SystemExit(main())

@@ -51,4 +51,8 @@ def main() -> None:
     print(json.dumps(run(runtime_dir=args.runtime_dir,config_path=args.config_path,apply=args.apply),ensure_ascii=False,sort_keys=True))
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("search_cluster_cleaner_daily_schema_upgrade"):
+        main()

@@ -106,7 +106,23 @@ class FinanceHttpApp:
 def build_finance_http_server(
     host: str, port: int, app: FinanceHttpApp
 ) -> ThreadingHTTPServer:
-    class Handler(BaseHTTPRequestHandler):
+    from packages.procedure_journal import JournalHTTPMixin
+
+    class Handler(JournalHTTPMixin, BaseHTTPRequestHandler):
+        def journal_route(self):
+            path = self.path.partition("?")[0]
+            if not path.startswith(FINANCE_CASH_API_PREFIX + "/"):
+                return super().journal_route()
+            parts = path[len(FINANCE_CASH_API_PREFIX) + 1:].split("/")
+            resources = {"accounts", "categories", "category-groups", "counterparties", "audit", "capabilities",
+                         "documents", "cash-reconciliations", "operations", "operator-operations",
+                         "directories", "transfers", "openings"}
+            if parts[0] not in resources:
+                return "finance.other"
+            actions = {"post", "reverse", "replace-opening", "complete", "cancel", "resolve", "movements"}
+            label = "finance." + parts[0]
+            return label + "." + parts[2] if len(parts) == 3 and parts[2] in actions else label
+
         def log_message(self, _format: str, *_args: object) -> None:
             pass
 
