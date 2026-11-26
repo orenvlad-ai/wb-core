@@ -176,6 +176,65 @@ def current_ready(rt):
 
 
 class FinanceNoChangeTests(unittest.TestCase):
+    def test_approved_finance_reporting_source_is_bound_to_the_exact_book(self):
+        from packages.application.fbs_accounting_runtime import ActiveSharedCostSnapshot
+        from packages.application.operator_supplier_cost_proof import _finance_reporting_version
+        from packages.application.shared_sku_cost import SharedSkuCostSnapshot
+        from packages.application.vitrina_last_known_cost import ApprovedEstimateCostSnapshot
+
+        exact = ActiveSharedCostSnapshot([], effective_date='2026-10-15')
+        cells = {'1': {'2026-10-16': {'management_value': '12.50'}}}
+        report = ApprovedEstimateCostSnapshot(exact, cells)
+        block = SimpleNamespace(shared_cost_snapshot=exact, shared_cost_is_candidate=False)
+        self.assertEqual(_finance_reporting_version(block, exact.version_id), (exact.version_id, False))
+        block.shared_cost_snapshot = report
+        self.assertNotEqual(exact.version_id, report.version_id)
+        self.assertEqual(_finance_reporting_version(block, exact.version_id), (report.version_id, True))
+
+        foreign = ActiveSharedCostSnapshot([], effective_date='2026-10-14')
+        candidate = SharedSkuCostSnapshot([], effective_date=exact.effective_date)
+        other_wrapper = SimpleNamespace(exact=exact, metadata=report.metadata)
+        rejected = [(ApprovedEstimateCostSnapshot(foreign, cells), False),
+                    (ApprovedEstimateCostSnapshot(candidate, cells), False),
+                    (report, True), (exact, True), (other_wrapper, False), (None, False)]
+        for snapshot, is_candidate in rejected:
+            with self.subTest(snapshot=type(snapshot).__name__, candidate=is_candidate):
+                block.shared_cost_snapshot = snapshot
+                block.shared_cost_is_candidate = is_candidate
+                with self.assertRaisesRegex(ValueError, 'supplier_finance_accounting_version_mismatch'):
+                    _finance_reporting_version(block, exact.version_id)
+
+    def test_approved_finance_retains_only_a_reporting_version_stamp(self):
+        from packages.application.fbs_accounting_runtime import ActiveSharedCostSnapshot
+        from packages.application.operator_supplier_cost_proof import _finance_retained_stamp_no_change
+        from packages.application.vitrina_last_known_cost import ApprovedEstimateCostSnapshot
+
+        exact = ActiveSharedCostSnapshot([], effective_date='2026-10-15')
+        report = ApprovedEstimateCostSnapshot(exact, {'1': {'2026-10-16': {'management_value': '12.50'}}})
+        def image(metadata):
+            return {'wb_finance_weekly_cost_coverage': [{
+                'seller_id': 'canonical', 'week_start': '2026-11-09', 'week_end': '2026-11-15',
+                'quality_json': {'shared_cost': dict(metadata)},
+                'coverage_json': {'quality': {'shared_cost': dict(metadata)}, 'cogs_rub': '12.50'}}]}
+        current = image({**report.metadata(), 'version_id': 'sha256:' + 'a'*64})
+        expected = image(report.metadata())
+        def compare(before, after, allowed=True):
+            return _finance_retained_stamp_no_change(before, after, shared_version=report.version_id,
+                                                      approved_estimates=allowed)
+        differences = compare(current, expected)
+        self.assertEqual(len(differences), 2)
+        self.assertEqual({d['current_native_shared_version_id'] for d in differences}, {report.version_id})
+        foreign = {**report.metadata(), 'management_estimate_policy': 'unknown_policy'}
+        with self.assertRaisesRegex(ValueError, 'supplier_finance_global_stamp_unproven'):
+            compare(image(foreign), image(foreign))
+        with self.assertRaisesRegex(ValueError, 'supplier_finance_global_stamp_unproven'):
+            compare(current, expected, False)
+        with self.assertRaisesRegex(ValueError, 'supplier_finance_target_projection_pending'):
+            compare(image(exact.metadata()), expected)
+        current['wb_finance_weekly_cost_coverage'][0]['coverage_json']['cogs_rub'] = '13.00'
+        with self.assertRaisesRegex(ValueError, 'supplier_finance_target_projection_pending'):
+            compare(current, expected)
+
     def test_actual_native_images_only_two_stamps_and_adversarial_operands(self):
         from packages.application import operator_supplier_history as history,fbs_accounting_runtime as accounting
         from packages.application.operator_supplier_cost_proof import _finance_business_image,_finance_retained_stamp_no_change
