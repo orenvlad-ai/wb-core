@@ -1,6 +1,11 @@
 {
   "schema": "wb-core.check-map/v1",
   "command_dependencies": {
+    "procedure_journal_timer_imports": {
+      "scripts": ["apps/procedure_journal_smoke.py"],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
+    },
     "cycle_v2_regression_imports": {"scripts": ["apps/nomenclature_readonly_smoke.py", "apps/current_fbo_closure_evidence_smoke.py", "apps/wb_buyer_authenticated_admission_smoke.py"], "commands": [], "pip": ["openpyxl==3.1.5"]},
     "fulfillment_payment_proof_imports": {
       "scripts": ["apps/fulfillment_payment_proof_smoke.py", "apps/fulfillment_payment_proof_http_smoke.py", "apps/fulfillment_payment_proof_browser_smoke.py"],

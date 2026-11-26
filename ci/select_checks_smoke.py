@@ -532,6 +532,15 @@ def stock_monitor_dependency_checks():
 
 
 def command_dependency_checks():
+    journal = "apps/procedure_journal_smoke.py"
+    for source in (journal, "packages/procedure_journal_writer.py"):
+        plan = build_plan_from_paths(pull_request=30, base=BASE, head=HEAD,
+            paths=[source], file_exists=lambda _, path: (select_checks.ROOT / path).is_file())
+        verify_plan(plan)
+        assert plan["commands"].count(["python3", journal]) == 1, plan
+        assert set(plan["pip"]) == {"openpyxl==3.1.5", "playwright==1.58.0"}, plan
+        assert not any(cmd[:3] == ["python3", "-m", "playwright"] for cmd in plan["commands"]), plan
+
     # Independent entrypoint expectations: browser dependencies follow commands,
     # not a filename heuristic or an unrelated changed-path group.
     future_script = "apps/finance_liquidity_browser_smoke.py"
