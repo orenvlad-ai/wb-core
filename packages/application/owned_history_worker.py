@@ -421,10 +421,12 @@ class _OwnedHistoryWorker:
         phases = ["supplier_preparation", "derived_work"]
         if cap["mode"] == "verify":
             phases.append("supplier_native_proof")
+        elif cap["mode"] == "portion":
+            phases.append("dated_write")
         identity = {"contract": CONTRACT, "invocation": cap["invocation"]}
         started = deadline - seconds
         window = min(240.0, float(self.config.budget_seconds) + PARENT_GRACE_SECONDS)
-        # Even a terminal verification gets at most two windows in total.
+        # All grants on one invocation draw from the same two-window limit.
         invocation_limit = min(self._completion_deadline, started + 2 * window)
         phase_start = started
         for index, phase in enumerate(phases):

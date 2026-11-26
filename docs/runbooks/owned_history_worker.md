@@ -50,9 +50,11 @@ indivisible day that cannot finish stops.
 
 When a cycle owns a validated `SupplierHistory` receipt, the child first
 checks its original sources and exact date scope. It then requests time for
-the derived work on the same invocation and inherited socket. Only a terminal
-verification may request the final supplier proof interval after checking the
-published objects. The parent checks ownership and the preceding deadline
+the derived work on the same invocation and inherited socket. A writing portion
+may request time for dated objects once the catalog, target and baseline have
+been checked, before saving its intent. Status-only paths use the current grant.
+Only a terminal verification may request the final supplier proof interval
+after checking the published objects. The parent checks ownership and the preceding deadline
 before each grant. Each phase has at most the configured window including
 five seconds of grace. All phases of one child share a limit of two such
 windows (at most 480 seconds) and the remaining completion body deadline.

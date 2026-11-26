@@ -263,6 +263,7 @@ def execute(cap, channel=None):
 
     class AnchoredStore(HistoryStore):
         def update(self, **args):
+            nonlocal deadline
             check_base()
             catalog = args["catalog"]
             if catalog["context_epoch"] != anchor["catalog_context"] or args["vector"] != anchor["vector"]:
@@ -282,6 +283,14 @@ def execute(cap, channel=None):
             intent = root / "proofs" / ("owned-portion-" + cap["invocation"] + ".json")
             if intent.exists():
                 raise HistoryDelegationError("history_worker_invocation_already_submitted")
+            if phased:
+                # The native catalog and exact point of continuation are known.
+                # Use the remaining invocation allowance for durable dated work.
+                deadline = _supplier_phase(channel, cap, "dated_write")
+                _bound(cap)
+                check_base()
+                adapter.deadline = deadline
+                args["deadline_monotonic"] = deadline
             _atomic(intent, proof)  # Exact dated target before writer mutation.
             return super().update(**args)
 

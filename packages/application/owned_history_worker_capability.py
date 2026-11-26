@@ -22,7 +22,7 @@ import time
 from packages.application.owned_history_mismatch_diagnostics import safe_mismatch
 
 CONTRACT = "owned_history_portion_fd_v1"
-SUPPLIER_PHASE_PROTOCOL = "owned_supplier_history_phases_v1"
+SUPPLIER_PHASE_PROTOCOL = "owned_supplier_history_phases_v2"
 MAX_MESSAGE = 256 * 1024
 MAX_JSON_FILE = 16 * 1024 * 1024
 

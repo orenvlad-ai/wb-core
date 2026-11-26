@@ -779,6 +779,11 @@ class LinuxTests(unittest.TestCase):
                         self.assertTrue(result['supplier_ack'])
                         native_proofs = [inv for inv, phase in phase_grants if phase == "supplier_native_proof"]
                         self.assertEqual(len(native_proofs), 1)
+                        dated = [inv for inv, phase in phase_grants if phase == "dated_write"]
+                        self.assertTrue(dated)
+                        for invocation in dated:
+                            self.assertEqual([phase for inv, phase in phase_grants if inv == invocation],
+                                             ["derived_work", "dated_write"])
                         self.assertEqual([phase for inv, phase in phase_grants if inv == native_proofs[0]],
                                          ["derived_work", "supplier_native_proof"])
             if race:

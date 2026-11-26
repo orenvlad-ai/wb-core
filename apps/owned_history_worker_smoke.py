@@ -120,6 +120,26 @@ class SupplierPhaseBudgetTests(unittest.TestCase):
         self.assertEqual((result["status"], deadline), ("pending", 540))
         self.assertEqual([(g["phase"], g["inner_deadline"]) for g in grants], [("derived_work", 535)])
 
+    def test_dated_writes_share_the_limit_with_source_and_catalog_preparation(self):
+        frames = [(270, {"phase": "derived_work"}), (335, {"phase": "dated_write"}),
+                  (540, {"result": {"status": "published"}})]
+        result, deadline, grants = self.exchange("portion", frames)
+        self.assertEqual((result["status"], deadline), ("published", 575))
+        self.assertEqual([g["inner_deadline"] for g in grants], [505, 570])
+        _, short, grants = self.exchange("portion", frames[:-1] + [(545, frames[-1][1])], body_deadline=550)
+        self.assertEqual((short, grants[-1]["inner_deadline"]), (550, 545))
+        _, limit, grants = self.exchange("portion", [(330, frames[0][1]), (475, frames[1][1]), frames[2]])
+        self.assertEqual((limit, grants[-1]["inner_deadline"]), (580, 575))
+        with self.assertRaises(HistoryDelegationError):
+            self.exchange("portion", [(200, {"phase": "dated_write"})])
+        with self.assertRaises(HistoryDelegationError):
+            self.exchange("portion", frames[:2] + [(370, {"phase": "dated_write"})])
+        with self.assertRaises(TimeoutError):
+            self.exchange("portion", [(200, {"phase": "derived_work"}), (441, {"phase": "dated_write"})])
+        with self.assertRaisesRegex(HistoryDelegationError, "history_parent_owner_changed"):
+            self.exchange("portion", frames[:2], owner_error=[None, HistoryDelegationError("history_parent_owner_changed")])
+        self.assertEqual([g["phase"] for g in self.grants], ["derived_work"])
+
     def test_child_uses_only_the_bound_parent_deadline(self):
         from apps.web_vitrina_owned_history_worker import _supplier_phase
         from packages.application.owned_history_worker_capability import CONTRACT, receive_message, send_message
