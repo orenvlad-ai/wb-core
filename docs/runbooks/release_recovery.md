@@ -366,6 +366,18 @@ with its original baseline and an empty expected SHA. Review the preview
 fingerprint and apply it once. The canonical deploy, same-owner completion,
 Finance readback and existing-claim rules above apply unchanged.
 
+Recovery `45800208191` consumed that deploy claim. Its adapter finished the
+restart and activation readback, then timed out at the final cleaner listener
+check on line 1285. For this exact nested run, use Post-merge Release Recovery
+with `release_run_id=45800208191`. Preview verifies both GitHub runs, the
+original bot claim, the failed recovery artifact and job log, and the installed
+merge. It requires the same held window, started owner, unchanged Finance,
+and a successful native cleaner check. Compare the preview fingerprint before
+apply. The remaining write is the guarded deploy-metadata completion against
+the reviewed bytes and service PID, followed by native owner finish. A consumed
+continuation claim permits only final readback and finish. Once confirmed, the
+parent recovery can record its terminal receipt using its original fingerprint.
+
 ## PR1623: exact unentered Chrome RAM guard after sync
 
 Recovery `45473903471` of the original PR1623 operation reached adapter line1242, then

@@ -87,6 +87,7 @@ EXPECTED_ACTIVATION_MERGE_SHA = "7a9196e8af0d2113db7e42f0f4291fc2bc2c528c"
 CLEANER_RELEASE_RUN_ID = 39635174275
 CLEANER_BOUNDED_LISTENER_RUN_ID = 45429927905
 PR1628_CLEANER_RELEASE_RUN_ID = 45604611131
+PR1635_CLEANER_RECOVERY_RUN_ID = 45800208191
 CLEANER_PROFILE = {
     "pull_request": 1486, "gate_run_id": 39630567883,
     "base_sha": "bde0f6cd47277ae3f44e3ea44b0b29f5629c1fb6",
@@ -271,7 +272,16 @@ def recovery_case(release_run_id: int) -> RecoveryCase:
 
 
 def cleaner_completion_case(case: RecoveryCase, release_run_id: int) -> bool:
-    return case is RecoveryCase.STORAGE_TAIL and release_run_id in CLEANER_PROFILES
+    return case is RecoveryCase.STORAGE_TAIL and (
+        release_run_id in CLEANER_PROFILES or release_run_id == PR1635_CLEANER_RECOVERY_RUN_ID
+    )
+
+
+def cleaner_merge(release_run_id: int) -> str:
+    if release_run_id == PR1635_CLEANER_RECOVERY_RUN_ID:
+        from ci.pr1635_cleaner_evidence import PROFILE
+        return PROFILE['PROFILE']['merge_sha']
+    return CLEANER_PROFILES[release_run_id]['merge_sha']
 
 
 def storage_tail_precomplete_case(case: RecoveryCase, release_run_id: int) -> bool:
@@ -516,6 +526,9 @@ def _prove_failed_stage(
     release_run_id: int = EXPECTED_ACTIVATION_RELEASE_RUN_ID,
 ) -> dict[str, Any]:
     text = raw_log.decode("utf-8", errors="replace")
+    if release_run_id == PR1635_CLEANER_RECOVERY_RUN_ID:
+        from ci.pr1635_cleaner_evidence import prove_job
+        return prove_job(raw_log, gate_run_id, job_name)
     if release_run_id in {45470334066, 45514713724, 45797154129}:
         from ci.pr1623_presync_recovery import prove_failure
         return prove_failure(raw_log, gate_run_id, job_name, release_run_id=release_run_id)
@@ -661,6 +674,9 @@ def _canonical_manual_release(run: Mapping[str, Any], release_run_id: int) -> bo
 
 
 def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, Any]:
+    if release_run_id == PR1635_CLEANER_RECOVERY_RUN_ID:
+        from ci.pr1635_cleaner_evidence import collect
+        return collect(client)
     case = recovery_case(release_run_id)
     run = client.get(f"/actions/runs/{release_run_id}")
     reasons: list[str] = []
@@ -1792,7 +1808,7 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion_input": completion_script,
     }
     if ((case is RecoveryCase.SQLITE_ACTIVATION or unchanged_dependency_tail_case(case)) or cleaner_completion_case(case, release_run_id) or backup_capacity_case(case, release_run_id) or storage_tail_precomplete_case(case, release_run_id)):
-        expected_merge = STORAGE_TAIL_PRECOMPLETE_PROFILE["merge_sha"] if storage_tail_precomplete_case(case, release_run_id) else BACKUP_CAPACITY_MERGE_SHA if backup_capacity_case(case, release_run_id) else _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else CLEANER_PROFILES[release_run_id]["merge_sha"] if cleaner_completion_case(case, release_run_id) else _predependency_profile(release_run_id)["receipt"]["merge_sha"]
+        expected_merge = STORAGE_TAIL_PRECOMPLETE_PROFILE["merge_sha"] if storage_tail_precomplete_case(case, release_run_id) else BACKUP_CAPACITY_MERGE_SHA if backup_capacity_case(case, release_run_id) else _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else cleaner_merge(release_run_id) if cleaner_completion_case(case, release_run_id) else _predependency_profile(release_run_id)["receipt"]["merge_sha"]
         if target.target_id != "wb_core_eu_hosted_runtime_active" or runtime_dir != "/opt/wb-core-runtime/state" or merge != expected_merge:
             raise RecoveryError("sqlite-activation-target-contract-invalid")
         commands["cleaner_precomplete_probe"] = hosted._remote_shell_command(
@@ -1800,8 +1816,6 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
             f"--phase before_complete --expected-sha {shlex.quote(merge)} --runtime-dir {shlex.quote(runtime_dir)}"
         )
     if cleaner_completion_case(case, release_run_id):
-        if release_run_id not in CLEANER_PROFILES:
-            raise RecoveryError("cleaner-completion-release-not-exact")
         # The original log proves successful skipped activation. Never replay it.
         del commands["activation"]
     if case is RecoveryCase.BUYER_CHROME_RESERVE:
@@ -2102,6 +2116,9 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
     if cleaner_completion_case(case, release_run_id):
         if result["existing_started_owner"] is None:
             raise RecoveryError("cleaner-completion-started-owner-required")
+        if release_run_id == PR1635_CLEANER_RECOVERY_RUN_ID:
+            from ci.pr1635_cleaner_evidence import verify_before
+            verify_before(target, prestate, result["existing_started_owner"])
         commands = build_stage_commands(target, original["merge_sha"], prestate["metadata_sha256"],
                                         int(prestate["main_pid"]), case=case, release_run_id=release_run_id)
         result["activation_completion_proof"] = collect_completed_activation(commands["activation_readback"])
@@ -2173,6 +2190,17 @@ def _finish_deploy_protection(target, source):
                         hosted._remote_shell_command(target, remote_shell('finish', **identity)))
 
 
+def _finish_recovery_owner(target, source, release_run_id, final):
+    if release_run_id != PR1635_CLEANER_RECOVERY_RUN_ID:
+        return _finish_deploy_protection(target, source)
+    from ci.pr1635_cleaner_evidence import verify_finance, verify_owner
+    verify_finance(final['finance_pilot'])
+    verify_owner(target)
+    result = _finish_deploy_protection(target, source)
+    verify_owner(target, complete=True)
+    return result
+
+
 def existing_recovery_readback(
     client: release.GitHub,
     release_run_id: int,
@@ -2202,7 +2230,7 @@ def existing_recovery_readback(
             raise RecoveryError("recovery-receipt-binding-invalid")
         final = collect_prestate(target, original["merge_sha"], require_incomplete=False, case=case)
         try:
-            owner = _finish_deploy_protection(target, original)
+            owner = _finish_recovery_owner(target, original, release_run_id, final)
         except RecoveryError:
             return {**receipt, 'state': 'ambiguous', 'reason': 'deploy-owner-final-readback-unproven',
                     'fresh_final_readback': final, 'runner_readback': runner}
@@ -2244,7 +2272,7 @@ def existing_recovery_readback(
             "runner_readback": runner,
         }
     try:
-        owner = _finish_deploy_protection(target, original)
+        owner = _finish_recovery_owner(target, original, release_run_id, final)
     except RecoveryError:
         return {'schema': RECOVERY_SCHEMA, 'state': 'ambiguous', 'operation_id': operation,
                 'source': claim['source'], 'preview_fingerprint': expected_fingerprint,
@@ -2442,6 +2470,12 @@ def apply_recovery(
         )
         if canonical_bytes(before_completion) != canonical_bytes(fresh):
             raise RecoveryError("target-drift-before-completion")
+        if release_run_id == PR1635_CLEANER_RECOVERY_RUN_ID:
+            from ci.pr1635_cleaner_evidence import verify_before
+            current_owner = collect_existing_started_owner(target, preview['source'])
+            if current_owner != started_owner:
+                raise RecoveryError('existing-started-owner-drift-before-completion')
+            verify_before(target, before_completion, current_owner)
         completion_runner = prove_repo_only_descendant(client, preview["source"])
         if canonical_bytes(completion_runner) != canonical_bytes(fresh_runner):
             raise RecoveryError("trusted-main-drift-before-completion")
@@ -2457,7 +2491,7 @@ def apply_recovery(
         else:
             stages.append({"stage": "completion", "stdout_sha256": digest(completion.stdout.encode())})
         final = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=False, case=case)
-        stages.append(_finish_deploy_protection(target, preview['source']))
+        stages.append(_finish_recovery_owner(target, preview['source'], release_run_id, final))
     except Exception as exc:
         reason = exc.reason if isinstance(exc, RecoveryError) else type(exc).__name__
         return {
