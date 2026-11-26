@@ -216,7 +216,8 @@ Client root/epoch/date/source/ownership selection is forbidden.
 GET preparation and same-ID readback are read-only: no job, directory or source
 acceptance. The deterministic ID binds latest completed wall-clock 3h slot in
 Asia/Yekaterinburg, fixed profile, deployed SHA and server-owned history contract
-(with existing 240s portion/max31 limits). POST delegates to canonical same-daemon
+(with 31 recomputes per portion and the [supervised History time limits](owned_history_worker.md)).
+POST delegates to canonical same-daemon
 cycle acceptance; backup priority/recheck and actual lease handoff are preserved.
 The ID grants dedup evidence, never heavy ownership. Canonical source stages
 require the actual same-thread live cycle lease; names, copied IDs and forked

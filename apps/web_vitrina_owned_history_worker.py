@@ -9,8 +9,8 @@ import sys
 import time
 
 from packages.application.owned_history_worker_capability import (
-    CONTRACT, HistoryDelegationError, child_bootstrap, file_digest, fingerprint,
-    lock_proof, process_generation, read_json, send_message, history_child_failure,
+    CONTRACT, SUPPLIER_PHASE_PROTOCOL, HistoryDelegationError, child_bootstrap, file_digest, fingerprint,
+    lock_proof, process_generation, read_json, receive_message, send_message, history_child_failure,
 )
 
 
@@ -47,7 +47,21 @@ def _bound(cap):
             raise HistoryDelegationError("history_worker_standalone_admission_changed")
 
 
-def execute(cap):
+def _supplier_phase(channel, cap, phase):
+    request = {"contract": CONTRACT, "invocation": cap["invocation"], "phase": phase}
+    send_message(channel, request)
+    grant = receive_message(channel, deadline=time.monotonic() + cap["inner_seconds"])
+    if not isinstance(grant, dict):
+        raise HistoryDelegationError("supplier_history_phase_unproven")
+    deadline = grant.get("inner_deadline")
+    now = time.monotonic()
+    if (grant != {**request, "inner_deadline": deadline} or type(deadline) not in (int, float)
+            or not now < deadline <= now + cap["inner_seconds"]):
+        raise HistoryDelegationError("supplier_history_phase_unproven")
+    return deadline
+
+
+def execute(cap, channel=None):
     # Bootstrap has authenticated inherited kernel capability before these
     # imports/constructors. No ContextVar lease or source producer is installed.
     from packages.business_time import current_business_date_iso
@@ -126,6 +140,11 @@ def execute(cap):
         if backfill_dates != sorted((cap.get("closed_receipt") or {}).get("dates", [])):
             raise HistoryDelegationError("history_closed_exact_scope_changed")
 
+    phased = "supplier_phase_protocol" in cap
+    if phased and (cap["supplier_phase_protocol"] != SUPPLIER_PHASE_PROTOCOL or channel is None or supplier is None):
+        raise HistoryDelegationError("supplier_history_phase_unproven")
+    work_until = _supplier_phase(channel, cap, "derived_work") if phased else None
+
     class AnchoredAdapter(LiveNativeAdapter):
         def capture(self):
             _bound(cap)
@@ -144,7 +163,7 @@ def execute(cap):
     # Canonical contiguous source context. Only rolling_scope may be written;
     # intervening archive dates are read without enrollment or re-evaluation.
     store = HistoryStore(root / "history")
-    deadline = time.monotonic() + cap["inner_seconds"]
+    deadline = work_until if phased else time.monotonic() + cap["inner_seconds"]
     if cap["mode"] == "capture":
         if anchor is not None:
             raise HistoryDelegationError("history_capture_must_not_accept_anchor")
@@ -215,6 +234,8 @@ def execute(cap):
                     raise HistoryDelegationError('policy_history_native_anchor_changed')
                 observed['policy']={key:native[key] for key in ('receipt_digest','native')}
             if observed['terminal'] and supplier is not None:
+                if phased:
+                    deadline = _supplier_phase(channel, cap, "supplier_native_proof")
                 canonical_adapter=LiveNativeAdapter(db_path=runtime.db_path,runtime_dir=runtime_dir,cache_dir=root/'proofs',
                     now=now,date_from=source_dates[0],date_to=source_dates[-1],formula_epoch=cap['formula_epoch'])
                 native=supplier.validate_native_readonly(adapter=canonical_adapter,store=store,now=now)
@@ -227,6 +248,8 @@ def execute(cap):
             if source_stamp(runtime_dir, runtime.db_path) != stamp:
                 raise HistoryDelegationError("history_source_changed_during_readback")
             watch.check()
+            if phased and time.monotonic() >= deadline:
+                raise HistoryDelegationError("history_dated_readback_deadline")
             return {"status": "verified", "watch_directories": directories, "invocation": cap["invocation"], "source_stamp": stamp, **observed}
 
     def check_base():
@@ -289,7 +312,7 @@ def main():
             from packages.procedure_journal import child_scope
             with child_scope(cap.get("journal_parent"), cap["mode"], cap["invocation"]):
                 try:
-                    result = execute(cap)
+                    result = execute(cap, channel=channel)
                 finally:
                     import resource
                     from packages.procedure_journal import event

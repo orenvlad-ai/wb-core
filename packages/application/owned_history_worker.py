@@ -22,7 +22,7 @@ import time
 from uuid import uuid4
 
 from packages.application.owned_history_worker_capability import (
-    CONTRACT, HistoryDelegationError, file_digest, fingerprint, linux_required,
+    CONTRACT, SUPPLIER_PHASE_PROTOCOL, HistoryDelegationError, file_digest, fingerprint, linux_required,
     lock_proof, process_generation, read_json, receive_message, send_message, history_result_error,
 )
 
@@ -405,15 +405,61 @@ class _OwnedHistoryWorker:
             raise HistoryDelegationError("history_child_already_live")
         config = self.config
         invocation = uuid4().hex
+        started = time.monotonic()
         seconds = min(240.0, float(config.budget_seconds) + PARENT_GRACE_SECONDS)
         if self._completion_deadline is not None:
-            seconds = min(seconds, self._completion_deadline - time.monotonic())
+            seconds = min(seconds, self._completion_deadline - started)
         if self._completion_deadline is not None and seconds <= PARENT_GRACE_SECONDS:
             raise HistoryDelegationError("history_completion_total_deadline")
-        deadline = time.monotonic() + seconds
+        deadline = started + seconds
         with journal_log.span("history_transport", mode, invocation=invocation,
                               budget_ms=int(seconds * 1000)) as diag:
             return self._exchange(mode, now, anchor, invocation, seconds, deadline, diag)
+
+    def _receive_supplier_reply(self, channel, cap, seconds, deadline, diag):
+        """Grant work on this same FD after the bound supplier sources have been checked."""
+        phases = ["supplier_preparation", "derived_work"]
+        if cap["mode"] == "verify":
+            phases.append("supplier_native_proof")
+        identity = {"contract": CONTRACT, "invocation": cap["invocation"]}
+        started = deadline - seconds
+        window = min(240.0, float(self.config.budget_seconds) + PARENT_GRACE_SECONDS)
+        # Even a terminal verification gets at most two windows in total.
+        invocation_limit = min(self._completion_deadline, started + 2 * window)
+        phase_start = started
+        for index, phase in enumerate(phases):
+            with journal_log.span("history_phase", phase, invocation=cap["invocation"],
+                                  budget_ms=round(1000 * (deadline - phase_start))):
+                reply = receive_message(channel, deadline=deadline)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError()
+                if (not isinstance(reply, dict) or reply.get("contract") != CONTRACT
+                        or reply.get("invocation") != cap["invocation"]):
+                    raise HistoryDelegationError("supplier_history_phase_unproven")
+                if "result" in reply:
+                    result = reply["result"]
+                    if set(reply) != {"contract", "invocation", "result"} or not isinstance(result, dict):
+                        raise HistoryDelegationError("supplier_history_phase_unproven")
+                    if result.get("status") != "failed":
+                        native = phase == "supplier_native_proof"
+                        if (index == 0 or (cap["mode"] == "verify" and
+                                (result.get("terminal") is not native or ("supplier" in result) != native))):
+                            raise HistoryDelegationError("supplier_history_phase_unproven")
+                    return reply, deadline
+                if index + 1 >= len(phases) or reply != {**identity, "phase": phases[index + 1]}:
+                    raise HistoryDelegationError("supplier_history_phase_unproven")
+            self._check()
+            phase_start = time.monotonic()
+            if phase_start >= deadline:
+                raise TimeoutError()
+            deadline = min(invocation_limit, phase_start + window)
+            inner = min(phase_start + cap["inner_seconds"], deadline - PARENT_GRACE_SECONDS)
+            if inner <= phase_start:
+                raise TimeoutError()
+            diag["budget_ms"] = round(1000 * (deadline - started))
+            channel.settimeout(deadline - phase_start)
+            send_message(channel, {**reply, "inner_deadline": inner})
+        raise HistoryDelegationError("supplier_history_phase_unproven")
 
     def _exchange(self, mode, now, anchor, invocation, seconds, deadline, diag):
         config, runtime = self.config, self.runtime
@@ -440,6 +486,8 @@ class _OwnedHistoryWorker:
                 "formula_epoch": config.formula_epoch,
                 "inner_seconds": min(float(config.budget_seconds), seconds - PARENT_GRACE_SECONDS),
                 "max_recomputes": config.max_recomputes, "anchor": anchor}
+            if self.operation == "cycle" and self._supplier_receipt is not None:
+                cap["supplier_phase_protocol"] = SUPPLIER_PHASE_PROTOCOL
             pass_fds = (child.fileno(), *self.lock_fds)
             if mode == "verify":
                 cap["source_watch_fd"] = self._source_watch.fd
@@ -482,10 +530,15 @@ class _OwnedHistoryWorker:
                 phase = "send"
                 send_message(parent, cap)
                 phase = "receive"
-                response = receive_message(parent)
+                if "supplier_phase_protocol" in cap:
+                    response, deadline = self._receive_supplier_reply(parent, cap, seconds, deadline, diag)
+                else:
+                    response = receive_message(parent)
                 phase = "wait"
                 process.wait(timeout=max(0.001, deadline - time.monotonic()))
-                if (process.returncode != 0 or not isinstance(response, dict)
+                if "supplier_phase_protocol" in cap and time.monotonic() >= deadline:
+                    raise TimeoutError()
+                if (process.returncode != 0 or not isinstance(response, dict) or not isinstance(response.get("result"), dict)
                         or response.get("invocation") != invocation or response.get("contract") != CONTRACT):
                     raise HistoryDelegationError("history_child_terminal_unproven")
             except (OSError, ValueError, subprocess.TimeoutExpired, HistoryDelegationError) as exc:
