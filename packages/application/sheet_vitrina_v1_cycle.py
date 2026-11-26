@@ -1,6 +1,8 @@
 """Dormant same-daemon sequential cycle; receipts are evidence, never a replay queue."""
 from __future__ import annotations
 
+from packages import procedure_journal as journal_log
+
 from contextlib import closing
 from dataclasses import dataclass, asdict
 from datetime import date, datetime, timedelta, timezone
@@ -108,6 +110,12 @@ def validate_collection(summary, *, require_full_scope=False):
         raise CycleStageFailure('collection_full_scope_required')
     for slot in summary['slots']:
         policy = slot['policy']
+        if journal_log.enabled():
+            from packages.application.sheet_vitrina_v1_live_plan import ACCEPTED_CURRENT_SOURCE_KEYS
+            source = slot['source_key']
+            state = policy if policy in {'accepted_complete', 'accepted_partial', 'accepted_retained',
+                'archive_only', 'temporal_role_unavailable', 'unavailable'} else 'unknown'
+            journal_log.event("source_capture", source if source in ACCEPTED_CURRENT_SOURCE_KEYS else "other", state)
         if slot.get('invalid_payload_reason'):
             raise CycleStageFailure('collection_payload_invalid:' + slot['source_key'] + ':' + slot['invalid_payload_reason'])
         if bool(slot['accepted']) != bool(slot['accepted_digest']):
@@ -545,7 +553,11 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
     """At most one fresh next-day epoch; never retry an unknown stage outcome."""
     while True:
         try:
-            return _run_cycle_epoch(entrypoint, store, receipt, history_config, log)
+            with journal_log.span("cycle", "epoch", cycle_id=receipt["cycle_id"],
+                                  job_id=receipt.get("job_id"), day=receipt["business_date"]) as observed:
+                result = _run_cycle_epoch(entrypoint, store, receipt, history_config, log)
+                observed["state"] = result["status"]
+                return result
         except CycleDateRollover as exc:
             try:
                 if exc.expected_date != receipt['business_date']:
@@ -742,17 +754,19 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
         for item, action in zip(receipt['stages'], actions, strict=True):
             require_cycle_business_date(receipt['business_date'], entrypoint.now_factory())
             receipt.update(status='running', current_stage=item['stage'])
-            item.update(status='running', started_at=store.timestamp_factory())
-            store.write(receipt)  # Before effects: a crash is uncertain, never pending replay.
-            from packages.application.fbs_accounting_degraded import degraded_accounting_scope
-            with degraded_accounting_scope(entrypoint.runtime, receipt['final_versions']):
-                proof = action()
-            if not isinstance(proof, StageProof) or not proof.versions or not all(isinstance(v,str) and v for v in proof.versions.values()):
-                raise CycleStageFailure('cycle_stage_proof_missing:' + item['stage'])
-            item.update(status='degraded' if proof.warnings else 'complete', finished_at=store.timestamp_factory(),
-                versions=proof.versions, warnings=list(proof.warnings))
-            receipt['final_versions'].update(proof.versions)
-            store.write(receipt)
+            with journal_log.span("cycle_stage", item["stage"]) as observed:
+                item.update(status='running', started_at=store.timestamp_factory())
+                store.write(receipt)  # Before effects: a crash is uncertain, never pending replay.
+                from packages.application.fbs_accounting_degraded import degraded_accounting_scope
+                with degraded_accounting_scope(entrypoint.runtime, receipt['final_versions']):
+                    proof = action()
+                if not isinstance(proof, StageProof) or not proof.versions or not all(isinstance(v,str) and v for v in proof.versions.values()):
+                    raise CycleStageFailure('cycle_stage_proof_missing:' + item['stage'])
+                item.update(status='degraded' if proof.warnings else 'complete', finished_at=store.timestamp_factory(),
+                    versions=proof.versions, warnings=list(proof.warnings))
+                receipt['final_versions'].update(proof.versions)
+                store.write(receipt)
+                observed.update(state=item["status"], warnings=len(proof.warnings))
             if item['stage'] == 'final_ready':
                 # Closed and final Ready have durably consumed this collection.
                 # History reads native published sources and needs only their
@@ -814,4 +828,7 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
                         item['completed_effects'] = dict(exc.completed_effects)
         _observe_terminal(receipt, exc)
         store.write(receipt)
+        if history_failure:
+            journal_log.event("history_failure", history_failure["reason_code"], history_failure["outcome"],
+                              cycle_id=receipt["cycle_id"], job_id=receipt.get("job_id"))
         raise

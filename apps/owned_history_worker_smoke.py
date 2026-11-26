@@ -114,6 +114,27 @@ class LinuxWorkerSmoke(unittest.TestCase):
             finally:
                 os.close(fd)
 
+    def test_journal_start_consumes_existing_history_budget(self):
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        clock = [100.0]
+
+        @contextmanager
+        def delayed_event(*args, **kwargs):
+            clock[0] += 10.0
+            yield {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = simple_runtime(directory)
+            with ownership(runtime, Path(directory) / "candidate", seconds=1.0) as worker, \
+                    patch.object(supervisor, "PARENT_GRACE_SECONDS", .1), \
+                    patch.object(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                    patch.object(supervisor.journal_log, "span", delayed_event), \
+                    patch.object(supervisor, "_POPEN") as spawn:
+                with self.assertRaisesRegex(HistoryDelegationError, "history_budget_exhausted_before_spawn"):
+                    worker.capture(NOW)
+                spawn.assert_not_called()
+
     def test_hard_cpu_timeout_reaps_before_domain_and_drain_release(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = simple_runtime(directory)

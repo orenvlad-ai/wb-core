@@ -270,7 +270,7 @@ def _chrome_cleanup_counts_only_owned_executables() -> None:
                 return original_stat(path, *args, **kwargs)
 
             with patch.object(Path, "stat", new=sandboxed_stat):
-                assert auth._owned_chrome_pids(proc) == [104, 105]
+                assert sorted(auth._owned_chrome_pids(proc)) == [104, 105]
                 process(106, other_chrome, own_cgroup, b"other", "other")
                 try:
                     auth._owned_chrome_pids(proc)

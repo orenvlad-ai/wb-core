@@ -74,4 +74,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("business_data_schedule_profile"):
+        raise SystemExit(main())

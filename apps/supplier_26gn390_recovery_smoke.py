@@ -111,7 +111,7 @@ def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
             "invoice_no": "26GN390",
             "invoice_date": "2026-06-15",
             "currency": "CNY",
-            "expenses_complete": True,
+            "expenses_complete": False,
         },
         lines=[
             {
@@ -133,6 +133,12 @@ def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
     )
     _save_document(runtime, ACTIVE_DOCUMENT_ID, "parsed")
     _save_document(runtime, ARCHIVED_DOCUMENT_ID, "excluded")
+    _assert(
+        runtime.update_supplier_shipment_expenses_complete(
+            shipment_id=SHIPMENT_ID, expenses_complete=True, updated_at="2026-07-24T08:01:00Z"
+        ),
+        "expenses confirmed after the final document",
+    )
     runtime.save_supplier_shipment(
         header={
             "shipment_id": "non_target",

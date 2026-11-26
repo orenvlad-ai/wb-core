@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from packages import procedure_journal as journal_log
+
 from packages.application.business_data_heavy_admission import HeavyAdmissionBusy
 
 import base64
@@ -7021,7 +7023,10 @@ def _build_handler(
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
             return
 
-    return RegistryUploadHandler
+    class ObservedRegistryHandler(journal_log.JournalHTTPMixin, RegistryUploadHandler):
+        pass
+
+    return ObservedRegistryHandler
 
 
 def _handle_web_vitrina_history_snapshot_request(handler, query_string, store):

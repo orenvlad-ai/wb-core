@@ -641,4 +641,7 @@ def _iso_now() -> str:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("seller_portal_feedbacks_complaints_status_sync"):
+        main()

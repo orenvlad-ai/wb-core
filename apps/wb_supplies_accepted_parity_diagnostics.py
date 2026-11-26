@@ -204,4 +204,7 @@ def _flags(expected: Mapping[str, Any], normalized: Mapping[str, Any]) -> dict[s
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("wb_supplies_accepted_parity_diagnostics"):
+        raise SystemExit(main())

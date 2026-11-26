@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from apps.sqlite_failed_backup_cleanup import run  # noqa: E402
 import packages.application.registry_upload_db_backed_runtime as runtime_module  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
+from packages.application.root_storage_policy import RootStoragePolicyError  # noqa: E402
 
 
 def main() -> int:
@@ -77,9 +78,16 @@ def main() -> int:
             conn.execute("CREATE TABLE source(id INTEGER PRIMARY KEY,value TEXT NOT NULL)")
             conn.execute("INSERT INTO source(value) VALUES('evidence')")
         completed_destination = Path(tmp) / "backups" / "warehouse-functional" / "complete.sqlite3"
+        try:
+            runtime.backup_database(completed_destination, admission_owner="registry_sqlite_backup_primitive")
+        except RootStoragePolicyError as exc:
+            _assert("concrete caller owner" in str(exc), "generic backup owner refused")
+        else:
+            raise AssertionError("generic backup owner unexpectedly admitted")
+        _assert(not completed_destination.exists(), "refused backup created no file")
         completed = runtime.backup_database(
             completed_destination,
-            admission_owner="registry_sqlite_backup_primitive",
+            admission_owner="warehouse_recovery_policy",
         )
         _assert(completed["integrity_check"] == "ok", "coherent backup succeeds")
         _assert((completed_destination.stat().st_mode & 0o777) == 0o600, "backup private from creation")
@@ -93,7 +101,7 @@ def main() -> int:
             try:
                 runtime.backup_database(
                     destination,
-                    admission_owner="registry_sqlite_backup_primitive",
+                    admission_owner="warehouse_recovery_policy",
                 )
             except ValueError as exc:
                 _assert("insufficient filesystem capacity" in str(exc), "capacity preflight fails closed")
@@ -132,7 +140,7 @@ def main() -> int:
             try:
                 runtime.backup_database(
                     destination,
-                    admission_owner="registry_sqlite_backup_primitive",
+                    admission_owner="warehouse_recovery_policy",
                 )
             except sqlite3.OperationalError as exc:
                 _assert("disk is full" in str(exc), "original backup failure preserved")

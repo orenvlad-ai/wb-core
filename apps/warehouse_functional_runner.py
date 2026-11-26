@@ -1279,4 +1279,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("warehouse_functional_runner"):
+        raise SystemExit(main())

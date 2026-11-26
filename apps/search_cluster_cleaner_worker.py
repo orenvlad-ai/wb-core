@@ -40,4 +40,8 @@ def main():
     print(json.dumps(product_tick(cleaner,source,guard,generation=web.generation,max_targets=args.max_targets),ensure_ascii=False))
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("search_cluster_cleaner_worker"):
+        main()

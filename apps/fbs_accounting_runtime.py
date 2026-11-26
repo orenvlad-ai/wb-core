@@ -34,4 +34,7 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("fbs_accounting_runtime"):
+        raise SystemExit(main())

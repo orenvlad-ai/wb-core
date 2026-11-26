@@ -50,6 +50,17 @@ BUYER_GUARD_SOURCES = {
 }
 
 
+# The guarded entrypoints and write barrier are identical in both installations.
+# In the journaled build the shared decorator emits only after default admission.
+# The optional held web-source owner is never selected by these timer commands.
+ADMISSION_SOURCE = 'packages/application/business_data_procedure_admission.py'
+JOURNALED_GUARD_SOURCES = {
+    ADMISSION_SOURCE: '72d59fa7f9700b7103f76ccac1deb5a5ca46be2e64f6dde52e9afe14c77332f6',
+    'packages/procedure_journal.py': '17fbdfaf1487aee63d7d883a4bcea07b97cbbbb6fc9308cd2d1d8d80e8334ace',
+    'packages/procedure_journal_writer.py': '572f664b491ea1f5f067c434a2e6622fef17eefb5fc4fba9fbccec4c9d5a64bd',
+}
+
+
 # Exact additional default-guarded CLIs in reviewed installed base 678f6130.
 # No arbitrary failed service or disabled original timer can use this proof.
 GUARDED_SERVICE_SPECS = {
@@ -549,6 +560,8 @@ def _guarded_service_completion(runtime, plan, old, current, systemd, activity_r
     app, directory = Path(plan['app_dir']), Path(plan['unit_directory'])
     if _bytes(directory / unit) != _bytes(app / ('artifacts/registry_upload_http_entrypoint/systemd/' + unit)):
         raise RuntimeError('formula resume guarded service fragment is not canonical')
+    if _hash(_bytes(app / ADMISSION_SOURCE, 16 * 1024 * 1024)) == JOURNALED_GUARD_SOURCES[ADMISSION_SOURCE]:
+        sources = {**sources, **JOURNALED_GUARD_SOURCES}
     for path, expected in sources.items():
         if _hash(_bytes(app / path, 16 * 1024 * 1024)) != expected:
             raise RuntimeError('formula resume guarded service admission source differs')

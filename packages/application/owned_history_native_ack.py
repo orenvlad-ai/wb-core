@@ -30,12 +30,8 @@ def closed_receipt_digest(value):
 
 def source_stamp(runtime_dir, db_path):
     """Bounded physical fence around the consumed native read, never freshness."""
-    from packages.application.storage_registry import MANIFEST_FILENAME
-    runtime_dir = Path(runtime_dir).resolve()
-    databases = (Path(db_path).resolve(), runtime_dir / 'fbs-snapshot-accounting.sqlite3')
-    paths = [Path(str(path) + suffix) for path in databases for suffix in ('', '-wal')]
-    paths += [runtime_dir / MANIFEST_FILENAME, runtime_dir / '.auto-updates-policy.json',
-              runtime_dir / '.web-vitrina-fbs-lifecycle-last-good.json']
+    from packages.application.owned_history_source_watch import source_paths
+    paths = source_paths(runtime_dir, db_path)
     result = {}
     for path in paths:
         try:
@@ -203,6 +199,7 @@ def consume_closed_history_ack(proof, runtime_dir, receipt_digest, backfill_date
             or source_stamp(runtime_dir, owner.runtime.db_path) != proof.source_stamp
             or read_json(Path(owner.config.candidate_root) / 'history' / 'CURRENT.json', limit=4096) != proof.current):
         raise HistoryDelegationError('history_closed_ack_owner_or_target_changed')
+    owner._check_verified_events()
     owner._closed_proof = None
     return MappingProxyType({day: MappingProxyType({'edition_id': proof.current['current'], **deepcopy(proof.native[day])})
         for day in proof.backfill_dates})
@@ -232,6 +229,7 @@ def consume_historical_history_ack(proof, runtime_dir, receipt_digest, dates):
             or proof.dates!=tuple(dates) or source_stamp(runtime_dir,owner.runtime.db_path)!=proof.source_stamp
             or read_json(Path(owner.config.candidate_root)/'history'/'CURRENT.json',limit=4096)!=proof.current):
         raise HistoryDelegationError('historical_history_ack_owner_or_target_changed')
+    owner._check_verified_events()
     owner._historical_proof=None
     return MappingProxyType({day:MappingProxyType(deepcopy(proof.native[day])) for day in proof.dates})
 
@@ -263,6 +261,7 @@ def consume_supplier_history_ack(proof, runtime_dir, receipt_digest, dates):
             or proof.dates!=tuple(dates) or source_stamp(runtime_dir,owner.runtime.db_path)!=proof.source_stamp
             or read_json(Path(owner.config.candidate_root)/'history'/'CURRENT.json',limit=4096)!=proof.current):
         raise HistoryDelegationError('supplier_history_ack_owner_or_target_changed')
+    owner._check_verified_events()
     owner._supplier_proof=None
     return MappingProxyType({day:MappingProxyType(deepcopy(proof.native[day])) for day in proof.dates})
 
@@ -290,5 +289,6 @@ def consume_policy_history_ack(proof, runtime_dir, receipt_digest, dates):
             or proof.dates!=tuple(dates) or source_stamp(runtime_dir,owner.runtime.db_path)!=proof.source_stamp
             or read_json(Path(owner.config.candidate_root)/'history'/'CURRENT.json',limit=4096)!=proof.current):
         raise HistoryDelegationError('policy_history_ack_owner_or_target_changed')
+    owner._check_verified_events()
     owner._policy_proof=None
     return MappingProxyType({day:MappingProxyType(deepcopy(proof.native[day])) for day in proof.dates})

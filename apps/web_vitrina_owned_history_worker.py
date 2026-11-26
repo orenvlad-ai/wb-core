@@ -1,6 +1,7 @@
 """Private fixed FD worker, dormant. No user-facing command or admission bypass."""
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 import os
@@ -167,60 +168,66 @@ def execute(cap):
         raise HistoryDelegationError("history_portion_anchor_binding_mismatch")
 
     if cap["mode"] == "verify":
-        stamp = source_stamp(runtime_dir, runtime.db_path)
-        adapter.capture()  # Fresh bounded fence; no compiler/publication retry.
-        observed = verified_derived_state(store, anchor, cap.get("target"), deadline)
-        if observed["terminal"] and store.start_dates_changed(store.edition(), contract.get("metric_start_dates", {})):
-            observed["terminal"] = False
-        # Immutable object hashing does not consume the operational DB. Fence
-        # native receipt reads and the final anchored capture with a fresh full
-        # stamp, retaining generation/book/policy guards over the whole verify.
-        stamp = stamp_after_derived_read(runtime_dir, runtime.db_path, stamp)
-        if observed["terminal"] and cap.get("closed_receipt") is not None:
-            from types import SimpleNamespace
-            from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog
-            closed = ClosedBacklog(SimpleNamespace(block=SimpleNamespace(runtime=runtime)))
-            value = closed.status()
-            binding = cap["closed_receipt"]
-            from packages.application.owned_history_native_ack import closed_receipt_digest
-            if closed_receipt_digest(value) != binding["digest"] or not set(binding["dates"]) <= set(backfill_dates):
-                raise HistoryDelegationError("history_closed_receipt_changed")
-            canonical_adapter = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=runtime_dir,
-                cache_dir=root / "proofs", now=now, date_from=source_dates[0], date_to=source_dates[-1],
-                formula_epoch=cap["formula_epoch"])
-            native = closed.validate_native_readonly(value=value, adapter=canonical_adapter, store=store,
-                backfill_dates=tuple(binding["dates"]))
-            if (native["vector"] != anchor["vector"] or native["fence"] != anchor["fence"]
-                    or native["current"] != observed["current"]):
-                raise HistoryDelegationError("history_closed_native_anchor_changed")
-            observed["closed"] = {key: native[key] for key in ("receipt_digest", "native")}
-        if observed['terminal'] and historical is not None:
-            canonical_adapter=LiveNativeAdapter(db_path=runtime.db_path,runtime_dir=runtime_dir,cache_dir=root/'proofs',
-                now=now,date_from=source_dates[0],date_to=source_dates[-1],formula_epoch=cap['formula_epoch'])
-            native=historical.validate_native_readonly(adapter=canonical_adapter,store=store,now=now)
-            if native['vector']!=anchor['vector'] or native['fence']!=anchor['fence'] or native['current']!=observed['current']:
-                raise HistoryDelegationError('historical_history_native_anchor_changed')
-            observed['historical']={key:native[key] for key in ('receipt_digest','native')}
-        if observed['terminal'] and policy is not None:
-            canonical_adapter=LiveNativeAdapter(db_path=runtime.db_path,runtime_dir=runtime_dir,cache_dir=root/'proofs',
-                now=now,date_from=source_dates[0],date_to=source_dates[-1],formula_epoch=cap['formula_epoch'])
-            native=policy.validate_native_readonly(adapter=canonical_adapter,store=store,now=now)
-            if native['vector']!=anchor['vector'] or native['fence']!=anchor['fence'] or native['current']!=observed['current']:
-                raise HistoryDelegationError('policy_history_native_anchor_changed')
-            observed['policy']={key:native[key] for key in ('receipt_digest','native')}
-        if observed['terminal'] and supplier is not None:
-            canonical_adapter=LiveNativeAdapter(db_path=runtime.db_path,runtime_dir=runtime_dir,cache_dir=root/'proofs',
-                now=now,date_from=source_dates[0],date_to=source_dates[-1],formula_epoch=cap['formula_epoch'])
-            native=supplier.validate_native_readonly(adapter=canonical_adapter,store=store,now=now)
-            if native['vector']!=anchor['vector'] or native['fence']!=anchor['fence'] or native['current']!=observed['current']:
-                raise HistoryDelegationError('supplier_history_native_anchor_changed')
-            observed['supplier']={key:native[key] for key in ('receipt_digest','native')}
-        if adapter.capture() != anchor["vector"] or store._current() != observed["current"]:
-            raise HistoryDelegationError("history_readback_changed_during_verify")
-        _bound(cap)
-        if source_stamp(runtime_dir, runtime.db_path) != stamp:
-            raise HistoryDelegationError("history_source_changed_during_readback")
-        return {"status": "verified", "invocation": cap["invocation"], "source_stamp": stamp, **observed}
+        from packages.application.owned_history_source_watch import HistorySourceWatch
+        with closing(HistorySourceWatch(runtime_dir, runtime.db_path, inherited=cap.get("source_watch_fd"))) as watch:
+            directories = watch.arm()
+            stamp = source_stamp(runtime_dir, runtime.db_path)
+            adapter.capture()  # Fresh bounded fence; no compiler/publication retry.
+            observed = verified_derived_state(store, anchor, cap.get("target"), deadline)
+            if observed["terminal"] and store.start_dates_changed(store.edition(), contract.get("metric_start_dates", {})):
+                observed["terminal"] = False
+            # Immutable object hashing does not consume the operational DB. Fence
+            # native receipt reads and the final anchored capture with a fresh full
+            # stamp, retaining generation/book/policy guards over the whole verify.
+            watch.check(allow_operational_writes=True)
+            watch.watch_current_files()  # The operational WAL may have rotated during the relaxed interval.
+            stamp = stamp_after_derived_read(runtime_dir, runtime.db_path, stamp)
+            if observed["terminal"] and cap.get("closed_receipt") is not None:
+                from types import SimpleNamespace
+                from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog
+                closed = ClosedBacklog(SimpleNamespace(block=SimpleNamespace(runtime=runtime)))
+                value = closed.status()
+                binding = cap["closed_receipt"]
+                from packages.application.owned_history_native_ack import closed_receipt_digest
+                if closed_receipt_digest(value) != binding["digest"] or not set(binding["dates"]) <= set(backfill_dates):
+                    raise HistoryDelegationError("history_closed_receipt_changed")
+                canonical_adapter = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=runtime_dir,
+                    cache_dir=root / "proofs", now=now, date_from=source_dates[0], date_to=source_dates[-1],
+                    formula_epoch=cap["formula_epoch"])
+                native = closed.validate_native_readonly(value=value, adapter=canonical_adapter, store=store,
+                    backfill_dates=tuple(binding["dates"]))
+                if (native["vector"] != anchor["vector"] or native["fence"] != anchor["fence"]
+                        or native["current"] != observed["current"]):
+                    raise HistoryDelegationError("history_closed_native_anchor_changed")
+                observed["closed"] = {key: native[key] for key in ("receipt_digest", "native")}
+            if observed['terminal'] and historical is not None:
+                canonical_adapter=LiveNativeAdapter(db_path=runtime.db_path,runtime_dir=runtime_dir,cache_dir=root/'proofs',
+                    now=now,date_from=source_dates[0],date_to=source_dates[-1],formula_epoch=cap['formula_epoch'])
+                native=historical.validate_native_readonly(adapter=canonical_adapter,store=store,now=now)
+                if native['vector']!=anchor['vector'] or native['fence']!=anchor['fence'] or native['current']!=observed['current']:
+                    raise HistoryDelegationError('historical_history_native_anchor_changed')
+                observed['historical']={key:native[key] for key in ('receipt_digest','native')}
+            if observed['terminal'] and policy is not None:
+                canonical_adapter=LiveNativeAdapter(db_path=runtime.db_path,runtime_dir=runtime_dir,cache_dir=root/'proofs',
+                    now=now,date_from=source_dates[0],date_to=source_dates[-1],formula_epoch=cap['formula_epoch'])
+                native=policy.validate_native_readonly(adapter=canonical_adapter,store=store,now=now)
+                if native['vector']!=anchor['vector'] or native['fence']!=anchor['fence'] or native['current']!=observed['current']:
+                    raise HistoryDelegationError('policy_history_native_anchor_changed')
+                observed['policy']={key:native[key] for key in ('receipt_digest','native')}
+            if observed['terminal'] and supplier is not None:
+                canonical_adapter=LiveNativeAdapter(db_path=runtime.db_path,runtime_dir=runtime_dir,cache_dir=root/'proofs',
+                    now=now,date_from=source_dates[0],date_to=source_dates[-1],formula_epoch=cap['formula_epoch'])
+                native=supplier.validate_native_readonly(adapter=canonical_adapter,store=store,now=now)
+                if native['vector']!=anchor['vector'] or native['fence']!=anchor['fence'] or native['current']!=observed['current']:
+                    raise HistoryDelegationError('supplier_history_native_anchor_changed')
+                observed['supplier']={key:native[key] for key in ('receipt_digest','native')}
+            if adapter.capture() != anchor["vector"] or store._current() != observed["current"]:
+                raise HistoryDelegationError("history_readback_changed_during_verify")
+            _bound(cap)
+            if source_stamp(runtime_dir, runtime.db_path) != stamp:
+                raise HistoryDelegationError("history_source_changed_during_readback")
+            watch.check()
+            return {"status": "verified", "watch_directories": directories, "invocation": cap["invocation"], "source_stamp": stamp, **observed}
 
     def check_base():
         pointer = store._current()
@@ -279,7 +286,15 @@ def main():
             return 2
         channel, cap = child_bootstrap(int(sys.argv[1]))
         try:
-            result = execute(cap)
+            from packages.procedure_journal import child_scope
+            with child_scope(cap.get("journal_parent"), cap["mode"], cap["invocation"]):
+                try:
+                    result = execute(cap)
+                finally:
+                    import resource
+                    from packages.procedure_journal import event
+                    event("history_worker", "resources", "sample",
+                          rss_peak_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         except Exception as exc:
             from packages.application.web_vitrina_history_store import HistoryUnavailable
             result = history_child_failure(exc, mode=cap["mode"], source_error=isinstance(exc, HistoryUnavailable))

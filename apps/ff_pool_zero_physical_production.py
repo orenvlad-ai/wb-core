@@ -124,4 +124,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("ff_pool_zero_physical_production"):
+        raise SystemExit(main())

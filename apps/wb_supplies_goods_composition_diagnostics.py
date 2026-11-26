@@ -89,4 +89,7 @@ def _run(args):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("wb_supplies_goods_composition_diagnostics"):
+        raise SystemExit(main())

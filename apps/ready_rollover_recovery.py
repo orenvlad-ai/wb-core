@@ -43,4 +43,7 @@ def main():
         print(json.dumps(result,ensure_ascii=False))
 
 if __name__ == '__main__':
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("ready_rollover_recovery"):
+        main()

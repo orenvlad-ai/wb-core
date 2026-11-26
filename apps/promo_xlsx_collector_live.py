@@ -58,4 +58,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from packages.procedure_journal import cli_scope
+
+    with cli_scope("promo_xlsx_collector_live"):
+        main()

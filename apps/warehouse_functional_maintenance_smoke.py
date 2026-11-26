@@ -3,11 +3,9 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-import importlib.util
 import json
+import os
 from pathlib import Path
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -587,87 +585,36 @@ def _assert_pending_daemon_reload_stays_fail_closed() -> None:
             raise AssertionError("pending daemon-reload must block deployed-unit proof")
 
 
-def _load_finance_cli() -> Any:
-    path = Path(__file__).resolve().with_name("wb_finance_weekly.py")
-    spec = importlib.util.spec_from_file_location("wb_finance_weekly_lock_subject", path)
-    if spec is None or spec.loader is None:
-        raise AssertionError("cannot load Finance CLI")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _assert_finance_apply_holds_shared_lock() -> None:
-    module = _load_finance_cli()
-    events: list[str] = []
-    locked = {"value": False}
-
-    class FakeBlock:
-        def __init__(self, db_path: Path) -> None:
-            self.db_path = db_path
-
-        def plan_canonical_finance_backfill(self, **_: Any) -> dict[str, Any]:
-            assert locked["value"] is True
-            events.append("plan")
-            return {"fingerprint": "sha256:approved", "apply_allowed": True}
-
-        def canonical_finance_fingerprint_applied(self, **_: Any) -> bool:
-            assert locked["value"] is True
-            events.append("applied-check")
-            return False
-
-        def apply_canonical_finance_backfill(self, **_: Any) -> dict[str, Any]:
-            assert locked["value"] is True
-            events.append("apply-readback")
-            return {"status": "applied"}
+def _assert_finance_apply_checks_target_under_warehouse_contention() -> None:
+    from apps.wb_finance_weekly_business_approved_backfill_smoke import (
+        _make_stored_results_stale, _seed_sources, _seed_weeks,
+    )
+    from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+    from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
 
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
-        db_path = root / "state.sqlite3"
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "CREATE TABLE sheet_vitrina_v1_warehouse_lock_smoke("
-                "id INTEGER PRIMARY KEY)"
-            )
-            conn.commit()
-        block = FakeBlock(db_path)
-
-        @contextmanager
-        def fake_lock(_: Path):
-            events.append("lock-enter")
-            locked["value"] = True
-            try:
-                yield
-            finally:
-                locked["value"] = False
-                events.append("lock-exit")
-
-        module.block_from_env = lambda _: block
-        module.warehouse_functional_write_lock = fake_lock
-        code = module.main(
-            [
-                "canonical-cost-backfill",
-                "--runtime-dir",
-                str(root),
-                "--env-file",
-                str(root / "missing.env"),
-                "--apply",
-                "--confirm-fingerprint",
-                "sha256:approved",
-                "--backup-dir",
-                str(root / "backup"),
-                "--approval-reference",
-                "smoke approval",
-            ]
-        )
-        assert code == 0
-        assert events == [
-            "lock-enter",
-            "plan",
-            "applied-check",
-            "apply-readback",
-            "lock-exit",
-        ]
+        block = WbFinanceWeeklyBlock(root, seller_id="seller-1")
+        block.ensure_schema()
+        _seed_sources(block.db_path)
+        _seed_weeks(block)
+        _make_stored_results_stale(block.db_path)
+        command = [sys.executable, "-m", "apps.wb_finance_weekly", "canonical-cost-backfill",
+                   "--runtime-dir", str(root), "--env-file", os.devnull,
+                   "--date-to", "2026-08-23"]
+        cli = dict(cwd=ROOT, capture_output=True, text=True, timeout=30,
+                   env={**os.environ, "SELLER_PORTAL_CANONICAL_SUPPLIER_ID": "seller-1"})
+        with warehouse_functional_write_lock(root):
+            plan_result = subprocess.run(command, check=True, **cli)
+            plan = json.loads(plan_result.stdout)
+            assert plan["apply_allowed"] and plan["weeks"]
+            apply = command + ["--apply", "--approval-reference", "fixture", "--confirm-fingerprint"]
+            refused = subprocess.run(apply + ["sha256:stale"], **cli)
+            assert refused.returncode != 0 and "does not match" in refused.stderr
+            assert not block.canonical_finance_fingerprint_applied(fingerprint=plan["fingerprint"])
+            completed = subprocess.run(apply + [plan["fingerprint"]], check=True, **cli)
+            assert json.loads(completed.stdout)["fingerprint"] == plan["fingerprint"]
+        assert block.canonical_finance_fingerprint_applied(fingerprint=plan["fingerprint"])
 
 
 def main() -> int:
@@ -682,7 +629,7 @@ def main() -> int:
     _assert_unproven_service_refresh_stays_fail_closed()
     _assert_service_refresh_race_stays_fail_closed()
     _assert_pending_daemon_reload_stays_fail_closed()
-    _assert_finance_apply_holds_shared_lock()
+    _assert_finance_apply_checks_target_under_warehouse_contention()
     print("warehouse functional maintenance smoke: ok")
     return 0
 

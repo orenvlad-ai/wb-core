@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from packages import procedure_journal as journal_log
+
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -308,6 +310,7 @@ class WarehouseUpdateJournal:
                 (now, run_id, phase_key),
             )
             conn.commit()
+        journal_log.event("warehouse_phase", phase_key, "started", warehouse_id=run_id)
 
     def phase_finished(
         self,
@@ -363,6 +366,9 @@ class WarehouseUpdateJournal:
                 (now, run_id),
             )
             conn.commit()
+        outcome = status if status in {"success", "degraded", "error", "failed", "skipped"} else "other"
+        journal_log.event("warehouse_phase", phase_key, outcome, warehouse_id=run_id,
+                          elapsed_ms=duration_ms, count=max(0, int(item_count)))
 
     def finish(
         self,
