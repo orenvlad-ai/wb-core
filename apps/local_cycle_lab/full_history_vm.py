@@ -33,9 +33,19 @@ def guest(*args, **kwargs):
 def sync_source(destination="/opt/wbc-lab", archive=None):
     # Only tracked application/fixture source and this lab's current Python
     # files. No git metadata, production runtime, env files, tokens or control.
-    tracked = subprocess.check_output(['git', 'ls-files', '-z', 'apps', 'packages', 'artifacts'], cwd=ROOT).decode().split('\0')
-    files = {ROOT / name for name in tracked if name}
-    files.update((ROOT / 'apps/local_cycle_lab').glob('*.py'))
+    tracked = subprocess.check_output(
+        ['git', 'ls-files', '--stage', '-z', 'apps', 'packages', 'artifacts'], cwd=ROOT)
+    files = {}
+    for entry in tracked.split(b'\0'):
+        if entry:
+            metadata, name = entry.split(b'\t', 1)
+            mode, _, stage = metadata.split()
+            if stage != b'0':
+                raise ValueError('Cannot install conflicted source: ' + os.fsdecode(name))
+            if mode in (b'100644', b'100755'):
+                files[ROOT / os.fsdecode(name)] = int(mode, 8) & 0o777
+    for path in (ROOT / 'apps/local_cycle_lab').glob('*.py'):
+        files.setdefault(path, 0o644)
     archive = archive or ROOT / 'output/stage4-vm/source.tgz'
     fingerprint = hashlib.sha256()
     with tarfile.open(archive, 'w:gz', compresslevel=1) as out:
@@ -45,7 +55,11 @@ def sync_source(destination="/opt/wbc-lab", archive=None):
                 with path.open('rb') as source:
                     fingerprint.update(name.encode() + b'\0' + hashlib.file_digest(source, 'sha256').digest())
                     source.seek(0)
-                    out.addfile(out.gettarinfo(str(path), arcname=name), source)
+                    info = out.gettarinfo(str(path), arcname=name)
+                    # The guest installs as root and runs as wbc-lab. A private
+                    # umask on the developer's checkout must not hide Git source.
+                    info.mode = files[path]
+                    out.addfile(info, source)
         head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
         dirty = bool(subprocess.check_output(
             ['git', 'status', '--porcelain', '--', 'apps', 'packages', 'artifacts'], cwd=ROOT))

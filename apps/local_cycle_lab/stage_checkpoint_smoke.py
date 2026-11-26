@@ -3,18 +3,45 @@ from contextlib import closing
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 
 if __package__ in (None, ""):
     sys.path[0] = str(Path(__file__).resolve().parents[2])
-from apps.local_cycle_lab import stage_checkpoint as cp
+from apps.local_cycle_lab import full_history_vm, stage_checkpoint as cp
 from apps.local_cycle_lab.state import atomic_json
 
 
 class StageCheckpointTest(unittest.TestCase):
+    def test_source_sync_uses_git_modes_on_private_checkout(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            lab = root / 'apps/local_cycle_lab'
+            lab.mkdir(parents=True)
+            for name in ('worker.py', 'command', 'new_probe.py', 'private.env'):
+                path = lab / name
+                path.write_text(name)
+                path.chmod(0o600)
+            def git(*args):
+                subprocess.run(['git', *args], cwd=root, check=True, capture_output=True)
+            git('init', '-q')
+            git('add', 'apps/local_cycle_lab/worker.py', 'apps/local_cycle_lab/command')
+            git('update-index', '--chmod=+x', 'apps/local_cycle_lab/command')
+            git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'source')
+            archive = root / 'source.tgz'
+            with patch.object(full_history_vm, 'ROOT', root), patch.object(full_history_vm, 'guest'):
+                full_history_vm.sync_source(archive=archive)
+            with tarfile.open(archive) as bundle:
+                modes = {item.name: item.mode for item in bundle if item.name.startswith('apps/')}
+            self.assertEqual(modes, {'apps/local_cycle_lab/worker.py': 0o644,
+                                     'apps/local_cycle_lab/command': 0o755,
+                                     'apps/local_cycle_lab/new_probe.py': 0o644})
+            self.assertEqual((lab / 'worker.py').stat().st_mode & 0o777, 0o600)
+
     def test_live_wal_and_sealed_database(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
