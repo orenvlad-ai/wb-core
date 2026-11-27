@@ -109,6 +109,20 @@ def main():
             patch.object(command.subprocess, 'check_output', return_value=contract['mount']), \
             patch.object(command.os, 'statvfs', return_value=SimpleNamespace(f_bavail=reserve, f_frsize=1)):
         command.runtime_storage_admission(root, contract_path, epoch)
+        target, link, fs, options = contract['mount'].split()
+        kernel_view = f'{target} /dev/sdb {fs} {options}'
+        for uuid in (Path(link).name, 'different-filesystem'):
+            with patch.object(command.subprocess, 'check_output', side_effect=[
+                    kernel_view, f'{target} {uuid} {fs} {options}']):
+                if uuid == Path(link).name:
+                    command.runtime_storage_admission(root, contract_path, epoch)
+                else:
+                    try:
+                        command.runtime_storage_admission(root, contract_path, epoch)
+                    except ValueError as error:
+                        assert str(error) == 'history_mount_identity_drift'
+                    else:
+                        raise AssertionError('wrong filesystem UUID admitted')
         for changed, expected in [('reserve', 'history_storage_reserve'),
                                   ('mount', 'history_mount_identity_drift'),
                                   ('epoch', 'history_formula_epoch_drift')]:

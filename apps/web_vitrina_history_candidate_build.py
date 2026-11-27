@@ -70,8 +70,16 @@ def runtime_storage_admission(root, contract_path, formula_epoch, *, group_migra
         raise ValueError('history_storage_path_or_mount')
     actual = subprocess.check_output(['findmnt', '-n', '-T', str(mount), '-o',
                                      'TARGET,SOURCE,FSTYPE,OPTIONS'], text=True, timeout=2)
-    if actual.split() != contract['mount'].split():
-        raise ValueError('history_mount_identity_drift')
+    expected = contract['mount'].split()
+    if actual.split() != expected:
+        # After reboot findmnt may display the kernel device name. Read the
+        # mounted filesystem's UUID while checking the target and flags again.
+        if len(expected) != 4 or Path(expected[1]).parent != Path('/dev/disk/by-uuid'):
+            raise ValueError('history_mount_identity_drift')
+        mounted = subprocess.check_output(['findmnt', '-n', '-T', str(mount), '-o',
+                                           'TARGET,UUID,FSTYPE,OPTIONS'], text=True, timeout=2)
+        if mounted.split() != [expected[0], Path(expected[1]).name, *expected[2:]]:
+            raise ValueError('history_mount_identity_drift')
     disk = os.statvfs(mount)
     if disk.f_bavail * disk.f_frsize < contract['reserve_bytes']:
         raise ValueError('history_storage_reserve')
