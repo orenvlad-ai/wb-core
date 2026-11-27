@@ -1549,7 +1549,16 @@ def extract_card_data(
         else next((line for line in card_lines[1:] if line in {"Запланирована", "Акция идёт", "Завершилась"}), None)
     )
     promo_status_text = next((line for line in card_lines[1:] if line.startswith("Автоакция:")), None)
-    promo_start_at, promo_end_at, confidence = parse_period_text(promo_period_text, reference_year=reference_year)
+    # The short period omits years. Only the matched drawer's explicit start
+    # statement can resolve a December-January interval without guessing.
+    start_statements = re.findall(
+        r"старта автоакции\s+(\d{1,2})\s+([А-Яа-яё]+)\s+(\d{4})\s+в\s+(\d{2}:\d{2})",
+        " ".join(card_lines),
+    ) if title_matched else []
+    explicit_start = start_statements[0] if len(set(start_statements)) == 1 else None
+    promo_start_at, promo_end_at, confidence = parse_period_text(
+        promo_period_text, reference_year=reference_year, explicit_start=explicit_start,
+    )
     temporal_classification = classify_temporal_status(promo_status)
     if temporal_classification == "ambiguous" and title_matched and confidence == "high":
         observed_at = datetime.fromisoformat(snapshot.ts).astimezone(BUSINESS_TIMEZONE).replace(tzinfo=None)
@@ -1738,7 +1747,10 @@ def classify_collector_preflight(card: PromoCardData) -> dict[str, Any]:
     }
 
 
-def parse_period_text(period_text: str, *, reference_year: int) -> tuple[str | None, str | None, str]:
+def parse_period_text(
+    period_text: str, *, reference_year: int,
+    explicit_start: tuple[str, str, str, str] | None = None,
+) -> tuple[str | None, str | None, str]:
     match = re.search(
         r"(?P<start_day>\d{1,2})\s+(?P<start_month>[А-Яа-яё]+)\s+(?P<start_time>\d{2}:\d{2})\s*[→–—-]\s*(?P<end_day>\d{1,2})\s+(?P<end_month>[А-Яа-яё]+)\s+(?P<end_time>\d{2}:\d{2})",
         period_text,
@@ -1749,22 +1761,35 @@ def parse_period_text(period_text: str, *, reference_year: int) -> tuple[str | N
     end_month = _MONTHS.get(match.group("end_month").lower())
     if start_month is None or end_month is None:
         return None, None, "low"
-    if end_month < start_month:
+    try:
+        start_year = reference_year
+        if explicit_start is not None:
+            day, month, year, clock = explicit_start
+            if (int(day), _MONTHS.get(month.lower()), clock) != (
+                int(match.group("start_day")), start_month, match.group("start_time"),
+            ):
+                return None, None, "low"
+            start_year = int(year)
+        if end_month < start_month and explicit_start is None:
+            return None, None, "low"
+        start_at = datetime(
+            start_year,
+            start_month,
+            int(match.group("start_day")),
+            int(match.group("start_time").split(":")[0]),
+            int(match.group("start_time").split(":")[1]),
+        )
+        end_at = datetime(
+            start_year + int(end_month < start_month),
+            end_month,
+            int(match.group("end_day")),
+            int(match.group("end_time").split(":")[0]),
+            int(match.group("end_time").split(":")[1]),
+        )
+    except (TypeError, ValueError, OverflowError):
         return None, None, "low"
-    start_at = datetime(
-        reference_year,
-        start_month,
-        int(match.group("start_day")),
-        int(match.group("start_time").split(":")[0]),
-        int(match.group("start_time").split(":")[1]),
-    )
-    end_at = datetime(
-        reference_year,
-        end_month,
-        int(match.group("end_day")),
-        int(match.group("end_time").split(":")[0]),
-        int(match.group("end_time").split(":")[1]),
-    )
+    if end_at <= start_at:
+        return None, None, "low"
     return start_at.strftime("%Y-%m-%dT%H:%M"), end_at.strftime("%Y-%m-%dT%H:%M"), "high"
 
 

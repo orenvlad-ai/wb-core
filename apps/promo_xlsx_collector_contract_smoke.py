@@ -21,6 +21,8 @@ from packages.adapters.promo_xlsx_collector_block import (  # noqa: E402
     COOKIE_MODAL_SELECTOR,
     DRAWER_CLOSE_SELECTOR,
     DRAWER_OVERLAY_SELECTOR,
+    FLOATING_COOKIE_SELECTOR,
+    FLOATING_COOKIE_NOTICE,
     PROMOTIONS_TIMELINE_PATH,
     PlaywrightPromoCollectorDriver,
     TIMELINE_ACTION_SELECTOR,
@@ -53,6 +55,7 @@ ARTIFACTS = ROOT / "artifacts" / "promo_xlsx_collector_block" / "fixture"
 def main() -> None:
     _assert_manifest_response_callback_never_reads_body()
     _assert_cookie_layer_cleared_before_timeline_identity()
+    _assert_floating_cookie_layer_scoped_before_configure()
     exclude_fixture = json.loads((ARTIFACTS / "workbook_headers__exclude_list_template__fixture.json").read_text(encoding="utf-8"))
     eligible_fixture = json.loads((ARTIFACTS / "workbook_headers__eligible_items_report__fixture.json").read_text(encoding="utf-8"))
     cross_year_fixture = json.loads((ARTIFACTS / "card__cross_year__fixture.json").read_text(encoding="utf-8"))
@@ -159,6 +162,28 @@ def main() -> None:
         assert card.download_action_state == "available", card
     for label in ["04 - 28 сентября", "28 декабря 02:00 – 04 января 01:59"]:
         assert parse_period_text(label, reference_year=2026) == (None, None, "low")
+
+    observed_cross_year = extract_card_data(
+        snapshot=replace(ended_card.state_snapshot, ts="2026-11-27T09:12:45+05:00", has_configure=True,
+            body_excerpt=("Автоакция.Отмечательная распродажа-2 (автоматические скидки)\n"
+                "01 декабря 02:00 – 11 января 01:59(41 день)\nБуду участвовать\n"
+                "Скидка на участвующие товары применится в момент старта автоакции 01 декабря 2026 в\u00a002:00.\n"
+                "Настроить список товаров")),
+        fallback_title="Отмечательная распродажа-2 (автоматические скидки)",
+        source_tab="Доступные", source_filter_code="AVAILABLE", reference_year=2026,
+    )
+    assert observed_cross_year.promo_start_at == "2026-12-01T02:00"
+    assert observed_cross_year.promo_end_at == "2027-01-11T01:59"
+    assert observed_cross_year.temporal_classification == "future"
+    assert parse_period_text("01 декабря 02:00 – 11 января 01:59(41 день)", reference_year=2027,
+        explicit_start=("01", "декабря", "2026", "02:00")) == ("2026-12-01T02:00", "2027-01-11T01:59", "high")
+    assert parse_period_text("01 декабря 02:00 – 11 января 01:59(41 день)", reference_year=2026,
+        explicit_start=("02", "декабря", "2026", "02:00")) == (None, None, "low")
+    for label in ["31 ноября 02:00 – 11 декабря 01:59", "01 ноября 25:00 – 11 ноября 01:59",
+                  "11 ноября 02:00 – 01 ноября 01:59"]:
+        assert parse_period_text(label, reference_year=2026) == (None, None, "low")
+    assert parse_period_text("01 декабря 02:00 – 11 января 01:59", reference_year=2026,
+        explicit_start=("01", "декабря", "0000", "02:00")) == (None, None, "low")
 
     _assert_drawer_capture_is_scoped()
     timeline_candidate = build_timeline_candidate(
@@ -449,6 +474,8 @@ def _assert_cookie_layer_cleared_before_timeline_identity() -> None:
         def locator(self, selector):
             if selector == COOKIE_MODAL_SELECTOR:
                 return modal
+            if selector == FLOATING_COOKIE_SELECTOR:
+                return SimpleNamespace(filter=lambda **_kwargs: SimpleNamespace(count=lambda: 0))
             assert selector == TIMELINE_ACTION_SELECTOR
             return Timeline()
 
@@ -502,6 +529,93 @@ def _assert_cookie_layer_cleared_before_timeline_identity() -> None:
         assert str(exc) == "visible cookie layer has no unique accept control"
     else:
         raise AssertionError("ambiguous accept controls must stop")
+
+
+def _assert_floating_cookie_layer_scoped_before_configure() -> None:
+    clicks: list[str] = []
+
+    class Layer:
+        visible = True
+        text = FLOATING_COOKIE_NOTICE + ", чтобы анализировать, как вы пользуетесь сайтом. Принять"
+        controls = 1
+        matches = 1
+
+        def filter(self, *, has_text):
+            assert has_text == FLOATING_COOKIE_NOTICE
+            return self
+
+        def count(self):
+            return self.matches if FLOATING_COOKIE_NOTICE in self.text else 0
+
+        def evaluate(self, _script):
+            return self.visible
+
+        def inner_text(self):
+            return self.text
+
+        def get_by_text(self, text, *, exact):
+            assert text == "Принять" and exact
+            return SimpleNamespace(count=lambda: self.controls, is_visible=lambda: self.visible,
+                click=self.accept)
+
+        def accept(self, *, timeout):
+            assert timeout == 5000
+            clicks.append("cookie")
+            self.visible = False
+
+    layer = Layer()
+
+    class Page:
+        url = "https://seller.wildberries.ru/dp-promo-calendar?action=3225"
+
+        def locator(self, selector):
+            if selector == COOKIE_MODAL_SELECTOR:
+                return SimpleNamespace(count=lambda: 0)
+            assert selector == FLOATING_COOKIE_SELECTOR
+            return layer
+
+        def get_by_text(self, text, *, exact):
+            assert text == "Настроить список товаров" and exact
+            return SimpleNamespace(first=SimpleNamespace(click=self.configure))
+
+        def configure(self, *, timeout):
+            assert timeout == 8000 and not layer.visible
+            clicks.append("configure")
+
+    driver = PlaywrightPromoCollectorDriver(Path("/tmp/wb-core-floating-cookie-smoke"))
+    driver._page = Page()
+    driver._record_action = lambda *_args: None
+    driver._has_generate = lambda: True
+    driver.capture_state = lambda label: label
+    driver.open_generate_screen("3225")
+    assert clicks == ["cookie", "configure"]
+    assert not driver._cookie_portal_has_visible_content(SimpleNamespace(count=lambda: 0))
+
+    # Participation/contract dialogs with the same button are never accepted.
+    clicks.clear()
+    layer.visible = True
+    layer.text = "Условия участия в акции. Принять"
+    assert driver._dismiss_cookie_banner_before_action() is False
+    assert not clicks and layer.visible
+    layer.text = FLOATING_COOKIE_NOTICE + ". Принять"
+    for controls, matches in [(0, 1), (2, 1), (1, 2)]:
+        layer.controls, layer.matches = controls, matches
+        try:
+            driver.open_generate_screen("ambiguous")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("ambiguous cookie controls/layers must stop before configure")
+        assert not clicks and layer.visible
+    layer.controls = layer.matches = 1
+    layer.text = "Условия участия. " + FLOATING_COOKIE_NOTICE + ". Принять"
+    try:
+        driver.open_generate_screen("mixed-dialog")
+    except RuntimeError as exc:
+        assert "identity is ambiguous" in str(exc)
+    else:
+        raise AssertionError("a surrounding contract must not become a cookie layer")
+    assert not clicks
 
 
 def _assert_manifest_response_callback_never_reads_body() -> None:

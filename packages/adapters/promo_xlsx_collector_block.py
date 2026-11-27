@@ -41,6 +41,8 @@ SERVER_DEFAULT_SESSION_STATE_PATH = "/opt/wb-web-bot/storage_state.json"
 TIMELINE_ACTION_SELECTOR = '[data-testid="timeline-action"]'
 COOKIE_ACCEPT_TEXT = "Принимаю"
 COOKIE_MODAL_SELECTOR = "#Portal-warning-cookies-modal"
+FLOATING_COOKIE_SELECTOR = '[data-floating-ui-focusable]'
+FLOATING_COOKIE_NOTICE = "Мы используем cookies"
 AUTO_PROMO_MODAL_OVERLAY_SELECTOR = '[data-testid="components/auto-promo-modal-overlay"]'
 AUTO_PROMO_MODAL_CLOSE_SELECTOR = (
     '[data-testid="components/auto-promo-modal/close-button-button-interface"]'
@@ -252,7 +254,7 @@ class PlaywrightPromoCollectorDriver:
         timeline = page.locator(TIMELINE_ACTION_SELECTOR)
         block = timeline.nth(candidate.index)
         block.scroll_into_view_if_needed(timeout=5000)
-        self._dismiss_cookie_banner_before_timeline_click()
+        self._dismiss_cookie_banner_before_action()
         self._record_action(
             "click_timeline_candidate",
             {
@@ -277,7 +279,7 @@ class PlaywrightPromoCollectorDriver:
                 drawer_open = self._count(DRAWER_CLOSE_SELECTOR) > 0
                 if attempt or not cookie_obstruction or drawer_open:
                     raise
-                if not self._dismiss_cookie_banner_before_timeline_click():
+                if not self._dismiss_cookie_banner_before_action():
                     raise
                 self._record_action("retry_timeline_after_cookie_obstruction", {
                     "index": candidate.index,
@@ -288,24 +290,36 @@ class PlaywrightPromoCollectorDriver:
         time.sleep(0.5)
         return self.capture_state(f"card__{_slug(getattr(candidate, 'title', 'candidate'))}")
 
-    def _dismiss_cookie_banner_before_timeline_click(self) -> bool:
-        """Dismiss only WB's identified cookie layer before it can intercept a card."""
+    def _dismiss_cookie_banner_before_action(self, action: str = "timeline") -> bool:
+        """Dismiss only WB's identified cookie layer before the next UI action."""
         page = self._require_page()
         modal = page.locator(COOKIE_MODAL_SELECTOR)
-        if modal.count() == 0:
-            return False
+        accept_text = COOKIE_ACCEPT_TEXT
+        selector = COOKIE_MODAL_SELECTOR
+        if modal.count() > 1:
+            raise RuntimeError("cookie layer identity is ambiguous")
+        if modal.count() == 0 or not self._cookie_portal_has_visible_content(modal):
+            # WB's new banner has no legacy portal/test-id. Scope it by the
+            # observed cookie notice; never accept a generic floating dialog.
+            modal = page.locator(FLOATING_COOKIE_SELECTOR).filter(has_text=FLOATING_COOKIE_NOTICE)
+            accept_text = "Принять"
+            selector = f"{FLOATING_COOKIE_SELECTOR}:cookie_notice"
+            if modal.count() == 0:
+                return False
         if modal.count() != 1:
             raise RuntimeError("cookie layer identity is ambiguous")
         # WB portal roots can have zero dimensions while fixed children remain
         # visible and intercept pointer events. Inspect the scoped contents.
         if not self._cookie_portal_has_visible_content(modal):
             return False
-        accept = modal.get_by_text(COOKIE_ACCEPT_TEXT, exact=True)
+        if accept_text == "Принять" and not modal.inner_text().strip().startswith(FLOATING_COOKIE_NOTICE):
+            raise RuntimeError("floating cookie notice identity is ambiguous")
+        accept = modal.get_by_text(accept_text, exact=True)
         if accept.count() != 1 or not accept.is_visible():
             raise RuntimeError("visible cookie layer has no unique accept control")
-        self._record_action("click_cookie_accept_before_timeline", {
-            "selector": COOKIE_MODAL_SELECTOR,
-            "text": COOKIE_ACCEPT_TEXT,
+        self._record_action(f"click_cookie_accept_before_{action}", {
+            "selector": selector,
+            "text": accept_text,
             "url": page.url,
         })
         accept.click(timeout=5000)
@@ -314,6 +328,8 @@ class PlaywrightPromoCollectorDriver:
 
     @staticmethod
     def _cookie_portal_has_visible_content(modal: Any) -> bool:
+        if modal.count() == 0:
+            return False
         return bool(modal.evaluate("""root => [root, ...root.querySelectorAll('*')].some(node => {
             const style = getComputedStyle(node);
             if (style.display === 'none' || style.visibility !== 'visible') return false;
@@ -322,6 +338,7 @@ class PlaywrightPromoCollectorDriver:
 
     def open_generate_screen(self, slug: str) -> CollectorStateSnapshot:
         page = self._require_page()
+        self._dismiss_cookie_banner_before_action("configure")
         self._record_action("click_configure", {"slug": slug, "url": page.url})
         page.get_by_text(CONFIGURE_BUTTON_TEXT, exact=True).first.click(timeout=8000)
         self._wait_for(lambda: self._has_generate() or self._has_download(), timeout_sec=12)
@@ -329,6 +346,7 @@ class PlaywrightPromoCollectorDriver:
 
     def generate_file_and_wait_ready(self, slug: str) -> CollectorStateSnapshot:
         page = self._require_page()
+        self._dismiss_cookie_banner_before_action("generate")
         self._record_action("click_generate", {"slug": slug, "url": page.url})
         page.get_by_text(GENERATE_BUTTON_TEXT, exact=True).first.click(timeout=8000)
         self._wait_for(lambda: self._has_ready() or self._has_download(), timeout_sec=20)
@@ -336,6 +354,7 @@ class PlaywrightPromoCollectorDriver:
 
     def download_current_workbook(self) -> DownloadArtifact:
         page = self._require_page()
+        self._dismiss_cookie_banner_before_action("download")
         self._record_action("click_download", {"url": page.url})
         with page.expect_download(timeout=15000) as download_info:
             page.get_by_text(DOWNLOAD_BUTTON_TEXT, exact=True).first.click(timeout=8000)

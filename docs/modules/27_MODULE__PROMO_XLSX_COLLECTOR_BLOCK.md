@@ -232,6 +232,11 @@ Campaign manifest metadata is a read-only Seller Portal network observation used
   - `promo_start_at = null`
   - `promo_end_at = null`
   - `period_parse_confidence = low`
+- Исключение: matched drawer содержит единственное явное утверждение
+  `старта автоакции DD месяца YYYY в HH:MM`, совпадающее с началом short period.
+  Тогда начало берётся с указанным годом, конец после декабрьского начала —
+  в следующем году. Без этого доказательства, при несовпадении или невалидной
+  календарной дате результат остаётся `low`/null.
 - Canonical drawer reset внутри repo совпадает с доказанным live seam:
   - close selector внутри `#Portal-drawer`
   - waiting for overlay disappearance
@@ -247,10 +252,14 @@ Campaign manifest metadata is a read-only Seller Portal network observation used
 
 # 9. Cookie obstruction before campaign identity
 
-Before every timeline-card opening, the driver inspects the identified cookie
-portal and its visible descendants. A zero-size portal root does not imply that
-its fixed-position children are hidden. The exact scoped `Принять` control must
-be unique and visible; missing/ambiguous controls stop the attempt.
+Before timeline, configure, generate and download actions, the driver inspects
+the identified cookie layer and its visible descendants. It accepts only the
+legacy `#Portal-warning-cookies-modal` with `Принимаю`, or a unique
+`[data-floating-ui-focusable]` layer starting with `Мы используем cookies` and
+containing the unique visible `Принять` control. Other floating dialogs do not
+qualify. A zero-size portal root does not imply that its fixed-position children
+are hidden; removal of the layer also proves dismissal. Missing/ambiguous
+controls stop the attempt.
 
 If the cookie layer appears after preflight, the same read-only card opening may
 be tried once more only when the Playwright call log identifies that exact cookie
