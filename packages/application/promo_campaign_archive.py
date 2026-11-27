@@ -383,13 +383,24 @@ def validate_promo_campaign_artifact(
             state = ARTIFACT_STATE_CORRUPTED
             reason = inspection_reason
 
+    if state == ARTIFACT_STATE_COMPLETE and requested_slot_date is not None:
+        observed_date = _observation_date(record.downloaded_at)
+        if observed_date is None or observed_date > requested_slot_date:
+            state = ARTIFACT_STATE_STALE
+            reason = ("workbook_observation_time_unproven" if observed_date is None else
+                      "workbook_observed_after_requested_slot")
+
     if (
         state == ARTIFACT_STATE_COMPLETE
         and deep_workbook_check
         and workbook_path is not None
         and workbook_exists
     ):
-        workbook_reason = _workbook_open_failure_reason(workbook_path)
+        workbook_reason = (
+            "workbook_fingerprint_mismatch"
+            if record.workbook_fingerprint and _sha256_path(workbook_path) != record.workbook_fingerprint
+            else _workbook_open_failure_reason(workbook_path)
+        )
         if workbook_reason:
             state = ARTIFACT_STATE_CORRUPTED
             reason = workbook_reason
@@ -1216,6 +1227,15 @@ def _sync_archive_record_from_metadata(
     archive_dir.mkdir(parents=True, exist_ok=True)
 
     existing_record = _load_archive_record(archive_dir / ARCHIVE_RECORD_FILENAME)
+    if (existing_record is not None
+            and _metadata_has_qualified_dates(existing_record.metadata)
+            and not _metadata_has_qualified_dates(metadata)):
+        # A failed later drawer capture cannot prove that a previously known
+        # campaign stopped covering its interval. Keep that operand, including
+        # its missing-workbook failure; the failed observation remains in runs.
+        # Replaying retained runs also repairs an archive already downgraded
+        # to null dates, without deleting evidence or inventing price rows.
+        return "unchanged"
     workbook_src = promo_dir / "workbook.xlsx"
     inspection_src = promo_dir / "workbook_inspection.json"
     workbook_present = workbook_src.exists()
@@ -1514,6 +1534,15 @@ def _record_dates_parseable(record: PromoCampaignArchiveRecord) -> bool:
     except Exception:
         return False
     return True
+
+
+def _metadata_has_qualified_dates(metadata: PromoMetadata) -> bool:
+    if metadata.period_parse_confidence != "high":
+        return False
+    try:
+        return datetime.fromisoformat(metadata.promo_start_at) < datetime.fromisoformat(metadata.promo_end_at)
+    except (TypeError, ValueError):
+        return False
 
 
 def _candidate_workbook_paths(

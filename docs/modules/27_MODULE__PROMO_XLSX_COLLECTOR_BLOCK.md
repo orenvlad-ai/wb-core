@@ -260,6 +260,22 @@ containing the unique visible `Принять` control. Other floating dialogs d
 qualify. A zero-size portal root does not imply that its fixed-position children
 are hidden; removal of the layer also proves dismissal. Missing/ambiguous
 controls stop the attempt.
+The notice comparison normalizes whitespace, including WB's nonbreaking spaces.
+
+An unqualified later period never replaces a previously qualified interval for
+the same archive identity, even when its workbook is missing. Normal sync can
+repair an already downgraded archive from retained qualified run metadata; the
+failed later run remains available as evidence. Missing workbooks remain fatal
+for a covering campaign. Current collection with ambiguous identities/periods or
+a truncated timeline cannot certify a nonempty archived subset as complete.
+Successful hydration and a processed outcome for every enumerated campaign are
+required; strict existing ended timeline/manifest exclusions need no drawer.
+Replay cannot use a workbook first observed after the requested business date,
+including when only its normalized rows remain. Unknown observation time also
+remains unavailable. Deep validation binds actual workbook bytes to their stored
+fingerprint. A newer changed workbook cannot inherit an older observation date.
+The former interval-only test that used a 20 April download for 17 April now
+uses a genuinely dated 17 April operand; new negative tests cover later files.
 
 If the cookie layer appears after preflight, the same read-only card opening may
 be tried once more only when the Playwright call log identifies that exact cookie

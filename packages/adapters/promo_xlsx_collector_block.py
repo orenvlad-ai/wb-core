@@ -312,7 +312,7 @@ class PlaywrightPromoCollectorDriver:
         # visible and intercept pointer events. Inspect the scoped contents.
         if not self._cookie_portal_has_visible_content(modal):
             return False
-        if accept_text == "Принять" and not modal.inner_text().strip().startswith(FLOATING_COOKIE_NOTICE):
+        if accept_text == "Принять" and not " ".join(modal.inner_text().split()).startswith(FLOATING_COOKIE_NOTICE):
             raise RuntimeError("floating cookie notice identity is ambiguous")
         accept = modal.get_by_text(accept_text, exact=True)
         if accept.count() != 1 or not accept.is_visible():

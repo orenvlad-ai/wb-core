@@ -33,6 +33,9 @@ from packages.contracts.promo_xlsx_collector_block import PromoMetadata  # noqa:
 
 
 def main() -> None:
+    _assert_known_missing_campaign_survives_bad_later_capture()
+    _assert_new_workbook_cannot_certify_earlier_dates()
+    _assert_revised_workbook_cannot_reuse_old_observation_date()
     with TemporaryDirectory(prefix="promo-campaign-archive-integrity-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         _write_promo_fixture(
@@ -505,6 +508,111 @@ def _write_identity_summary(runtime_dir: Path, run_name: str, ids: list[int], *,
         "promos": [{"promo_id": promo_id, "metadata": {"campaign_identity_match": True, "ui_loaded_success": True}} for promo_id in ids],
     }
     (run_dir / "run_summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _assert_known_missing_campaign_survives_bad_later_capture() -> None:
+    from packages.application.promo_campaign_archive import load_promo_campaign_archive
+    with TemporaryDirectory(prefix="promo-null-period-regression-") as tmp:
+        runtime = Path(tmp)
+        common = dict(runtime_dir=runtime, promo_folder="3225__pending__missing", promo_id=3225,
+            period_id=None, title="Known missing workbook", confidence="high", workbook_kind="missing",
+            coverage_start="2026-11-24T02:00", coverage_end="2026-12-01T01:59")
+        _write_promo_fixture(run_name="2026-11-26__known", **common)
+        sync_promo_campaign_archive(runtime)
+        record = load_promo_campaign_archive(runtime)[0]
+        _write_promo_fixture(run_name="2026-11-27__bad", **common)
+        bad = runtime / "promo_xlsx_collector_runs/2026-11-27__bad/promos/3225__pending__missing/metadata.json"
+        payload = json.loads(bad.read_text())
+        payload.update(promo_start_at=None, promo_end_at=None, period_parse_confidence="low")
+        bad.write_text(json.dumps(payload))
+        for damaged in (False, True):
+            if damaged:
+                # Reproduce the already-installed corrupt archive; retain all
+                # original runs and repair by the ordinary sync, never reset.
+                archive_path = Path(record.archive_dir) / "archive_record.json"
+                current = json.loads(archive_path.read_text())
+                current["metadata"].update(promo_start_at=None, promo_end_at=None, period_parse_confidence="low")
+                archive_path.write_text(json.dumps(current))
+                (Path(record.archive_dir) / "metadata.json").write_text(json.dumps(current["metadata"]))
+            sync_promo_campaign_archive(runtime)
+            restored = load_promo_campaign_archive(runtime)[0]
+            assert restored.metadata.promo_start_at == "2026-11-24T02:00"
+            assert restored.metadata.promo_end_at == "2026-12-01T01:59"
+            for day in ("2026-11-24", "2026-11-25", "2026-11-26", "2026-11-27"):
+                result = materialize_promo_result_from_archive(runtime_dir=runtime, snapshot_date=day,
+                    requested_nm_ids=[123456])
+                assert result.kind == "incomplete" and not result.items
+                assert "missing_campaign_artifacts=" in result.detail
+            assert json.loads(bad.read_text())["promo_start_at"] is None
+        # A later genuine observation with qualified bounds still supersedes.
+        payload.update(promo_start_at="2026-11-25T02:00", promo_end_at="2026-12-02T01:59", period_parse_confidence="high")
+        bad.write_text(json.dumps(payload))
+        sync_promo_campaign_archive(runtime)
+        assert load_promo_campaign_archive(runtime)[0].metadata.promo_start_at == "2026-11-25T02:00"
+
+
+def _assert_new_workbook_cannot_certify_earlier_dates() -> None:
+    from packages.application.promo_campaign_archive import load_promo_campaign_archive, PromoCampaignArchiveSyncSummary
+    with TemporaryDirectory(prefix="promo-workbook-observation-cutoff-") as tmp:
+        runtime = Path(tmp)
+        _write_promo_fixture(runtime_dir=runtime, run_name="2026-11-27__new", promo_folder="3225__2869__new",
+            promo_id=3225, period_id=2869, title="Newly downloaded workbook", confidence="high", workbook_kind="valid",
+            coverage_start="2026-11-24T02:00", coverage_end="2026-12-01T01:59")
+        _write_price_truth(runtime_dir=runtime, snapshot_date="2026-11-27", nm_id=123456, discounted_price=900)
+        sync_promo_campaign_archive(runtime)
+        record = load_promo_campaign_archive(runtime)[0]
+        for normalized_only in (False, True):
+            if normalized_only:
+                Path(record.workbook_path).unlink()
+            for day in ("2026-11-24", "2026-11-25", "2026-11-26", "2026-11-27"):
+                result = materialize_promo_result_from_archive(runtime_dir=runtime, snapshot_date=day,
+                    requested_nm_ids=[123456], sync_summary=PromoCampaignArchiveSyncSummary())
+                if day == "2026-11-27":
+                    assert result.kind == "success" and result.items[0].promo_participation == 1
+                else:
+                    assert result.kind == "incomplete" and not result.items
+                    assert "workbook_observed_after_requested_slot" in result.detail
+
+
+def _assert_revised_workbook_cannot_reuse_old_observation_date() -> None:
+    from packages.application.promo_campaign_archive import (
+        load_promo_campaign_archive, PromoCampaignArchiveSyncSummary, validate_promo_campaign_artifact,
+    )
+    from datetime import date
+    import shutil
+    with TemporaryDirectory(prefix="promo-revised-plan-price-") as tmp:
+        runtime = Path(tmp)
+        common = dict(runtime_dir=runtime, promo_folder="3225__2869__versioned", promo_id=3225,
+            period_id=2869, title="Versioned workbook", confidence="high", workbook_kind="valid",
+            coverage_start="2026-11-24T02:00", coverage_end="2026-12-01T01:59")
+        _write_promo_fixture(run_name="2026-11-24__old", **common)
+        _write_price_truth(runtime_dir=runtime, snapshot_date="2026-11-26", nm_id=123456, discounted_price=900)
+        sync_promo_campaign_archive(runtime)
+        old = load_promo_campaign_archive(runtime)[0]
+        result = materialize_promo_result_from_archive(runtime_dir=runtime, snapshot_date="2026-11-26",
+            requested_nm_ids=[123456], sync_summary=PromoCampaignArchiveSyncSummary())
+        assert result.kind == "success" and result.items[0].promo_entry_price_best == 999
+        _write_promo_fixture(run_name="2026-11-27__new", **common)
+        new_path = runtime / "promo_xlsx_collector_runs/2026-11-27__new/promos/3225__2869__versioned/workbook.xlsx"
+        workbook = Workbook(); workbook.active.append(["Артикул WB", "Плановая цена для акции"])
+        workbook.active.append([123456, 888]); workbook.save(new_path); workbook.close()
+        # New bytes under the old metadata/fingerprint never inherit old truth.
+        shutil.copy2(new_path, old.workbook_path)
+        validation = validate_promo_campaign_artifact(old, requested_slot_date=date(2026, 11, 26), deep_workbook_check=True)
+        assert validation.validation_failure_reason == "workbook_fingerprint_mismatch"
+        sync_promo_campaign_archive(runtime)
+        current = load_promo_campaign_archive(runtime)[0]
+        assert current.downloaded_at.startswith("2026-11-27")
+        assert current.workbook_fingerprint != old.workbook_fingerprint
+        result = materialize_promo_result_from_archive(runtime_dir=runtime, snapshot_date="2026-11-26",
+            requested_nm_ids=[123456], sync_summary=PromoCampaignArchiveSyncSummary())
+        assert result.kind == "incomplete" and "workbook_observed_after_requested_slot" in result.detail
+        _write_price_truth(runtime_dir=runtime, snapshot_date="2026-11-27", nm_id=123456, discounted_price=900)
+        result = materialize_promo_result_from_archive(runtime_dir=runtime, snapshot_date="2026-11-27",
+            requested_nm_ids=[123456], sync_summary=PromoCampaignArchiveSyncSummary())
+        assert result.kind == "success" and result.items[0].promo_entry_price_best == 888
+        assert result.items[0].promo_participation == 0
+        assert (runtime / "promo_xlsx_collector_runs/2026-11-24__old/promos/3225__2869__versioned/workbook.xlsx").is_file()
 
 
 def _write_promo_fixture(
