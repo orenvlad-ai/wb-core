@@ -1368,6 +1368,7 @@
         "packages/adapters/seller_portal_web_source_collector.py",
         "apps/seller_portal_web_source_collect.py",
         "apps/seller_portal_scoped_search_collector_smoke.py",
+        "packages/application/web_vitrina_observed_source_totals.py",
         "apps/web_vitrina_web_source_publication.py",
         "apps/web_vitrina_web_source_publication_smoke.py",
         "packages/application/registry_upload_http_entrypoint.py",
@@ -1385,6 +1386,7 @@
         "apps/web_vitrina_source_history_repair*.py",
         "packages/application/web_vitrina_source_history_repair.py",
         "packages/application/web_vitrina_history_store.py",
+        "packages/application/web_vitrina_observed_source_totals.py",
         "apps/web_vitrina_web_source_publication.py"
       ],
       "commands": [
@@ -1557,6 +1559,13 @@
     },
     "web_vitrina_history_activation": {
       "patterns": [
+        "packages/application/web_vitrina_dated_source_quality.py",
+        "packages/application/web_vitrina_history_frozen_adapter.py",
+        "packages/application/web_vitrina_source_history_repair.py",
+        "packages/application/web_source_snapshot_block.py",
+        "packages/application/web_vitrina_observed_source_totals.py",
+        "apps/web_vitrina_web_source_publication.py",
+        "apps/web_vitrina_dated_source_quality_smoke.py",
         "packages/application/ads_spend_presentation.py",
         "packages/application/ads_spend_verification.py",
         "packages/application/ads_snapshot_payload.py",
@@ -1611,6 +1620,7 @@
         "packages/application/wb_incident_policy.py"
       ],
       "commands": [
+        ["python3", "apps/web_vitrina_dated_source_quality_smoke.py"],
         ["python3", "apps/web_vitrina_history_activation_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5"]
@@ -1830,11 +1840,12 @@
         "packages/application/owned_history_native_ack.py",
         "packages/application/owned_history_source_watch.py",
         "apps/owned_history_completion_smoke.py",
+        "apps/owned_history_handoff_smoke.py",
         "apps/owned_history_diagnostics_smoke.py",
         "apps/business_data_cycle_owned_integration_smoke.py",
         "apps/web_vitrina_history_candidate_build.py"
       ],
-      "commands": [["python3", "apps/owned_history_worker_smoke.py"], ["python3", "apps/owned_history_completion_smoke.py"], ["python3", "apps/owned_history_diagnostics_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"]],
+      "commands": [["python3", "apps/owned_history_worker_smoke.py"], ["python3", "apps/owned_history_completion_smoke.py"], ["python3", "apps/owned_history_handoff_smoke.py"], ["python3", "apps/owned_history_diagnostics_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "finance_backup_handoff": {

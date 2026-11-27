@@ -24,6 +24,12 @@ _DAY = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _COUNTS = {"elapsed_ms", "returncode", "http_status", "count", "warnings", "budget_ms",
            "inner_ms", "before_cleanup_rc", "completed", "pid_child", "attempt", "line", "rss_peak_kib", "errno", "dropped_before"}
 _IDS = {"cycle_id", "job_id", "invocation", "warehouse_id", "receipt_id", "proof_sha256"}
+_HISTORY_ENUMS = {
+    "reason_code": {"history_source_changed_during_readback", "history_source_changed_after_readback"},
+    "source_class": {"operational_database", "operational_wal", "operational_database_or_wal", "auxiliary", "unknown"},
+    "event_class": {"modified", "attributes_changed", "file_replaced_or_removed", "source_directory_changed",
+                    "queue_overflow", "unmount", "queue_limit_or_unavailable", "unknown"},
+}
 
 
 def enabled():
@@ -36,6 +42,8 @@ def _fields(values):
         if key in _COUNTS and type(value) is int:
             result[key] = value
         elif key in _IDS and isinstance(value, str) and _ID.fullmatch(value):
+            result[key] = value
+        elif key in _HISTORY_ENUMS and isinstance(value, str) and value in _HISTORY_ENUMS[key]:
             result[key] = value
         elif key == "error_kind" and value in {"timeout", "memory", "permission", "os", "value", "key", "type", "exit", "exception"}:
             result[key] = value

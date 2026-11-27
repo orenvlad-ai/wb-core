@@ -520,8 +520,12 @@ class LinuxWorkerSmoke(unittest.TestCase):
                 self.assertTrue(admission_idle(runtime)["idle"])
                 self.assertTrue(heavy_admission_status(runtime)["idle"])
                 stat = Path(f"/proc/{pid}/stat")
-                if stat.exists():
-                    self.assertIn(stat.read_text().split(") ", 1)[1].split()[0], {"Z", "X"})
+                try:
+                    proc_status = stat.read_text()
+                except (FileNotFoundError, ProcessLookupError):
+                    pass  # The kernel reaped the child before or during the read.
+                else:
+                    self.assertIn(proc_status.split(") ", 1)[1].split()[0], {"Z", "X"})
             finally:
                 if parent.poll() is None:
                     os.killpg(parent.pid, signal.SIGKILL)

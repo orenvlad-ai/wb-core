@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from apps.owned_history_worker_smoke import ownership, NOW, logical_source_digest, simple_runtime
+from apps.owned_history_handoff_smoke import _completion_fixture
 from packages.application import owned_history_worker as supervisor
 from packages.application.owned_history_worker_capability import HistoryDelegationError
 from packages.application.web_vitrina_history_store import HistoryStore
@@ -469,6 +470,27 @@ conn.close()
 
 @unittest.skipUnless(sys.platform == 'linux', 'requires Linux source events')
 class HistorySourceWatchTests(unittest.TestCase):
+    def test_revalidation_classification_drains_mixed_queue_and_logs_no_paths(self):
+        from packages.application.owned_history_source_watch import HistorySourceWatch
+        from packages import procedure_journal
+        for auxiliary in (False, True):
+            with self.subTest(auxiliary=auxiliary), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); db = root / 'operational.sqlite3'; db.write_bytes(b'initial')
+                with closing(HistorySourceWatch(root, db)) as watch, patch.object(procedure_journal, 'event') as logged:
+                    watch.arm()
+                    db.write_bytes(b'unrelated')
+                    if auxiliary:
+                        path = root / '.auto-updates-policy.json'
+                        path.write_text('{}'); path.unlink()
+                    with self.assertRaises(HistoryDelegationError):
+                        watch.check()
+                    self.assertEqual(watch.operational_revalidation_allowed, not auxiliary)
+                    call = logged.call_args
+                    self.assertEqual(call.args, ('history','source_watch_refused','failed'))
+                    self.assertEqual(set(call.kwargs), {'reason_code','source_class','event_class'})
+                    self.assertEqual(call.kwargs['source_class'], 'auxiliary' if auxiliary else 'operational_database')
+                    self.assertNotIn(str(root), repr(call))
+
     def test_transient_auxiliary_and_parent_handoff(self):
         from packages.application.owned_history_source_watch import HistorySourceWatch
         with tempfile.TemporaryDirectory() as directory:
@@ -516,16 +538,14 @@ class HistorySourceWatchTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == 'linux', 'actual inherited kernel authority required')
 class CompletionTests(unittest.TestCase):
+
+
+
+
+
+
     def fixture(self):
-        from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtureServer
-        from packages.application.ready_publication import ensure_publication_schema
-        fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True, ready_days=14, now=NOW)
-        self.enterContext(fixture)
-        keeper = self.enterContext(sqlite3.connect(fixture.entrypoint.runtime.db_path))
-        keeper.execute('PRAGMA journal_mode=WAL'); ensure_publication_schema(keeper); keeper.commit()
-        keeper.execute('SELECT 1 FROM sqlite_master').fetchone()
-        root = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'candidate'
-        return fixture.entrypoint.runtime, root, keeper
+        return _completion_fixture(self)
 
     def test_real_many_portions_and_exact_current_no_source_writes(self):
         runtime, root, keeper = self.fixture()
@@ -600,6 +620,7 @@ class CompletionTests(unittest.TestCase):
             self.assertEqual(calls, ['capture', 'verify', 'portion', 'verify'])
             self.assertEqual(result['portions'], 1)
             self.assertEqual(result['edition_id'], HistoryStore(root / 'history')._current()['current'])
+
 
     def test_no_dated_progress_stops_even_if_cache_grows(self):
         runtime, root, keeper = self.fixture()
@@ -748,6 +769,8 @@ class ClosedCompletionTests(unittest.TestCase):
                         with self.assertRaisesRegex(HistoryDelegationError, 'owner_or_target_changed'):
                             worker.complete(fixture.NOW, backfill_dates=tuple(fixture.DAYS),
                                 closed_receipt=case.backlog, total_seconds=180)
+                        self.assertTrue(worker._ack_started)
+                        self.assertFalse(worker._handoff_revalidation_used)
                 self.assertEqual(case.backlog.path.read_bytes(), receipt_before)
                 before = logical_source_digest(case.runtime.db_path)
                 with patch('apps.web_vitrina_history_candidate_build.runtime_storage_admission'), \

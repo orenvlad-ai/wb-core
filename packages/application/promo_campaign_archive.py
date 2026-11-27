@@ -383,13 +383,24 @@ def validate_promo_campaign_artifact(
             state = ARTIFACT_STATE_CORRUPTED
             reason = inspection_reason
 
+    if state == ARTIFACT_STATE_COMPLETE and requested_slot_date is not None:
+        observed_date = _observation_date(record.downloaded_at)
+        if observed_date is None or observed_date > requested_slot_date:
+            state = ARTIFACT_STATE_STALE
+            reason = ("workbook_observation_time_unproven" if observed_date is None else
+                      "workbook_observed_after_requested_slot")
+
     if (
         state == ARTIFACT_STATE_COMPLETE
         and deep_workbook_check
         and workbook_path is not None
         and workbook_exists
     ):
-        workbook_reason = _workbook_open_failure_reason(workbook_path)
+        workbook_reason = (
+            "workbook_fingerprint_mismatch"
+            if record.workbook_fingerprint and _sha256_path(workbook_path) != record.workbook_fingerprint
+            else _workbook_open_failure_reason(workbook_path)
+        )
         if workbook_reason:
             state = ARTIFACT_STATE_CORRUPTED
             reason = workbook_reason
@@ -1216,6 +1227,15 @@ def _sync_archive_record_from_metadata(
     archive_dir.mkdir(parents=True, exist_ok=True)
 
     existing_record = _load_archive_record(archive_dir / ARCHIVE_RECORD_FILENAME)
+    if (existing_record is not None
+            and _metadata_has_qualified_dates(existing_record.metadata)
+            and not _metadata_has_qualified_dates(metadata)):
+        # A failed later drawer capture cannot prove that a previously known
+        # campaign stopped covering its interval. Keep that operand, including
+        # its missing-workbook failure; the failed observation remains in runs.
+        # Replaying retained runs also repairs an archive already downgraded
+        # to null dates, without deleting evidence or inventing price rows.
+        return "unchanged"
     workbook_src = promo_dir / "workbook.xlsx"
     inspection_src = promo_dir / "workbook_inspection.json"
     workbook_present = workbook_src.exists()
@@ -1514,6 +1534,75 @@ def _record_dates_parseable(record: PromoCampaignArchiveRecord) -> bool:
     except Exception:
         return False
     return True
+
+
+def _metadata_has_qualified_dates(metadata: PromoMetadata) -> bool:
+    if metadata.period_parse_confidence != "high":
+        return False
+    try:
+        return datetime.fromisoformat(metadata.promo_start_at) < datetime.fromisoformat(metadata.promo_end_at)
+    except (TypeError, ValueError):
+        return False
+
+
+def proven_archive_replay_omissions(prior: Any, replay: Any, snapshot_date: str) -> list[int]:
+    """Reject only an exhaustive old replay contradicted by dated missing material.
+
+    Transient failures, opaque snapshots and already-included campaign identities
+    do not establish an omission. This is a read-only comparison, not retraction.
+    """
+    if (getattr(prior, "kind", None) != "success" or getattr(replay, "kind", None) != "incomplete"
+            or getattr(prior, "snapshot_date", None) != snapshot_date
+            or getattr(replay, "snapshot_date", None) != snapshot_date):
+        return []
+    wanted = {"archive_mode", "archive_keys", "usable_campaigns"}
+    fields: dict[str, str] = {}
+    for part in str(getattr(prior, "detail", "")).split(";"):
+        if "=" not in part:
+            continue
+        key, value = (piece.strip() for piece in part.split("=", 1))
+        if key in wanted:
+            if key in fields:
+                return []
+            fields[key] = value
+    if fields.get("archive_mode") != "interval_replay" or set(fields) != wanted:
+        return []
+    try:
+        count = int(fields["usable_campaigns"])
+        keys = fields["archive_keys"].split(",") if fields["archive_keys"] else []
+        matches = [re.fullmatch(r"([1-9]\d*)__(?:[1-9]\d*|pending)__[\w-]+", key) for key in keys]
+        if count != len(keys) or len(set(keys)) != count or not all(matches):
+            return []
+        if getattr(prior, "current_promos_downloaded", None) != count:
+            return []
+        prior_ids = {int(match.group(1)) for match in matches}
+        day = date.fromisoformat(snapshot_date)
+    except (TypeError, ValueError):
+        return []
+    proven = set()
+    diagnostics = getattr(replay, "diagnostics", None) or {}
+    if not isinstance(diagnostics, dict) or not isinstance(diagnostics.get("fatal_missing_artifacts"), list):
+        return []
+    for failure in diagnostics["fatal_missing_artifacts"]:
+        if not isinstance(failure, dict):
+            continue
+        promo_id = failure.get("promo_id")
+        if type(promo_id) is not int or promo_id <= 0 or promo_id in prior_ids:
+            continue
+        if failure.get("date_confidence") != "high" or failure.get("validation_failure_reason") not in {
+            ARTIFACT_REASON_METADATA_ONLY_TRUE_ARTIFACT_LOSS, "workbook_file_missing",
+            "workbook_observed_after_requested_slot", "workbook_observation_time_unproven",
+        }:
+            continue
+        coverage = failure.get("coverage_dates") or {}
+        try:
+            start = date.fromisoformat(coverage["promo_start_at"][:10])
+            end = date.fromisoformat(coverage["promo_end_at"][:10])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if start <= day <= end:
+            proven.add(promo_id)
+    return sorted(proven)
 
 
 def _candidate_workbook_paths(

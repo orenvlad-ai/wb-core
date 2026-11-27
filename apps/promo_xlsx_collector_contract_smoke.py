@@ -536,7 +536,7 @@ def _assert_floating_cookie_layer_scoped_before_configure() -> None:
 
     class Layer:
         visible = True
-        text = FLOATING_COOKIE_NOTICE + ", чтобы анализировать, как вы пользуетесь сайтом. Принять"
+        text = "Мы\u00a0используем cookies, чтобы\u00a0анализировать, как\u00a0вы\u00a0пользуетесь сайтом. Принять"
         controls = 1
         matches = 1
 
@@ -545,7 +545,7 @@ def _assert_floating_cookie_layer_scoped_before_configure() -> None:
             return self
 
         def count(self):
-            return self.matches if FLOATING_COOKIE_NOTICE in self.text else 0
+            return self.matches if FLOATING_COOKIE_NOTICE in " ".join(self.text.split()) else 0
 
         def evaluate(self, _script):
             return self.visible

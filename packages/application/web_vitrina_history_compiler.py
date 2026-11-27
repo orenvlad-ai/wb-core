@@ -95,6 +95,7 @@ class NativeDatedCompiler:
     prepared_availability: dict | None = None
     lifecycle_quality_resolver: Any = None
     group_blocks: bool = False
+    source_scope_reader: Any = None
 
     def __post_init__(self) -> None:
         if self.now.tzinfo is None or active_window_read_context() is None:
@@ -205,8 +206,15 @@ class NativeDatedCompiler:
             if "no materialized row template" not in str(exc):
                 raise
             membership = []
+        dated_cells = {row_id: by_date[day] for row_id, by_date in cells.items()}
+        source_quality = None
+        if self.source_scope_reader is not None:
+            from packages.application.web_vitrina_dated_source_quality import verified_source_quality
+            dated_cells, source_quality = verified_source_quality(
+                self.runtime, day, dated_cells, self.source_scope_reader(day))
         return {"contract": CONTRACT, "date": day,
             "context_epoch": self.context_epoch,
             "accepted_ready_available": self.availability[day],
             "members": membership,
-            "cells": {row_id: by_date[day] for row_id, by_date in cells.items()}}
+            **({'source_metric_quality': source_quality} if source_quality is not None else {}),
+            "cells": dated_cells}

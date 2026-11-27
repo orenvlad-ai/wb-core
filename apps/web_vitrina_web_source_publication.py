@@ -25,7 +25,8 @@ from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurren
 from packages.application.ready_publication import ExpectedReady, replace_ready
 from packages.application.seller_funnel_snapshot_block import transform_legacy_payload as funnel_payload
 from packages.application.sheet_vitrina_v1 import _column_name
-from packages.application.web_source_snapshot_block import observed_search_ctr, transform_legacy_payload as search_payload
+from packages.application.web_source_snapshot_block import transform_legacy_payload as search_payload
+from packages.application.web_vitrina_observed_source_totals import observed_source_totals
 from packages.application.web_vitrina_history_group_repair import _catalog, _hash, _unit
 from packages.application.web_vitrina_history_store import HistoryStore
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
@@ -407,17 +408,7 @@ def project(plan, observations, nm_ids, operation_id, *, history_roster=None, ad
         items={i['nm_id']:i for i in o['items'] if i['nm_id'] in dated_ids}
         missing=sorted(dated_ids-set(items))
         if not items:raise ValueError('source-has-no-applicable-sku')
-        if source=='seller_funnel_snapshot':
-            totals={'total_view_count':sum(i['view_count'] for i in items.values()),
-                    'total_open_card_count':sum(i['open_card_count'] for i in items.values())}
-        else:
-            views=sum(i['views_current'] for i in items.values())
-            totals = {
-                'total_views_current': views,
-                'avg_ctr_current': observed_search_ctr((i['ctr_current'], i['views_current']) for i in items.values()),
-                'total_orders_current': sum(i['orders_current'] for i in items.values()),
-                'avg_position_avg': round(sum(i['position_avg'] for i in items.values()) / len(items), 6),
-            }
+        totals = observed_source_totals(source, items)
         for row in sheet['rows']:
             scope,metric=row[1].split('|',1)
             if scope=='TOTAL' and metric in TOTAL_METRICS[source]:

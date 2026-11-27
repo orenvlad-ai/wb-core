@@ -19,6 +19,7 @@ from packages.application.promo_campaign_archive import (
     materialize_promo_result_from_archive,
     promo_campaign_archive_root,
     sync_promo_campaign_archive,
+    _metadata_indicates_ended_without_download,
 )
 from packages.application.promo_xlsx_collector_block import PromoXlsxCollectorBlock
 from packages.contracts.promo_live_source import (
@@ -232,25 +233,44 @@ class PromoLiveSourceBlock:
             detail_prefix=detail_prefix,
             diagnostics=diagnostics,
         )
+        discovery_incomplete = (
+            collector_summary is not None
+            and (
+                collector_summary.status == "blocked"
+                or collector_summary.ambiguous_count > 0
+                or collector_summary.blocked_before_card_count > 0
+                or len(collector_summary.promos) != collector_summary.timeline_candidates_found
+                or not any(attempt.hydrated_success for attempt in collector_summary.hydration_attempts)
+                or any(not promo.card_path and not _metadata_indicates_ended_without_download(promo.metadata)
+                       for promo in collector_summary.promos)
+                or any(attempt.hydrated_success and attempt.timeline_count > collector_summary.timeline_candidates_found
+                       for attempt in collector_summary.hydration_attempts)
+            )
+        )
         if (
             collector_summary is not None
-            and collector_summary.status != "success"
             and result.kind == "success"
-            and "no_covering_campaign_rows_for_requested_nm_ids=true" in result.detail
+            and (discovery_incomplete or (
+                collector_summary.status != "success"
+                and "no_covering_campaign_rows_for_requested_nm_ids=true" in result.detail
+            ))
         ):
-            # An incomplete discovery cannot prove that no campaigns exist.
+            # Even a nonempty archive cannot prove that unidentified campaigns
+            # are irrelevant to the requested day.
             values = asdict(result)
             values.update(
                 kind="incomplete", covered_count=0, items=[],
                 missing_nm_ids=list(request.nm_ids),
-                detail=result.detail + "; incomplete_collector_cannot_confirm_empty_campaign_set=true",
+                detail=result.detail + (
+                    "; incomplete_collector_cannot_confirm_campaign_set=true" if discovery_incomplete else
+                    "; incomplete_collector_cannot_confirm_empty_campaign_set=true"),
             )
             result = PromoLiveSourceIncomplete(**values)
             _set_promo_counter(diagnostics, "accepted_row_count", 0)
             _set_promo_counter(diagnostics, "covered_count", 0)
             _append_instant_promo_phase(
                 diagnostics, "source_payload_build", status="incomplete",
-                note_kind="incomplete_collector_cannot_confirm_empty_campaign_set",
+                note_kind="incomplete_collector_cannot_confirm_campaign_set",
             )
         _finish_promo_phase(diagnostics, promo_total_phase, status=str(getattr(result, "kind", "") or "unknown"))
         _finalize_promo_diagnostics(diagnostics)

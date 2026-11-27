@@ -58,6 +58,15 @@ def main() -> None:
         raise AssertionError("fixture bundle must expose at least three enabled nm_ids")
 
     _assert_incomplete_discovery_rejects_zero_success()
+    _assert_incomplete_discovery_rejects_nonempty_archive()
+    _assert_proven_incomplete_archive_fallback_is_not_reused()
+    from apps.promo_campaign_archive_integrity_smoke import (
+        _assert_known_missing_campaign_survives_bad_later_capture, _assert_new_workbook_cannot_certify_earlier_dates,
+        _assert_revised_workbook_cannot_reuse_old_observation_date,
+    )
+    _assert_known_missing_campaign_survives_bad_later_capture()
+    _assert_new_workbook_cannot_certify_earlier_dates()
+    _assert_revised_workbook_cannot_reuse_old_observation_date()
     _assert_cross_year_parse_rule()
     metric_truth_note = _assert_candidate_entry_price_metric_cases()
     canonical_note = _assert_canonical_eligible_set_cases(requested_nm_ids)
@@ -85,6 +94,7 @@ def _assert_incomplete_discovery_rejects_zero_success() -> None:
                 run_dir=request.output_root, status=status, started_at="2026-09-06T10:00:00+05:00",
                 timeline_candidates_found=2 if status != "success" else 0,
                 ambiguous_count=2 if status != "success" else 0,
+                hydration_attempts=[SimpleNamespace(hydrated_success=True, timeline_count=0)] if status == "success" else [],
             ))
             block = PromoLiveSourceBlock(runtime_dir=Path(tmp), collector_block=collector,
                 now_factory=lambda: datetime.fromisoformat("2026-09-06T10:00:00+05:00"))
@@ -94,7 +104,113 @@ def _assert_incomplete_discovery_rejects_zero_success() -> None:
             else:
                 assert result.kind == "incomplete" and result.items == [] and result.covered_count == 0
                 assert result.missing_nm_ids == [123]
-                assert "incomplete_collector_cannot_confirm_empty_campaign_set=true" in result.detail
+                assert "incomplete_collector_cannot_confirm_campaign_set=true" in result.detail
+
+
+def _assert_incomplete_discovery_rejects_nonempty_archive() -> None:
+    from apps.promo_campaign_archive_integrity_smoke import _write_promo_fixture, _write_price_truth
+    from apps.promo_xlsx_collector_contract_smoke import _EndedNoDownloadDriver, _ManifestEndedNoDrawerDriver
+    from packages.application.promo_xlsx_collector_block import PromoXlsxCollectorBlock
+    from packages.contracts.promo_xlsx_collector_block import CollectorRunSummary, PromoOutcome, PromoXlsxCollectorRequest
+    cases = ["complete", "ambiguous", "identity_missing", "unprocessed", "truncated", "blocked_hydration",
+             "timeline_ended", "manifest_ended", "unproved_ended"]
+    for case in cases:
+        with TemporaryDirectory(prefix="promo-nonempty-discovery-") as tmp:
+            root = Path(tmp)
+            _write_promo_fixture(runtime_dir=root, run_name="2026-04-26__known", promo_folder="1001__2001__known",
+                promo_id=1001, period_id=2001, title="Known workbook", confidence="high", workbook_kind="valid")
+            _write_price_truth(runtime_dir=root, snapshot_date="2026-04-26", nm_id=123456, discounted_price=900.0)
+            metadata = PromoMetadata(**json.loads(next(root.glob("promo_xlsx_collector_runs/*/promos/*/metadata.json")).read_text()))
+            known = PromoOutcome(promo_title="Known workbook", timeline_block_index=0, timeline_short_period_text=None,
+                timeline_preliminary_classification="current", status="reused_archive", promo_id=1001, period_id=2001,
+                promo_folder="fixture", blocker=None, metadata=metadata, card_path="fixture/card.json")
+            ended = None
+            if case in {"timeline_ended", "manifest_ended"}:
+                driver = _EndedNoDownloadDriver() if case == "timeline_ended" else _ManifestEndedNoDrawerDriver()
+                ended = PromoXlsxCollectorBlock(driver).execute(PromoXlsxCollectorRequest(
+                    output_root=str(root / "excluded"), storage_state_path="unused")).promos[0]
+                assert not ended.card_path and ended.status == "skipped_past"
+            def collect(request):
+                count = 2 if ended else 1
+                values = dict(run_dir=request.output_root, status="success", started_at="2026-04-26T10:00:00+05:00",
+                    timeline_candidates_found=count, card_confirmed_count=1,
+                    promos=[known, ended] if ended else [known],
+                    hydration_attempts=[SimpleNamespace(hydrated_success=True, timeline_count=count)])
+                if case == "ambiguous": values["ambiguous_count"] = 1
+                if case == "identity_missing": values["blocked_before_card_count"] = 1
+                if case == "unprocessed": values["promos"] = []
+                if case == "truncated": values["hydration_attempts"] = [SimpleNamespace(hydrated_success=True, timeline_count=2)]
+                if case == "blocked_hydration":
+                    values.update(status="blocked", timeline_candidates_found=0, card_confirmed_count=0,
+                        promos=[], hydration_attempts=[SimpleNamespace(hydrated_success=False, timeline_count=0)])
+                if case == "unproved_ended":
+                    from dataclasses import replace
+                    values["promos"] = [replace(known, card_path=None, status="skipped_past")]
+                return CollectorRunSummary(**values)
+            block = PromoLiveSourceBlock(runtime_dir=root, collector_block=SimpleNamespace(execute=collect),
+                now_factory=lambda: datetime.fromisoformat("2026-04-26T10:00:00+05:00"))
+            result = block.execute(PromoLiveSourceRequest(snapshot_date="2026-04-26", nm_ids=[123456])).result
+            if case in {"complete", "timeline_ended", "manifest_ended"}:
+                assert result.kind == "success" and result.items[0].promo_participation == 1, case
+            else:
+                assert result.kind == "incomplete" and not result.items and result.missing_nm_ids == [123456], case
+                assert "incomplete_collector_cannot_confirm_campaign_set=true" in result.detail
+
+
+def _assert_proven_incomplete_archive_fallback_is_not_reused() -> None:
+    from dataclasses import asdict, replace
+    from unittest.mock import patch
+    from packages.application.promo_campaign_archive import proven_archive_replay_omissions
+    from packages.application.sheet_vitrina_v1_live_plan import _capture_live_source
+    day = "2026-11-26"
+    common = dict(snapshot_date=day, date_from=day, date_to=day, requested_count=1,
+        trace_run_dir="archive", current_promos=3, current_promos_downloaded=3, current_promos_blocked=0,
+        future_promos=0, skipped_past_promos=0, ambiguous_promos=0)
+    # Exact shape of the observed production detail, including the exhaustive
+    # count/list that omitted campaign 3225; opaque independent snapshots stay.
+    detail = ("collector_mode=archive_only; archive_mode=interval_replay; usable_campaigns=3; "
+        "archive_keys=3150__2834__чёрная-пятница-2-автоакция,"
+        "3178__2855__чёрная-пятница-хиты-автоматические-скидки,"
+        "3188__2865__повышаем-заказы-автоматические-скидки")
+    prior = PromoLiveSourceSuccess(kind="success", covered_count=1,
+        items=[PromoLiveSourceItem(day, 123456, 3, 999, 1)], detail=detail, **common)
+    failure = dict(promo_id=3225, date_confidence="high",
+        validation_failure_reason="metadata_only_true_artifact_loss",
+        coverage_dates=dict(promo_start_at="2026-11-24T02:00", promo_end_at="2026-12-01T01:59"))
+    replay = PromoLiveSourceIncomplete(kind="incomplete", covered_count=0, items=[], missing_nm_ids=[123456],
+        detail="missing_campaign_artifacts=3225__pending__missing",
+        diagnostics={"fatal_missing_artifacts": [failure]}, **common)
+    cases = [(prior, replay, True), (replace(prior, detail="independent good source"), replay, False),
+        (replace(prior, detail=detail.replace("usable_campaigns=3", "usable_campaigns=4")), replay, False),
+        (replace(prior, detail=detail + ",..."), replay, False),
+        (replace(prior, detail=detail.replace("3188__2865", "3225__2869")), replay, False),
+        (prior, replace(replay, diagnostics={}), False),
+        (prior, replace(replay, diagnostics={"fatal_missing_artifacts": [dict(failure,
+            coverage_dates=dict(promo_start_at="2026-11-28T02:00", promo_end_at="2026-12-01T01:59"))]}), False),
+        (prior, replace(replay, snapshot_date="2026-11-25"), False)]
+    for old, fresh, reject in cases:
+        old_before = asdict(old)
+        assert bool(proven_archive_replay_omissions(old, fresh, day)) is reject
+        for cached in (False, True):
+            scope = dict(source_key="promo_by_price", temporal_slot="yesterday_closed", temporal_policy="dual_day_capable",
+                column_date=day, requested_nm_ids=[123456])
+            old_status, _ = _capture_live_source(loader=lambda: old, **scope)
+            writes = []
+            block = object.__new__(SheetVitrinaV1LivePlanBlock)
+            block.runtime = SimpleNamespace(runtime_dir=Path("/unused"), db_path=Path("/unused/db"),
+                save_temporal_source_slot_snapshot=lambda **kwargs: writes.append(kwargs))
+            block.now_factory = lambda: datetime.fromisoformat("2026-11-27T10:00:00+05:00")
+            block.promo_live_source_block = SimpleNamespace(execute=lambda request: SimpleNamespace(result=fresh))
+            block._load_slot_snapshot_status = lambda **kwargs: None if cached else (old_status, old, "old-time")
+            block._load_cached_temporal_source = lambda **kwargs: (old_status, old) if cached else None
+            with patch("packages.application.promo_historical_recovery.recover_promo_display", return_value=None):
+                status, payload = block._capture_promo_closed_day_from_cache(**scope)
+            if reject:
+                assert payload.kind == "incomplete" and not payload.items and not writes
+                assert "rejected_proven_incomplete_archive_fallback" in status.note
+            else:
+                assert payload is old and status.kind == "success"
+            assert asdict(old) == old_before
 
 
 def _assert_cross_year_parse_rule() -> None:
@@ -270,7 +386,7 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
     with TemporaryDirectory(prefix="sheet-vitrina-promo-archive-replay-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
-        promo_run_dir = runtime_dir / "promo_xlsx_collector_runs" / "2026-04-20__fixture" / "promos" / "2287__2236__fixture-promo"
+        promo_run_dir = runtime_dir / "promo_xlsx_collector_runs" / "2026-04-17__fixture" / "promos" / "2287__2236__fixture-promo"
         promo_run_dir.mkdir(parents=True, exist_ok=True)
         workbook_path = promo_run_dir / "workbook.xlsx"
         _write_interval_fixture_workbook(workbook_path, requested_nm_ids)
@@ -284,8 +400,8 @@ def _assert_historical_interval_replay_cache_fill(requested_nm_ids: list[int]) -
             },
         )
         metadata = PromoMetadata(
-            collected_at="2026-04-20T08:00:00+05:00",
-            trace_run_dir=str(runtime_dir / "promo_xlsx_collector_runs" / "2026-04-20__fixture"),
+            collected_at="2026-04-17T08:00:00+05:00",
+            trace_run_dir=str(runtime_dir / "promo_xlsx_collector_runs" / "2026-04-17__fixture"),
             source_tab="Доступные",
             source_filter_code="AVAILABLE",
             calendar_url="https://seller.wildberries.ru/dp-promo-calendar?action=2287",

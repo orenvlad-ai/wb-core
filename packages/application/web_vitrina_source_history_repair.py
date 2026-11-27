@@ -53,16 +53,13 @@ def _cell(day, metric, value, missing, *, undefined):
 
 def _totals(observation, ids):
     """Reuse the accepted source publication's sums/weighted CTR/mean recipe."""
-    from apps.web_vitrina_web_source_publication import project, TOTAL_METRICS
-    source, day = observation['source_key'], observation['snapshot_date']
+    from packages.application.web_vitrina_observed_source_totals import observed_source_totals
+    source = observation['source_key']
     items = {i['nm_id']: i for i in observation['items'] if i['nm_id'] in ids}
     missing = sorted(set(ids)-set(items))
     if not items:
         return {k: None for k in TOTAL[source]}, missing, set()
-    plan = {'sheets': [{'sheet_name': 'DATA_VITRINA', 'header': ['label','row_id',day],
-        'rows': [[k, 'TOTAL|'+k, ''] for k in TOTAL_METRICS[source]]}], 'temporal_slots': []}
-    projected, _ = project(plan, [observation], ids, 'history-recipe')
-    values = {r[1].split('|')[1]: r[2] for r in projected['sheets'][0]['rows']}
+    values = observed_source_totals(source, items)
     undefined = set()
     if source == 'seller_funnel_snapshot':
         # Native visible funnel CTR is a rounded ratio of paired operands,
@@ -77,7 +74,8 @@ def _totals(observation, ids):
     return values, missing, undefined
 
 
-def project_day(day, catalog, unit, observations, ids, operation_id, *, presentation_catalog=None):
+def project_day(day, catalog, unit, observations, ids, operation_id, *, presentation_catalog=None,
+                metadata_only=False):
     if roster(unit) != ids:
         raise HistoryUnavailable('source_history_roster_drift')
     cells, patch = unit['cells'], {}
@@ -119,6 +117,10 @@ def project_day(day, catalog, unit, observations, ids, operation_id, *, presenta
     # HistoryStore/read_history_page serves assets from edition.catalog. Dated
     # catalogs bind row membership/context but may lack an asset already in the
     # unchanged serving union (e.g. an old day had no numeric percent cells).
+    if metadata_only:
+        # The dated compiler copies only quality/coverage fields onto an
+        # existing native cell. It neither selects nor publishes these assets.
+        return patch
     presentation = (catalog if presentation_catalog is None else presentation_catalog).get('presentation', {})
     renderers = {r['renderer_id']: r.get('formatter_id') for r in presentation.get('renderers', [])}
     formatters = {f['formatter_id'] for f in presentation.get('formatters', [])}

@@ -105,6 +105,15 @@ Loss of the watch or overflow of its queue requires fresh verification. This
 additional check covers local filesystem operations observed by inotify. Native
 revision, digest and physical stamp checks continue to apply.
 
+An ordinary existing operational DB/WAL write at the verify-to-parent handoff
+may replace that refused proof with one fresh native verify for the entire cycle.
+The same anchor, target, descriptors and completion deadline remain in force;
+no portion or acknowledgement is resubmitted. The original refusal is recorded
+as `history.handoff_revalidation`. A second event, changed READY/native inputs,
+auxiliary-source event, inode replacement, unknown event, queue overflow or an
+exhausted deadline fails closed. Once acknowledgement begins, no revalidation
+is allowed. This is not a replay of a failed cycle or an unknown write outcome.
+
 Ordinary `web_vitrina_history_candidate_build` enters history SH/heavy before
 constructors and delegates through the same fixed child. It retains its original
 source range and one-portion/240-second outer ceiling. Its hidden `--worker`
