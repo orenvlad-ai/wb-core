@@ -25,6 +25,23 @@ class ProcedureJournalTests(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, WBC_PROCEDURE_LOG="1"))
         self.enterContext(patch.object(journal, "_send", self.records.append))
 
+    def test_history_refusal_enums_survive_serialization_without_arbitrary_text(self):
+        for key, values in journal._HISTORY_ENUMS.items():
+            for value in values:
+                journal.event('history', 'source_watch_refused', 'failed', **{key:value})
+                record = json.loads(json.dumps(self.records[-1]))
+                self.assertEqual(record[key], value)
+        secret = '/private/customer/canary-SQL-select'
+        journal.event('history', 'source_watch_refused', 'failed', reason_code=secret,
+                      source_class=secret, event_class=secret, path=secret, sql=secret)
+        record = json.loads(json.dumps(self.records[-1]))
+        self.assertFalse({'reason_code','source_class','event_class','path','sql'} & set(record))
+        self.assertNotIn(secret, json.dumps(self.records))
+        journal.event('history', 'handoff_revalidation', 'fresh_verify',
+                      reason_code='history_source_changed_after_readback')
+        self.assertEqual(json.loads(json.dumps(self.records[-1]))['reason_code'],
+                         'history_source_changed_after_readback')
+
     def test_worker_copies_only_observation_and_preserves_error(self):
         secret = "sensitive-example-must-never-appear"
         lease = contextvars.ContextVar("lease", default=None)

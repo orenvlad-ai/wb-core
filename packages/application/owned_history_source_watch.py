@@ -8,6 +8,8 @@ from pathlib import Path
 import struct
 import sys
 
+from packages import procedure_journal as journal_log
+
 from packages.application.owned_history_worker_capability import HistoryDelegationError
 from packages.application.storage_registry import MANIFEST_FILENAME
 
@@ -40,6 +42,7 @@ class HistorySourceWatch:
         self.directory_names = {}
         self.file_roles = {}
         self.invalid = False
+        self.operational_revalidation_allowed = False
         self.fd = None
         # Native child delegation requires Linux. In-process portable readers
         # retain their existing stat, source revision and digest checks.
@@ -99,11 +102,18 @@ class HistorySourceWatch:
             raise HistoryDelegationError(error)
         if self.fd is None:
             return
+        operational_roles = set()
         # Fail closed on a flooded queue instead of starving the native deadline.
         for _ in range(64):
             try:
                 data = os.read(self.fd, 65536)
             except BlockingIOError:
+                if self.invalid:
+                    # The entire bounded queue contained only ordinary writes
+                    # to the existing operational DB/WAL. This does not clear
+                    # the refusal; one new native verify may replace the proof.
+                    source = "operational_database" if operational_roles == {0} else "operational_wal" if operational_roles == {1} else "operational_database_or_wal"
+                    self._refuse(error, source, "modified", revalidation_allowed=True)
                 return
             if not data:
                 break
@@ -114,18 +124,16 @@ class HistorySourceWatch:
                 name = data[offset:offset + size].rstrip(b"\0")
                 offset += size
                 if mask & (_UNMOUNT | _OVERFLOW):
-                    self.invalid = True
-                    raise HistoryDelegationError(error)
+                    self._refuse(error, "unknown", "queue_overflow" if mask & _OVERFLOW else "unmount")
                 if wd in self.directory_names:
                     if not name:  # The directory itself was removed, moved or changed.
-                        self.invalid = True
-                        raise HistoryDelegationError(error)
+                        self._refuse(error, "unknown", "source_directory_changed")
                     role = self.directory_names[wd].get(name)
                     if role is None:
                         continue
                 else:
-                    # After handoff the parent needs no inode map: every event
-                    # outside the named directory watches is a strict refusal.
+                    # Existing inode watches classify ordinary DB/WAL writes.
+                    # Unknown or replaced old inodes remain strict refusals.
                     role = self.file_roles.get(wd)
                 if allow_operational_writes:
                     if role == 1:  # The operational WAL may also rotate.
@@ -133,8 +141,22 @@ class HistorySourceWatch:
                     if role == 0 and not (mask & (_PATH_CHANGES | _SELF_CHANGES | _IGNORED)):
                         continue
                 self.invalid = True
-                raise HistoryDelegationError(error)
+                if role in (0, 1) and mask == _MODIFY:
+                    operational_roles.add(role)
+                    continue
+                source = "operational_database" if role == 0 else "operational_wal" if role == 1 else "auxiliary" if role is not None else "unknown"
+                event = "file_replaced_or_removed" if mask & (_PATH_CHANGES | _SELF_CHANGES | _IGNORED) else "attributes_changed" if mask & _ATTRIB else "modified" if mask == _MODIFY else "unknown"
+                self._refuse(error, source, event)
+        self._refuse(error, "unknown", "queue_limit_or_unavailable")
+
+    def _refuse(self, error, source_class, event_class, *, revalidation_allowed=False):
         self.invalid = True
+        self.operational_revalidation_allowed = revalidation_allowed
+        try:
+            journal_log.event("history", "source_watch_refused", "failed", reason_code=error,
+                              source_class=source_class, event_class=event_class)
+        except Exception:
+            pass  # Diagnostic failure must preserve the original refusal.
         raise HistoryDelegationError(error)
 
     def close(self):

@@ -162,6 +162,8 @@ class _OwnedHistoryWorker:
         self._process = None
         self._closed = False
         self._source_watch = None
+        self._handoff_revalidation_used = False
+        self._ack_started = False
         self._anchor = None
         self._capture_used = False
         self._portion_used = False
@@ -330,16 +332,36 @@ class _OwnedHistoryWorker:
 
     def _verified_state(self, anchor):
         from packages.application.owned_history_source_watch import HistorySourceWatch
-        if self._source_watch is not None:
-            self._source_watch.close()
-        self._source_watch = HistorySourceWatch(self.runtime.runtime_dir, self.runtime.db_path)
-        result = self._invoke("verify", anchor["now"], anchor)
-        if (result.get("status") != "complete" or result["result"].get("status") != "verified"
-                or result["result"].get("invocation") != result.get("invocation")):
-            raise history_result_error("history_completion_readback_unproven", result, mode="verify")
-        self._source_watch.bind_directories(result["result"].pop("watch_directories", None))
-        self._check_verified_events()
-        return result["result"]
+        for _ in range(2):
+            if self._source_watch is not None:
+                self._source_watch.close()
+            self._source_watch = HistorySourceWatch(self.runtime.runtime_dir, self.runtime.db_path)
+            result = self._invoke("verify", anchor["now"], anchor)
+            if (result.get("status") != "complete" or result["result"].get("status") != "verified"
+                    or result["result"].get("invocation") != result.get("invocation")):
+                raise history_result_error("history_completion_readback_unproven", result, mode="verify")
+            self._source_watch.bind_directories(result["result"].pop("watch_directories", None))
+            # Resolve the inherited existing-inode watches locally. Replacement,
+            # deletion and unknown old inodes remain strict refusals.
+            self._source_watch.watch_current_files()
+            try:
+                self._check_verified_events()
+            except HistoryDelegationError as exc:
+                if (str(exc) != "history_source_changed_after_readback" or self.operation != "cycle"
+                        or self._handoff_revalidation_used or self._ack_started
+                        or not self._source_watch.operational_revalidation_allowed
+                        or self._completion_deadline is None
+                        or time.monotonic() + PARENT_GRACE_SECONDS >= self._completion_deadline):
+                    raise
+                self._check()
+                self._handoff_revalidation_used = True
+                journal_log.event("history", "handoff_revalidation", "fresh_verify",
+                                  reason_code="history_source_changed_after_readback")
+                # Same owner, descriptors, anchor, target and total deadline.
+                # Only a fresh native read is sent; no portion or ACK is retried.
+                continue
+            return result["result"]
+        raise HistoryDelegationError("history_source_changed_after_readback")
 
     def _check_verified_events(self):
         if self._source_watch is None:
@@ -358,6 +380,7 @@ class _OwnedHistoryWorker:
                 raise HistoryDelegationError("history_closed_terminal_unproven")
             self._closed_proof = _VerifiedClosedHistory(self, observed["invocation"], closed["receipt_digest"],
                 tuple(self._closed_binding["dates"]), observed["current"], closed["native"], observed["source_stamp"])
+            self._ack_started = True
             closed_receipt._acknowledge_verified_native(self._closed_proof, backfill_dates=tuple(self._closed_binding["dates"]))
         if self._historical_receipt is not None:
             from packages.application.owned_history_native_ack import _VerifiedHistoricalHistory
@@ -366,6 +389,7 @@ class _OwnedHistoryWorker:
                 raise HistoryDelegationError('historical_history_terminal_unproven')
             self._historical_proof=_VerifiedHistoricalHistory(self,observed['invocation'],historical['receipt_digest'],
                 tuple(self._historical_binding['dates']),observed['current'],historical['native'],observed['source_stamp'])
+            self._ack_started = True
             self._historical_receipt._acknowledge_verified_native(self._historical_proof)
         if self._policy_receipt is not None:
             from packages.application.owned_history_native_ack import _VerifiedPolicyHistory
@@ -374,6 +398,7 @@ class _OwnedHistoryWorker:
                 raise HistoryDelegationError('policy_history_terminal_unproven')
             self._policy_proof=_VerifiedPolicyHistory(self,observed['invocation'],policy['receipt_digest'],
                 tuple(self._policy_binding['dates']),observed['current'],policy['native'],observed['source_stamp'])
+            self._ack_started = True
             self._policy_receipt._acknowledge_verified_native(self._policy_proof)
         if self._supplier_receipt is not None:
             from packages.application.owned_history_native_ack import _VerifiedSupplierHistory
@@ -382,6 +407,7 @@ class _OwnedHistoryWorker:
                 raise HistoryDelegationError('supplier_history_terminal_unproven')
             self._supplier_proof=_VerifiedSupplierHistory(self,observed['invocation'],supplier['receipt_digest'],
                 tuple(self._supplier_binding['dates']),observed['current'],supplier['native'],observed['source_stamp'])
+            self._ack_started = True
             self._supplier_receipt._acknowledge_verified_native(self._supplier_proof)
         return {"status": "unchanged" if observed["current"]["current"] == self._anchor["base"] else "published",
                 "edition_id": observed["current"]["current"], "vector_digest": fingerprint(self._anchor["vector"]),

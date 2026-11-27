@@ -469,6 +469,27 @@ conn.close()
 
 @unittest.skipUnless(sys.platform == 'linux', 'requires Linux source events')
 class HistorySourceWatchTests(unittest.TestCase):
+    def test_revalidation_classification_drains_mixed_queue_and_logs_no_paths(self):
+        from packages.application.owned_history_source_watch import HistorySourceWatch
+        from packages import procedure_journal
+        for auxiliary in (False, True):
+            with self.subTest(auxiliary=auxiliary), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); db = root / 'operational.sqlite3'; db.write_bytes(b'initial')
+                with closing(HistorySourceWatch(root, db)) as watch, patch.object(procedure_journal, 'event') as logged:
+                    watch.arm()
+                    db.write_bytes(b'unrelated')
+                    if auxiliary:
+                        path = root / '.auto-updates-policy.json'
+                        path.write_text('{}'); path.unlink()
+                    with self.assertRaises(HistoryDelegationError):
+                        watch.check()
+                    self.assertEqual(watch.operational_revalidation_allowed, not auxiliary)
+                    call = logged.call_args
+                    self.assertEqual(call.args, ('history','source_watch_refused','failed'))
+                    self.assertEqual(set(call.kwargs), {'reason_code','source_class','event_class'})
+                    self.assertEqual(call.kwargs['source_class'], 'auxiliary' if auxiliary else 'operational_database')
+                    self.assertNotIn(str(root), repr(call))
+
     def test_transient_auxiliary_and_parent_handoff(self):
         from packages.application.owned_history_source_watch import HistorySourceWatch
         with tempfile.TemporaryDirectory() as directory:
@@ -516,6 +537,102 @@ class HistorySourceWatchTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == 'linux', 'actual inherited kernel authority required')
 class CompletionTests(unittest.TestCase):
+    def _handoff_case(self, interference):
+        """Real current/pending, CAS READY writes and authenticated Linux children."""
+        from apps.ready_publication_fixture import save_ready_fixture
+        from packages.application.search_cluster_cleaner_store import install_schema
+        runtime, root, keeper = self.fixture()
+        install_schema(keeper)
+        keeper.execute("""INSERT INTO cleaner_runs(run_id,account,kind,trigger,state,phase,
+            created_at,captured_versions,targets) VALUES('handoff','fixture','scan','manual',
+            'running','scan',?,'{}','[]')""", (NOW.isoformat(),))
+        keeper.commit()
+        with ownership(runtime, root, seconds=60) as worker:
+            worker.complete(NOW, total_seconds=180)
+        store = HistoryStore(root / 'history')
+        pointer = (store.root / 'CURRENT.json').read_bytes()
+        current = runtime.load_current_state()
+        days = sorted(store.edition()['days'])[:2]
+        expected = {}
+        def publish_changed_ready(day, increment):
+            plan = deepcopy(runtime.load_sheet_vitrina_ready_snapshot(as_of_date=day))
+            row = next(row for row in plan.sheets[0].rows if row[1] == 'TOTAL|total_orderSum')
+            row[2] += increment
+            save_ready_fixture(runtime, current_state=current, refreshed_at=NOW.isoformat().replace('+00:00','Z'), plan=plan)
+            return row[2]
+        for day in days:
+            expected[day] = publish_changed_ready(day, 1)
+        calls, verified = [], []
+        with ownership(runtime, root, seconds=60) as worker:
+            worker.config.max_recomputes = 1
+            native = worker._invoke
+            held_fds = worker.lock_fds
+            deadline = []
+            def invoke(mode, now, anchor):
+                value = native(mode, now, anchor)
+                calls.append(mode)
+                self.assertEqual(worker.lock_fds, held_fds)
+                if not deadline:
+                    deadline.append(worker._completion_deadline)
+                self.assertEqual(worker._completion_deadline, deadline[0])
+                if mode == 'verify':
+                    verified.append(value)
+                    if len(verified) == 2 or (interference == 'repeated' and len(verified) == 3):
+                        if interference == 'auxiliary':
+                            path = runtime.runtime_dir / '.auto-updates-policy.json'
+                            path.write_text('{}'); path.unlink()
+                        else:
+                            keeper.execute("UPDATE cleaner_runs SET phase=? WHERE run_id='handoff'", (str(len(verified)),))
+                            keeper.commit()
+                        if interference == 'ready_changed':
+                            expected[days[1]] = publish_changed_ready(days[1], 123)
+                        if interference == 'deadline':
+                            worker._completion_deadline = supervisor.time.monotonic() + 1
+                return value
+            with patch.object(worker, '_invoke', side_effect=invoke):
+                if interference == 'once':
+                    result = worker.complete(NOW, total_seconds=180)
+                    self.assertEqual(result['completed'], 14)
+                    self.assertEqual(result['portions'], 2)
+                    self.assertEqual(calls, ['capture','verify','portion','verify','verify','portion','verify'])
+                    edition = store.edition()
+                    for day in days:
+                        with closing(store._open_day(store.root/'objects'/(edition['days'][day]+'.sqlite3'))) as conn:
+                            raw = conn.execute("SELECT payload FROM cells WHERE row_id='TOTAL|total_orderSum'").fetchone()[0]
+                        import zlib
+                        self.assertEqual(json.loads(zlib.decompress(raw))[0], expected[day])
+                    self.assertNotEqual((store.root/'CURRENT.json').read_bytes(), pointer)
+                else:
+                    reason = 'history_completion_readback_unproven' if interference == 'ready_changed' else 'history_source_changed_after_readback'
+                    with self.assertRaisesRegex(HistoryDelegationError, reason) as caught:
+                        worker.complete(NOW, total_seconds=180)
+                    self.assertEqual((store.root/'CURRENT.json').read_bytes(), pointer)
+                    self.assertEqual(calls.count('portion'), 1)
+                    self.assertEqual(len(verified), 3 if interference == 'repeated' else 2)
+                    self.assertFalse(worker._ack_started)
+                    if interference == 'ready_changed':
+                        self.assertEqual(caught.exception.diagnostic()['reason_code'], 'history_worker_anchor_changed')
+                        plan = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=days[1])
+                        row = next(row for row in plan.sheets[0].rows if row[1]=='TOTAL|total_orderSum')
+                        self.assertEqual(row[2], expected[days[1]])
+                self.assertEqual(worker._handoff_revalidation_used,
+                                 interference in {'once','repeated','ready_changed'})
+
+    def test_one_operational_handoff_event_reverifies_without_replaying_portion(self):
+        self._handoff_case('once')
+
+    def test_repeated_handoff_event_stops_after_one_fresh_verify(self):
+        self._handoff_case('repeated')
+
+    def test_handoff_ready_change_retains_prior_history_and_new_ready(self):
+        self._handoff_case('ready_changed')
+
+    def test_transient_auxiliary_event_is_not_retried(self):
+        self._handoff_case('auxiliary')
+
+    def test_handoff_event_cannot_renew_completion_deadline(self):
+        self._handoff_case('deadline')
+
     def fixture(self):
         from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtureServer
         from packages.application.ready_publication import ensure_publication_schema
@@ -600,6 +717,32 @@ class CompletionTests(unittest.TestCase):
             self.assertEqual(calls, ['capture', 'verify', 'portion', 'verify'])
             self.assertEqual(result['portions'], 1)
             self.assertEqual(result['edition_id'], HistoryStore(root / 'history')._current()['current'])
+
+    def test_unknown_published_portion_and_handoff_event_never_resubmit_write(self):
+        runtime, root, keeper = self.fixture()
+        keeper.execute('CREATE TABLE handoff_observation(value INTEGER)')
+        keeper.execute('INSERT INTO handoff_observation VALUES(0)'); keeper.commit()
+        with ownership(runtime, root, seconds=60) as worker:
+            receive, invoke = supervisor.receive_message, worker._invoke
+            calls = []
+            def wrapped(mode, now, anchor):
+                calls.append(mode)
+                if mode == 'portion':
+                    def lose(channel):
+                        receive(channel)
+                        raise HistoryDelegationError('fixture_lost_after_commit')
+                    with patch.object(supervisor, 'receive_message', side_effect=lose):
+                        return invoke(mode, now, anchor)
+                result = invoke(mode, now, anchor)
+                if mode == 'verify' and calls == ['capture','verify','portion','verify']:
+                    keeper.execute('UPDATE handoff_observation SET value=1'); keeper.commit()
+                return result
+            with patch.object(worker, '_invoke', side_effect=wrapped):
+                result = worker.complete(NOW, total_seconds=180)
+            self.assertEqual(calls, ['capture','verify','portion','verify','verify'])
+            self.assertEqual(result['portions'], 1)
+            self.assertTrue(worker._handoff_revalidation_used)
+            self.assertEqual(result['edition_id'], HistoryStore(root/'history')._current()['current'])
 
     def test_no_dated_progress_stops_even_if_cache_grows(self):
         runtime, root, keeper = self.fixture()
@@ -748,6 +891,8 @@ class ClosedCompletionTests(unittest.TestCase):
                         with self.assertRaisesRegex(HistoryDelegationError, 'owner_or_target_changed'):
                             worker.complete(fixture.NOW, backfill_dates=tuple(fixture.DAYS),
                                 closed_receipt=case.backlog, total_seconds=180)
+                        self.assertTrue(worker._ack_started)
+                        self.assertFalse(worker._handoff_revalidation_used)
                 self.assertEqual(case.backlog.path.read_bytes(), receipt_before)
                 before = logical_source_digest(case.runtime.db_path)
                 with patch('apps.web_vitrina_history_candidate_build.runtime_storage_admission'), \
