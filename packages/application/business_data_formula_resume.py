@@ -567,10 +567,13 @@ def _guarded_service_completion(runtime, plan, old, current, systemd, activity_r
         raise RuntimeError('formula resume guarded service fragment is not canonical')
     if _hash(_bytes(app / ADMISSION_SOURCE, 16 * 1024 * 1024)) == JOURNALED_GUARD_SOURCES[ADMISSION_SOURCE]:
         sources = {**sources, **JOURNALED_GUARD_SOURCES}
+    verified_hashes = {}
     for path, expected in sources.items():
         reviewed_hashes = expected if isinstance(expected, tuple) else (expected,)
-        if _hash(_bytes(app / path, 16 * 1024 * 1024)) not in reviewed_hashes:
+        actual_hash = _hash(_bytes(app / path, 16 * 1024 * 1024))
+        if actual_hash not in reviewed_hashes:
             raise RuntimeError('formula resume guarded service admission source differs')
+        verified_hashes[path] = actual_hash
     records = _loaded_records(props.get('ExecStart'), 'ExecStart')
     if len(records) != 1 or records[0] != ('/usr/bin/python3',
             argv, 'no'):
@@ -681,7 +684,7 @@ def _guarded_service_completion(runtime, plan, old, current, systemd, activity_r
         plan_fingerprint=plan['fingerprint'], expected_sha=plan['expected_sha'],
         boot_id=boot, invocation_id=invocation, pid=terminal[3], start=terminal[1], stop=terminal[2],
         journal_sha256=_hash(barrier._canonical_json(events).encode()),
-        journal_events=events, source_hashes=sources)
+        journal_events=events, source_hashes=verified_hashes)
 
 
 def _observe(runtime, plan, systemd, activity_reader, proc_root, *, final=False, _completed_owner=None):
