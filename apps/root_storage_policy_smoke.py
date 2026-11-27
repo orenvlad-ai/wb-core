@@ -230,6 +230,130 @@ def _warehouse_native_writer_mount_guard(loaded: dict) -> None:
         registry._assert_recovery_placement()
 
 
+def _operation_bound_rollback_images(loaded: dict) -> None:
+    from packages.application import web_source_rollback_registration as rollback
+    from apps.production_apply_launcher import make_receipt
+    from apps import web_source_rollback_registration as registration_app
+
+    with TemporaryDirectory() as directory:
+        runtime = Path(directory).resolve()
+        evidence = runtime / "evidence"
+        evidence.mkdir()
+        operation = "wbc0208-n27-16-21-publication"
+        image = evidence / (operation + ".before.json")
+        observations = [{"fixture": "source"}]
+        request = {"runtime_dir": str(runtime), "phase": "publication", "observations": observations,
+                   "source_sha256": rollback._digest(observations)}
+        before = {"ready": [], "slots": [], "closure": []}
+        candidate = {"operation_id": operation, "phase": "publication", "before_images": before,
+                     "source_sha256": request["source_sha256"], "prestate_sha256": rollback._digest(before)}
+        image.write_text(json.dumps({"operation_id": operation, "request": request, "candidate": candidate}))
+        preview = {"operation_id": operation, "prestate_sha256": candidate["prestate_sha256"],
+                   "candidate_sha256": rollback._digest(candidate),
+                   "recovery": {"kind": "exact-source-and-ready-before-images", "path": str(image)}}
+        changed = deepcopy(loaded)
+        changed["scan_roots"] = [str(evidence)]
+        changed["thresholds_bytes"]["large_output"] = 1
+        producer = next(item for item in changed["producers"] if item["owner"] == rollback.OWNER)
+        assert producer["path_patterns"] == []
+        producer["operation_bound_artifact"]["runtime_dir"] = str(runtime)
+        assert policy.registered_producer_for_path(changed, image) is None
+        for invalid in ({**preview, "operation_id": "other-operation"},
+                        {**preview, "candidate_sha256": "sha256:" + "0" * 64},
+                        {**preview, "prestate_sha256": "sha256:" + "0" * 64}):
+            try:
+                rollback.prepare_registration(image=image, runtime=runtime, preview=invalid)
+            except rollback.RollbackRegistrationError:
+                pass
+            else:
+                raise AssertionError("unbound operation image was accepted")
+        try:
+            rollback.prepare_registration(image=image, runtime=runtime, preview=preview,
+                                          expected_image_sha256="0" * 64)
+        except rollback.RollbackRegistrationError:
+            pass
+        else:
+            raise AssertionError("wrong image SHA was accepted")
+        registration = rollback.prepare_registration(image=image, runtime=runtime, preview=preview)
+        sidecar = evidence / rollback.DIRECTORY / (operation + ".json")
+        # A crash before atomic publication never leaves a partial final claim.
+        with patch.object(rollback.os, "link", side_effect=OSError("interrupted publication")):
+            try:
+                rollback.write_registration(image=image, runtime=runtime, registration=registration)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("simulated crash was ignored")
+        assert not sidecar.exists() and not list(sidecar.parent.iterdir())
+        assert not rollback.registered_image(image, runtime=runtime)
+        # An interruption after atomic link exposes only a complete valid claim.
+        with patch.object(rollback.os, "fsync", side_effect=[None, OSError("directory fsync interrupted")]):
+            try:
+                rollback.write_registration(image=image, runtime=runtime, registration=registration)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("post-publication interruption was ignored")
+        assert rollback.registered_image(image, runtime=runtime)
+        assert not list(sidecar.parent.glob(".claim-*"))
+        sidecar.unlink()
+        receipt = runtime / "receipt.json"
+        receipt.write_text(json.dumps(make_receipt(action="apply", adapter="web_source_publication_v1",
+                                                 operation_id=operation, state="applied", preview=preview)))
+        command = ["registration", "--runtime-dir", str(runtime), "--image", str(image),
+                   "--receipt", str(receipt), "--expected-image-sha256", registration["image_sha256"]]
+        with patch.object(sys, "argv", command):
+            assert registration_app.main() == 0
+        assert not sidecar.exists()  # CLI defaults to read-only validation.
+        with patch.object(sys, "argv", command + ["--register"]):
+            assert registration_app.main() == 0
+        rollback.write_registration(image=image, runtime=runtime, registration=registration)  # idempotent
+        assert sidecar.stat().st_mode & 0o777 == 0o600
+        assert sidecar.parent.stat().st_mode & 0o777 == 0o700
+        # The periodic status must not read/hash/parse the large rollback body.
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("large body read")):
+            assert policy.registered_producer_for_path(changed, image)["owner"] == rollback.OWNER
+            scan = policy._scan_large_files(changed, root_device=image.stat().st_dev)
+            assert next(item for item in scan if item["path"] == str(image))["registered"] is True
+        foreign = evidence / "arbitrary-file.before.json"
+        foreign.write_text(image.read_text())
+        assert policy.registered_producer_for_path(changed, foreign) is None
+        nested = evidence / "nested"
+        nested.mkdir()
+        (nested / image.name).write_text(image.read_text())
+        assert policy.registered_producer_for_path(changed, nested / image.name) is None
+        sidecar.chmod(0o644)
+        assert not rollback.registered_image(image, runtime=runtime)
+        sidecar.chmod(0o600)
+        sidecar.parent.chmod(0o755)
+        assert not rollback.registered_image(image, runtime=runtime)
+        sidecar.parent.chmod(0o700)
+        original_claim = sidecar.read_bytes()
+        conflicting = {**registration, "candidate_sha256": "sha256:" + "0" * 64}
+        sidecar.write_text(json.dumps(conflicting))
+        try:
+            rollback.write_registration(image=image, runtime=runtime, registration=registration)
+        except rollback.RollbackRegistrationError:
+            pass
+        else:
+            raise AssertionError("conflicting operation claim was overwritten")
+        assert json.loads(sidecar.read_text()) == conflicting
+        for malformed in (b"[]", b"{", b"x" * (rollback.MAX_REGISTRATION_BYTES + 1)):
+            sidecar.write_bytes(malformed)
+            assert policy.registered_producer_for_path(changed, image) is None
+        sidecar.write_bytes(original_claim)
+        original_body = image.read_bytes()
+        original_stat = image.stat()
+        image.write_bytes(original_body.replace(b"source", b"SOURCE", 1))
+        # Same size and restored mtime still cannot conceal changed ctime.
+        import os
+        os.utime(image, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        assert not rollback.registered_image(image, runtime=runtime)
+        image.unlink()
+        image.symlink_to(foreign)
+        assert not rollback.registered_image(image, runtime=runtime)
+
+
 def main() -> int:
     loaded = policy.load_policy()
     assert set(loaded["storage_registry"]["filesystems"]) == {
@@ -246,6 +370,7 @@ def main() -> int:
     _autoanswers_v11_backup_admission(loaded)
     _warehouse_placement_transition(loaded)
     _warehouse_native_writer_mount_guard(loaded)
+    _operation_bound_rollback_images(loaded)
     print("root_storage_policy_smoke: ok")
     return 0
 

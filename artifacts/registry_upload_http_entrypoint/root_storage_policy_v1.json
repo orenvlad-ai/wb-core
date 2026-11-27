@@ -30,7 +30,7 @@
     "filesystems": {
       "root": {
         "path": "/",
-        "source": "/dev/sda1",
+        "source": "/dev/disk/by-uuid/d77f6a25-e90f-4292-a85d-9bcc1cecf9e2",
         "filesystem_uuid": "d77f6a25-e90f-4292-a85d-9bcc1cecf9e2",
         "filesystem_type": "ext4",
         "required_mount_options": ["rw"],
@@ -39,7 +39,7 @@
       },
       "backup": {
         "path": "/opt/wb-core-runtime/state/backups",
-        "source": "/dev/sdb1",
+        "source": "/dev/disk/by-uuid/bd3d563f-e5ea-4e4a-a76a-be45e7f94ec0",
         "filesystem_uuid": "bd3d563f-e5ea-4e4a-a76a-be45e7f94ec0",
         "filesystem_type": "ext4",
         "required_mount_options": ["rw"],
@@ -48,7 +48,7 @@
       },
       "generation": {
         "path": "/opt/wb-core-runtime/state/generations",
-        "source": "/dev/sdc1",
+        "source": "/dev/disk/by-uuid/284b3362-b890-431d-a7da-7f0fcd2ee0a6",
         "filesystem_uuid": "284b3362-b890-431d-a7da-7f0fcd2ee0a6",
         "filesystem_type": "ext4",
         "required_mount_options": ["rw", "noatime", "nodev", "nosuid", "noexec"],
@@ -117,6 +117,7 @@
       }
     },
     "producers": [
+      {"owner":"web_source_publication_rollback","current":false,"data_class":"operation_bound_rollback_image","destination_role":"root","relative_roots":["opt/wb-core-runtime/state/evidence"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"disabled","max_single_write_bytes":0},
       {"owner":"warehouse_recovery_policy","current":true,"data_class":"bounded_checkpoint","destination_role":"backup","relative_roots":["warehouse-recovery"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
       {"owner":"warehouse_functional_sync_artifacts","current":true,"data_class":"bounded_checkpoint","destination_role":"backup","relative_roots":["warehouse-functional-sync"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
       {"owner":"calculation_parameters_and_economics","current":true,"data_class":"target_before_image","destination_role":"backup","relative_roots":["calculation-parameters"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
@@ -318,6 +319,15 @@
     ]
   },
   "producers": [
+    {
+      "owner": "web_source_publication_rollback",
+      "classification": "retained_no_active_writer",
+      "path_patterns": [],
+      "operation_bound_artifact": {
+        "contract_version": "wb_core_web_source_rollback_registration_v1",
+        "runtime_dir": "/opt/wb-core-runtime/state"
+      }
+    },
     {
       "owner": "fbs_snapshot_accounting",
       "classification": "essential_bounded_business_writer",
