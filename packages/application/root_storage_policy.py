@@ -14,6 +14,12 @@ import stat
 import subprocess
 from typing import Any, Mapping
 
+from packages.application.web_source_rollback_registration import (
+    CONTRACT as WEB_SOURCE_ROLLBACK_CONTRACT,
+    OWNER as WEB_SOURCE_ROLLBACK_OWNER,
+    registered_image,
+)
+
 from packages.application.warehouse_recovery_placement import (
     ROLE as WAREHOUSE_BACKUP_ROLE,
     WarehousePlacementError,
@@ -141,6 +147,16 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
         for pattern in patterns:
             if not str(pattern).startswith("/"):
                 raise RootStoragePolicyError("root storage producer paths must be absolute")
+        operation_bound = producer.get("operation_bound_artifact")
+        if operation_bound is not None and (
+            owner != WEB_SOURCE_ROLLBACK_OWNER
+            or patterns
+            or operation_bound != {
+                "contract_version": WEB_SOURCE_ROLLBACK_CONTRACT,
+                "runtime_dir": "/opt/wb-core-runtime/state",
+            }
+        ):
+            raise RootStoragePolicyError("operation-bound rollback registration policy drift")
         owner_ids.add(owner)
         producers_by_owner[owner] = producer
     try:
@@ -1075,7 +1091,14 @@ def _producer_for_path(policy: Mapping[str, Any], path: Path) -> dict[str, Any] 
     value = str(path)
     matches: list[dict[str, Any]] = []
     for producer in list(policy.get("producers") or []):
-        if any(fnmatchcase(value, str(pattern)) for pattern in producer.get("path_patterns") or []):
+        bound = producer.get("operation_bound_artifact")
+        operation_match = (
+            producer.get("owner") == WEB_SOURCE_ROLLBACK_OWNER
+            and isinstance(bound, Mapping)
+            and bound.get("contract_version") == WEB_SOURCE_ROLLBACK_CONTRACT
+            and registered_image(path, runtime=Path(str(bound["runtime_dir"])))
+        )
+        if operation_match or any(fnmatchcase(value, str(pattern)) for pattern in producer.get("path_patterns") or []):
             matches.append(dict(producer))
     if len(matches) > 1:
         raise RootStoragePolicyError(f"large root file matches multiple producers: {value}")

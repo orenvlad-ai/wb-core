@@ -801,6 +801,9 @@ class WebSourcePublicationAdapter(WebVitrinaManagementHistoryAdapter):
                 if request['phase']=='publication':self._materialized(request)
                 durable_json(backup,{'operation_id':operation_id,'candidate':candidate,'request':request})
                 if digest(json.loads(backup.read_text())['candidate'])!=preview['candidate_sha256']:raise ValueError('backup-verification-failed')
+                from packages.application.web_source_rollback_registration import prepare_registration, write_registration
+                registration = prepare_registration(image=backup, runtime=runtime, preview=preview)
+                write_registration(image=backup, runtime=runtime, registration=registration)
                 if request['phase']=='source':
                     self._source_apply(request,operation_id,candidate,runtime,pg)
                 else:

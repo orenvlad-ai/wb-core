@@ -119,6 +119,8 @@ BOUNDARIES = {
         'apps/finance_storage_backup_rotation.py',
     ),
     'root_storage_policy_smoke': (
+        'packages/application/web_source_rollback_registration.py',
+        'apps/web_source_rollback_registration.py',
         'packages/application/root_storage_policy.py',
         'apps/root_storage_policy.py',
         'artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json',
