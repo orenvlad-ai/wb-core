@@ -2497,6 +2497,13 @@ class SheetVitrinaV1LivePlanBlock:
             snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
             require_closed_day_fresh=True,
         )
+        from packages.application.promo_campaign_archive import proven_archive_replay_omissions
+        if accepted_snapshot is not None and proven_archive_replay_omissions(
+            accepted_snapshot[1], replay_payload, column_date,
+        ):
+            replay_status = _append_status_note(replay_status,
+                "resolution_rule=rejected_proven_incomplete_archive_fallback; snapshot_acceptance=disabled")
+            accepted_snapshot = None
         if accepted_snapshot is not None:
             accepted_status, accepted_payload, accepted_at = accepted_snapshot
             note = "resolution_rule=accepted_closed_runtime_snapshot"
@@ -2513,6 +2520,12 @@ class SheetVitrinaV1LivePlanBlock:
             runtime_cache_note="resolution_rule=accepted_prior_current_runtime_cache",
             require_closed_day_fresh=True,
         )
+        if cached_snapshot is not None and proven_archive_replay_omissions(
+            cached_snapshot[1], replay_payload, column_date,
+        ):
+            replay_status = _append_status_note(replay_status,
+                "resolution_rule=rejected_proven_incomplete_archive_fallback; snapshot_acceptance=disabled")
+            cached_snapshot = None
         if cached_snapshot is not None:
             cached_status, cached_payload = cached_snapshot
             accepted_at = _format_runtime_timestamp(self.now_factory())

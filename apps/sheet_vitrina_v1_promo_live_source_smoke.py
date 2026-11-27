@@ -59,6 +59,7 @@ def main() -> None:
 
     _assert_incomplete_discovery_rejects_zero_success()
     _assert_incomplete_discovery_rejects_nonempty_archive()
+    _assert_proven_incomplete_archive_fallback_is_not_reused()
     from apps.promo_campaign_archive_integrity_smoke import (
         _assert_known_missing_campaign_survives_bad_later_capture, _assert_new_workbook_cannot_certify_earlier_dates,
         _assert_revised_workbook_cannot_reuse_old_observation_date,
@@ -154,6 +155,62 @@ def _assert_incomplete_discovery_rejects_nonempty_archive() -> None:
             else:
                 assert result.kind == "incomplete" and not result.items and result.missing_nm_ids == [123456], case
                 assert "incomplete_collector_cannot_confirm_campaign_set=true" in result.detail
+
+
+def _assert_proven_incomplete_archive_fallback_is_not_reused() -> None:
+    from dataclasses import asdict, replace
+    from unittest.mock import patch
+    from packages.application.promo_campaign_archive import proven_archive_replay_omissions
+    from packages.application.sheet_vitrina_v1_live_plan import _capture_live_source
+    day = "2026-11-26"
+    common = dict(snapshot_date=day, date_from=day, date_to=day, requested_count=1,
+        trace_run_dir="archive", current_promos=3, current_promos_downloaded=3, current_promos_blocked=0,
+        future_promos=0, skipped_past_promos=0, ambiguous_promos=0)
+    # Exact shape of the observed production detail, including the exhaustive
+    # count/list that omitted campaign 3225; opaque independent snapshots stay.
+    detail = ("collector_mode=archive_only; archive_mode=interval_replay; usable_campaigns=3; "
+        "archive_keys=3150__2834__чёрная-пятница-2-автоакция,"
+        "3178__2855__чёрная-пятница-хиты-автоматические-скидки,"
+        "3188__2865__повышаем-заказы-автоматические-скидки")
+    prior = PromoLiveSourceSuccess(kind="success", covered_count=1,
+        items=[PromoLiveSourceItem(day, 123456, 3, 999, 1)], detail=detail, **common)
+    failure = dict(promo_id=3225, date_confidence="high",
+        validation_failure_reason="metadata_only_true_artifact_loss",
+        coverage_dates=dict(promo_start_at="2026-11-24T02:00", promo_end_at="2026-12-01T01:59"))
+    replay = PromoLiveSourceIncomplete(kind="incomplete", covered_count=0, items=[], missing_nm_ids=[123456],
+        detail="missing_campaign_artifacts=3225__pending__missing",
+        diagnostics={"fatal_missing_artifacts": [failure]}, **common)
+    cases = [(prior, replay, True), (replace(prior, detail="independent good source"), replay, False),
+        (replace(prior, detail=detail.replace("usable_campaigns=3", "usable_campaigns=4")), replay, False),
+        (replace(prior, detail=detail + ",..."), replay, False),
+        (replace(prior, detail=detail.replace("3188__2865", "3225__2869")), replay, False),
+        (prior, replace(replay, diagnostics={}), False),
+        (prior, replace(replay, diagnostics={"fatal_missing_artifacts": [dict(failure,
+            coverage_dates=dict(promo_start_at="2026-11-28T02:00", promo_end_at="2026-12-01T01:59"))]}), False),
+        (prior, replace(replay, snapshot_date="2026-11-25"), False)]
+    for old, fresh, reject in cases:
+        old_before = asdict(old)
+        assert bool(proven_archive_replay_omissions(old, fresh, day)) is reject
+        for cached in (False, True):
+            scope = dict(source_key="promo_by_price", temporal_slot="yesterday_closed", temporal_policy="dual_day_capable",
+                column_date=day, requested_nm_ids=[123456])
+            old_status, _ = _capture_live_source(loader=lambda: old, **scope)
+            writes = []
+            block = object.__new__(SheetVitrinaV1LivePlanBlock)
+            block.runtime = SimpleNamespace(runtime_dir=Path("/unused"), db_path=Path("/unused/db"),
+                save_temporal_source_slot_snapshot=lambda **kwargs: writes.append(kwargs))
+            block.now_factory = lambda: datetime.fromisoformat("2026-11-27T10:00:00+05:00")
+            block.promo_live_source_block = SimpleNamespace(execute=lambda request: SimpleNamespace(result=fresh))
+            block._load_slot_snapshot_status = lambda **kwargs: None if cached else (old_status, old, "old-time")
+            block._load_cached_temporal_source = lambda **kwargs: (old_status, old) if cached else None
+            with patch("packages.application.promo_historical_recovery.recover_promo_display", return_value=None):
+                status, payload = block._capture_promo_closed_day_from_cache(**scope)
+            if reject:
+                assert payload.kind == "incomplete" and not payload.items and not writes
+                assert "rejected_proven_incomplete_archive_fallback" in status.note
+            else:
+                assert payload is old and status.kind == "success"
+            assert asdict(old) == old_before
 
 
 def _assert_cross_year_parse_rule() -> None:

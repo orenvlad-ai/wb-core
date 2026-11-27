@@ -276,6 +276,15 @@ remains unavailable. Deep validation binds actual workbook bytes to their stored
 fingerprint. A newer changed workbook cannot inherit an older observation date.
 The former interval-only test that used a 20 April download for 17 April now
 uses a genuinely dated 17 April operand; new negative tests cover later files.
+Closed-day fallback is also rejected when a fresh dated missing-artifact proof
+identifies an active campaign absent from the prior replay's exhaustive
+`archive_keys`/`usable_campaigns` list. Both accepted and cached fallbacks use the
+same comparison. Independent good snapshots and transient-failure fallback stay
+available; prior payloads and audit records are preserved. This changes the
+pinned live-plan file and therefore the reviewed formula epoch. Before activating
+that epoch, compare the private rolling14 candidate against the served edition,
+including previously restored search/funnel cells; no history preservation is
+implied merely by a successful code check.
 
 If the cookie layer appears after preflight, the same read-only card opening may
 be tried once more only when the Playwright call log identifies that exact cookie
