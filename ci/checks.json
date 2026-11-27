@@ -1557,6 +1557,12 @@
     },
     "web_vitrina_history_activation": {
       "patterns": [
+        "packages/application/web_vitrina_dated_source_quality.py",
+        "packages/application/web_vitrina_history_frozen_adapter.py",
+        "packages/application/web_vitrina_source_history_repair.py",
+        "packages/application/web_source_snapshot_block.py",
+        "apps/web_vitrina_web_source_publication.py",
+        "apps/web_vitrina_dated_source_quality_smoke.py",
         "packages/application/ads_spend_presentation.py",
         "packages/application/ads_spend_verification.py",
         "packages/application/ads_snapshot_payload.py",
@@ -1611,6 +1617,7 @@
         "packages/application/wb_incident_policy.py"
       ],
       "commands": [
+        ["python3", "apps/web_vitrina_dated_source_quality_smoke.py"],
         ["python3", "apps/web_vitrina_history_activation_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5"]

@@ -126,8 +126,10 @@ def update_frozen_history(*, adapter: FrozenNativeAdapter, runtime, store: Histo
                 "edition_id": pointer["current"]}
     catalog = _read(store.root / "catalogs" / (old["catalog"] + ".json")) if old else None
     with window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir):
+        from packages.application.web_vitrina_dated_source_quality import retained_scope_reader
         compiler = NativeDatedCompiler(runtime, adapter.now, adapter.days[0], adapter.days[-1],
-                                      existing_catalog=catalog, dependency_epoch=vector["epoch"])
+                                      existing_catalog=catalog, dependency_epoch=vector["epoch"],
+                                      source_scope_reader=retained_scope_reader(store, old))
         result = store.update(vector=vector, catalog=compiler.catalog,
             compile_day=compiler.compile, revalidate=adapter.capture,
             max_recomputes=max_recomputes, deadline_monotonic=deadline_monotonic,

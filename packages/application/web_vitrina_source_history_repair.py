@@ -77,7 +77,8 @@ def _totals(observation, ids):
     return values, missing, undefined
 
 
-def project_day(day, catalog, unit, observations, ids, operation_id, *, presentation_catalog=None):
+def project_day(day, catalog, unit, observations, ids, operation_id, *, presentation_catalog=None,
+                metadata_only=False):
     if roster(unit) != ids:
         raise HistoryUnavailable('source_history_roster_drift')
     cells, patch = unit['cells'], {}
@@ -119,6 +120,10 @@ def project_day(day, catalog, unit, observations, ids, operation_id, *, presenta
     # HistoryStore/read_history_page serves assets from edition.catalog. Dated
     # catalogs bind row membership/context but may lack an asset already in the
     # unchanged serving union (e.g. an old day had no numeric percent cells).
+    if metadata_only:
+        # The dated compiler copies only quality/coverage fields onto an
+        # existing native cell. It neither selects nor publishes these assets.
+        return patch
     presentation = (catalog if presentation_catalog is None else presentation_catalog).get('presentation', {})
     renderers = {r['renderer_id']: r.get('formatter_id') for r in presentation.get('renderers', [])}
     formatters = {f['formatter_id'] for f in presentation.get('formatters', [])}

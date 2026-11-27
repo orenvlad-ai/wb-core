@@ -55,7 +55,8 @@ STATIC_TABLES = {
 }
 PARAMETERS = (PREFIX + "calculation_parameter_versions", PREFIX + "proxy_v4_parameter_versions")
 POLICIES = (".auto-updates-policy.json", ".web-vitrina-fbs-lifecycle-last-good.json")
-SOURCES = (SALES_FUNNEL_HISTORY_SOURCE_KEY, BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY)
+SOURCES = (SALES_FUNNEL_HISTORY_SOURCE_KEY, BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
+           'seller_funnel_snapshot', 'web_source_snapshot')
 
 
 class LiveSourceUnavailable(HistoryUnavailable):
@@ -479,7 +480,7 @@ class LiveNativeAdapter:
         for table, role in (("temporal_source_snapshots", "''"), ("temporal_source_slot_snapshots", "t.snapshot_role")):
             if table not in tables:
                 continue
-            rows = self._rows(conn, "SELECT t.source_key,t.snapshot_date," + role + ",t.captured_at,COALESCE(r.revision,0) FROM " + table + " t LEFT JOIN sheet_vitrina_v1_ready_temporal_revisions r ON r.source_key=t.source_key AND r.snapshot_date=t.snapshot_date AND r.snapshot_role=" + role + " WHERE t.source_key IN (?,?) AND t.snapshot_date>=? AND t.snapshot_date<=? ORDER BY 1,2,3", (*SOURCES, self.days[0], self.days[-1]))
+            rows = self._rows(conn, "SELECT t.source_key,t.snapshot_date," + role + ",t.captured_at,COALESCE(r.revision,0) FROM " + table + " t LEFT JOIN sheet_vitrina_v1_ready_temporal_revisions r ON r.source_key=t.source_key AND r.snapshot_date=t.snapshot_date AND r.snapshot_role=" + role + " WHERE t.source_key IN (" + ','.join('?' for _ in SOURCES) + ") AND t.snapshot_date>=? AND t.snapshot_date<=? ORDER BY 1,2,3", (*SOURCES, self.days[0], self.days[-1]))
             for source, day, snapshot_role, captured, revision in rows:
                 key = digest([table, source, day, snapshot_role, captured, revision])
                 self.used_slices.add(key)
@@ -822,10 +823,12 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
         # deadline; the same accumulated byte cap remains in force.
         adapter.deadline = deadline_monotonic if deadline_monotonic is not None else float("inf")
         try:
+            from packages.application.web_vitrina_dated_source_quality import retained_scope_reader
             compiler = NativeDatedCompiler(runtime, adapter.now, adapter.days[0], adapter.days[-1],
                 existing_catalog=catalog, prepared_context=adapter.context,
                 prepared_availability=adapter.availability,
-                lifecycle_quality_resolver=adapter.lifecycle_quality_resolver, group_blocks=group_blocks)
+                lifecycle_quality_resolver=adapter.lifecycle_quality_resolver, group_blocks=group_blocks,
+                source_scope_reader=retained_scope_reader(store, old))
             def revalidate():
                 # Close the entire bounded portion before obtaining a fresh fence.
                 # Pending/error paths also close through ExitStack's finally.
