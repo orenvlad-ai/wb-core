@@ -56,7 +56,12 @@ BUYER_GUARD_SOURCES = {
 ADMISSION_SOURCE = 'packages/application/business_data_procedure_admission.py'
 JOURNALED_GUARD_SOURCES = {
     ADMISSION_SOURCE: '72d59fa7f9700b7103f76ccac1deb5a5ca46be2e64f6dde52e9afe14c77332f6',
-    'packages/procedure_journal.py': '17fbdfaf1487aee63d7d883a4bcea07b97cbbbb6fc9308cd2d1d8d80e8334ace',
+    # Both reviewed serializers emit only bounded procedure diagnostics.
+    # The latter adds the source-watch event classes.
+    'packages/procedure_journal.py': (
+        '17fbdfaf1487aee63d7d883a4bcea07b97cbbbb6fc9308cd2d1d8d80e8334ace',
+        '5ecd7ccec540f39d1f128d3e1d6a1faaad316f63012b76bf0d2d231829e5f20c',
+    ),
     'packages/procedure_journal_writer.py': '572f664b491ea1f5f067c434a2e6622fef17eefb5fc4fba9fbccec4c9d5a64bd',
 }
 
@@ -563,7 +568,8 @@ def _guarded_service_completion(runtime, plan, old, current, systemd, activity_r
     if _hash(_bytes(app / ADMISSION_SOURCE, 16 * 1024 * 1024)) == JOURNALED_GUARD_SOURCES[ADMISSION_SOURCE]:
         sources = {**sources, **JOURNALED_GUARD_SOURCES}
     for path, expected in sources.items():
-        if _hash(_bytes(app / path, 16 * 1024 * 1024)) != expected:
+        reviewed_hashes = expected if isinstance(expected, tuple) else (expected,)
+        if _hash(_bytes(app / path, 16 * 1024 * 1024)) not in reviewed_hashes:
             raise RuntimeError('formula resume guarded service admission source differs')
     records = _loaded_records(props.get('ExecStart'), 'ExecStart')
     if len(records) != 1 or records[0] != ('/usr/bin/python3',
