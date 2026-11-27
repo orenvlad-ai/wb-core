@@ -1368,6 +1368,7 @@
         "packages/adapters/seller_portal_web_source_collector.py",
         "apps/seller_portal_web_source_collect.py",
         "apps/seller_portal_scoped_search_collector_smoke.py",
+        "packages/application/web_vitrina_observed_source_totals.py",
         "apps/web_vitrina_web_source_publication.py",
         "apps/web_vitrina_web_source_publication_smoke.py",
         "packages/application/registry_upload_http_entrypoint.py",
@@ -1385,6 +1386,7 @@
         "apps/web_vitrina_source_history_repair*.py",
         "packages/application/web_vitrina_source_history_repair.py",
         "packages/application/web_vitrina_history_store.py",
+        "packages/application/web_vitrina_observed_source_totals.py",
         "apps/web_vitrina_web_source_publication.py"
       ],
       "commands": [
@@ -1561,6 +1563,7 @@
         "packages/application/web_vitrina_history_frozen_adapter.py",
         "packages/application/web_vitrina_source_history_repair.py",
         "packages/application/web_source_snapshot_block.py",
+        "packages/application/web_vitrina_observed_source_totals.py",
         "apps/web_vitrina_web_source_publication.py",
         "apps/web_vitrina_dated_source_quality_smoke.py",
         "packages/application/ads_spend_presentation.py",
