@@ -627,6 +627,4 @@ class PlatformSmoke(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    # Keep the six native handoff regressions in the selected, lighter group.
-    from apps.owned_history_handoff_smoke import HandoffTests
     unittest.main()

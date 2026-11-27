@@ -1845,7 +1845,7 @@
         "apps/business_data_cycle_owned_integration_smoke.py",
         "apps/web_vitrina_history_candidate_build.py"
       ],
-      "commands": [["python3", "apps/owned_history_worker_smoke.py"], ["python3", "apps/owned_history_completion_smoke.py"], ["python3", "apps/owned_history_diagnostics_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"]],
+      "commands": [["python3", "apps/owned_history_worker_smoke.py"], ["python3", "apps/owned_history_completion_smoke.py"], ["python3", "apps/owned_history_handoff_smoke.py"], ["python3", "apps/owned_history_diagnostics_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "finance_backup_handoff": {
