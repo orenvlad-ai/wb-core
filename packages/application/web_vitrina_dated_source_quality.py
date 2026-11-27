@@ -5,7 +5,7 @@ defines the scope; the accepted exact-day WB payload supplies the observations.
 Neither current nomenclature nor a previous numeric cell is an operand.
 """
 from contextlib import closing
-from datetime import datetime
+from packages.business_time import business_date_from_timestamp
 import json
 import math
 import hashlib
@@ -66,7 +66,7 @@ def retained_scope_reader(store, edition):
     return read
 
 
-def _observation(payload, source, day):
+def _observation(payload, source, day, captured_at):
     from packages.application.registry_upload_db_backed_runtime import _to_jsonable
     if payload is None:
         return None
@@ -78,9 +78,11 @@ def _observation(payload, source, day):
                 raw.get('date_from') != day or raw.get('date_to') != day)):
         return None
     try:
-        if datetime.fromisoformat(str(raw['source_fetched_at'])).tzinfo is None:
+        # A later local import does not turn an intraday WB report into a
+        # closed-day observation. Both clocks use the business timezone.
+        if any(business_date_from_timestamp(stamp) <= day for stamp in (captured_at, raw['source_fetched_at'])):
             return None
-    except ValueError:
+    except (TypeError, ValueError):
         return None
     items = raw.get('items')
     if not isinstance(items, list) or type(raw.get('count')) is not int or raw['count'] != len(items):
@@ -142,9 +144,9 @@ def verified_source_quality(runtime, day, cells, reference):
     proof = {'contract': 'native_dated_source_quality_v1', 'date': day,
              'dated_scope': scope, 'scope_sha256': _scope_digest(scope), 'sources': {}}
     for source in ('seller_funnel_snapshot', 'web_source_snapshot'):
-        payload, _ = runtime.load_temporal_source_slot_snapshot(source_key=source, snapshot_date=day,
+        payload, captured_at = runtime.load_temporal_source_slot_snapshot(source_key=source, snapshot_date=day,
             snapshot_role='accepted_closed_day_snapshot')
-        observation = _observation(payload, source, day)
+        observation = _observation(payload, source, day, captured_at)
         if observation is None:
             continue
         required = {f'SKU:{nm}|{key}' for nm in ids for key in SKU[source]}

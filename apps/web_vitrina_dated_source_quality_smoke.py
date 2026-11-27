@@ -77,7 +77,7 @@ def main():
         def load(**kwargs):
             assert kwargs['snapshot_date'] == day and kwargs['snapshot_role']=='accepted_closed_day_snapshot'
             reads.append(kwargs['source_key'])
-            return current.get(kwargs['source_key']), 'capture'
+            return current.get(kwargs['source_key']), '2026-11-12T08:01:00+00:00'
         runtime = SimpleNamespace(load_temporal_source_slot_snapshot=load)
         result, proof = verified_source_quality(runtime, day, cells, reference)
         assert cells == original and set(reads)==set(current)
@@ -159,7 +159,9 @@ def main():
         assert proof['sources']['seller_funnel_snapshot']['mismatched_count'] > 0
         # Wrong-day, unproven, malformed and absent operands never certify
         # metadata, including when an old rendered value is numeric or zero.
-        for replacement in (None, _to_namespace({'kind':'success','date':'2099-01-01','count':0,'items':[],
+        intraday = deepcopy(observed)
+        intraday[0]['source_fetched_at'] = day + 'T16:00:00+05:00'
+        for replacement in (None, payloads(day, intraday)['seller_funnel_snapshot'], _to_namespace({'kind':'success','date':'2099-01-01','count':0,'items':[],
                                                  'source_fetched_at':'capture'}),
                             _to_namespace({'kind':'success','date':day,'count':2,'items':[]})):
             current['seller_funnel_snapshot'] = replacement
