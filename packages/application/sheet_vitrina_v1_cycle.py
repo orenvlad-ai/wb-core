@@ -581,6 +581,106 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
                 raise
 
 
+def run_rolling_history_stage(entrypoint, store, receipt, history_config, *, ready, finance, fbs,
+                              backfill_dates, closed):
+    """Publish and acknowledge History under the current admitted worker's ownership."""
+    if history_config.fingerprint() != receipt['history_config_fingerprint']:
+        raise CycleStageFailure('cycle_history_contract_changed')
+    from packages.application.fbs_accounting_historical_history import pending_receipt
+    historical = (None if receipt['final_versions'].get('fbs_accounting_status') == 'unavailable'
+                  else pending_receipt(entrypoint.runtime))
+    def before_child():
+        from packages.application.cycle_memory import release_cycle_memory
+        receipt['history_memory_before_child'] = {
+            'business_date': receipt['business_date'], **release_cycle_memory()}
+        # The actual cycle owns this store and receipt. Persist telemetry
+        # before the child starts so a later OOM cannot erase the sample.
+        store.write(receipt)
+    kwargs=dict(backfill_dates=backfill_dates,closed_receipt=closed if backfill_dates else None,
+                before_child=before_child)
+    if historical is not None:
+        historical.freeze_scope(entrypoint.now_factory())
+        from datetime import datetime,timedelta
+        yesterday=(datetime.fromisoformat(receipt['business_date'])-timedelta(days=1)).date().isoformat()
+        kwargs.update(historical_receipt=historical,backfill_dates=tuple(sorted(set(backfill_dates)|{d for d in historical.publication_dates() if d<yesterday})))
+    proof = entrypoint._cycle_history(history_config, receipt, ready, **kwargs)
+    if backfill_dates:
+        value = closed.status()
+        if not value or any(value['dates'][day]['state'] != 'acknowledged' for day in backfill_dates):
+            raise CycleStageFailure('closed_native_ack_missing')
+    transition = proof.supplier_material if isinstance(proof, StageProof) else None
+    material = transition.material(receipt) if transition is not None else receipt['final_versions']
+    # The completed native proof is persisted by the outer stage before
+    # rollover. New-day predecessor admission belongs to the fresh epoch.
+    if current_business_date_iso(entrypoint.now_factory()) == receipt['business_date']:
+        try:
+            entrypoint._cycle_validate_predecessors(finance, fbs, material)
+        except CycleDateRollover as exc:
+            if exc.expected_date != receipt['business_date']:
+                raise
+    if transition is not None:
+        return StageProof({**proof.versions, 'fbs_book': material['fbs_book'],
+                           'daily_projection_digest': material['daily_projection_digest']}, proof.warnings)
+    return proof
+
+
+def run_final_ready_stage(entrypoint, receipt, source_adapter, handle, finance, fbs):
+    recovery_day = receipt.get('recovery_as_of_date')
+    entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
+    plan = source_adapter.derive_collected(handle)
+    require_cycle_business_date(receipt['business_date'], entrypoint.now_factory())
+    return entrypoint._cycle_publish_ready(plan, **(
+        {'execution_mode': 'manual_operator'} if recovery_day else {}))
+
+
+def run_closed_ready_stage(entrypoint, receipt, source_adapter, handle, finance, fbs, closed):
+    recovery_day = receipt.get('recovery_as_of_date')
+    accounting_unavailable = receipt['final_versions'].get('fbs_accounting_status') == 'unavailable'
+    if recovery_day is not None:
+        return (), StageProof({'closed_backlog_policy': 'preserved_for_regular_cycle'})
+    warnings, proofs = list(closed.prepare_retained(receipt['cycle_id'])), []
+    value = closed.status()
+    for day, item in (value['dates'].items() if value else ()):
+        if item['state'] == 'acknowledged' or item.get('deferred_reason') or not all(source['anchor'] for source in item['sources'].values()):
+            continue
+        if accounting_unavailable and not closed.retained_replay(day):
+            warnings.append(dict(source_key='closed_ready', date=day,
+                policy='deferred_accounting_unavailable'))
+            continue
+        require_cycle_business_date(receipt['business_date'], entrypoint.now_factory())
+        entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
+        try:
+            # A prior ready commit needs evidence readback, not an accepted
+            # source refetch or another dated publication merely for dates.
+            try:
+                proof = closed.record_ready(day)
+            except ClosedBacklogConflict as exc:
+                if not str(exc).startswith('closed_ready_missing:') and not closed.can_replace_retained_ready(day, exc):
+                    raise
+                plan = source_adapter.derive_collected(closed.compose(handle, day))
+                if closed.retained_replay(day):
+                    plan = closed.merge_retained_ready(day, plan)
+                    _, result = entrypoint._cycle_publish_dated_ready(plan, retained_only=True,
+                        expected_business_date=receipt['business_date'])
+                else:
+                    _, result = entrypoint._cycle_publish_dated_ready(plan,
+                        expected_business_date=receipt['business_date'])
+                warnings.extend(result.warnings)
+                proof = closed.record_ready(day)
+            proofs.append(proof)
+        except ClosedBacklogConflict as exc:
+            if not str(exc).startswith(('closed_operand_unavailable:', 'closed_operand_invalid:')):
+                raise
+            closed._defer_publication(day, str(exc))
+            warnings.append(dict(source_key='closed_ready', date=day, policy=str(exc)))
+    # Previously committed Ready dates retain their existing native proof
+    # obligation; unavailable accounting only prevents a new full replay.
+    backfill_dates = closed.publication_dates()
+    return backfill_dates, StageProof({'closed_ready_proofs': canonical(proofs),
+        'closed_backfill_dates': canonical(backfill_dates),
+        'closed_receipt_digest': digest(canonical(closed.status()))}, tuple(warnings))
+
+
 def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
     """Only the owning admitted worker calls this; no external-stage retries."""
     from packages.application.business_data_heavy_admission import require_heavy_owner
@@ -635,97 +735,15 @@ def _run_cycle_epoch(entrypoint, store, receipt, history_config, log):
         return proof
     def final_ready():
         nonlocal ready
-        entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
-        plan = source_adapter.derive_collected(handle)
-        require_cycle_business_date(receipt['business_date'], entrypoint.now_factory())
-        ready, proof = entrypoint._cycle_publish_ready(plan, **(
-            {'execution_mode': 'manual_operator'} if recovery_day else {}))
+        ready, proof = run_final_ready_stage(entrypoint, receipt, source_adapter, handle, finance, fbs)
         return proof
     def closed_ready():
         nonlocal backfill_dates
-        accounting_unavailable = receipt['final_versions'].get('fbs_accounting_status') == 'unavailable'
-        if recovery_day is not None:
-            return StageProof({'closed_backlog_policy': 'preserved_for_regular_cycle'})
-        warnings, proofs = list(closed.prepare_retained(receipt['cycle_id'])), []
-        value = closed.status()
-        for day, item in (value['dates'].items() if value else ()):
-            if item['state'] == 'acknowledged' or item.get('deferred_reason') or not all(source['anchor'] for source in item['sources'].values()):
-                continue
-            if accounting_unavailable and not closed.retained_replay(day):
-                warnings.append(dict(source_key='closed_ready', date=day,
-                    policy='deferred_accounting_unavailable'))
-                continue
-            require_cycle_business_date(receipt['business_date'], entrypoint.now_factory())
-            entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
-            try:
-                # A prior ready commit needs evidence readback, not an accepted
-                # source refetch or another dated publication merely for dates.
-                try:
-                    proof = closed.record_ready(day)
-                except ClosedBacklogConflict as exc:
-                    if not str(exc).startswith('closed_ready_missing:') and not closed.can_replace_retained_ready(day, exc):
-                        raise
-                    plan = source_adapter.derive_collected(closed.compose(handle, day))
-                    if closed.retained_replay(day):
-                        plan = closed.merge_retained_ready(day, plan)
-                        _, result = entrypoint._cycle_publish_dated_ready(plan, retained_only=True,
-                            expected_business_date=receipt['business_date'])
-                    else:
-                        _, result = entrypoint._cycle_publish_dated_ready(plan,
-                            expected_business_date=receipt['business_date'])
-                    warnings.extend(result.warnings)
-                    proof = closed.record_ready(day)
-                proofs.append(proof)
-            except ClosedBacklogConflict as exc:
-                if not str(exc).startswith(('closed_operand_unavailable:', 'closed_operand_invalid:')):
-                    raise
-                closed._defer_publication(day, str(exc))
-                warnings.append(dict(source_key='closed_ready', date=day, policy=str(exc)))
-        # Previously committed Ready dates retain their existing native proof
-        # obligation; unavailable accounting only prevents a new full replay.
-        backfill_dates = closed.publication_dates()
-        return StageProof({'closed_ready_proofs': canonical(proofs),
-            'closed_backfill_dates': canonical(backfill_dates),
-            'closed_receipt_digest': digest(canonical(closed.status()))}, tuple(warnings))
-    def history():
-        if history_config.fingerprint() != receipt['history_config_fingerprint']:
-            raise CycleStageFailure('cycle_history_contract_changed')
-        from packages.application.fbs_accounting_historical_history import pending_receipt
-        historical = (None if receipt['final_versions'].get('fbs_accounting_status') == 'unavailable'
-                      else pending_receipt(entrypoint.runtime))
-        def before_child():
-            from packages.application.cycle_memory import release_cycle_memory
-            receipt['history_memory_before_child'] = {
-                'business_date': receipt['business_date'], **release_cycle_memory()}
-            # The actual cycle owns this store and receipt. Persist telemetry
-            # before the child starts so a later OOM cannot erase the sample.
-            store.write(receipt)
-        kwargs=dict(backfill_dates=backfill_dates,closed_receipt=closed if backfill_dates else None,
-                    before_child=before_child)
-        if historical is not None:
-            historical.freeze_scope(entrypoint.now_factory())
-            from datetime import datetime,timedelta
-            yesterday=(datetime.fromisoformat(receipt['business_date'])-timedelta(days=1)).date().isoformat()
-            kwargs.update(historical_receipt=historical,backfill_dates=tuple(sorted(set(backfill_dates)|{d for d in historical.publication_dates() if d<yesterday})))
-        proof = entrypoint._cycle_history(history_config, receipt, ready, **kwargs)
-        if backfill_dates:
-            value = closed.status()
-            if not value or any(value['dates'][day]['state'] != 'acknowledged' for day in backfill_dates):
-                raise CycleStageFailure('closed_native_ack_missing')
-        transition = proof.supplier_material if isinstance(proof, StageProof) else None
-        material = transition.material(receipt) if transition is not None else receipt['final_versions']
-        # The completed native proof is persisted by the outer stage before
-        # rollover. New-day predecessor admission belongs to the fresh epoch.
-        if current_business_date_iso(entrypoint.now_factory()) == receipt['business_date']:
-            try:
-                entrypoint._cycle_validate_predecessors(finance, fbs, material)
-            except CycleDateRollover as exc:
-                if exc.expected_date != receipt['business_date']:
-                    raise
-        if transition is not None:
-            return StageProof({**proof.versions, 'fbs_book': material['fbs_book'],
-                               'daily_projection_digest': material['daily_projection_digest']}, proof.warnings)
+        backfill_dates, proof = run_closed_ready_stage(entrypoint, receipt, source_adapter, handle, finance, fbs, closed)
         return proof
+    def history():
+        return run_rolling_history_stage(entrypoint, store, receipt, history_config, ready=ready,
+            finance=finance, fbs=fbs, backfill_dates=backfill_dates, closed=closed)
     try:
         # A durable accepted cycle must terminalize even if constructing its
         # adapters fails before the first source action. Ownership above still

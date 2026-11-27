@@ -197,6 +197,17 @@
     }
   },
   "groups": {
+    "local_cycle_lab": {
+      "patterns": ["apps/local_cycle_lab/**"],
+      "commands": [
+        ["python3", "-m", "apps.local_cycle_lab.smoke"],
+        ["python3", "-m", "apps.local_cycle_lab.local_smoke"],
+        ["python3", "apps/local_cycle_lab/full_sources_smoke.py"],
+        ["python3", "apps/local_cycle_lab/stage_checkpoint_smoke.py"],
+        ["python3", "-m", "apps.local_cycle_lab.parity_smoke"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "fbs_forward_recovery": {
       "patterns": ["packages/application/ff_pool_fbs_forward_recovery.py"],
       "commands": [["python3", "apps/ff_pool_fbs_forward_recovery_smoke.py"]],
