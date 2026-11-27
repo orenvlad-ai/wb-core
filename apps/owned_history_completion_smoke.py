@@ -608,7 +608,7 @@ class CompletionTests(unittest.TestCase):
                         worker.complete(NOW, total_seconds=180)
                     self.assertEqual((store.root/'CURRENT.json').read_bytes(), pointer)
                     self.assertEqual(calls.count('portion'), 1)
-                    self.assertEqual(len(verified), 3 if interference == 'repeated' else 2)
+                    self.assertEqual(len(verified), 3 if interference in {'repeated','ready_changed'} else 2)
                     self.assertFalse(worker._ack_started)
                     if interference == 'ready_changed':
                         self.assertEqual(caught.exception.diagnostic()['reason_code'], 'history_worker_anchor_changed')
