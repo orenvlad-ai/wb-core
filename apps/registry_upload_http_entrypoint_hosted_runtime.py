@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import inspect
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -15370,6 +15371,49 @@ def _build_managed_systemd_commands(
     }
 
 
+def _legacy_uuid_preflight(policy_path, unregistered):
+    """Read the old policy with its two reviewed corrections, before sync."""
+    import hashlib
+    import json
+    from pathlib import Path
+    import subprocess
+    import sys
+    import tempfile
+
+    def sha256(path):
+        with path.open('rb') as source:
+            return hashlib.file_digest(source, 'sha256').hexdigest()
+
+    policy_path = Path(policy_path)
+    if (not Path('.wb-core-runtime-sha').is_file()
+            or Path('.wb-core-runtime-sha').read_text().strip() != 'fea41398877c6d9d0bf963c13c2a8b8482acc0ae'
+            or sha256(policy_path) != 'ebc27a7676c29fc9664a1aeb8dce827072a9e83536197f9193f460b91d4f41c8'):
+        return False
+    state = Path('/opt/wb-core-runtime/state')
+    image = state / 'evidence/wbc0208-n27-16-21-publication.before.json'
+    if [row.get('path') for row in unregistered] != [str(image)]:
+        return False
+    receipt = state / 'private-evidence/wbc0208-nov27/16-21/publication-apply.json'
+    if (image.is_symlink() or receipt.is_symlink()
+            or sha256(receipt) != '7248aaa280155e51b69426dfae0267a014d35cf7d15e0e77e2b0ae321fb5dc30'
+            or sha256(image) != '8baa42b5c18081937aa2e79eaf3cb582bc7ad3a462b60e63fcd8cbea06735487'):
+        return False
+    policy = json.loads(policy_path.read_bytes())
+    backup = policy['storage_registry']['filesystems']['backup']
+    backup['source'] = '/dev/disk/by-uuid/' + backup['filesystem_uuid']
+    policy['producers'].append({'owner': 'verified_web_source_before_image',
+                                'classification': 'retained_no_active_writer',
+                                'path_patterns': [str(image)]})
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json') as draft:
+        json.dump(policy, draft)
+        draft.flush()
+        result = subprocess.run([sys.executable, '-B', 'apps/root_storage_policy.py',
+                                 '--policy-file', draft.name, 'status'],
+                                check=True, capture_output=True, text=True)
+    checked = json.loads(result.stdout)
+    return checked['unregistered_large_root_files'] == [] and checked['storage_registry']['ok'] is True
+
+
 def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str, Any]:
     if not target.root_storage_policy_file:
         return {
@@ -15408,6 +15452,9 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
         "unregistered = payload.get('unregistered_large_root_files') if isinstance(payload, dict) else None",
         "registry = payload.get('storage_registry') if isinstance(payload, dict) else None",
         "ok = isinstance(unregistered, list) and not unregistered and isinstance(registry, dict) and registry.get('ok') is True",
+        inspect.getsource(_legacy_uuid_preflight),
+        "if not ok and unregistered and len(unregistered) == 1 and isinstance(registry, dict):",
+        "    ok = _legacy_uuid_preflight(" + repr(remote_policy_path) + ", unregistered)",
         "print(json.dumps({'stage': 'root-storage-preflight', 'ok': ok, 'alerts': payload.get('alerts') if isinstance(payload, dict) else None}))",
         "sys.exit(0 if ok else 3)",
     ])

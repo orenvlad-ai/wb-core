@@ -30,7 +30,7 @@
     "filesystems": {
       "root": {
         "path": "/",
-        "source": "/dev/sda1",
+        "source": "/dev/disk/by-uuid/d77f6a25-e90f-4292-a85d-9bcc1cecf9e2",
         "filesystem_uuid": "d77f6a25-e90f-4292-a85d-9bcc1cecf9e2",
         "filesystem_type": "ext4",
         "required_mount_options": ["rw"],
@@ -39,7 +39,7 @@
       },
       "backup": {
         "path": "/opt/wb-core-runtime/state/backups",
-        "source": "/dev/sdb1",
+        "source": "/dev/disk/by-uuid/bd3d563f-e5ea-4e4a-a76a-be45e7f94ec0",
         "filesystem_uuid": "bd3d563f-e5ea-4e4a-a76a-be45e7f94ec0",
         "filesystem_type": "ext4",
         "required_mount_options": ["rw"],
@@ -48,7 +48,7 @@
       },
       "generation": {
         "path": "/opt/wb-core-runtime/state/generations",
-        "source": "/dev/sdc1",
+        "source": "/dev/disk/by-uuid/284b3362-b890-431d-a7da-7f0fcd2ee0a6",
         "filesystem_uuid": "284b3362-b890-431d-a7da-7f0fcd2ee0a6",
         "filesystem_type": "ext4",
         "required_mount_options": ["rw", "noatime", "nodev", "nosuid", "noexec"],
