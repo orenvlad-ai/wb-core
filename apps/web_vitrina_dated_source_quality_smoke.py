@@ -103,11 +103,12 @@ def main():
             if rid.startswith('SKU:'):
                 row['group_id'] = 'group:today-only'
         (next_root/'catalogs'/'catalog.json').write_text(json.dumps(changed_catalog))
+        retained_proof = proof
         def open_metadata(_):
             conn = sqlite3.connect(':memory:')
             conn.execute('CREATE TABLE metadata(payload TEXT)')
             conn.execute('INSERT INTO metadata VALUES(?)', (json.dumps({'date': day,
-                'members': reference['members'], 'source_metric_quality': proof}),))
+                'members': reference['members'], 'source_metric_quality': retained_proof}),))
             return conn
         next_store = SimpleNamespace(root=next_root, day_catalogs=lambda edition: {day:'catalog'}, _open_day=open_metadata)
         next_reference = retained_scope_reader(next_store, {'days':{day:'a-different-native-object'}})(day)
@@ -129,6 +130,17 @@ def main():
         assert scoped_result['TOTAL|total_view_count'] == original['TOTAL|total_view_count']
         assert scoped_proof['sources']['seller_funnel_snapshot']['state'] == 'dated_family_rows_unproven'
         assert scoped_result['TOTAL|total_orders_current'][11:13] == ['partial', 1]
+        # A catalog rebuild and a temporary missing observation must never
+        # turn sparse historical membership into evidence for an entire family.
+        retained_proof = scoped_proof
+        sparse_reference = retained_scope_reader(next_store, {'days': {day: 'sparse'}})(day)
+        second, second_proof = verified_source_quality(runtime, day, original, sparse_reference)
+        assert second['TOTAL|total_view_count'] == original['TOTAL|total_view_count']
+        assert second_proof['sources']['seller_funnel_snapshot']['state'] == 'dated_family_rows_unproven'
+        no_data = SimpleNamespace(load_temporal_source_slot_snapshot=lambda **_: (None, None))
+        _, retained_proof = verified_source_quality(no_data, day, original, sparse_reference)
+        assert retained_proof['dated_scope'] == scoped_proof['dated_scope'] and not retained_proof['sources']
+        assert verified_source_quality(runtime, day, cells, {**reference, 'members': []}) == (cells, None)
         # A newer genuinely changed exact-day report is accepted when the
         # native rebuild already uses it. Retained numbers are never read.
         newer = deepcopy(observed)

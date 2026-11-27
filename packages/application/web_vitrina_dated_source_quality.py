@@ -50,7 +50,12 @@ def retained_scope_reader(store, edition):
                     or len([nm for values in groups.values() for nm in values]) != len({nm for values in groups.values() for nm in values})):
                 raise ValueError('dated_source_scope_proof_invalid')
             from packages.application.web_vitrina_source_history_repair import SKU
-            keys = sorted({key for family in SKU.values() for key in family})
+            # A subsequent catalog can introduce rows that were absent on the
+            # business date. Only the original dated family proof can qualify them.
+            families = scope.get('complete_families', [])
+            if not isinstance(families, list) or families != sorted(set(families)) or not set(families) <= SKU.keys():
+                raise ValueError('dated_source_scope_proof_invalid')
+            keys = sorted({key for family in families for key in SKU[family]})
             memberships = {nm: group for group, values in groups.items() for nm in values}
             structural = {f'SKU:{nm}|{key}': {'group_id': memberships.get(nm, '')} for nm in ids for key in keys}
             # Keep only explicit typed historical scope, not this generation's
@@ -111,15 +116,28 @@ def verified_source_quality(runtime, day, cells, reference):
     if reference is None:
         return cells, None
     unit = {'members': reference['members'], 'cells': cells}
-    ids = roster(unit)
+    scope = reference.get('dated_scope')
+    ids = scope['nm_ids'] if scope is not None else roster(unit)
+    if not ids:
+        return cells, None
+    catalog_rows = reference['catalog']['rows']
+    if scope is None:
+        memberships = {nm: set() for nm in ids}
+        dated_rows = set(reference['members']) & catalog_rows.keys()
+        for rid in reference['members']:
+            if rid.startswith('SKU:'):
+                nm = int(rid.split('|', 1)[0][4:])
+                memberships[nm].add(catalog_rows.get(rid, {}).get('group_id', ''))
+        groups = {}
+        for nm, candidates in memberships.items():
+            if len(candidates) == 1:
+                group = next(iter(candidates))
+                if group.startswith('group:'):
+                    groups.setdefault(group, []).append(nm)
+        scope = {'nm_ids': ids, 'groups': groups, 'complete_families': sorted(
+            source for source, keys in SKU.items()
+            if all(f'SKU:{nm}|{key}' in dated_rows for nm in ids for key in keys))}
     result = dict(cells)
-    membership = {str(nm): sorted({reference['catalog']['rows'][rid].get('group_id', '')
-              for rid in reference['members'] if rid.startswith(f'SKU:{nm}|')}) for nm in ids}
-    groups = {}
-    for nm, candidates in membership.items():
-        if len(candidates) == 1 and candidates[0].startswith('group:'):
-            groups.setdefault(candidates[0], []).append(int(nm))
-    scope = reference.get('dated_scope') or {'nm_ids': ids, 'groups': {g: sorted(n) for g, n in sorted(groups.items())}}
     grouped = {nm for values in scope['groups'].values() for nm in values}
     proof = {'contract': 'native_dated_source_quality_v1', 'date': day,
              'dated_scope': scope, 'scope_sha256': _scope_digest(scope), 'sources': {}}
@@ -130,7 +148,7 @@ def verified_source_quality(runtime, day, cells, reference):
         if observation is None:
             continue
         required = {f'SKU:{nm}|{key}' for nm in ids for key in SKU[source]}
-        if not required <= set(unit['members']) or not required <= reference['catalog']['rows'].keys():
+        if source not in scope.get('complete_families', []):
             proof['sources'][source] = {'state': 'dated_family_rows_unproven',
                 'payload_sha256': digest(observation)}
             continue
@@ -139,7 +157,7 @@ def verified_source_quality(runtime, day, cells, reference):
         # returned: it merely lets the independent source recipe count the
         # entire proven dated cohort before matching the still-existing cells.
         absent = required - cells.keys()
-        projection_unit = {**unit, 'cells': {**cells, **{rid: [None] * len(CELL_FIELDS) for rid in absent}}}
+        projection_unit = {'members': [rid for rid in unit['members'] if rid in catalog_rows], 'cells': {**cells, **{rid: [None] * len(CELL_FIELDS) for rid in absent}}}
         expected = project_day(day, reference['catalog'], projection_unit, [observation], ids,
             'native-dated-source-quality', metadata_only=True)
         matched, mismatched = [], []
@@ -171,4 +189,4 @@ def verified_source_quality(runtime, day, cells, reference):
             'payload_sha256': digest(observation), 'matched_count': len(matched),
             'matched_row_ids_sha256': digest(matched), 'mismatched_count': len(mismatched),
             'mismatched_row_ids_sha256': digest(mismatched), 'absent_native_count': len(absent)}
-    return result, proof if proof['sources'] else None
+    return result, proof
